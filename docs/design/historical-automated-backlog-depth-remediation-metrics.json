@@ -4,20 +4,20 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T09:09:44.456036Z",
+    "as_of": "2026-07-17T09:33:10.830913Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Stage 3 evidence assignment corrected",
-        "detail": "The Windows researcher self-corrected its initial three output findings to zero in the same signed-in Terra session, and the corrected controller accepts that repair. The provisional same-cause assignment now supplies all 25 signed atoms—including the ten previously omitted member atoms—with zero lineage or assignment errors.",
+        "value": "Stage 3 reached causal evidence review",
+        "detail": "The Windows case now has all 25 signed atoms, the same Terra author assessed the ten newly supplied observations, and the output contract no longer contradicts its open-label guidance. An exact zero-model replay reached the evidence verifier, where 41 raw findings collapse into four causal clusters that are now prepared for one focused same-author correction.",
         "tone": "good"
       },
       {
         "label": "Current lifecycle outcome",
         "value": "Active; no work exported",
-        "detail": "Stage 1/2 remain accepted. The first Stage 3 case now has both a valid same-author output correction and a complete 25-atom assignment. A model continuation is still required to assess the newly supplied evidence and reach a truthful ready, blocked, already-addressed, split, or distinct-case disposition. No result has advanced to Stage 4, export, tickets, implementation, or Docker.",
+        "detail": "Stage 1/2 remain accepted. The first Stage 3 case has progressed from missing evidence to a complete assignment and a substantive researcher conclusion, but its `evidence_sufficient/already_addressed` claim is not accepted: experiments over-claim direct atom coverage, two declared pytest commands were not observed, mechanism/falsification bindings are unresolved, and one origin-context read is incomplete. No result has advanced to Stage 4, export, tickets, implementation, or Docker.",
         "tone": "warn"
       },
       {
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Resume the same researcher with all 25 atoms",
-        "detail": "Materialize the expanded assignment and continue the same signed-in Terra author so it—not supervision—assesses the ten newly available observations. Do not restart Stage 1/2 or start the Docker case until this first research route reaches its truthful disposition.",
+        "value": "Correct four causal-evidence clusters",
+        "detail": "Return the 41 exact verifier findings as four evidence-backed clusters to the same signed-in Terra author for one turn. Require actual atom consumption and observed commands, while explicitly allowing an honest downgrade or split. Do not restart Stage 1/2 or start the Docker case.",
         "tone": "warn"
       }
     ],
@@ -2652,29 +2652,29 @@
         "lifecycle_id": "pipeline-cycle:338a373f:20260717",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 27,
-          "continuation_launches": 4,
+          "author_invocations": 29,
+          "continuation_launches": 6,
           "stage_reruns": 2,
           "full_restarts": 0,
-          "summary": "Twenty-seven author calls have started. The Windows Stage 3 case used six calls in one gpt-5.6-terra author session: the first correction improved three output findings to zero; a controller defect then caused avoidable 24-to-17-to-1 rework before supervision stopped the known-bad old controller. Four externally launched continuations and two stage-local reruns are counted. No full-cycle restart occurred."
+          "summary": "Twenty-nine author calls have started. The Windows Stage 3 case used one gpt-5.6-terra session throughout: six old-controller calls, one expanded-evidence continuation, and one focused output correction. The expanded turn resolved the missing-evidence feedback and reached one deeper finding; the next turn repeated that finding because the validator contradicted its own guidance. Six externally launched continuations and two stage-local reruns are counted. No full-cycle restart occurred."
         },
         "label": "Clean exact-revision backlog qualification cycle",
         "scope": "Reconciled non-IDEA evidence custody, output-blind currentness, canonical lifecycle materialization, accepted Stage 1/2, and one bounded canonical Windows Stage 3 reassessment; Stage 4+, exports, tickets, implementation, and Docker disabled",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 21564.456036,
+          "elapsed_seconds": 22970.830913,
           "coverage": "active",
-          "display": "5 h 59 m 24.46 s as of 09:09:44Z",
+          "display": "6 h 22 m 50.83 s as of 09:33:10Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifests, preflights, component executions, tests, and correction intervals separately."
         },
-        "furthest_stage": "Single-case Stage 3 evidence verification after accepted Stage 1/2",
-        "current_state": "The exact 2,854-atom input and 24-case seed-first graph remain accepted. The Windows researcher used one signed-in gpt-5.6-terra session and corrected its initial three deterministic output findings to zero. The old controller wrongly rejected that valid correction, causing 24-to-17-to-1 avoidable rework; the exact process was stopped without deleting artifacts. PR #217 now accepts verifier-backed falsification removal, and a zero-model exact replay on abcd5307 passed that controller boundary in 46.796 seconds. The upstream assignment correction now validates the provisional group and supplies all 25 member-facet atoms; exact retained-case construction is complete with zero missing atoms and zero lineage errors, and 365 affected tests pass. The next action is a same-author continuation over those ten newly available observations. Stage 4+, export, ticketing, implementation, and Docker remain disabled.",
-        "outcome": "Active; Stage 3 mechanics and complete evidence custody green, semantic continuation next",
+        "furthest_stage": "Single-case Stage 3 causal evidence verification after accepted Stage 1/2",
+        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment now contains all 25 member-facet atoms and the same signed-in Terra session assessed the ten additions. That 174.9-second turn resolved the assignment feedback, added direct-coverage and falsification claims, and reached one model-output finding. A second 172.4-second turn retained that finding because repository guidance permits open descriptive scenario labels while the validator silently rejected them. BDS-109 corrected the contract; 337 tests pass, and an exact 99.2-second zero-model replay now reaches the evidence verifier. Its 41 raw findings are grouped into four actionable clusters: 28 direct-atom-binding overclaims, five unobserved-command/mechanism gaps, seven dependent root-cause/falsification findings, and one incomplete run-context read. The authored `evidence_sufficient/already_addressed` result remains non-ready pending same-author correction. Stage 4+, export, ticketing, implementation, and Docker remain disabled.",
+        "outcome": "Active; Stage 3 causal claims rejected with focused same-author feedback ready",
         "errors": {
-          "count": 18,
+          "count": 20,
           "count_kind": "deduplicated_clusters",
-          "summary": "Nine product defects are counted: BDS-100 through BDS-108. Nine supervisor/observability errors are counted: AN-05 through AN-13. BDS-107 rejected a verifier-clean same-author correction; BDS-108 omits provisional-member evidence from the canonical Stage 3 assignment. AN-13 groups two model-free helper launch/control-flow mistakes as one supervisor diagnostic cluster. Automatically corrected model findings are tracked separately.",
+          "summary": "Ten product defects are counted: BDS-100 through BDS-109. Ten supervisor/observability errors are counted: AN-05 through AN-14. BDS-109 is the hidden contradiction between open descriptive scenario guidance and literal-label advancement. AN-14 is one safe-directory setup mistake on the first U: execution root. The 41 current verifier strings are model-quality findings grouped for correction, not 41 new product-error clusters.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2685,6 +2685,7 @@
             "BDS-106",
             "BDS-107",
             "BDS-108",
+            "BDS-109",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2693,18 +2694,19 @@
             "AN-10",
             "AN-11",
             "AN-12",
-            "AN-13"
+            "AN-13",
+            "AN-14"
           ]
         },
         "automatic_self_corrections": {
-          "count": 3,
+          "count": 4,
           "count_kind": "deduplicated_clusters",
-          "summary": "Three nondeterministic quality clusters improved automatically: the original relation reviewer split the cross-mechanism record; a later reviewer corrected its missing peer-evidence citation; and the Windows researcher corrected three dossier-output findings to zero in the same session. The later 24-to-17-to-1 path is recorded as improvement too, but remains part of the same Windows correction cluster rather than inflating the count."
+          "summary": "Four nondeterministic quality clusters improved automatically: the relation split, the later peer-evidence correction, the Windows three-to-zero output correction, and the expanded-evidence turn that read the missing member facet, resolved that feedback, and advanced to a deeper one-finding frontier. The later 24-to-17-to-1 path remains real improvement within the existing Windows cluster; the next repeated one-finding turn is recorded as nonprogress."
         },
         "supervisor_interventions": {
-          "count": 17,
+          "count": 19,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior fourteen interventions remain. BDS-107 adds one general controller correction and termination of known-bad rework after the same author had already produced a verifier-clean result. AN-13 adds one model-free replay-helper correction cluster. BDS-108 adds one general evidence-custody correction that restores all authenticated provisional-member atoms.",
+          "summary": "The prior seventeen interventions remain. BDS-109 adds one general contract correction after an exact repeated finding proved the model was following contradictory guidance. AN-14 adds one immediate Git safe-directory registration. Current audit grouped 41 verifier strings into four feedback clusters but is not counted as another intervention until the same-author continuation is launched.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2716,18 +2718,20 @@
             "BDS-106",
             "BDS-107",
             "BDS-108",
+            "BDS-109",
             "AN-07",
             "AN-08",
             "AN-09",
             "AN-10",
             "AN-11",
             "AN-12",
-            "AN-13"
+            "AN-13",
+            "AN-14"
           ]
         },
-        "next_action": "Continue the same Windows author with the complete 25-atom assignment and audit its truthful Stage 3 disposition before starting the Docker case.",
+        "next_action": "Send the four audited causal-evidence clusters to the same Windows author for one evidence-capable turn, then reverify and accept an honest downgrade, split, or verified already-addressed conclusion before starting the Docker case.",
         "tone": "warn",
-        "data_quality": "Invalid zero-context run retained and unscored: 531.399 seconds/four calls. Corrected context run: 538.115 seconds/three calls, stopped on BDS-103. First same-author continuation: 132.293 seconds/two calls, content-correct but stopped on BDS-104. Clean 6df385b0 continuation: 175.756 seconds/six calls/two Stage-1 records/two Stage-2 priorities/zero contract errors. Relation-only 209166cd: 13.981 seconds/one signed-in call. Live 5f0f277a Stage 1/2 reuse: 21.276 seconds/one signed-in Stage-2 call. Windows Stage 3 used six calls in one author session; its first correction reached zero output findings. The old run's retained termination receipt SHA is D2A0B6A3.... Exact abcd5307 model-free replay receipt SHA 2419FE7E...: 46.796 seconds/two retained invocations/zero new model calls/zero coverage regressions/no source changes/no downstream. The upstream correction is exact-case model-free evidence: 15-to-25 assigned atoms, all eight newer 192508 observations, zero missing, zero lineage errors, and 365 affected tests passed in 98.7 seconds. The prior 22 evidence findings remain unscored because they were generated against the incomplete assignment.",
+        "data_quality": "Earlier receipts remain retained. BDS-108 exact-case proof: 15-to-25 assigned atoms, all eight newer 192508 observations, zero missing, zero lineage errors, 365 tests in 98.7 seconds. Expanded-assignment preflight SHA 734E7391...: 2.087 seconds/zero model/signed-in subscription/source unchanged. Same-author expanded turn SHA E96B7919...: 174.909 seconds/ten new atoms/one deeper finding. Focused correction SHA 1358289A...: 172.436 seconds/same session/same finding. BDS-109 verification: 337 tests in 90.5 seconds. Exact 73a6e2e1 replay SHA 43D4C6EE...: 99.200 seconds/zero new model calls/source dossier unchanged/41 evidence findings. Current raw verifier denominator is 41 strings grouped into four causal clusters, not 41 independent cases or product defects.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_prepare_c1b44df8_20260717",
@@ -2750,6 +2754,10 @@
           "stage3_windows_reassessment_live_5f0f277a_20260717",
           "stage3_windows_reassessment_termination_5f0f277a_20260717",
           "stage3_windows_retained_output_replay_abcd5307_20260717",
+          "stage3_windows_expanded_assignment_preflight_c8eefa80_20260717",
+          "stage3_windows_expanded_assignment_live_c8eefa80_20260717",
+          "stage3_windows_primary_support_correction_c8eefa80_20260717",
+          "stage3_windows_descriptive_scenario_replay_73a6e2e1_20260717",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -7998,6 +8006,62 @@
       "source_files_unchanged": true,
       "stage1_stage2_or_downstream_invoked": false,
       "limitations": "This closes the BDS-107 controller mechanic only. The 22 evidence findings were deliberately not sent to the model because audit found the upstream canonical assignment omitted ten provisional-member atoms; research readiness remains false."
+    },
+    {
+      "id": "stage3_windows_expanded_assignment_preflight_c8eefa80_20260717",
+      "path": "U:/usertest_backlog_qualification/c8eefa80_20260717T091500Z/component_frontiers/stage3_windows_expanded_assignment_preflight_20260717T091500Z/expanded_assignment_preflight_receipt.json",
+      "kind": "model_free_same_author_expanded_assignment_preflight",
+      "file_sha256": "734E739112C26A52534C869716B0D689FEA3061052DDCF992969F0AE8EE3DDD0",
+      "duration_seconds": 2.087051,
+      "pipeline_git_head": "c8eefa801d9162975cebe35e08676c63f8785c2c",
+      "previous_expected_atom_count": 15,
+      "current_expected_atom_count": 25,
+      "new_model_invocations": 0,
+      "subscription_status": "Logged in using ChatGPT",
+      "source_files_unchanged": true,
+      "limitations": "This proves assignment and materialization mechanics only; it contains no semantic reassessment."
+    },
+    {
+      "id": "stage3_windows_expanded_assignment_live_c8eefa80_20260717",
+      "path": "U:/usertest_backlog_qualification/c8eefa80_20260717T091500Z/component_frontiers/stage3_windows_expanded_assignment_live_20260717T091700Z/expanded_assignment_continuation_receipt.json",
+      "kind": "same_author_expanded_evidence_continuation",
+      "file_sha256": "E96B7919DBF7A1F238702A2CBCC754BF2F822338D60A7E13F264D1CAE67EE3B1",
+      "duration_seconds": 174.909394,
+      "pipeline_git_head": "c8eefa801d9162975cebe35e08676c63f8785c2c",
+      "model": "gpt-5.6-terra",
+      "author_session_continuity": true,
+      "previous_expected_atom_count": 15,
+      "current_expected_atom_count": 25,
+      "remaining_finding_count": 1,
+      "source_files_unchanged": true,
+      "limitations": "The author advanced the evidence frontier but the dossier remained non-ready behind one model-output finding."
+    },
+    {
+      "id": "stage3_windows_primary_support_correction_c8eefa80_20260717",
+      "path": "U:/usertest_backlog_qualification/c8eefa80_20260717T091500Z/component_frontiers/stage3_windows_primary_support_correction_20260717T092100Z/one_turn_continuation_receipt.json",
+      "kind": "same_author_single_finding_correction",
+      "file_sha256": "1358289AA9F734A13E93D7879CD58318829BD19FA45CA86336C631EF4625DE61",
+      "duration_seconds": 172.435546,
+      "pipeline_git_head": "c8eefa801d9162975cebe35e08676c63f8785c2c",
+      "model": "gpt-5.6-terra",
+      "author_session_continuity": true,
+      "input_finding_count": 1,
+      "remaining_finding_count": 1,
+      "limitations": "The same finding remained because the author followed open-label guidance that contradicted the hidden validator rule. This is retained as nonprogress evidence for BDS-109, not blamed on nondeterminism."
+    },
+    {
+      "id": "stage3_windows_descriptive_scenario_replay_73a6e2e1_20260717",
+      "path": "U:/usertest_backlog_qualification/73a6e2e1_20260717T093000Z/component_frontiers/stage3_windows_descriptive_scenario_replay_20260717T093000Z/one_turn_continuation_receipt.json",
+      "kind": "model_free_exact_authored_dossier_evidence_replay",
+      "file_sha256": "43D4C6EE7E2E801F84BCF561A50AAEDB6091D664243FB2DD0A39177FAF5C97DA",
+      "duration_seconds": 99.199561,
+      "pipeline_git_head": "73a6e2e1a52ce03509616c41b653d38fc09de2eb",
+      "retained_model_run_count": 1,
+      "new_model_invocations": 0,
+      "evidence_verifier_finding_count": 41,
+      "evidence_finding_cluster_count": 4,
+      "source_dossier_unchanged": true,
+      "limitations": "The raw 41-string finding set is not 41 independent defects. It is a rejected causal proof grouped into direct atom binding, observed command/mechanism, dependent root/falsification, and complete context-read clusters."
     },
     {
       "id": "executive_summary",
