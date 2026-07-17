@@ -4672,6 +4672,7 @@ def _relation_decision_item_errors(
     known_evidence_atom_ids: set[str],
     allowed_actions: set[str],
     evidence_atom_ids_by_problem_id: Mapping[str, set[str]] | None = None,
+    durable_collapse_problem_pairs: set[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Return model-correctable structure/reference errors for one relation decision."""
 
@@ -4755,6 +4756,20 @@ def _relation_decision_item_errors(
                         "relation_decision_collapse_peer_evidence_missing:"
                         f"{focus_id}:{peer_problem_id}"
                     )
+                if (
+                    action in {"merge", "alias"}
+                    and peer_problem_id in known_problem_ids
+                    and bool(cited_evidence.intersection(focus_evidence))
+                    and bool(cited_evidence.intersection(peer_evidence))
+                    and not focus_evidence.intersection(peer_evidence)
+                    and tuple(sorted((focus_id, peer_problem_id)))
+                    not in (durable_collapse_problem_pairs or set())
+                ):
+                    errors.append(
+                        "relation_decision_durable_collapse_identity_missing:"
+                        f"{focus_id}:{peer_problem_id}:"
+                        "use_same_cause_group_or_keep_separate"
+                    )
 
     if action == "merge":
         target_ids = string_list("target_ids")
@@ -4807,6 +4822,7 @@ def _relation_review_response_errors(
     known_evidence_atom_ids: set[str],
     allowed_actions: set[str],
     evidence_atom_ids_by_problem_id: Mapping[str, set[str]] | None = None,
+    durable_collapse_problem_pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[list[str], set[str]]:
     errors: list[str] = []
     valid_focus_ids: list[str] = []
@@ -4818,6 +4834,7 @@ def _relation_review_response_errors(
             known_problem_ids=known_problem_ids,
             known_evidence_atom_ids=known_evidence_atom_ids,
             evidence_atom_ids_by_problem_id=evidence_atom_ids_by_problem_id,
+            durable_collapse_problem_pairs=durable_collapse_problem_pairs,
             allowed_actions=allowed_actions,
         )
         errors.extend(f"relation_decision_index={index}:{error}" for error in item_errors)
@@ -4930,6 +4947,34 @@ def _failed_relation_review_batch_count(batches: Sequence[Mapping[str, Any]]) ->
     )
 
 
+def _durable_collapse_problem_pairs(
+    relation_items: Sequence[Mapping[str, Any]],
+    verified_relation_edges: set[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Project runner-verified case edges into model-visible problem identities."""
+
+    problem_ids_by_case: dict[str, set[str]] = {}
+    for item in relation_items:
+        case_id = _coerce_string(item.get("case_id"))
+        if case_id is None:
+            continue
+        problem_ids_by_case.setdefault(case_id, set()).update(
+            problem_id
+            for problem_id in [
+                _coerce_string(item.get("problem_id")),
+                *_coerce_string_list(item.get("case_member_problem_ids")),
+            ]
+            if problem_id is not None
+        )
+    return {
+        tuple(sorted((left_problem_id, right_problem_id)))
+        for left_case_id, right_case_id in verified_relation_edges
+        for left_problem_id in problem_ids_by_case.get(left_case_id, set())
+        for right_problem_id in problem_ids_by_case.get(right_case_id, set())
+        if left_problem_id != right_problem_id
+    }
+
+
 def _write_relation_review_checkpoint(
     *,
     review_dir: Path,
@@ -4974,6 +5019,7 @@ def _run_relation_review_batches(
     model: str | None,
     cfg: RunnerConfig,
     max_foci: int = _PROBLEM_RELATION_REVIEW_MAX_FOCI,
+    durable_collapse_problem_pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run bounded relation batches and degrade only a failed batch to provisional review."""
 
@@ -5081,6 +5127,9 @@ def _run_relation_review_batches(
                 )
             ),
             _continuity_key: str = continuity_key,
+            _durable_collapse_problem_pairs: frozenset[tuple[str, str]] = frozenset(
+                durable_collapse_problem_pairs or set()
+            ),
         ) -> CorrectionObservation[dict[str, Any]]:
             transport_error: str | None = None
             attempt_started = _time.monotonic()
@@ -5139,6 +5188,9 @@ def _run_relation_review_batches(
                             _evidence_atom_ids_by_problem_id
                         )
                     },
+                    durable_collapse_problem_pairs=set(
+                        _durable_collapse_problem_pairs
+                    ),
                     allowed_actions=set(allowed_actions),
                 )
             except Exception as exc:  # noqa: BLE001 - exact validator feedback
@@ -6146,6 +6198,10 @@ def _run_problem_case_relation_review(
             agent=agent,
             model=model,
             cfg=cfg,
+            durable_collapse_problem_pairs=_durable_collapse_problem_pairs(
+                relation_items,
+                verified_relation_edges,
+            ),
         )
 
     canonical_candidates = canonicalize_problem_cases(
@@ -6645,6 +6701,10 @@ def continue_problem_relation_review_from_independent_feedback(
             known_problem_ids=known_problem_ids,
             known_evidence_atom_ids=known_evidence_ids,
             evidence_atom_ids_by_problem_id=evidence_ids_by_problem_id,
+            durable_collapse_problem_pairs=_durable_collapse_problem_pairs(
+                pre_relation_records,
+                _verified_relation_edges_from_case_registry(previous_case_registry),
+            ),
             allowed_actions={
                 "merge",
                 "alias",

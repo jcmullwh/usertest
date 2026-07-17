@@ -5116,6 +5116,57 @@ def test_relation_review_requires_cited_evidence_from_every_collapse_side() -> N
     ]
 
 
+def test_relation_review_routes_unsupported_durable_alias_back_to_author() -> None:
+    decision = {
+        "focus_id": "problem:a",
+        "action": "alias",
+        "alias_target_id": "problem:b",
+        "evidence_atom_ids": ["atom:a", "atom:b"],
+        "rationale": "The separate observations may share one underlying cause.",
+        "review_confidence": 0.95,
+    }
+    common = {
+        "focus_problem_ids": {"problem:a"},
+        "known_problem_ids": {"problem:a", "problem:b"},
+        "known_evidence_atom_ids": {"atom:a", "atom:b"},
+        "evidence_atom_ids_by_problem_id": {
+            "problem:a": {"atom:a"},
+            "problem:b": {"atom:b"},
+        },
+        "allowed_actions": {
+            "merge",
+            "alias",
+            "split",
+            "same_cause_group",
+            "keep_separate",
+        },
+    }
+
+    errors = _relation_decision_item_errors(decision, **common)
+    verified = _relation_decision_item_errors(
+        decision,
+        durable_collapse_problem_pairs={("problem:a", "problem:b")},
+        **common,
+    )
+    provisional = _relation_decision_item_errors(
+        {
+            **decision,
+            "action": "same_cause_group",
+            "group_id": "cause:suspected",
+            "member_ids": ["problem:a", "problem:b"],
+            "alias_target_id": None,
+        },
+        **common,
+    )
+
+    assert errors == [
+        "relation_decision_durable_collapse_identity_missing:"
+        "problem:a:problem:b:use_same_cause_group_or_keep_separate"
+    ]
+    assert verified == []
+    assert provisional == []
+
+
 def test_relation_review_repairs_incomplete_alias_evidence_in_same_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5125,13 +5176,13 @@ def test_relation_review_repairs_incomplete_alias_evidence_in_same_session(
             "problem_id": "problem:a",
             "case_id": "case:a",
             "title": "Failure facet A",
-            "evidence_atom_ids": ["atom:a"],
+            "evidence_atom_ids": ["atom:shared", "atom:a"],
         },
         {
             "problem_id": "problem:b",
             "case_id": "case:b",
             "title": "Failure facet B",
-            "evidence_atom_ids": ["atom:b"],
+            "evidence_atom_ids": ["atom:shared", "atom:b"],
         },
     ]
     neighborhoods = [
@@ -5151,7 +5202,11 @@ def test_relation_review_repairs_incomplete_alias_evidence_in_same_session(
     ]
 
     def alias_response(*, complete_evidence: bool) -> str:
-        evidence = ["atom:a", "atom:b"] if complete_evidence else ["atom:a"]
+        evidence = (
+            ["atom:shared", "atom:a", "atom:b"]
+            if complete_evidence
+            else ["atom:a"]
+        )
         return json.dumps(
             [
                 {
@@ -5220,7 +5275,7 @@ def test_relation_review_repairs_incomplete_alias_evidence_in_same_session(
     )
     assert not any("missing_focus" in error for error in first_errors)
     assert all(
-        decision["evidence_atom_ids"] == ["atom:a", "atom:b"]
+        decision["evidence_atom_ids"] == ["atom:shared", "atom:a", "atom:b"]
         for decision in decisions
     )
 

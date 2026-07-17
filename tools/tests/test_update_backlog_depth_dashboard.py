@@ -241,13 +241,13 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     current = lifecycle_runs[-1]
     assert current["lifecycle_id"] == "pipeline-cycle:338a373f:20260717"
     assert current["timing"]["start_at"] == "2026-07-17T03:10:20Z"
-    assert current["rework"]["author_invocations"] == 13
-    assert current["rework"]["continuation_launches"] == 1
+    assert current["rework"]["author_invocations"] == 19
+    assert current["rework"]["continuation_launches"] == 2
     assert current["rework"]["stage_reruns"] == 2
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 13
-    assert current["automatic_self_corrections"]["count"] == 1
-    assert current["supervisor_interventions"]["count"] == 12
+    assert current["errors"]["count"] == 14
+    assert current["automatic_self_corrections"]["count"] == 2
+    assert current["supervisor_interventions"]["count"] == 13
 
     rendered = mod._render_dashboard(dashboard)
     html_text = mod.DEFAULT_HTML.read_text(encoding="utf-8")

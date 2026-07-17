@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T07:19:59.642226Z",
+    "as_of": "2026-07-17T07:33:29.620101Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Stage 1 semantics corrected; continuation bookkeeping blocked",
-        "detail": "The context-complete eight-source run found two real mechanisms and kept six recovered, positive, or dependent observations out of new cases. Relation review caught their initial cross-backend collapse; the exact authors corrected it, but duplicate coverage-attempt identity stopped the retained correction before Stage 2.",
+        "value": "Stage 1/2 green; duplicate Windows research withheld",
+        "detail": "The exact authors preserved two real mechanisms and six non-case dispositions. Stage 2 completed, but the relation reviewer proposed an unsupported durable Windows alias; the canonicalizer rejected it and would research the duplicate separately. A same-session relation fix is now tested and required before Stage 3.",
         "tone": "warn"
       },
       {
         "label": "Current lifecycle outcome",
         "value": "Active; no work exported",
-        "detail": "Exact corpus, lineage, currentness, and the corrected author content remain green. The cycle is paused at the Stage 1 correction handoff; Stage 3+, export, tickets, implementation, and Docker remain disabled.",
+        "detail": "Exact corpus, lineage, currentness, Stage 1 content, and Stage 2 mechanics are green. The two priority records are held at the relation boundary; Stage 3+, export, tickets, implementation, and Docker remain disabled.",
         "tone": "warn"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No full export-disabled shadow cycle is claimed. The current work is still the smallest eight-source Stage 1/2 component, and Stage 2 has not completed.",
+        "detail": "No full export-disabled shadow cycle is claimed. The smallest eight-source component reached Stage 2, but its Windows canonical relation is not yet accepted for research.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Recover retained correction and reach Stage 2",
-        "detail": "Verify the general attempt-identity fix, reuse completed correction work where safe, rerun relation review, and complete only Stage 2. Do not restart preparation or Stage 1 authors, and do not enter Stage 3+, export, tickets, implementation, or Docker.",
+        "value": "Resume relation reviewer; rematerialize Stage 2",
+        "detail": "Return the durable-alias finding only to the retained relation session, then rerun deterministic case materialization and Stage 2. Do not call the miner or coverage author again, and do not enter Stage 3+, export, tickets, implementation, or Docker.",
         "tone": "warn"
       }
     ],
@@ -2652,35 +2652,36 @@
         "lifecycle_id": "pipeline-cycle:338a373f:20260717",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 13,
-          "continuation_launches": 1,
+          "author_invocations": 19,
+          "continuation_launches": 2,
           "stage_reruns": 2,
           "full_restarts": 0,
-          "summary": "Thirteen author calls have run: eight before the context correction, three in the valid context-complete Stage 1/relation run, and two same-session correction calls. The context-complete component is the second Stage 1 rerun. One externally launched same-author continuation is counted; preflights and the rejected argparse launch are not author calls or stage reruns. No full-cycle restart occurred."
+          "summary": "Nineteen author calls have run. The successful correction added six verified calls: the exact miner, exact coverage reviewer, one automatic coverage correction, a relation reviewer plus one same-session relation correction, and Stage 2. Two externally launched same-author continuations are counted; the first exposed BDS-104 and the second completed Stage 2. The context-complete component remains the second Stage 1 rerun. No full-cycle restart occurred."
         },
         "label": "Clean exact-revision backlog qualification cycle",
         "scope": "Reconciled non-IDEA evidence custody, output-blind currentness, canonical lifecycle materialization, and bounded Stage 1/2 component validation; exports, Stage 3+, tickets, implementation, and Docker disabled",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 14979.642226,
+          "elapsed_seconds": 15789.620101,
           "coverage": "active",
-          "display": "4 h 9 m 39.64 s as of 07:19:59Z",
+          "display": "4 h 23 m 9.62 s as of 07:33:29Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifests, preflights, component executions, tests, and correction intervals separately."
         },
-        "furthest_stage": "Context-complete Stage 1 relation review and same-author correction",
-        "current_state": "The exact 8a047703 input, 24-case seed-first lineage replay, and 2,854-atom currentness v5 remain green. The context-complete component ran for 538.115 seconds with three verified signed-in Terra calls. Primary and coverage authors correctly withheld six recovered, positive, or shell-dependent observations, but initially collapsed the Windows sandbox panic and Docker shell-probe block into one broad record. The independent relation reviewer automatically split the disjoint mechanisms at confidence 0.96; deterministic split materialization then failed before Stage 2 (BDS-103). One same-author continuation retained both exact sessions. In 132.293 seconds and two verified calls, both authors independently produced the correct separate Windows and Docker records with exact evidence bindings and preserved all six non-case decisions. The controller then rejected the completed coverage correction because its second verified attempt reused the component's logical tag (BDS-104). The general tag/attempt-identity correction has two narrow green regressions; broader affected verification and retained-work recovery are next. Stage 3+, export, tickets, implementation, and Docker remain disabled.",
-        "outcome": "Active; corrected Stage 1 content retained, Stage 2 blocked by correction-history identity",
+        "furthest_stage": "Context-complete Stage 1 correction and Stage 2 prioritization",
+        "current_state": "The exact 2,854-atom input and 24-case seed-first graph remain green. At clean correction revision 6df385b0, the retained miner and coverage sessions repeated their already-correct split in a 175.756-second bounded continuation. Six verified signed-in calls completed: miner, coverage plus one automatic correction, relation review plus one automatic correction, and Stage 2. Stage contracts have zero errors; source custody is unchanged; no later stage or mutation ran. Stage 1 retains exactly the Windows sandbox and Docker shell-probe mechanisms, while all six recovered/positive/dependent observations remain out of new cases. Docker is a legitimate active, unresearched p1 case. The Windows record was also prioritized p1, but its relation reviewer incorrectly proposed a durable alias to a historical Windows case without shared exact source identity or a verified prior edge. The canonicalizer correctly refused the alias, leaving duplicate research throughput. BDS-105 now routes that known durable-identity rule back into same-session relation feedback; 143 full affected tests pass. Stage 3 is withheld until only the retained relation reviewer revises this disposition and Stage 2 is rematerialized.",
+        "outcome": "Active; Stage 1/2 mechanically green, one duplicate-research relation withheld",
         "errors": {
-          "count": 13,
+          "count": 14,
           "count_kind": "deduplicated_clusters",
-          "summary": "Five product defects are counted: BDS-100 through BDS-104. Eight supervisor/observability errors are counted: AN-05 through AN-12. AN-12 is the stale app-local dependency collection command; its canonical source-graph rerun passed. The broad two-mechanism author record is not an extra product defect: relation review caught it as one normal nondeterministic quality correction. The invalid zero-context output remains unscored.",
+          "summary": "Six product defects are counted: BDS-100 through BDS-105. Eight supervisor/observability errors are counted: AN-05 through AN-12. BDS-105 is the missing same-session durable-relation feedback, not the reviewer's ordinary first-turn citation error. Automatically corrected model findings are tracked separately from product/supervisor error clusters. The invalid zero-context output remains unscored.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
             "BDS-102",
             "BDS-103",
             "BDS-104",
+            "BDS-105",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2692,14 +2693,14 @@
           ]
         },
         "automatic_self_corrections": {
-          "count": 1,
+          "count": 2,
           "count_kind": "deduplicated_clusters",
-          "summary": "The independent relation reviewer automatically detected and precisely partitioned one cross-mechanism record. Exact authors then corrected the content after supervisor routing. This counts as one successful quality-correction cluster, but not as end-to-end autonomous recovery because the normal handoff failed before Stage 2."
+          "summary": "Two nondeterministic quality clusters improved automatically: the original relation reviewer split the cross-mechanism Stage 1 record, and the latest relation reviewer corrected its missing peer-evidence citation in the same session. Neither is counted as perfect end-to-end recovery: the first needed supervisor routing, and the second exposed the distinct BDS-105 durable-identity feedback gap."
         },
         "supervisor_interventions": {
-          "count": 12,
+          "count": 13,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior eight interventions remain. BDS-103 required one bounded supervisor route of relation feedback to the exact authors; BDS-104 required one general attempt-identity code correction; AN-11 required one immediate corrected launch; AN-12 required the same broad tests under the canonical source graph. None supplied case conclusions, restarted an author, or entered a downstream stage.",
+          "summary": "The prior twelve interventions remain. BDS-105 adds one general same-session relation-feedback correction after audit withheld the duplicate Windows Stage-2 selection. Supervision did not author the relation answer, restart a Stage-1 author, or enter a downstream stage.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2707,6 +2708,7 @@
             "BDS-102",
             "BDS-103",
             "BDS-104",
+            "BDS-105",
             "AN-07",
             "AN-08",
             "AN-09",
@@ -2715,9 +2717,9 @@
             "AN-12"
           ]
         },
-        "next_action": "Complete affected verification for the general correction-attempt identity fix, preserve the already-correct primary response, rerun only the retained coverage-review frontier if necessary, then run relation review and Stage 2.",
+        "next_action": "Commit the BDS-105 relation-feedback fix, resume only the retained relation-review session with its exact unsupported-alias finding, and rematerialize Stage 2 before allowing either selected case into Stage 3.",
         "tone": "warn",
-        "data_quality": "Invalid zero-context run retained and unscored: 531.399 seconds/four calls. Corrected context preflight: 322.682 seconds/zero calls/SHA D6D48223.... Valid context-complete Stage 1/relation run: 538.115 seconds/three calls/SHA 9E3AF873..., stopped before Stage 2 on BDS-103. Same-author correction: 132.293 seconds/two calls/SHA 78EFF62D..., both responses content-correct and subscription-verified, stopped before relation/Stage 2 on BDS-104. No Stage 3+, export, ticket, implementation, or Docker invocation.",
+        "data_quality": "Invalid zero-context run retained and unscored: 531.399 seconds/four calls. Corrected context run: 538.115 seconds/three calls, stopped on BDS-103. First same-author continuation: 132.293 seconds/two calls, content-correct but stopped on BDS-104. Clean 6df385b0 continuation receipt SHA A2F26814...: 175.756 seconds/six calls/two Stage-1 records/two Stage-2 priorities/zero stage-contract errors/source unchanged/no downstream or mutation. Exact relation evidence shows no atom intersection between new Windows case 7df... and historical case fe51..., so the canonicalizer's alias rejection is evidence-backed rather than inferred. BDS-105 full affected verification: 143 tests in 40.9 seconds plus Ruff/diff checks.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_prepare_c1b44df8_20260717",
@@ -2730,6 +2732,8 @@
           "stage12_multisource_8_context_live_8a047703_20260717",
           "stage12_relation_split_correction_preflight_8a047703_20260717",
           "stage12_relation_split_correction_live_8a047703_20260717",
+          "stage12_relation_split_correction_preflight_6df385b0_20260717",
+          "stage12_relation_split_correction_live_6df385b0_20260717",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -7785,6 +7789,51 @@
       "terminal_error": "problem_mining_external_correction_selection_invalid",
       "stage3_export_ticket_implementation_or_docker_invoked": false,
       "limitations": "Both exact authors produced substantively correct separate Windows and Docker records. The result is retained as completed author work but is not a completed pipeline correction because deterministic attempt-history binding failed before new relation review and Stage 2."
+    },
+    {
+      "id": "stage12_relation_split_correction_preflight_6df385b0_20260717",
+      "path": "U:/usertest_backlog_qualification/6df385b0_20260717T072300Z/component_frontiers/stage12_relation_split_correction_preflight_20260717T072300Z/stage12_relation_split_correction_receipt.json",
+      "kind": "model_free_exact_revision_same_author_correction_preflight",
+      "file_sha256": "0C33BBEE753E1327721AD589DEEE1F682B022D744E4D4469DF6FA1782CC3E445",
+      "duration_seconds": 2.127,
+      "pipeline_git_head": "6df385b0db3a0bd2978e4734e212a9721c3f03f8",
+      "state": "preflight_complete_not_executed",
+      "target_atom_count": 2,
+      "primary_session_bound": true,
+      "coverage_session_bound": true,
+      "subscription_status": "Logged in using ChatGPT",
+      "api_billing_variables_blank": true,
+      "model_invocation_count": 0,
+      "stage_invocation_count": 0,
+      "stage3_export_ticket_implementation_or_docker_invoked": false,
+      "limitations": "The source Stage-1 and bundle receipts were created at 8a047703 and are explicitly hash-bound. This preflight proves the 6df385b0 correction runner can consume that retained frontier; it is not a new full-cycle bundle."
+    },
+    {
+      "id": "stage12_relation_split_correction_live_6df385b0_20260717",
+      "path": "U:/usertest_backlog_qualification/6df385b0_20260717T072300Z/component_frontiers/stage12_relation_split_correction_live_20260717T072500Z/stage12_relation_split_correction_receipt.json",
+      "kind": "same_author_stage1_relation_correction_and_stage2_component",
+      "file_sha256": "A2F268141C662217D283316821498D7D2B3F2E20C3BBB35C13AAB54ACCE23BFD",
+      "duration_seconds": 175.756,
+      "pipeline_git_head": "6df385b0db3a0bd2978e4734e212a9721c3f03f8",
+      "state": "completed",
+      "author_invocation_count": 6,
+      "verified_subscription_invocation_count": 6,
+      "stage1_problem_count": 2,
+      "stage2_priority_count": 2,
+      "stage1_contract_error_count": 0,
+      "stage2_contract_error_count": 0,
+      "case_count": 24,
+      "source_files_unchanged": true,
+      "stage3_export_ticket_implementation_or_docker_invoked": false,
+      "relation_audit": {
+        "docker_disposition": "keep_separate_supported",
+        "windows_submitted_disposition": "alias",
+        "windows_applied_disposition": "keep_separate",
+        "windows_relation_validation_error": "collapse_objective_identity_missing:case:fe517dafc2a12d5779ab",
+        "windows_exact_shared_atom_count": 0,
+        "windows_duplicate_research_withheld": true
+      },
+      "limitations": "Stage 1 and Stage 2 mechanics completed, but the Windows priority is not accepted for Stage 3. The reviewer corrected peer citation automatically yet still chose a durable alias without objective identity; the canonicalizer's safe fallback preserved duplicate research rather than self-healing the relation."
     },
     {
       "id": "executive_summary",
