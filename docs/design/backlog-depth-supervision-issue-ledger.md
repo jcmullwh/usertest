@@ -1,6 +1,6 @@
 # Backlog-depth supervision issue ledger
 
-Updated: 2026-07-17 02:33 America/New_York
+Updated: 2026-07-17 03:55 America/New_York
 
 This is the supervisor-owned ledger for defects and unresolved findings discovered while bringing the automated backlog pipeline to a working baseline. Generated atoms, dossiers, options, plans, and tickets remain system-owned evidence; this ledger records work that the supervising Codex process must ensure is addressed rather than silently losing it between reruns.
 
@@ -763,6 +763,16 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: relation-response validation now returns an actionable durable-identity finding only after both sides are validly cited. A durable `merge` or `alias` without shared source identity or a runner-verified prior edge must be revised by the same author to `same_cause_group` or `keep_separate`. Verified prior edges remain allowed. The feedback is sequenced: an incomplete citation receives only its citation error, avoiding redundant error floods.
 - Verification: 29 focused relation/canonicalization tests passed. The complete problem-mining-evidence and canonical-relation modules then passed 143 tests in 40.9 seconds; Ruff and `git diff --check` pass. Tests prove disjoint durable alias rejection, verified-edge allowance, provisional same-cause allowance, exact shared-source alias acceptance, and nonduplicative correction feedback.
 - Closure proof: resume only the retained relation-review session against the unchanged two corrected problem records. It must revise the unsupported alias without another miner or coverage call, rematerialize a provisional research unit or justified separation, and produce a Stage-2 frontier that does not start duplicate Windows research.
+
+### BDS-106 - External relation correction forgot historical candidate and evidence custody
+
+- Status: `code_corrected_full_affected_tests_green_live_same_author_completion_pending`
+- Priority: relation self-healing, useful research throughput
+- Objective impact: the exact relation author made the requested substantive improvement, but the external-correction validator rejected references that were valid in the original relation packet. Repeating mining, restarting the author, or forcing the author to omit the historical peer would waste good work and could reintroduce duplicate research.
+- Exact evidence: the clean `209166cd` relation-only continuation resumed session `019f6ef6-fc6d-7992-8fe3-55666e8c6dc9`, verified signed-in ChatGPT subscription provenance with API billing variables blank, and returned `same_cause_group` for the new and historical Windows records plus `keep_separate` for Docker. The 13.981-second run made one author call, no miner or coverage call, and no Stage 2/downstream/Docker call. It stopped with `relation_decision_evidence_refs_invalid` and `relation_decision_group_members_invalid`. The external-correction path builds `known_problem_ids`, `known_evidence_ids`, and per-problem evidence solely from `pre_relation_records`, which contain the two active records; the original review packet also contained historical candidate records. The cited historical problem and its evidence were therefore forgotten by the controller, not invented outside the author's supplied context.
+- Required correction: persist or deterministically reconstruct the exact candidate/evidence frontier used by each relation batch and validate every later same-author correction against that frontier. Bind it to the retained batch so unrelated candidates cannot be injected. Preserve the invalid response and return its two narrow findings to the same author after the controller context is repaired.
+- Local correction and verification: every new relation batch now persists the exact bounded candidate preview plus its canonical content hash. External correction validates only that packet. Legacy batches recover their packet from the original prompt only after the model-invocation manifest re-verifies prompt bytes, signed author session, and workspace authority. The correction prompt carries the content-bound frontier and the corrected batch retains its provenance. Eleven narrow relation tests pass, then the complete problem-mining evidence, qualification-repair, and historical-depth suites pass 159 tests in 47.1 seconds; Ruff and diff checks pass. A model-free replay against the exact retained `6df385b0` artifact recovered the original six candidate records with frontier SHA `14b84a81...`, including all 15 evidence IDs on the historical Windows peer.
+- Closure proof: the exact retained relation session accepts correction feedback against the content-bound original candidate packet, produces a valid provisional group or justified separation, rematerializes Stage 2 without miner or coverage calls, and does not start duplicate Windows research.
 
 ### AN-11 - Same-author correction launcher omitted required static path arguments
 

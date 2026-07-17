@@ -43,6 +43,9 @@ from usertest_backlog.workflows.problem_mining import (
     _problem_mining_routing_decision_errors,
     _recall_bearing_cross_job_groups,
     _reconcile_problem_mining_reviews,
+    _relation_candidate_frontier_for_correction,
+    _relation_candidate_frontier_sha256,
+    _relation_case_preview,
     _relation_decision_item_errors,
     _relation_review_payload,
     _run_cross_job_problem_synthesis,
@@ -4907,6 +4910,10 @@ def test_relation_review_repairs_structural_errors_in_exact_reviewer_session(
     assert calls[0]["workspace_dir"] == calls[1]["workspace_dir"]
     assert batches[0]["status"] == "completed"
     assert batches[0]["correction_status"] == "corrected"
+    assert batches[0]["candidate_frontier"] == [_relation_case_preview(relation_items[0])]
+    assert batches[0]["candidate_frontier_sha256"] == (
+        _relation_candidate_frontier_sha256(batches[0]["candidate_frontier"])
+    )
     correction_prompt = str(calls[1]["prompt"])
     assert "relation_decision_merge_targets_invalid" in correction_prompt
     assert invalid not in correction_prompt
@@ -6110,6 +6117,15 @@ def test_independent_relation_feedback_resumes_relation_author_not_miner(
             "evidence_atom_ids": ["atom:two"],
         },
     ]
+    candidate_frontier = [
+        *pre_relation,
+        {
+            "problem_id": "problem:historical",
+            "case_id": "case:historical",
+            "evidence_atom_ids": ["atom:historical"],
+            "candidate_only": True,
+        },
+    ]
     stage_doc = {
         "stage": "problem_mining",
         "items": [
@@ -6142,6 +6158,13 @@ def test_independent_relation_feedback_resumes_relation_author_not_miner(
                 {
                     "tag": "problem_mining_relation_review_001_batch_001",
                     "focus_ids": ["problem:one", "problem:two"],
+                    "case_index_count": 3,
+                    "candidate_frontier": candidate_frontier,
+                    "candidate_frontier_sha256": (
+                        problem_mining._relation_candidate_frontier_sha256(
+                            candidate_frontier
+                        )
+                    ),
                     "attempt_history": [
                         {
                             "attempt_number": 1,
@@ -6160,8 +6183,11 @@ def test_independent_relation_feedback_resumes_relation_author_not_miner(
     corrected_decisions = [
         {
             "focus_id": "problem:one",
-            "action": "keep_separate",
-            "rationale": "The mechanisms differ.",
+            "action": "same_cause_group",
+            "group_id": "provisional:shared-mechanism",
+            "member_ids": ["problem:one", "problem:historical"],
+            "evidence_atom_ids": ["atom:one", "atom:historical"],
+            "rationale": "The current and historical records may share a mechanism.",
             "review_confidence": 0.9,
         },
         {
@@ -6235,6 +6261,105 @@ def test_independent_relation_feedback_resumes_relation_author_not_miner(
     assert calls[0]["workspace_dir"] == workspace.resolve()
     assert relation_calls[0]["relation_decisions_override"] == corrected_decisions
     assert relation_calls[0]["relation_manifest_refs"]
+    corrected_batch = relation_calls[0]["relation_review_batches_override"][0]
+    assert corrected_batch["candidate_frontier"] == candidate_frontier
+    assert corrected_batch["candidate_frontier_source"] == "persisted_batch_frontier"
+
+
+def test_relation_correction_recovers_legacy_candidate_frontier_from_verified_prompt(
+    tmp_path: Path,
+) -> None:
+    session_id = "55555555-5555-4555-8555-555555555555"
+    workspace = tmp_path / "relation-workspace"
+    workspace.mkdir()
+    tag = "problem_mining_relation_review_001_batch_001"
+    frontier = [
+        {
+            "problem_id": "problem:focus",
+            "case_id": "case:focus",
+            "evidence_atom_ids": ["atom:focus"],
+            "candidate_only": False,
+        },
+        {
+            "problem_id": "problem:historical",
+            "case_id": "case:historical",
+            "evidence_atom_ids": ["atom:historical"],
+            "candidate_only": True,
+        },
+    ]
+    prompt = (
+        "Relation review instructions.\n\n"
+        "## Focus items and candidate neighborhoods\n\n"
+        + json.dumps(
+            {
+                "focus_neighborhoods": [],
+                "case_index": frontier,
+                "case_index_count": 2,
+                "full_case_index_count": 12,
+                "focus_count": 1,
+            }
+        )
+    )
+    response = "[]"
+    for suffix, content in (
+        ("prompt.txt", prompt),
+        ("response.txt", response),
+        ("raw_events.jsonl", ""),
+        ("last_message.txt", response),
+        ("stderr.txt", ""),
+    ):
+        (tmp_path / f"{tag}.{suffix}").write_text(
+            content,
+            encoding="utf-8",
+            newline="\n",
+        )
+    _write_model_invocation_manifest(
+        stage="problem_mining",
+        tag=tag,
+        agent="claude",
+        out_dir=tmp_path,
+        prompt=prompt,
+        response=response,
+        error_kind=None,
+        agent_session_id=session_id,
+        workspace_dir=workspace,
+    )
+
+    recovered, frontier_sha256, source = _relation_candidate_frontier_for_correction(
+        {
+            "tag": tag,
+            "prompt_path": str(tmp_path / f"{tag}.prompt.txt"),
+            "case_index_count": 2,
+        },
+        expected_session=session_id,
+        expected_workspace=workspace.resolve(),
+        focus_ids={"problem:focus"},
+    )
+
+    assert recovered == frontier
+    assert frontier_sha256 == _relation_candidate_frontier_sha256(frontier)
+    assert source == "verified_legacy_prompt_frontier"
+
+
+def test_relation_correction_rejects_changed_persisted_candidate_frontier() -> None:
+    frontier = [
+        {
+            "problem_id": "problem:focus",
+            "case_id": "case:focus",
+            "evidence_atom_ids": ["atom:focus"],
+        }
+    ]
+    with pytest.raises(ValueError, match="relation_review_candidate_frontier_hash_changed"):
+        _relation_candidate_frontier_for_correction(
+            {
+                "case_index_count": 1,
+                "candidate_frontier": frontier,
+                "candidate_frontier_sha256": "0" * 64,
+            },
+            expected_session="unused",
+            expected_workspace=Path.cwd(),
+            focus_ids={"problem:focus"},
+        )
 
 
 def test_primary_miner_correction_requires_retained_independent_rereview(

@@ -17,7 +17,10 @@ from backlog_miner.origin_evidence import (
     materialize_origin_attachments,
     verify_materialized_origin_attachments,
 )
-from backlog_miner.pipeline import model_invocation_manifest_ref
+from backlog_miner.pipeline import (
+    model_invocation_manifest_ref,
+    verify_model_invocation_manifest,
+)
 from backlog_miner.prompt_correction import (
     CorrectionRunResult,
     acquire_author_session,
@@ -4664,6 +4667,145 @@ def _relation_review_payload(
     }
 
 
+def _relation_candidate_frontier_sha256(frontier: Sequence[Mapping[str, Any]]) -> str:
+    """Bind the exact candidate/evidence packet used to validate one relation batch."""
+
+    import json as _json
+
+    return sha256(
+        _json.dumps(
+            [dict(item) for item in frontier],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validated_relation_candidate_frontier(
+    raw_frontier: Any,
+    *,
+    focus_ids: set[str],
+    expected_count: int | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_frontier, list) or not raw_frontier:
+        raise ValueError("relation_review_candidate_frontier_invalid")
+    frontier = [dict(item) for item in raw_frontier if isinstance(item, Mapping)]
+    if len(frontier) != len(raw_frontier):
+        raise ValueError("relation_review_candidate_frontier_invalid")
+    if expected_count is not None and len(frontier) != expected_count:
+        raise ValueError("relation_review_candidate_frontier_count_changed")
+    problem_ids = [_coerce_string(item.get("problem_id")) for item in frontier]
+    if any(problem_id is None for problem_id in problem_ids) or len(problem_ids) != len(
+        set(problem_ids)
+    ):
+        raise ValueError("relation_review_candidate_frontier_problem_ids_invalid")
+    if not focus_ids <= {problem_id for problem_id in problem_ids if problem_id is not None}:
+        raise ValueError("relation_review_candidate_frontier_focus_missing")
+    for item in frontier:
+        evidence_ids = item.get("evidence_atom_ids")
+        if not isinstance(evidence_ids, list) or not all(
+            isinstance(atom_id, str) and atom_id.strip() for atom_id in evidence_ids
+        ):
+            raise ValueError("relation_review_candidate_frontier_evidence_invalid")
+    return frontier
+
+
+def _relation_candidate_frontier_for_correction(
+    batch: Mapping[str, Any],
+    *,
+    expected_session: str,
+    expected_workspace: Path,
+    focus_ids: set[str],
+) -> tuple[list[dict[str, Any]], str, str]:
+    """Recover a batch's exact candidate packet without widening correction authority."""
+
+    import json as _json
+
+    expected_count_raw = batch.get("case_index_count")
+    expected_count = (
+        expected_count_raw
+        if isinstance(expected_count_raw, int) and not isinstance(expected_count_raw, bool)
+        else None
+    )
+    stored_frontier = batch.get("candidate_frontier")
+    if stored_frontier is not None:
+        frontier = _validated_relation_candidate_frontier(
+            stored_frontier,
+            focus_ids=focus_ids,
+            expected_count=expected_count,
+        )
+        expected_sha256 = _coerce_string(batch.get("candidate_frontier_sha256"))
+        actual_sha256 = _relation_candidate_frontier_sha256(frontier)
+        if expected_sha256 is None or expected_sha256 != actual_sha256:
+            raise ValueError("relation_review_candidate_frontier_hash_changed")
+        return frontier, actual_sha256, "persisted_batch_frontier"
+
+    # Backward-compatible custody for retained batches created before the frontier
+    # was persisted explicitly. The original verified model invocation already
+    # content-binds the complete prompt, including the bounded case_index packet.
+    prompt_path_raw = _coerce_string(batch.get("prompt_path"))
+    batch_tag = _coerce_string(batch.get("tag"))
+    if prompt_path_raw is None or batch_tag is None:
+        raise ValueError("relation_review_candidate_frontier_unavailable")
+    prompt_path = Path(prompt_path_raw).resolve()
+    invocation_path = prompt_path.parent / f"{batch_tag}.model_invocation.json"
+    invocation_errors = verify_model_invocation_manifest(invocation_path)
+    if invocation_errors:
+        raise ValueError(
+            "relation_review_candidate_frontier_invocation_invalid:"
+            + ",".join(invocation_errors)
+        )
+    try:
+        invocation = _json.loads(invocation_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError(
+            "relation_review_candidate_frontier_invocation_unreadable"
+        ) from exc
+    if (
+        not isinstance(invocation, Mapping)
+        or _coerce_string(invocation.get("agent_session_id")) != expected_session
+        or Path(_coerce_string(invocation.get("workspace_dir")) or "").resolve()
+        != expected_workspace
+    ):
+        raise ValueError("relation_review_candidate_frontier_authority_changed")
+    prompt_artifact = (
+        invocation.get("artifacts", {}).get("prompt")
+        if isinstance(invocation.get("artifacts"), Mapping)
+        else None
+    )
+    if (
+        not isinstance(prompt_artifact, Mapping)
+        or Path(_coerce_string(prompt_artifact.get("path")) or "").resolve()
+        != prompt_path
+    ):
+        raise ValueError("relation_review_candidate_frontier_prompt_changed")
+    try:
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("relation_review_candidate_frontier_prompt_unreadable") from exc
+    marker = "## Focus items and candidate neighborhoods"
+    marker_index = prompt_text.find(marker)
+    if marker_index < 0:
+        raise ValueError("relation_review_candidate_frontier_payload_missing")
+    try:
+        payload = _json.loads(prompt_text[marker_index + len(marker) :].strip())
+    except _json.JSONDecodeError as exc:
+        raise ValueError("relation_review_candidate_frontier_payload_invalid") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("relation_review_candidate_frontier_payload_invalid")
+    frontier = _validated_relation_candidate_frontier(
+        payload.get("case_index"),
+        focus_ids=focus_ids,
+        expected_count=expected_count,
+    )
+    return (
+        frontier,
+        _relation_candidate_frontier_sha256(frontier),
+        "verified_legacy_prompt_frontier",
+    )
+
+
 def _relation_decision_item_errors(
     decision: dict[str, Any],
     *,
@@ -5104,6 +5246,10 @@ def _run_relation_review_batches(
             "focus_ids": list(batch_focus_ids),
             "focus_count": len(batch_focus_ids),
             "case_index_count": batch_payload["case_index_count"],
+            "candidate_frontier": deepcopy(batch_payload["case_index"]),
+            "candidate_frontier_sha256": _relation_candidate_frontier_sha256(
+                batch_payload["case_index"]
+            ),
             "prompt_path": str(prompt_path),
             "response_path": str(response_path),
         }
@@ -6588,9 +6734,25 @@ def continue_problem_relation_review_from_independent_feedback(
         }
     expected_workspace = Path(expected_workspace_raw).resolve()
     focus_ids = set(_coerce_string_list(batch.get("focus_ids")))
+    try:
+        candidate_frontier, candidate_frontier_sha256, candidate_frontier_source = (
+            _relation_candidate_frontier_for_correction(
+                batch,
+                expected_session=expected_session,
+                expected_workspace=expected_workspace,
+                focus_ids=focus_ids,
+            )
+        )
+    except ValueError as exc:
+        return {
+            "status": "repairable_paused:relation_review_candidate_frontier_invalid",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": [str(exc)],
+        }
     known_problem_ids = {
         value
-        for record in pre_relation_records
+        for record in candidate_frontier
         for value in [
             _coerce_string(record.get("problem_id")),
             *_coerce_string_list(record.get("case_member_problem_ids")),
@@ -6599,12 +6761,12 @@ def continue_problem_relation_review_from_independent_feedback(
     }
     known_evidence_ids = {
         value
-        for record in pre_relation_records
+        for record in candidate_frontier
         for value in _coerce_string_list(record.get("evidence_atom_ids"))
     }
     evidence_ids_by_problem_id = {
         problem_id: set(_coerce_string_list(record.get("evidence_atom_ids")))
-        for record in pre_relation_records
+        for record in candidate_frontier
         for problem_id in [
             _coerce_string(record.get("problem_id")),
             *_coerce_string_list(record.get("case_member_problem_ids")),
@@ -6643,6 +6805,10 @@ def continue_problem_relation_review_from_independent_feedback(
         + json.dumps(feedback, ensure_ascii=False, indent=2, sort_keys=True)
         + "\n\nBATCH FOCUS IDS:\n"
         + json.dumps(sorted(focus_ids), ensure_ascii=False, indent=2)
+        + "\n\nCONTENT-BOUND ORIGINAL CANDIDATE/EVIDENCE FRONTIER:\n"
+        + json.dumps(candidate_frontier, ensure_ascii=False, indent=2)
+        + "\nFrontier SHA-256: "
+        + candidate_frontier_sha256
         + "\n\nCURRENT BATCH DECISIONS:\n"
         + json.dumps(
             [
@@ -6702,7 +6868,7 @@ def continue_problem_relation_review_from_independent_feedback(
             known_evidence_atom_ids=known_evidence_ids,
             evidence_atom_ids_by_problem_id=evidence_ids_by_problem_id,
             durable_collapse_problem_pairs=_durable_collapse_problem_pairs(
-                pre_relation_records,
+                candidate_frontier,
                 _verified_relation_edges_from_case_registry(previous_case_registry),
             ),
             allowed_actions={
@@ -6728,6 +6894,8 @@ def continue_problem_relation_review_from_independent_feedback(
         "workspace_dir": str(actual_workspace),
         "elapsed_seconds": elapsed,
         "validation_errors": list(errors),
+        "candidate_frontier_sha256": candidate_frontier_sha256,
+        "candidate_frontier_source": candidate_frontier_source,
     }
     if errors:
         return {
@@ -6754,6 +6922,9 @@ def continue_problem_relation_review_from_independent_feedback(
         if _coerce_string(corrected_batch.get("tag")) != batch_tag:
             continue
         corrected_batch["status"] = "qualification_corrected"
+        corrected_batch["candidate_frontier"] = deepcopy(candidate_frontier)
+        corrected_batch["candidate_frontier_sha256"] = candidate_frontier_sha256
+        corrected_batch["candidate_frontier_source"] = candidate_frontier_source
         corrected_batch["attempt_history"] = [
             *attempts,
             *[dict(item) for item in (prior_correction_attempts or [])],
