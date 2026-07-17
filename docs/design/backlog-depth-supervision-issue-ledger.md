@@ -815,23 +815,23 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-113 - Persisted causal-proof identity depended on JSON mapping insertion order
 
-- Status: `local_general_correction_full_affected_verification_green_exact_replay_pending`
+- Status: `closed_exact_persistence_and_stage4_replay_green`
 - Priority: Stage 3-to-4 throughput and persisted-evidence integrity
 - Objective impact: a verifier-clean causal proof became unverifiable after ordinary JSON persistence even though no semantic evidence changed. This blocks good research throughput and can falsely present a valid no-change result as altered evidence.
 - Exact evidence: downstream `verify_persisted_research_evidence` returned five findings against both the raw final continued dossier and the lineage-enriched Stage 3 document: `research_proof_adapter_receipts_changed`, `research_mechanism_evidence_changed`, `research_verified_mechanism_provenance_changed`, `research_verified_mechanism_provenance_hash_changed`, and `research_hypothesis_receipts_changed`. A structural diff of stored and recomputed proof-adapter receipts found one root difference at the outcome node locator and positive-outcome observation source. The original receipt used Python `str(dict)` order (`source`, `operator`, `expected`); the saved JSON used sorted order (`expected`, `operator`, `source`). Values and predicate semantics were identical, but the changed string cascaded into a different proof receipt ID and four dependent hashes.
 - Correction: structured replay selectors are rendered as canonical compact JSON with sorted keys for both the mechanism-graph locator and positive-outcome observation source. Actual selector content remains part of the receipt; only irrelevant insertion order is removed from identity.
 - Verification: the focused adapter module passes nine tests. A new persistence regression proves two selectors with different key insertion order mint byte-identical receipts and survive a sorted-JSON round trip; its negative proves changing the selected JSON pointer changes the proof receipt ID. Ruff and diff checks pass. The full causal-proof, Stage-contract, proof-adapter, research-evidence, and research-runner gate collected 562 tests; 561 passed and one expected skip in 232.5 seconds.
-- Closure proof: replay the exact retained Windows dossier without a model call, require downstream persisted-evidence verification to return `(True, [])`, then materialize Stage 3 and the required Stage 4 zero-option `not_required` disposition through the normal workflow.
+- Closure proof: the exact retained replay at `ef356030` completed in 69.751 seconds with zero model calls, an unchanged source dossier, and signed-in ChatGPT provenance. Direct downstream verification returned `ready=true` and zero errors. Production Stage 3 then rematerialized the dossier with zero model calls, and the production Stage 4 path ultimately emitted the required zero-option `not_required` disposition. Replay receipt SHA-256 is `31B20563C6EA60ADE048986C2529988F8F03FAFC98C1A45CF9C5DF794BED5153`.
 
 ### BDS-114 - Stage 4 revalidated its own case-lineage envelope as model output
 
-- Status: `local_general_correction_affected_verification_green_exact_stage4_replay_pending`
+- Status: `closed_exact_stage4_no_change_disposition_green`
 - Priority: Stage 3-to-4 baseline throughput
 - Objective impact: every normally persisted Stage 3 dossier can be rejected before optioning because Stage 4 treats two runner-added lineage fields as forbidden model-authored content. This yields zero downstream throughput even when research is valid, and it is unrelated to research depth or actionability.
 - Exact evidence: after the BDS-113 replay returned `ready=true` with zero persisted-evidence errors and production Stage 3 rematerialized the dossier, the Stage 4 no-change preflight failed with `research_proof_invalid` and `research_dossier_unknown_fields: ... ['canonical_problem_id', 'case_member_problem_ids']`. `_persist_downstream_case_lineage` adds those two fields after Stage 3 validation. `_run_solution_optioning_stage` then passed the enriched object directly to `assess_research_readiness`, `verify_persisted_research_evidence`, and `research_prompt_projection`, all of which intentionally validate the strict model dossier.
 - Correction: Stage 4 now removes exactly the two runner-owned case-lineage envelope fields before evidence/readiness revalidation and prompt projection. It preserves every other field, so genuinely unknown model content remains subject to the strict contract. Case identity continues to flow from the authenticated problem/case records and is reattached to Stage 4 output by the existing lineage materializer.
 - Verification: the focused Stage 4 boundary regression and the complete 69-test planning-depth contract module pass. The regression begins with both lineage fields present and proves readiness verification, persisted-evidence verification, and prompt projection receive only the strict authored contract; both no-change dispositions still emit `not_required` without a model call. Ruff and diff checks pass.
-- Closure proof: the exact preflight accepts the production Stage 3 artifact, and the production Stage 4 path emits one `not_required` outcome, zero options, zero rejected options, and zero model invocations while preserving the 24-case identity set.
+- Closure proof: the exact `4f58c693` preflight accepted the production Stage 3 artifact. The subsequent production Stage 4 run emitted one `not_required` outcome with `already_addressed`, zero options, zero rejected options, zero model invocations, no Stage 5/6, no export/ticket/implementation/Docker action, unchanged inputs, and the same 24-case identity set. The completed 6.833-second receipt is `U:\usertest_backlog_qualification\4f58c693_20260717T115000Z\component_frontiers\stage4_windows_no_change_live_v2_20260717T115300Z\stage4_no_change_receipt.json`, SHA-256 `A75C2B490AAF90CCBC2C471CEFB86A961440837F35D8A07E4E4D2234ECD5A2DF`.
 
 ### BDS-108 - Provisional same-cause member evidence was omitted from Stage 3
 
@@ -897,11 +897,11 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### AN-17 - Stage 4 no-change preflight used incorrect helper boundaries
 
-- Status: `corrected_helper_ready_for_post_product_fix_replay`
+- Status: `closed_corrected_helper_and_live_disposition_green`
 - Classification: one supervisor diagnostic-helper cluster, not model, pipeline-stage, or product failures
 - Exact evidence: the throw-away Stage 4 helper first imported `verify_persisted_research_evidence` from the wrong package and stopped before optioning. After that import was corrected, its preliminary strict parse received the lineage-enriched Stage 3 record and rejected the runner-owned `canonical_problem_id` and `case_member_problem_ids` fields. Neither failure invoked a model, entered Stage 4, or changed pipeline state.
 - Containment and result: the helper now imports the production verifier from its owning package and removes only the two named runner-owned lineage fields at its preliminary authored-contract boundary. The subsequent preflight reached production-equivalent persistence validation and exposed BDS-113, then after BDS-113 reached BDS-114 in the actual Stage 4 readiness path. It did not conceal or reinterpret either product failure. The helper mistakes are counted as one supervisor-owned mechanics cluster.
-- Closure proof: the corrected helper passes preflight against the BDS-113 replay, then the production Stage 4 path emits exactly one `not_required` outcome, zero options, and zero model calls for the already-addressed case.
+- Final helper correction and closure: the first production Stage 4 execution produced the correct `not_required` artifact, but the helper expected a nonexistent `manifest_ref_count` convenience field and mislabeled the empty persisted `manifests` list. The helper now checks the actual model-invocation contract instead of changing product output. Its fresh live run completed and retained the BDS-114 closure receipt above. All import, strict-projection, and assertion mistakes remain one AN-17 supervisor-helper cluster.
 
 ### BDS-082 - Attempt-14 preflight validated an authored projection as a persisted dossier
 
