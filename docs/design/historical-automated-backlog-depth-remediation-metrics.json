@@ -4,20 +4,20 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T07:55:11.927966Z",
+    "as_of": "2026-07-17T08:04:02.019641Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Candidate custody fixed; same-author completion pending",
-        "detail": "The exact relation author replaced the unsupported Windows alias with a provisional same-cause group and kept Docker separate. BDS-106 now persists each new candidate frontier and reconstructs legacy frontiers only from a verified original prompt. The complete affected suites and exact retained six-case replay pass model-free.",
+        "value": "Valid relation work reusable; Stage 2 replay pending",
+        "detail": "The exact relation response now validates with zero findings against its restored six-case frontier. BDS-106 persists new candidate frontiers, reconstructs legacy frontiers only from verified prompts, and reuses a fully verified retained response without another author turn. The complete affected suites pass.",
         "tone": "warn"
       },
       {
         "label": "Current lifecycle outcome",
         "value": "Active; no work exported",
-        "detail": "Exact corpus, lineage, currentness, and Stage 1 content remain green. The latest 13.981-second relation-only response is retained. BDS-106 is code-corrected with 159 affected tests green; live correction and Stage 2 rematerialization remain pending. Stage 3+, export, tickets, implementation, and Docker remain disabled.",
+        "detail": "Exact corpus, lineage, currentness, and Stage 1 content remain green. The retained 13.981-second response revalidates with zero findings. BDS-106 is code-corrected with 159 affected tests green; zero-model relation reuse and Stage 2 rematerialization remain to be proved live. Stage 3+, export, tickets, implementation, and Docker remain disabled.",
         "tone": "warn"
       },
       {
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Resume same relation author; rematerialize Stage 2",
-        "detail": "Return the retained response's narrow evidence findings to the same session against the restored six-case frontier, then rematerialize Stage 2. Do not call the miner or coverage author again, and do not enter Stage 3+, export, tickets, implementation, or Docker.",
+        "value": "Reuse retained relation answer; rematerialize Stage 2",
+        "detail": "Revalidate the exact retained response and invocation without another author call, then rematerialize Stage 2. Do not call the relation author, miner, or coverage author again, and do not enter Stage 3+, export, tickets, implementation, or Docker.",
         "tone": "warn"
       }
     ],
@@ -2663,13 +2663,13 @@
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 17091.927966,
+          "elapsed_seconds": 17622.019641,
           "coverage": "active",
-          "display": "4 h 44 m 51.93 s as of 07:55:11Z",
+          "display": "4 h 53 m 42.02 s as of 08:04:02Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifests, preflights, component executions, tests, and correction intervals separately."
         },
         "furthest_stage": "Context-complete Stage 1 correction and Stage 2 prioritization",
-        "current_state": "The exact 2,854-atom input and 24-case seed-first graph remain green. The prior 175.756-second continuation produced the correct Windows and Docker records and a mechanically green Stage 2, but its unsupported durable Windows alias was withheld. At clean revision 209166cd, a 13.981-second relation-only continuation resumed the exact reviewer through the signed-in subscription, invoked neither miner nor coverage, and returned the intended provisional Windows same-cause group while preserving Docker as separate. The controller stopped before Stage 2 because the external-correction path forgot historical candidate identity and evidence. BDS-106 now persists a content-bound candidate frontier for every new relation batch and recovers older frontiers only from the original verified invocation prompt and exact author/workspace. All 159 affected tests pass; a model-free replay against the exact retained artifact recovers all six supplied cases and the historical Windows record's 15 evidence atoms. The retained response still needs a narrow same-session evidence-citation correction before Stage 2. Stage 3+, export, tickets, implementation, and Docker remain disabled.",
+        "current_state": "The exact 2,854-atom input and 24-case seed-first graph remain green. The prior 175.756-second continuation produced the correct Windows and Docker records and a mechanically green Stage 2, but its unsupported durable Windows alias was withheld. At clean revision 209166cd, a 13.981-second relation-only continuation resumed the exact reviewer through the signed-in subscription, invoked neither miner nor coverage, and returned the intended provisional Windows same-cause group while preserving Docker as separate. The controller stopped before Stage 2 because the external-correction path forgot historical candidate identity and evidence. BDS-106 now persists a content-bound candidate frontier for every new relation batch and recovers older frontiers only from the original verified invocation prompt and exact author/workspace. The retained response revalidates with zero findings; a verified-response reuse path can accept it without spending another author turn while preserving the original invalid record and a separate deterministic revalidation record. All 159 affected tests pass, including proof that valid retained work skips model invocation. Live zero-model reuse and Stage 2 rematerialization are pending. Stage 3+, export, tickets, implementation, and Docker remain disabled.",
         "outcome": "Active; correct relation answer retained, Stage 2 blocked by missing candidate custody",
         "errors": {
           "count": 15,
@@ -2719,9 +2719,9 @@
             "AN-12"
           ]
         },
-        "next_action": "Resume only the retained relation-review session against the restored six-case frontier, return its exact citation findings, and rematerialize Stage 2 before allowing either selected case into Stage 3.",
+        "next_action": "Revalidate and reuse the exact retained relation response without a model call, then rematerialize Stage 2 before allowing either selected case into Stage 3.",
         "tone": "warn",
-        "data_quality": "Invalid zero-context run retained and unscored: 531.399 seconds/four calls. Corrected context run: 538.115 seconds/three calls, stopped on BDS-103. First same-author continuation: 132.293 seconds/two calls, content-correct but stopped on BDS-104. Clean 6df385b0 continuation receipt SHA A2F26814...: 175.756 seconds/six calls/two Stage-1 records/two Stage-2 priorities/zero stage-contract errors/source unchanged/no downstream or mutation. Relation-only 209166cd receipt SHA 448D20D3...: 13.981 seconds/one verified exact-session subscription call/no miner or coverage/no Stage 2 or downstream; retained answer uses same_cause_group for Windows and keep_separate for Docker. BDS-106 verification: 159 affected tests in 47.1 seconds, Ruff/diff checks, and exact model-free legacy-prompt recovery of six candidate records including 15 historical Windows evidence atoms.",
+        "data_quality": "Invalid zero-context run retained and unscored: 531.399 seconds/four calls. Corrected context run: 538.115 seconds/three calls, stopped on BDS-103. First same-author continuation: 132.293 seconds/two calls, content-correct but stopped on BDS-104. Clean 6df385b0 continuation receipt SHA A2F26814...: 175.756 seconds/six calls/two Stage-1 records/two Stage-2 priorities/zero stage-contract errors/source unchanged/no downstream or mutation. Relation-only 209166cd receipt SHA 448D20D3...: 13.981 seconds/one verified exact-session subscription call/no miner or coverage/no Stage 2 or downstream; retained answer uses same_cause_group for Windows and keep_separate for Docker. BDS-106 verification: 159 affected tests in 42.1 seconds, Ruff/diff checks, exact model-free recovery of six candidate records including 15 historical Windows evidence atoms, zero current response-validation findings, and a regression proving valid retained work skips model invocation.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_prepare_c1b44df8_20260717",

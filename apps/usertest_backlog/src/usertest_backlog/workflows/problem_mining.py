@@ -4806,6 +4806,92 @@ def _relation_candidate_frontier_for_correction(
     )
 
 
+def _retained_relation_correction_candidate(
+    invocation_path: Path,
+    *,
+    expected_agent: str,
+    expected_session: str,
+    expected_workspace: Path,
+    focus_ids: set[str],
+    known_problem_ids: set[str],
+    known_evidence_atom_ids: set[str],
+    evidence_atom_ids_by_problem_id: Mapping[str, set[str]],
+    durable_collapse_problem_pairs: set[tuple[str, str]],
+) -> dict[str, Any]:
+    """Revalidate already-authored relation bytes before spending another model turn."""
+
+    import json as _json
+
+    invocation_path = invocation_path.resolve()
+    invocation_errors = verify_model_invocation_manifest(invocation_path)
+    if invocation_errors:
+        raise ValueError(
+            "retained_relation_correction_invocation_invalid:"
+            + ",".join(invocation_errors)
+        )
+    try:
+        invocation = _json.loads(invocation_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError("retained_relation_correction_invocation_unreadable") from exc
+    if not isinstance(invocation, Mapping):
+        raise ValueError("retained_relation_correction_invocation_invalid")
+    if (
+        _coerce_string(invocation.get("stage")) != "problem_mining"
+        or _coerce_string(invocation.get("agent")) != expected_agent.strip().casefold()
+        or _coerce_string(invocation.get("agent_session_id")) != expected_session
+        or Path(_coerce_string(invocation.get("workspace_dir")) or "").resolve()
+        != expected_workspace
+    ):
+        raise ValueError("retained_relation_correction_authority_changed")
+    response_artifact = (
+        invocation.get("artifacts", {}).get("response")
+        if isinstance(invocation.get("artifacts"), Mapping)
+        else None
+    )
+    response_path_raw = (
+        _coerce_string(response_artifact.get("path"))
+        if isinstance(response_artifact, Mapping)
+        else None
+    )
+    if response_path_raw is None:
+        raise ValueError("retained_relation_correction_response_unavailable")
+    response_path = Path(response_path_raw).resolve()
+    try:
+        response = response_path.read_text(encoding="utf-8")
+        parsed = _json.loads(response)
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError("retained_relation_correction_response_unreadable") from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+        raise ValueError("retained_relation_correction_response_not_list")
+    decisions = [dict(item) for item in parsed]
+    validation_errors, valid_focus_ids = _relation_review_response_errors(
+        decisions,
+        focus_problem_ids=focus_ids,
+        known_problem_ids=known_problem_ids,
+        known_evidence_atom_ids=known_evidence_atom_ids,
+        evidence_atom_ids_by_problem_id=evidence_atom_ids_by_problem_id,
+        durable_collapse_problem_pairs=durable_collapse_problem_pairs,
+        allowed_actions={
+            "merge",
+            "alias",
+            "split",
+            "same_cause_group",
+            "keep_separate",
+        },
+    )
+    return {
+        "decisions": decisions,
+        "validation_errors": validation_errors,
+        "valid_focus_ids": sorted(valid_focus_ids),
+        "agent_session_id": expected_session,
+        "workspace_dir": str(expected_workspace),
+        "invocation_path": str(invocation_path),
+        "invocation_tag": invocation.get("tag"),
+        "response_path": str(response_path),
+        "response_sha256": invocation.get("response_sha256"),
+    }
+
+
 def _relation_decision_item_errors(
     decision: dict[str, Any],
     *,
@@ -6676,6 +6762,7 @@ def continue_problem_relation_review_from_independent_feedback(
     prior_correction_attempts: list[dict[str, Any]] | None = None,
     prior_correction_errors: list[str] | None = None,
     correction_attempt_number: int = 1,
+    retained_correction_invocation_path: Path | None = None,
 ) -> dict[str, Any]:
     """Resume the exact relation-review batch and rematerialize its case graph."""
 
@@ -6773,6 +6860,10 @@ def continue_problem_relation_review_from_independent_feedback(
         ]
         if problem_id is not None
     }
+    durable_collapse_problem_pairs = _durable_collapse_problem_pairs(
+        candidate_frontier,
+        _verified_relation_edges_from_case_registry(previous_case_registry),
+    )
     existing_decisions_raw = meta.get("relation_review_decisions")
     existing_decisions = (
         [dict(item) for item in existing_decisions_raw if isinstance(item, Mapping)]
@@ -6795,6 +6886,39 @@ def continue_problem_relation_review_from_independent_feedback(
             existing_decisions = [
                 dict(item) for item in response_loaded if isinstance(item, Mapping)
             ]
+    retained_candidate: dict[str, Any] | None = None
+    if retained_correction_invocation_path is not None:
+        try:
+            retained_candidate = _retained_relation_correction_candidate(
+                retained_correction_invocation_path,
+                expected_agent=agent,
+                expected_session=expected_session,
+                expected_workspace=expected_workspace,
+                focus_ids=focus_ids,
+                known_problem_ids=known_problem_ids,
+                known_evidence_atom_ids=known_evidence_ids,
+                evidence_atom_ids_by_problem_id=evidence_ids_by_problem_id,
+                durable_collapse_problem_pairs=durable_collapse_problem_pairs,
+            )
+        except ValueError as exc:
+            return {
+                "status": "repairable_paused:retained_relation_correction_invalid",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": [str(exc)],
+            }
+        retained_focus_decisions = [
+            dict(item)
+            for item in retained_candidate["decisions"]
+            if _coerce_string(item.get("focus_id")) in focus_ids
+        ]
+        existing_decisions = [
+            item
+            for item in existing_decisions
+            if _coerce_string(item.get("focus_id")) not in focus_ids
+        ] + retained_focus_decisions
+        if retained_candidate["validation_errors"]:
+            prior_correction_errors = list(retained_candidate["validation_errors"])
     prompt = (
         "INDEPENDENT QUALIFICATION CORRECTION FOR STAGE-1 RELATION REVIEW\n\n"
         "Continue the exact relation-review author session and workspace. Revise the "
@@ -6827,69 +6951,92 @@ def continue_problem_relation_review_from_independent_feedback(
         + sha256(str(feedback.get("content_sha256")).encode()).hexdigest()[:12]
         + f"_{max(1, correction_attempt_number):03d}"
     )
-    run = run_stage_prompt_json(
-        stage="problem_mining",
-        prompt=prompt,
-        out_dir=artifacts_dir,
-        tag=tag,
-        agent=agent,
-        model=model,
-        cfg=cfg,
-        workspace_dir=expected_workspace,
-        resume_session_id=expected_session,
-        allow_empty=True,
-        structured=True,
+    reused_retained_candidate = bool(
+        retained_candidate is not None
+        and not retained_candidate.get("validation_errors")
     )
-    if isinstance(run, str):
-        response = run
-        actual_session = None
+    if reused_retained_candidate:
+        decisions = [dict(item) for item in retained_candidate["decisions"]]
+        errors: list[str] = []
+        actual_session = expected_session
         actual_workspace = expected_workspace
         elapsed = 0.0
-        invocation_path = None
+        invocation_path = Path(retained_candidate["invocation_path"])
     else:
-        response = str(run.response)
-        actual_session = _coerce_string(run.agent_session_id)
-        actual_workspace = Path(run.workspace_dir or expected_workspace).resolve()
-        elapsed = max(0.0, float(run.elapsed_seconds))
-        invocation_path = Path(run.invocation_manifest_path)
-    errors: list[str] = []
-    decisions: list[dict[str, Any]] = []
-    try:
-        parsed = json.loads(response)
-        if not isinstance(parsed, list) or not all(
-            isinstance(item, dict) for item in parsed
-        ):
-            raise ValueError("relation_correction_response_not_list")
-        decisions = [dict(item) for item in parsed]
-        validation_errors, _ = _relation_review_response_errors(
-            decisions,
-            focus_problem_ids=focus_ids,
-            known_problem_ids=known_problem_ids,
-            known_evidence_atom_ids=known_evidence_ids,
-            evidence_atom_ids_by_problem_id=evidence_ids_by_problem_id,
-            durable_collapse_problem_pairs=_durable_collapse_problem_pairs(
-                candidate_frontier,
-                _verified_relation_edges_from_case_registry(previous_case_registry),
-            ),
-            allowed_actions={
-                "merge",
-                "alias",
-                "split",
-                "same_cause_group",
-                "keep_separate",
-            },
+        run = run_stage_prompt_json(
+            stage="problem_mining",
+            prompt=prompt,
+            out_dir=artifacts_dir,
+            tag=tag,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            workspace_dir=expected_workspace,
+            resume_session_id=expected_session,
+            allow_empty=True,
+            structured=True,
         )
-        errors.extend(validation_errors)
-    except Exception as exc:  # noqa: BLE001 - exact validator feedback
-        errors.append(f"{type(exc).__name__}: {exc}")
+        if isinstance(run, str):
+            response = run
+            actual_session = None
+            actual_workspace = expected_workspace
+            elapsed = 0.0
+            invocation_path = None
+        else:
+            response = str(run.response)
+            actual_session = _coerce_string(run.agent_session_id)
+            actual_workspace = Path(run.workspace_dir or expected_workspace).resolve()
+            elapsed = max(0.0, float(run.elapsed_seconds))
+            invocation_path = Path(run.invocation_manifest_path)
+        errors = []
+        decisions = []
+        try:
+            parsed = json.loads(response)
+            if not isinstance(parsed, list) or not all(
+                isinstance(item, dict) for item in parsed
+            ):
+                raise ValueError("relation_correction_response_not_list")
+            decisions = [dict(item) for item in parsed]
+            validation_errors, _ = _relation_review_response_errors(
+                decisions,
+                focus_problem_ids=focus_ids,
+                known_problem_ids=known_problem_ids,
+                known_evidence_atom_ids=known_evidence_ids,
+                evidence_atom_ids_by_problem_id=evidence_ids_by_problem_id,
+                durable_collapse_problem_pairs=durable_collapse_problem_pairs,
+                allowed_actions={
+                    "merge",
+                    "alias",
+                    "split",
+                    "same_cause_group",
+                    "keep_separate",
+                },
+            )
+            errors.extend(validation_errors)
+        except Exception as exc:  # noqa: BLE001 - exact validator feedback
+            errors.append(f"{type(exc).__name__}: {exc}")
     if actual_session != expected_session:
         errors.append("stage1_relation_review_exact_session_changed")
     if actual_workspace != expected_workspace:
         errors.append("stage1_relation_review_workspace_changed")
     attempt_record = {
-        "attempt_number": len(attempts) + len(prior_correction_attempts or []) + 1,
-        "tag": tag,
+        "record_kind": (
+            "retained_candidate_revalidation"
+            if reused_retained_candidate
+            else "author_correction_attempt"
+        ),
+        "attempt_number": (
+            None
+            if reused_retained_candidate
+            else len(attempts) + len(prior_correction_attempts or []) + 1
+        ),
+        "tag": (
+            retained_candidate.get("invocation_tag")
+            if reused_retained_candidate and retained_candidate is not None
+            else tag
+        ),
         "status": "verified" if not errors else "invalid",
+        "model_invoked": not reused_retained_candidate,
         "agent_session_id": actual_session,
         "workspace_dir": str(actual_workspace),
         "elapsed_seconds": elapsed,
@@ -6928,8 +7075,10 @@ def continue_problem_relation_review_from_independent_feedback(
         corrected_batch["attempt_history"] = [
             *attempts,
             *[dict(item) for item in (prior_correction_attempts or [])],
-            attempt_record,
+            *([] if reused_retained_candidate else [attempt_record]),
         ]
+        if reused_retained_candidate:
+            corrected_batch["retained_correction_revalidation"] = attempt_record
     draft_raw = meta.get("problem_mining_evidence_draft")
     if not isinstance(draft_raw, dict):
         receipt_ref = meta.get("problem_mining_evidence_receipt")
@@ -6994,6 +7143,7 @@ def continue_problem_relation_review_from_independent_feedback(
         "case_registry": registry,
         "validation_errors": [],
         "attempt_record": attempt_record,
+        "reused_retained_candidate": reused_retained_candidate,
         "agent_session_id": actual_session,
         "workspace_dir": str(actual_workspace),
     }

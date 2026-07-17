@@ -48,6 +48,7 @@ from usertest_backlog.workflows.problem_mining import (
     _relation_case_preview,
     _relation_decision_item_errors,
     _relation_review_payload,
+    _retained_relation_correction_candidate,
     _run_cross_job_problem_synthesis,
     _run_independently_reviewed_problem_pass,
     _run_problem_mining_job_with_response_retry,
@@ -6265,6 +6266,75 @@ def test_independent_relation_feedback_resumes_relation_author_not_miner(
     assert corrected_batch["candidate_frontier"] == candidate_frontier
     assert corrected_batch["candidate_frontier_source"] == "persisted_batch_frontier"
 
+    retained_dir = tmp_path / "retained-relation-correction"
+    retained_dir.mkdir()
+    retained_tag = "qualification_relation_retained_001"
+    retained_prompt = "Retained correction prompt"
+    retained_response = json.dumps(corrected_decisions)
+    for suffix, content in (
+        ("prompt.txt", retained_prompt),
+        ("response.txt", retained_response),
+        ("raw_events.jsonl", ""),
+        ("last_message.txt", retained_response),
+        ("stderr.txt", ""),
+    ):
+        (retained_dir / f"{retained_tag}.{suffix}").write_text(
+            content,
+            encoding="utf-8",
+            newline="\n",
+        )
+    retained_invocation = _write_model_invocation_manifest(
+        stage="problem_mining",
+        tag=retained_tag,
+        agent="claude",
+        out_dir=retained_dir,
+        prompt=retained_prompt,
+        response=retained_response,
+        error_kind=None,
+        agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+        workspace_dir=workspace,
+    )
+    reused = problem_mining.continue_problem_relation_review_from_independent_feedback(
+        stage_doc=stage_doc,
+        atoms=[{"atom_id": "atom:one"}, {"atom_id": "atom:two"}],
+        feedback={"content_sha256": "c" * 64, "rationale": "Revalidate retained work."},
+        author_provenance={
+            "agent_session_id": session_id,
+            "workspace_dir": str(workspace.resolve()),
+            "relation_review_batch_tag": (
+                "problem_mining_relation_review_001_batch_001"
+            ),
+        },
+        pipeline_manifest=object(),
+        stage_guidance_text="guidance",
+        artifacts_dir=tmp_path / "reuse",
+        out_json=tmp_path / "reused.json",
+        out_md=tmp_path / "reused.md",
+        case_registry_path=tmp_path / "reused-cases.json",
+        previous_case_registry={"cases": {}},
+        repo_root=tmp_path,
+        agent="claude",
+        model=None,
+        cfg=object(),
+        prior_correction_attempts=[
+            {
+                "attempt_number": 2,
+                "status": "invalid",
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace.resolve()),
+            }
+        ],
+        retained_correction_invocation_path=retained_invocation,
+    )
+    assert reused["status"] == "corrected"
+    assert reused["reused_retained_candidate"] is True
+    assert reused["attempt_record"]["model_invoked"] is False
+    assert len(calls) == 1
+    reused_batch = relation_calls[-1]["relation_review_batches_override"][0]
+    assert len(reused_batch["attempt_history"]) == 2
+    assert reused_batch["retained_correction_revalidation"]["status"] == "verified"
+
 
 def test_relation_correction_recovers_legacy_candidate_frontier_from_verified_prompt(
     tmp_path: Path,
@@ -6300,7 +6370,16 @@ def test_relation_correction_recovers_legacy_candidate_frontier_from_verified_pr
             }
         )
     )
-    response = "[]"
+    response = json.dumps(
+        [
+            {
+                "focus_id": "problem:focus",
+                "action": "keep_separate",
+                "rationale": "The historical record is only a candidate.",
+                "review_confidence": 0.9,
+            }
+        ]
+    )
     for suffix, content in (
         ("prompt.txt", prompt),
         ("response.txt", response),
@@ -6339,6 +6418,22 @@ def test_relation_correction_recovers_legacy_candidate_frontier_from_verified_pr
     assert recovered == frontier
     assert frontier_sha256 == _relation_candidate_frontier_sha256(frontier)
     assert source == "verified_legacy_prompt_frontier"
+    retained = _retained_relation_correction_candidate(
+        tmp_path / f"{tag}.model_invocation.json",
+        expected_agent="claude",
+        expected_session=session_id,
+        expected_workspace=workspace.resolve(),
+        focus_ids={"problem:focus"},
+        known_problem_ids={"problem:focus", "problem:historical"},
+        known_evidence_atom_ids={"atom:focus", "atom:historical"},
+        evidence_atom_ids_by_problem_id={
+            "problem:focus": {"atom:focus"},
+            "problem:historical": {"atom:historical"},
+        },
+        durable_collapse_problem_pairs=set(),
+    )
+    assert retained["validation_errors"] == []
+    assert retained["valid_focus_ids"] == ["problem:focus"]
 
 
 def test_relation_correction_rejects_changed_persisted_candidate_frontier() -> None:
