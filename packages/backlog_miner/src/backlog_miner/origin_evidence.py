@@ -35,6 +35,7 @@ RUN_CONTEXT_INDEX_MAX_BYTES = 256 * 1024
 ASSIGNED_EVIDENCE_SYMPTOM_EXCERPT_CHARS = 600
 RESEARCH_RUN_CONTEXT_FILES: dict[str, str] = {
     "preflight.json": "preflight",
+    "agent_shell_probe/raw_events.jsonl": "agent_shell_probe_events",
     "agent_attempts.json": "agent_attempts",
     "metrics.json": "metrics",
     "settings_ref.json": "settings",
@@ -573,6 +574,101 @@ def _project_context_json(role: str, value: Any) -> dict[str, Any]:
 
 
 def _context_projection(role: str, raw: bytes) -> dict[str, Any]:
+    if role == "agent_shell_probe_events":
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            return {
+                "projection_status": "invalid_jsonl",
+                "error_type": type(exc).__name__,
+            }
+
+        projected_events: list[dict[str, Any]] = []
+        invalid_line_count = 0
+        event_count = 0
+        command_execution_count = 0
+        completed_command_count = 0
+        successful_command_count = 0
+        nonempty_command_output_count = 0
+        turn_completed_count = 0
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_line_count += 1
+                continue
+            if not isinstance(event, Mapping):
+                invalid_line_count += 1
+                continue
+            event_count += 1
+            event_type = _safe_context_text(event.get("type"), limit=128)
+            item_raw = event.get("item")
+            item = item_raw if isinstance(item_raw, Mapping) else {}
+            item_type = _safe_context_text(item.get("type"), limit=128)
+            if item_type == "command_execution":
+                command_execution_count += 1
+                status = _safe_context_text(item.get("status"), limit=128)
+                exit_code = item.get("exit_code")
+                if event_type == "item.completed" or status == "completed":
+                    completed_command_count += 1
+                if exit_code == 0 and status == "completed":
+                    successful_command_count += 1
+                outputs = {
+                    field: cleaned
+                    for field in ("aggregated_output", "stdout", "output", "stderr")
+                    if (cleaned := _safe_context_text(item.get(field), limit=2000))
+                    is not None
+                }
+                if outputs:
+                    nonempty_command_output_count += 1
+                projected_events.append(
+                    {
+                        "event_type": event_type,
+                        "item_id": _safe_context_text(item.get("id"), limit=128),
+                        "item_type": item_type,
+                        "command": _safe_context_text(item.get("command"), limit=1000),
+                        "status": status,
+                        "exit_code": exit_code
+                        if exit_code is None or isinstance(exit_code, int)
+                        else None,
+                        **outputs,
+                    }
+                )
+            elif item_type == "agent_message":
+                projected_events.append(
+                    {
+                        "event_type": event_type,
+                        "item_id": _safe_context_text(item.get("id"), limit=128),
+                        "item_type": item_type,
+                        "text": _safe_context_text(item.get("text"), limit=1000),
+                    }
+                )
+            elif event_type == "turn.completed":
+                turn_completed_count += 1
+                projected_events.append({"event_type": event_type})
+
+        retained_events = projected_events
+        events_truncated = len(projected_events) > 64
+        if events_truncated:
+            retained_events = [*projected_events[:16], *projected_events[-48:]]
+        return {
+            "projection_status": "projected",
+            "content": {
+                "event_count": event_count,
+                "invalid_line_count": invalid_line_count,
+                "command_execution_count": command_execution_count,
+                "completed_command_count": completed_command_count,
+                "successful_command_count": successful_command_count,
+                "nonempty_command_output_count": nonempty_command_output_count,
+                "turn_completed_count": turn_completed_count,
+                "projected_event_count": len(projected_events),
+                "retained_event_count": len(retained_events),
+                "events_truncated": events_truncated,
+                "events": retained_events,
+            },
+        }
     try:
         value = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -913,8 +1009,7 @@ def _project_run_context(
                     source is None
                     or rel is None
                     or rel.is_absolute()
-                    or len(rel.parts) != 1
-                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.name) != role
+                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.as_posix()) != role
                     or not _path_within(source, run_dir)
                     or not source.is_file()
                     or source.relative_to(run_dir) != rel
@@ -937,7 +1032,7 @@ def _project_run_context(
                 }
             )
             source_record = {
-                "source_name": rel.name,
+                "source_name": rel.as_posix(),
                 "role": role,
                 "source_sha256": digest,
                 "source_size_bytes": size,

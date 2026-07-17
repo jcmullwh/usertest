@@ -729,6 +729,22 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
+    shell_probe_events = run_dir / "agent_shell_probe" / "raw_events.jsonl"
+    shell_probe_events.parent.mkdir()
+    shell_probe_events.write_text(
+        "\n".join(
+            (
+                '{"type":"thread.started","thread_id":"thread:one"}',
+                '{"type":"item.completed","item":{"id":"item_0",'
+                '"type":"command_execution","command":"/bin/bash -lc probe",'
+                '"aggregated_output":"shell_probe=ok\\n","exit_code":0,'
+                '"status":"completed"}}',
+                '{"type":"turn.completed"}',
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     settings = run_dir / "settings_ref.json"
     settings.write_text(
         json.dumps(
@@ -754,7 +770,7 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
             "path": str(path),
             "sha256": sha256(raw).hexdigest(),
             "size_bytes": len(raw),
-            "source_relpath": path.name,
+            "source_relpath": path.relative_to(run_dir).as_posix(),
             "research_context_role": role,
         }
 
@@ -768,6 +784,7 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
                     "atom_snapshot": atom,
                 "artifact_receipts": [
                     artifact_receipt(preflight, "preflight"),
+                    artifact_receipt(shell_probe_events, "agent_shell_probe_events"),
                     artifact_receipt(settings, "settings"),
                 ],
             }
@@ -796,6 +813,10 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
     )
     index_text = (workspace / str(context_requirement["file"])).read_text(encoding="utf-8")
     assert "not enough disk space on C:" in index_text
+    assert '"source_name": "agent_shell_probe/raw_events.jsonl"' in index_text
+    assert '"aggregated_output": "shell_probe=ok"' in index_text
+    assert '"successful_command_count": 1' in index_text
+    assert '"turn_completed_count": 1' in index_text
     assert '"exec_backend": "local"' in index_text
     assert "MUST_NOT_LEAK" not in index_text
     assert "DO_NOT_COPY_PROMPT_SECRET" not in index_text

@@ -91,6 +91,29 @@ def test_semantic_manifest_tracks_cleanup_sidecar_and_run_inventory(
     ]
 
 
+def test_semantic_manifest_tracks_nested_shell_probe_origin_evidence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runs"
+    run = _canonical_run(root)
+    shell_probe_events = _write(
+        run / "agent_shell_probe" / "raw_events.jsonl",
+        '{"type":"turn.completed"}\n',
+    )
+
+    sealed = _manifest(root)
+
+    assert (
+        "agent_shell_probe/raw_events.jsonl"
+        in sealed["artifact_contract"]["origin_evidence_relative_paths"]
+    )
+    assert verify_semantic_run_evidence_manifest(sealed, name="fixture") == []
+    _write(shell_probe_events, '{"type":"turn.failed"}\n')
+    assert verify_semantic_run_evidence_manifest(sealed, name="fixture") == [
+        "qualification_input_semantic_tree_changed:fixture"
+    ]
+
+
 def test_semantic_manifest_tracks_implementation_orphan_recovery_inputs(
     tmp_path: Path,
 ) -> None:

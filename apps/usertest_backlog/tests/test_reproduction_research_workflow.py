@@ -846,6 +846,14 @@ def test_origin_artifact_receipts_include_nested_and_retained_failure_streams(
     (run_dir / "settings_ref.json").write_text(
         '{"settings":{"applied":{"exec_backend":"local"}}}\n', encoding="utf-8"
     )
+    shell_probe_events = run_dir / "agent_shell_probe" / "raw_events.jsonl"
+    shell_probe_events.parent.mkdir()
+    shell_probe_events.write_text(
+        '{"type":"item.completed","item":{"type":"command_execution",'
+        '"aggregated_output":"shell_probe=ok\\n","exit_code":0,'
+        '"status":"completed"}}\n',
+        encoding="utf-8",
+    )
     (run_dir / "prompt.txt").write_text("must not be retained\n", encoding="utf-8")
     atom = {
         "atom_id": "atom:failure",
@@ -870,6 +878,12 @@ def test_origin_artifact_receipts_include_nested_and_retained_failure_streams(
     by_name = {Path(str(receipt["path"])).name: receipt for receipt in receipts}
     assert by_name["preflight.json"]["research_context_role"] == "preflight"
     assert by_name["settings_ref.json"]["research_context_role"] == "settings"
+    shell_probe_receipt = next(
+        receipt
+        for receipt in receipts
+        if receipt.get("source_relpath") == "agent_shell_probe/raw_events.jsonl"
+    )
+    assert shell_probe_receipt["research_context_role"] == "agent_shell_probe_events"
     assert "prompt.txt" not in by_name
     assert all(receipt["sha256"] for receipt in receipts)
 

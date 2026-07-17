@@ -51,6 +51,7 @@ _OPERATIONAL_CANDIDATE_ID_RE = re.compile(
 # source of truth instead of duplicating the list in the snapshot implementation.
 ORIGIN_EVIDENCE_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = (
     "preflight.json",
+    "agent_shell_probe/raw_events.jsonl",
     "agent_attempts.json",
     "settings_ref.json",
     "effective_run_spec.json",
@@ -296,11 +297,11 @@ def _research_file_receipt(path: Path, *, run_dir: Path | None = None) -> dict[s
         except ValueError:
             relative = None
         if relative is not None:
-            receipt["source_relpath"] = relative.as_posix()
-            if len(relative.parts) == 1:
-                role = RESEARCH_RUN_CONTEXT_FILES.get(relative.name)
-                if role is not None:
-                    receipt["research_context_role"] = role
+            relative_path = relative.as_posix()
+            receipt["source_relpath"] = relative_path
+            role = RESEARCH_RUN_CONTEXT_FILES.get(relative_path)
+            if role is not None:
+                receipt["research_context_role"] = role
     return receipt
 
 
