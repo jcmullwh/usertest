@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T19:12:00Z",
+    "as_of": "2026-07-17T19:50:00Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Two bounded no-change lifecycles complete; next actionable case pending",
-        "detail": "Windows and Docker-shell both reached evidence_sufficient, already_addressed research and production Stage 4 not_required dispositions. Neither produced an option, ticket, implementation, or Docker mutation. The exact 2,854-atom input and 24-case graph remain the accepted cycle frontier.",
+        "value": "Accepted queue completed through ticket assembly",
+        "detail": "Both eligible cases in the accepted 2,854-atom, 24-case frontier reached evidence_sufficient, already_addressed dispositions. The combined lifecycle emitted zero options, plans, and tickets, with two explicit not_emitted lineage records. There is no unprocessed requires_change case in this accepted queue.",
         "tone": "good"
       },
       {
         "label": "Current bounded throughput",
-        "value": "2 / 2 researched no-change cases reached correct Stage 4 dispositions",
-        "detail": "The Docker-shell author corrected the remaining readiness inconsistency in one turn. The old progress controller wrongly rejected that zero-error attempt and forced one 17-finding regression; BDS-121 now preserves and promotes the authenticated good attempt without another model call.",
+        "value": "2 / 2 eligible cases reached correct terminal dispositions",
+        "detail": "The combined Stage 3-through-ticket component run completed in 21.290 seconds with zero model calls, zero Stage 1/2 reruns, zero tickets, and no export, implementation, or Docker actions. BDS-122 prevents terminal no-change research from being reopened as false work.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No export-disabled full shadow cycle is claimed. The current cycle has accepted Stage 1/2 and two bounded no-change lifecycles, but it has not processed the remaining actionable queue through optioning, planning, implementation, and outcomes.",
+        "detail": "No standard export-disabled full shadow cycle is claimed yet. The accepted component frontier is complete, but the complete production command still must reproduce that outcome from a clean current pipeline revision and pass output adjudication.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Select the next accepted requires_change case and carry it end to end",
-        "detail": "Do not restart Stage 1/2 or reopen either already-addressed case. Continue component-first from the accepted case graph, using small stage-local runs until mechanics are green, then scale only when output quality requires volume.",
+        "value": "Run one clean standard export-disabled shadow cycle",
+        "detail": "Checkpoint the now-tested pipeline revision, prepare an isolated execution root, and run the normal end-to-end command. It must preserve the two terminal dispositions, emit no false tickets, retain signed-in subscription provenance, and pass adjudication before this counts as qualification cycle one.",
         "tone": "warn"
       }
     ],
@@ -2654,27 +2654,27 @@
         "rework": {
           "author_invocations": 61,
           "continuation_launches": 25,
-          "stage_reruns": 12,
+          "stage_reruns": 13,
           "full_restarts": 0,
-          "summary": "Sixty-one author calls are counted: the prior fifty-nine plus two same-session Docker-shell readiness-correction calls. One bounded continuation launch produced both calls. The first corrected the one readiness finding to zero; the second was a forced regression caused by BDS-121. One exact model-free replay, one authenticated promotion, production Stage 3 reuse, and production Stage 4 no-change processing completed without restarting Stage 1/2 or the cycle."
+          "summary": "Sixty-one author calls and twenty-five continuation launches remain unchanged. One additional Stage 3 model-free current-verifier rescore recovered stale runner-owned Windows evidence without changing authored claims. The combined two-case Stage 3-through-ticket lifecycle was the first run of that boundary, not another rerun. No full cycle or Stage 1/2 restart occurred."
         },
         "label": "Clean exact-revision backlog qualification cycle",
         "scope": "Reconciled non-IDEA evidence custody, accepted exact Stage 1/2, and completed two bounded already-addressed cases through production Stage 4 no-change disposition; automated export remains disabled and no Docker object mutation or removal was authorized",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 57700.0,
+          "elapsed_seconds": 59980.0,
           "coverage": "active",
-          "display": "16 h 1 m 40.0 s as of 19:12:00Z",
-          "note": "Wall time begins at creation of the retained qualification-cycle root. Model-free verifier replays and promotion are supporting stage-local operations; they are not new author work."
+          "display": "16 h 39 m 40.0 s as of 19:50:00Z",
+          "note": "Wall time begins at creation of the retained qualification-cycle root. The 71.030-second current-verifier replay, authenticated rescore, and 21.290-second combined lifecycle are supporting stage-local operations; they are not new author work."
         },
-        "furthest_stage": "Stage 4 completed for both bounded no-change cases",
-        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. Windows remains evidence_sufficient/partial/already_addressed with Stage 4 not_required. Docker-shell establishes that the historical parser omitted command_execution.aggregated_output and therefore misclassified successful probes; the target revision already contains the parser fix. The same Terra author removed one noncompeting alternative hypothesis while retaining its context as a boundary, reducing one readiness finding to zero. After BDS-121 corrected the controller's false regression judgment, authenticated attempt 36 became terminal attempt 38 while later regressed attempt 37 remained auditable as superseded. Production Stage 4 emitted not_required with zero options and zero model calls. No plan, export, ticket, implementation, Docker mutation, or removal occurred.",
-        "outcome": "Two bounded cases completed with correct no-change lifecycles; the next accepted actionable case remains to be processed",
+        "furthest_stage": "Ticket assembly completed for all eligible accepted cases",
+        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. Its two eligible cases are both evidence_sufficient/partial/already_addressed. Current Stage 3 reuse, Stage 4 not_required, empty Stages 5/6, and ticket assembly completed together. BDS-122 corrected the assembler's attempt to reopen verified no-change cases; BDS-123 recovered the Windows runner-owned proof projection under the current verifier without changing authored research. The combined result contains zero options, selections, plans, or tickets and two explicit not_emitted lineage records. No export, implementation, Docker mutation, removal, or additional model work occurred.",
+        "outcome": "All eligible accepted cases reached correct terminal dispositions and zero false tickets were emitted",
         "errors": {
-          "count": 35,
+          "count": 37,
           "count_kind": "deduplicated_clusters",
-          "summary": "Twenty-two product defects are counted: BDS-100 through BDS-121. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. Model-authored validation findings are not inflated into separate product-defect clusters.",
+          "summary": "Twenty-four product defects are counted: BDS-100 through BDS-123. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. The two additions are terminal-ticket reopening and stale runner-owned verifier projection; model-authored findings remain uninflated.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2698,6 +2698,8 @@
             "BDS-119",
             "BDS-120",
             "BDS-121",
+            "BDS-122",
+            "BDS-123",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2719,9 +2721,9 @@
           "summary": "Thirteen nondeterministic quality clusters improved automatically. The new cluster is attempt 36's same-author one-finding-to-zero readiness correction. Attempt 37's later 17-finding regression is not counted as progress, and evaluator-only corrections remain supervision rather than model success."
         },
         "supervisor_interventions": {
-          "count": 48,
+          "count": 50,
           "count_kind": "deduplicated_clusters",
-          "summary": "Forty-eight deduplicated interventions are counted. The two new clusters are the explicit same-author readiness-feedback launch and BDS-121's general progression/promotion correction. The exact replay, tests, observation, and dashboard update are supporting evidence rather than additional intervention clusters.",
+          "summary": "Fifty deduplicated interventions are counted. The additions are BDS-122's general ticket-terminal correction and BDS-123's authenticated model-free current-verifier recovery. Tests, combined execution, observation, and dashboard maintenance are supporting evidence rather than extra interventions.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2769,13 +2771,15 @@
             "BDS-118",
             "BDS-119",
             "BDS-120",
-            "stage3_readiness_adjudication_feedback_launch",
-            "BDS-121"
-          ]
+              "stage3_readiness_adjudication_feedback_launch",
+              "BDS-121",
+              "BDS-122",
+              "BDS-123"
+            ]
         },
-        "next_action": "Select the next accepted requires_change case from the existing case graph and carry it through research, optioning, planning, implementation, and outcome using section-local reruns; do not restart accepted Stage 1/2 or reopen already-addressed cases.",
+        "next_action": "Checkpoint the tested pipeline revision, prepare a clean isolated execution root, and run one standard export-disabled end-to-end shadow cycle. Score its complete output before claiming qualification; do not invent another actionable case from the completed accepted queue.",
         "tone": "good",
-        "data_quality": "Attempt 35 was runner feedback and attempts 36 and 37 were the two actual Terra calls. Attempt 36 reduced the single readiness finding to zero; attempt 37 regressed to 17 after the old controller wrongly rejected attempt 36. The 240.694-second exact replay, 71.5-second promotion, and 17.651-second production Stage 4 run bind the selected and superseded hashes, full 38-attempt ledger, zero model/upstream/downstream/Docker promotion calls, signed-in ChatGPT provenance, zero options, and unchanged 24-case identity set. The complete affected files collected 550 tests; 549 passed with one expected skip in 222.1 seconds. The broader package/dashboard gate collected 962 tests; 961 passed with one expected skip in 184.2 seconds, with Ruff and dashboard synchronization green. Full-cycle qualification and live Docker outcome proof remain absent.",
+        "data_quality": "The 71.030-second exact Windows replay changed five current verifier findings to zero while the authored dossier remained unchanged. Its authenticated rescore retained lineage and rechecked signed-in ChatGPT provenance with API-billing variables blank. The 21.290-second combined receipt binds both current research inputs, all six stage artifacts, registry before/after counts, two not-emitted lineages, zero tickets, and zero model, Stage 1/2, Docker, export, filesystem-ticket, or implementation actions. The broader affected gate collected 1,100 tests and completed in 275.3 seconds with 1,099 passing and one expected skip; Ruff, diff checks, and dashboard synchronization pass. Standard full-cycle qualification and live Docker outcome proof remain absent.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "stage12_multisource_8_live_8a047703_20260717",
@@ -2783,6 +2787,9 @@
           "stage3_docker_shell_attempt36_replay_20260717",
           "stage3_docker_shell_attempt36_promotion_20260717",
           "stage4_docker_shell_no_change_20260717",
+          "stage3_windows_current_evidence_replay_20260717",
+          "stage3_windows_current_rescore_20260717",
+          "combined_no_change_lifecycle_20260717",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -8375,6 +8382,64 @@
       "stage1_stage2_or_downstream_invoked": false,
       "docker_invocations_enabled": false,
       "limitations": "Stage completion means the runner emitted a verifier-clean disposition; it does not mean the case is ready. The signed-in author could not access the Docker Desktop named pipe, so the dossier honestly remains blocked pending a system-owned faithful Docker preflight replay. No Docker object was created or removed by this component."
+    },
+    {
+      "id": "stage3_windows_current_evidence_replay_20260717",
+      "path": "U:/usertest_backlog_qualification/ef356030_20260717T114000Z/component_frontiers/stage3_windows_attempt14_current_replay_20260717T194059Z/receipt.json",
+      "kind": "model_free_current_verifier_replay_of_retained_windows_research",
+      "file_sha256": "62F5714E16DC1444D724FD642EFF7842A3A3BB69AC498C7B4141EFA440539609",
+      "duration_seconds": 71.03034890000708,
+      "source_attempt_sha256": "a276e48064b37b3414e7fcd45af09ab70d900723fdb0bb4abda997d26078f63d",
+      "candidate_sha256": "877b5515616597c62384504f4fe5b86b1923a35c45bbfa251eb6514b6a2dbdf1",
+      "source_finding_count": 5,
+      "replacement_finding_count": 0,
+      "new_model_invocations": 0,
+      "stage1_stage2_or_downstream_invoked": false,
+      "docker_invocations_enabled": false,
+      "source_dossier_unchanged": true,
+      "limitations": "This proves the retained authored research is valid under the current evaluator after rebuilding runner-owned evidence projection. It is a component recovery, not a completed standard shadow cycle, and automatic current-verifier refresh remains unimplemented."
+    },
+    {
+      "id": "stage3_windows_current_rescore_20260717",
+      "path": "U:/usertest_backlog_qualification/ef356030_20260717T114000Z/component_frontiers/stage3_windows_current_rescore_20260717T194312Z/receipt.json",
+      "kind": "authenticated_zero_model_current_evidence_rescore_materialization",
+      "file_sha256": "65FB787932D4716C2EC602CF66C4BCC915C12A86515F68E430295D17EB783E06",
+      "source_finding_count": 5,
+      "replacement_finding_count": 0,
+      "terminal_attempt_number": 16,
+      "new_model_invocations": 0,
+      "stage1_stage2_or_downstream_invoked": false,
+      "docker_invocations_enabled": false,
+      "subscription_status": "Logged in using ChatGPT",
+      "api_provider_variables_blanked_in_child": true,
+      "limitations": "The rescore authenticates and persists the model-free replay result. It recovers this cycle but does not yet provide a general automatic refresh trigger for every future verifier-contract evolution."
+    },
+    {
+      "id": "combined_no_change_lifecycle_20260717",
+      "path": "U:/usertest_backlog_qualification/5f0f277a_20260717T080600Z/component_frontiers/combined_no_change_live_20260717T194520Z/combined_no_change_lifecycle_receipt.json",
+      "kind": "combined_production_component_stage3_through_ticket_lifecycle",
+      "file_sha256": "9F0C8FAF167FBB549FFBB71D7656659703E0EC98FAE0D3AB5595BE718B10168E",
+      "duration_seconds": 21.290033,
+      "pipeline_git_head": "264447ea86dfb3b12fa70a8492bb74a6404b2f04",
+      "model": "gpt-5.6-terra",
+      "atom_count": 2854,
+      "registry_case_count_before": 24,
+      "registry_case_count_after": 24,
+      "eligible_case_count": 2,
+      "stage4_not_required_count": 2,
+      "stage4_option_count": 0,
+      "stage5_selection_count": 0,
+      "stage6_plan_count": 0,
+      "ticket_count": 0,
+      "ticket_lineage_not_emitted_count": 2,
+      "new_model_invocations": 0,
+      "stage1_stage2_invocation_count": 0,
+      "docker_invocation_count": 0,
+      "export_ticket_filesystem_or_implementation_actions": false,
+      "subscription_status": "Logged in using ChatGPT",
+      "api_provider_variables_blanked_in_child": true,
+      "source_files_unchanged": true,
+      "limitations": "This is a stitched production-component lifecycle over the accepted Stage 1/2 frontier, not the normal clean end-to-end shadow command. It establishes the current mechanics and terminal disposition but does not count toward the required 2-cycle full qualification streak."
     },
     {
       "id": "executive_summary",

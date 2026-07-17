@@ -32,7 +32,10 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
-from backlog_core.stage_contracts import assess_research_readiness
+from backlog_core.stage_contracts import (
+    assess_research_readiness,
+    research_actionability_assessment,
+)
 from backlog_core.ticket_readiness import assess_ticket_readiness
 
 _LOG = logging.getLogger(__name__)
@@ -144,13 +147,26 @@ def _material_unknown_investigation_steps(research: dict[str, Any] | None) -> li
     ]
 
 
+def _research_contract_view(research: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Remove only the runner-owned case-lineage envelope from persisted research."""
+
+    if not isinstance(research, dict):
+        return None
+    return {
+        key: value
+        for key, value in research.items()
+        if key not in {"canonical_problem_id", "case_member_problem_ids"}
+    }
+
+
 def _research_stage_and_evidence(
     research: dict[str, Any] | None,
     *,
     needs_ux_review: bool,
 ) -> tuple[str, dict[str, Any]]:
     """Return the safe ticket stage and the complete research-readiness assessment."""
-    ready, reasons = assess_research_readiness(research)
+    contract_research = _research_contract_view(research)
+    ready, reasons = assess_research_readiness(contract_research)
     evidence = {
         "ready": ready,
         "reasons": reasons,
@@ -164,6 +180,17 @@ def _research_stage_and_evidence(
     if needs_ux_review:
         return "research_required", evidence
     return "ready_for_ticket", evidence
+
+
+def _research_is_terminal_no_change(research: dict[str, Any] | None) -> bool:
+    """Return whether verified research established that no product change is due."""
+
+    contract_research = _research_contract_view(research)
+    ready, _reasons = assess_research_readiness(contract_research)
+    if not ready or contract_research is None:
+        return False
+    disposition = research_actionability_assessment(contract_research).get("disposition")
+    return disposition in {"already_addressed", "non_actionable"}
 
 
 def assemble_backlog_tickets(
@@ -209,6 +236,24 @@ def assemble_backlog_tickets(
     selection_by_id = _index_by_problem_id(selection_decisions, kind="selection_decisions")
     options_by_problem = _group_by_problem_id(solution_option_sets, kind="solution_option_sets")
     plans_by_problem = _group_by_problem_id(change_plans, kind="change_plans")
+
+    terminal_no_change_problem_ids = {
+        pid
+        for pid, research in research_by_id.items()
+        if _research_is_terminal_no_change(research)
+    }
+    contradictory_downstream_problem_ids = sorted(
+        pid
+        for pid in terminal_no_change_problem_ids
+        if plans_by_problem.get(pid)
+        or options_by_problem.get(pid)
+        or pid in selection_by_id
+    )
+    if contradictory_downstream_problem_ids:
+        raise ValueError(
+            "assemble_backlog_tickets: terminal no-change research has downstream "
+            "implementation artifacts: " + ", ".join(contradictory_downstream_problem_ids)
+        )
 
     plan_problem_ids = sorted(plans_by_problem)
     missing_for_plans: list[str] = []
@@ -339,6 +384,12 @@ def assemble_backlog_tickets(
     # 2) Secondary path: problems without a change plan remain as triage/research tickets.
     for pid in sorted(records_by_id):
         if pid in ticketed_problem_ids:
+            continue
+        # A ready Stage-3 proof can establish that the reported problem was already
+        # addressed or is genuinely non-actionable. Stage 4 records that terminal
+        # disposition without options. Re-emitting it as a triage/research ticket here
+        # would undo the evidence-backed result merely because no plan exists.
+        if pid in terminal_no_change_problem_ids:
             continue
         record = records_by_id[pid]
         priority = priority_by_id.get(pid)

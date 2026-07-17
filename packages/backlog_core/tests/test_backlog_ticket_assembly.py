@@ -1380,6 +1380,91 @@ def test_assemble_backlog_tickets_splits_by_change_plan() -> None:
     assert triage[0]["stage"] == "triage"
 
 
+@pytest.mark.parametrize("disposition", ["already_addressed", "non_actionable"])
+def test_assemble_backlog_tickets_does_not_reopen_terminal_no_change_research(
+    disposition: str,
+) -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        actionability_assessment={
+            "disposition": disposition,
+            "rationale": "Verified evidence establishes that no product change is due.",
+            "evidence_refs": ["exp-1"],
+        },
+    )
+    research["canonical_problem_id"] = problem_id
+    research["case_member_problem_ids"] = [problem_id]
+
+    tickets = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[],
+        research_dossiers=[research],
+        solution_option_sets=[],
+        selection_decisions=[],
+        change_plans=[],
+    )
+
+    assert tickets == []
+
+
+def test_assemble_backlog_tickets_rejects_downstream_work_for_terminal_no_change() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        actionability_assessment={
+            "disposition": "already_addressed",
+            "rationale": "Verified evidence establishes that no product change is due.",
+            "evidence_refs": ["exp-1"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="terminal no-change research"):
+        assemble_backlog_tickets(
+            problem_records=[_problem_record(problem_id)],
+            priority_decisions=[],
+            research_dossiers=[research],
+            solution_option_sets=[_option(problem_id)],
+            selection_decisions=[],
+            change_plans=[],
+        )
+
+
+def test_assemble_backlog_tickets_does_not_trust_no_change_on_unready_research() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        reproduction_status="partial",
+        research_status="insufficient_evidence",
+        root_cause_confidence=0.4,
+        material_unknowns=[
+            {
+                "unknown": "Whether the claimed fix covers the original failure",
+                "affects": ["root_cause"],
+                "evidence_needed": "Replay the original scenario",
+            }
+        ],
+        actionability_assessment={
+            "disposition": "already_addressed",
+            "rationale": "The model claimed the issue was addressed without sufficient proof.",
+            "evidence_refs": ["exp-1"],
+        },
+    )
+
+    tickets = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[],
+        research_dossiers=[research],
+        solution_option_sets=[],
+        selection_decisions=[],
+        change_plans=[],
+    )
+
+    assert len(tickets) == 1
+    assert tickets[0]["stage"] == "research_required"
+    assert tickets[0]["research_readiness"]["ready"] is False
+
+
 def test_plan_cannot_abandon_verified_intervention_for_unbound_target() -> None:
     problem = _problem_record("problem:one", title="One")
     option = _option("problem:one")

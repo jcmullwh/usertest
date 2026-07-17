@@ -245,11 +245,11 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["timing"]["start_at"] == "2026-07-17T03:10:20Z"
     assert current["rework"]["author_invocations"] == 61
     assert current["rework"]["continuation_launches"] == 25
-    assert current["rework"]["stage_reruns"] == 12
+    assert current["rework"]["stage_reruns"] == 13
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 35
+    assert current["errors"]["count"] == 37
     assert current["automatic_self_corrections"]["count"] == 13
-    assert current["supervisor_interventions"]["count"] == 48
+    assert current["supervisor_interventions"]["count"] == 50
 
     rendered = mod._render_dashboard(dashboard)
     html_text = mod.DEFAULT_HTML.read_text(encoding="utf-8")
