@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T21:34:11Z",
+    "as_of": "2026-07-17T23:31:12Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Clean shadow reached substantive Stage 1; retained frontier repair is green",
-        "detail": "The normal export-disabled command completed seven miners, seven coverage reviews, hierarchical cross-job synthesis, and 27-case relation review. It retained four newly mined records, then stopped at a deterministic case-lineage persistence defect. The exact retained frontier now replays under the correction without another model call; Stage 2 has not yet run.",
+        "value": "Stage 1 and Stage 2 complete; first Stage 3 case retained under correction",
+        "detail": "The corrected retained Stage 1 frontier persisted as 24 canonical work units. Stage 2 completed 24/24 valid prioritization decisions in 92.334 seconds with one signed-in Terra call. The first P0 Stage 3 case has not reached disposition: 13 same-session author calls ran before supervision stopped repeated evaluator churn, and BDS-125 is now green in both complete owning test modules.",
         "tone": "warn"
       },
       {
         "label": "Current bounded throughput",
-        "value": "Stage 1: 4 new records; 24 canonical work units after relation review",
-        "detail": "The retained run made 28 signed-in Terra calls: 26 verified and two failed session-acquisition attempts, with automatic recovery. Exact replay leaves only the genuinely shared Windows atom as a durable absorption; plugin and quickstart remain provisional for research instead of being falsely merged.",
+        "value": "Stage 1: 24 work units; Stage 2: 24/24 decisions; Stage 3: 0/1 dispositions",
+        "detail": "Upstream output is durable and valid. Stage 3 produced real source inspection and three passing clean experiment replays, but no dossier is ready yet. The retained author did make partial progressâ€”including one seven-finding frontier reduced to oneâ€”so its work is being corrected in place rather than discarded.",
         "tone": "warn"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No standard export-disabled full shadow cycle has completed. The first clean attempt reached Stage 1 but did not enter Stage 2, research, planning, adjudication, or ticket assembly, so it contributes zero qualification passes.",
+        "detail": "No standard export-disabled full shadow cycle has completed. The current cycle has passed Stage 2 and entered one Stage 3 case, but it has not produced a correct terminal research disposition, planning, adjudication, or ticket assembly, so it still contributes zero qualification passes.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Persist the retained Stage 1 frontier, then continue at Stage 2",
-        "detail": "Checkpoint the tested BDS-124 correction, replay the retained model output through production persistence with zero new author calls, and resume the existing frontier. Do not repeat mining. A later complete normal command is still required before qualification.",
+        "value": "Resume the same Stage 3 author once on the corrected evaluator",
+        "detail": "Commit and seal BDS-125, then return precise feedback to the existing Terra session: preserve the passing control pair, expose the claimed mechanism through a directly verifiable observation or repair the attested adapter, remove the overlay path from inspected_files, and correct the literal atom binding. Do not restart Stage 1, Stage 2, or the research author.",
         "tone": "warn"
       }
     ],
@@ -2652,29 +2652,29 @@
         "lifecycle_id": "pipeline-cycle:338a373f:20260717",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 89,
-          "continuation_launches": 25,
+        "author_invocations": 102,
+        "continuation_launches": 37,
           "stage_reruns": 13,
           "full_restarts": 0,
-          "summary": "The prior sixty-one author calls are joined by 28 signed-in Terra call attempts in the first clean standard shadow: 26 verified and two failed during one miner's automatic session acquisition before recovery. Twenty-five prior continuation launches, thirteen stage reruns, and zero full restarts remain unchanged. The retained Stage 1 frontier will be replayed deterministically rather than mined again."
+        "summary": "The 89 prior author call attempts are joined by one original Stage 3 author call and twelve same-session continuations for the first P0 case. The author was not restarted. The current cycle now totals 102 author invocations, 37 continuation launches, thirteen stage reruns, and zero full restarts. Model-free diagnostics and test replays are not counted as author calls."
         },
         "label": "Clean exact-revision backlog qualification cycle",
-        "scope": "Reconciled non-IDEA evidence custody, completed the accepted two-case no-change component lifecycle, then launched the first clean normal export-disabled shadow through substantive Stage 1; no Docker object mutation, removal, ticket export, or implementation was authorized",
+      "scope": "Reconciled non-IDEA evidence custody, persisted the first clean shadow through Stage 2, and advanced one real P0 case into Stage 3 under signed-in Terra; no removal, ticket export, implementation, or Docker object mutation was authorized",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 66231.0,
+        "elapsed_seconds": 73252.0,
           "coverage": "active",
-          "display": "18 h 23 m 51.8 s as of 21:34:11Z",
-          "note": "Wall time begins at creation of the retained qualification-cycle root. Current clean preparation took 1,062.887 seconds. The standard shadow ran 2,792.218 seconds and stopped after Stage 1. Earlier component replays remain supporting operations rather than separate lifecycle rows."
+        "display": "20 h 20 m 52 s as of 23:31:12Z",
+        "note": "Wall time begins at creation of the retained qualification-cycle root. Clean preparation took 1,062.887 seconds; the standard shadow took 2,792.218 seconds through Stage 1; exact Stage 1 persistence replayed without a model; Stage 2 took 92.334 seconds. The first Stage 3 author/correction chain ran for roughly 57 minutes before supervision stopped it. Three model-free diagnostic/rescore operations took 399.7, 401.5, and 412.3 seconds; they are supporting work, not extra lifecycle rows."
         },
-        "furthest_stage": "Clean standard shadow completed Stage 1 author work; corrected persistence replay pending",
-        "current_state": "The clean a2de4947 preparation sealed 2,854 atoms and the current 24-case registry. The normal signed-in Terra shadow completed all Stage 1 mining, coverage, synthesis, and relation-review author work, producing four new records across 27 active inputs. It stopped before Stage 2 because provisional packet expansion falsely appeared to prove durable identity for two disjoint case pairs. BDS-124 now separates case-owned identity evidence from the complete research packet. Exact model-free replay yields 24 canonical work units and only one justified durable absorption. The authored outputs, failed receipt, and all source artifacts remain retained; no Stage 2/3, export, implementation, Docker mutation, or removal occurred.",
-        "outcome": "Substantive Stage 1 output retained and deterministic repair verified; full-cycle throughput remains unproven",
+      "furthest_stage": "Stage 2 complete; first P0 case active in Stage 3",
+      "current_state": "The clean a2de4947 preparation sealed 2,854 atoms and the 24-case registry. Exact production replay persisted the corrected Stage 1 frontier without another model call. Stage 2 then completed 24/24 decisions with one signed-in Terra call and selected all 24 for honest research/reassessment under policy. Stage 3 began with problem:codex-model-messages-config-invalid. Its retained author inspected production code and history and built three clean-replayable experiments, but 13 same-session calls did not reach readiness. BDS-125 proved that safe Python flag -B hid the authenticated harness; after correction the scalar intervention verifies, while the remaining shared-mechanism/output-flow and quote-attestation issues are genuine author proof work. The complete research_evidence and research_runner modules pass. No Stage 4+, export, implementation, removal, or Docker object mutation occurred.",
+      "outcome": "Stage 2 completed; Stage 3 work retained but not yet correctly dispositioned",
         "errors": {
-          "count": 40,
+          "count": 42,
           "count_kind": "deduplicated_clusters",
-          "summary": "Twenty-five product defects are counted: BDS-100 through BDS-124. Fourteen supervisor/observability errors are counted: AN-05 through AN-18. One automatic session-acquisition failure cluster is counted separately; it recovered inside Stage 1. Model-authored findings remain uninflated.",
+          "summary": "Twenty-six product defects are counted: BDS-100 through BDS-125. Fourteen supervisor/observability errors are counted: AN-05 through AN-18. One automatic session-acquisition failure cluster recovered inside Stage 1. One deduplicated current-author proof cluster covers the overlay-file classification, literal atom binding, shared mechanism-to-observation flow, and unattested adapter quote; its cascading verifier messages are not counted separately.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2701,6 +2701,7 @@
             "BDS-122",
             "BDS-123",
             "BDS-124",
+            "BDS-125",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2715,18 +2716,19 @@
             "AN-16",
             "AN-17",
             "AN-18",
-            "AUTO-SESSION-01"
+            "AUTO-SESSION-01",
+            "AUTHOR-STAGE3-CODEX-CONFIG-01"
           ]
         },
         "automatic_self_corrections": {
-          "count": 14,
+          "count": 15,
           "count_kind": "deduplicated_clusters",
-          "summary": "Fourteen nondeterministic quality clusters improved automatically. The latest is miner seven's failed session acquisition recovering to a verified signed-in author result without restarting Stage 1. Attempt 36's earlier one-finding-to-zero correction remains counted; deterministic evaluator fixes remain supervision rather than model success."
+          "summary": "Fifteen nondeterministic quality clusters improved automatically. The current Stage 3 author fixed its own initial harness execution defect and later reduced one seven-finding verifier frontier to one before a deeper evaluator boundary re-expanded the findings. That improvement counts even though the case is not complete. Deterministic BDS-125 work remains supervision rather than model success."
         },
         "supervisor_interventions": {
-          "count": 52,
+          "count": 53,
           "count_kind": "deduplicated_clusters",
-          "summary": "Fifty-two deduplicated interventions are counted. AN-18 covers the clean-shadow launcher's two pre-model source-binding mistakes as one cluster; BDS-124 covers the general provisional-evidence identity correction. Tests, exact replay, observation, and dashboard maintenance are supporting evidence rather than extra interventions.",
+          "summary": "Fifty-three deduplicated interventions are counted. BDS-125 covers stopping the nonconverging Stage 3 chain, proving the safe-interpreter-flag parser defect, correcting it, and replacing misleading pytest-only feedback with precise same-author guidance. The three model-free diagnostics, tests, observation, and dashboard maintenance are supporting evidence rather than extra interventions.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2780,11 +2782,12 @@
               "BDS-123"
               ,"AN-18"
               ,"BDS-124"
+              ,"BDS-125"
             ]
         },
-        "next_action": "Commit and seal the BDS-124 correction, persist the retained Stage 1 output without another author call, and continue the same frontier at Stage 2. Inspect research assignments and dispositions before scaling further; do not restart mining unless retained custody proves unusable.",
+        "next_action": "Commit and seal BDS-125, then resume the exact Stage 3 author/session once with the corrected runner feedback. Preserve the existing passing experiments, repair their directly verifiable shared-mechanism observation or attested adapter, correct the two remaining contract issues, independently rescore, and advance only to the evidence-supported terminal disposition. Do not restart Stage 1, Stage 2, or the author.",
         "tone": "warn",
-        "data_quality": "Clean preparation receipt 494E7361... records 1,062.887 seconds and 2,854 atoms. Standard-shadow launcher receipt 8BC4CD98... records 2,792.218 seconds, exact a2de4947 execution, gpt-5.6-terra, Logged in using ChatGPT, and blank API-billing variables. Twenty-eight model manifests are retained: 26 verified and two failed before automatic session recovery. Exact model-free replay of all 27 relation inputs and the retained response now yields 24 work units, one justified Windows absorption, and provisional plugin/quickstart packets. The affected gate passed 441/441 tests in 82.7 seconds; focused prompt/identity coverage passed 147/147; Ruff and diff checks pass. Zero full qualification cycles, adjudications, exports, implementations, Docker mutations, or removals occurred.",
+        "data_quality": "Clean preparation receipt 494E7361... records 1,062.887 seconds and 2,854 atoms. Standard-shadow launcher receipt 8BC4CD98... records 2,792.218 seconds, exact a2de4947 execution, gpt-5.6-terra, Logged in using ChatGPT, and blank API-billing variables. Exact Stage 1 replay persisted 24 work units. Stage 2 receipt records 92.334 seconds, one Terra call, 24/24 decisions, and unchanged signed-in subscription provenance. The first and corrected Stage 3 diagnostics each replayed all three experiments with zero replay errors; the corrected run authenticated scalar argv flow at entrypoint SHA-256 82B73C67.... The full rescore retained eleven prior authenticated event attempts, reported ten verifier errors, zero attachment errors, and zero model calls. Both complete owning test modules pass, with one expected skip in research_evidence; Ruff and diff checks pass. Zero full qualification cycles, Stage 4+ work, exports, implementations, removals, or Docker object mutations occurred.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "stage12_multisource_8_live_8a047703_20260717",

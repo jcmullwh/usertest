@@ -2042,6 +2042,29 @@ def _research_retry_remediation_hints(
                 "experiments, and state a machine-checkable disproof condition. An empty list is "
                 "correct when no honest counterfactual exists."
             )
+        elif code in {
+            "falsification_intervention_shared_mechanism_missing",
+            "falsification_intervention_mode_switch",
+        }:
+            target_fields = [
+                "experiments[].observable_assertion",
+                "experiments[].control_relationship",
+                "experiments[].proof_adapter",
+                "root_cause_hypotheses[].mechanism_symbols",
+            ]
+            required_change = (
+                "The runner verified the paired input change, but both arms did not expose one "
+                "shared claimed production mechanism through the same independently checkable "
+                "proof mode. Preserve the existing commands and attested harness. In both arms, "
+                "carry the claimed mechanism's return value, exception, or state transition into "
+                "the exact asserted stdout/stderr/exit observation through a direct executed "
+                "dataflow; do not merely include it in a helper result while asserting adjacent "
+                "output. Alternatively, repair the existing proof_adapter with an exact observed "
+                "JSON value and attested implementation touchpoint. Do not replace the harness "
+                "with pytest just to change proof shape. If the two arms genuinely exercise "
+                "different mechanisms, narrow the relationship or remove the optional "
+                "falsification attempt instead of claiming a shared intervention."
+            )
         elif "falsification_" in code:
             target_fields = [
                 "root_cause_hypotheses[].falsification_attempts[]",

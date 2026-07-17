@@ -4128,12 +4128,23 @@ def _research_harness_relative_path(executed_argv: Any) -> str | None:
     ):
         return None
     normalized = [argument.casefold() for argument in executed_argv]
-    index: int | None = None
-    if normalized[:3] == ["pdm", "run", "python"]:
-        index = 3
-    elif normalized[:1] == ["python"]:
-        index = 1
-    if index is None or index >= len(executed_argv):
+    executable_index: int | None = None
+    if normalized[:2] == ["pdm", "run"]:
+        executable_index = 2
+    elif normalized:
+        executable_index = 0
+    if executable_index is None or executable_index >= len(executed_argv):
+        return None
+    executable = PureWindowsPath(executed_argv[executable_index]).name.casefold()
+    if executable not in {"python", "python3", "python.exe", "py", "py.exe"}:
+        return None
+    index = executable_index + 1
+    while (
+        index < len(executed_argv)
+        and executed_argv[index] in _PYTHON_PYTEST_SAFE_PREFIX_FLAGS
+    ):
+        index += 1
+    if index >= len(executed_argv):
         return None
     candidate = executed_argv[index].replace("\\", "/")
     path = PurePosixPath(candidate)
@@ -6453,6 +6464,7 @@ def _falsification_intervention_receipts(
                 if isinstance(challenge_selection, dict)
                 else None
             )
+            fallback_errors: list[str] = []
             if structural is None:
                 structural = _structured_argv_intervention_difference(
                     baseline_replay=baseline_replay,
@@ -6487,6 +6499,7 @@ def _falsification_intervention_receipts(
                             else "shared_mechanism_missing"
                         )
                         errors.append(f"falsification_intervention_{reason}:{label}")
+                        fallback_errors.append(f"runner_argv_{reason}")
                         structural = None
                     else:
                         verification_method = "runner_argv_falsification_intervention_v2"
@@ -6528,7 +6541,21 @@ def _falsification_intervention_receipts(
                 )
             )
             if structural is None or not assertions_verified:
-                detail = ",".join(dict.fromkeys(selection_errors)) or "causal_delta_missing"
+                if structural is not None and not assertions_verified:
+                    fallback_errors.append("falsification_assertion_relation_unverified")
+                baseline_argv = baseline_replay.get("executed_argv")
+                challenge_argv = challenge_replay.get("executed_argv")
+                pytest_pair = (
+                    isinstance(baseline_argv, list)
+                    and isinstance(challenge_argv, list)
+                    and _pytest_args(baseline_argv) is not None
+                    and _pytest_args(challenge_argv) is not None
+                )
+                if not fallback_errors and not pytest_pair:
+                    fallback_errors.append("runner_argv_causal_delta_unresolved")
+                detail = ",".join(
+                    dict.fromkeys(fallback_errors or selection_errors)
+                ) or "causal_delta_missing"
                 errors.append(f"falsification_intervention_unverified:{label}:{detail}")
                 continue
             observation = {

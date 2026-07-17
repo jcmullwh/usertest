@@ -9862,8 +9862,17 @@ def test_control_rejects_mismatched_or_unverified_mechanism_subset(
     assert expected_error in errors
 
 
+@pytest.mark.parametrize(
+    "python_prefix",
+    [
+        pytest.param(["python"], id="direct"),
+        pytest.param(["python", "-B"], id="safe-interpreter-flag"),
+        pytest.param(["pdm", "run", "python", "-B"], id="project-runner-safe-flag"),
+    ],
+)
 def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
     tmp_path: Path,
+    python_prefix: list[str],
 ) -> None:
     baseline_workspace = tmp_path / "baseline-workspace"
     challenge_workspace = tmp_path / "challenge-workspace"
@@ -9890,7 +9899,7 @@ def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
             "scenario_kind": scenario_kind,
             "addresses_atom_ids": ["atom:one"],
             "artifact_refs": ["artifact:one"],
-            "command": f"python {harness} {value}",
+            "command": " ".join([*python_prefix, harness, value]),
             "outcome": "supports",
             "observable_assertion": {
                 "source": "stdout",
@@ -10012,6 +10021,31 @@ def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
         replays["baseline"]
     ) == mod._retained_harness_replay_context(replays["challenge"])
 
+    for workspace in (baseline_workspace, challenge_workspace):
+        (workspace / harness).write_text(
+            "import sys\nfrom src.core import run\nvalue = run(sys.argv[1])\n"
+            "print('unrelated')\n",
+            encoding="utf-8",
+        )
+    unverified_errors: list[str] = []
+    assert (
+        mod._falsification_intervention_receipts(
+            dossier,
+            clean_replays=replays,
+            planning_workspace=baseline_workspace,
+            symbol_receipts=[{"symbol": "core.run", "path": "src/core.py"}],
+            errors=unverified_errors,
+        )
+        == []
+    )
+    assert "falsification_intervention_shared_mechanism_missing:h1:attempt:scalar" in (
+        unverified_errors
+    )
+    assert (
+        "falsification_intervention_unverified:h1:attempt:scalar:"
+        "runner_argv_shared_mechanism_missing"
+    ) in unverified_errors
+
     (challenge_workspace / harness).write_text(
         "import sys\nfrom src.core import run\nprint('forged', run(sys.argv[1]))\n",
         encoding="utf-8",
@@ -10025,6 +10059,20 @@ def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["python", "-c", ".usertest_research/probe.py"],
+        ["python", "-X", "dev", ".usertest_research/probe.py"],
+        ["python", "-m", ".usertest_research.probe"],
+    ],
+)
+def test_research_harness_path_rejects_python_modes_with_unbound_semantics(
+    argv: list[str],
+) -> None:
+    assert mod._research_harness_relative_path(argv) is None
 
 
 @pytest.mark.parametrize("mismatch", ["setup_environment", "effective_environment", "platform"])

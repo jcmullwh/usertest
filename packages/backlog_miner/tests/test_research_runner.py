@@ -819,6 +819,21 @@ def test_verifier_hints_narrow_fix_only_symbols_before_replacing_harness() -> No
     ]
 
 
+def test_verifier_hint_preserves_scalar_harness_and_requests_shared_observable_flow() -> None:
+    hint = mod._research_retry_remediation_hints(
+        [
+            "falsification_intervention_shared_mechanism_missing:"
+            "hypothesis:one:falsification:one"
+        ]
+    )[0]
+
+    assert "runner verified the paired input change" in hint["required_change"]
+    assert "Preserve the existing commands and attested harness" in hint["required_change"]
+    assert "direct executed dataflow" in hint["required_change"]
+    assert "do not merely include it in a helper result" in hint["required_change"]
+    assert "Do not replace the harness with pytest" in hint["required_change"]
+
+
 def test_fresh_restart_retains_latest_safe_and_objective_best_frontiers() -> None:
     best_dossier = {"case_id": "case:test", "phase": "best", "errors": 1}
     latest_dossier = {"case_id": "case:test", "phase": "latest", "errors": 1}
