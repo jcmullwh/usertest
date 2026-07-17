@@ -947,6 +947,50 @@ def _registry_atom_case_memberships(
     return {atom_id: sorted(case_ids) for atom_id, case_ids in memberships.items() if case_ids}
 
 
+def _derived_source_atom_id_aliases(atom: Mapping[str, Any]) -> list[str]:
+    """Return durable pre-content-addressing identities for a re-ingested atom.
+
+    Derived-run ingestion uses a content-addressed record identity so the same run
+    discovered through more than one evidence root is suppressed deterministically.
+    Older plan and outcome records identify those atoms by the durable source-root
+    kind plus the run-relative path.  Both names refer to the same runner-owned
+    artifact; resolving the latter as a registry alias prevents an already-known
+    observation from being mined as a new problem after re-ingestion.
+
+    The alias is reconstructed only from runner-authored structured fields and only
+    when the atom's source and ordinal agree with its content-addressed ID.  Free-form
+    evidence text and generated ticket wording never participate in identity.
+    """
+
+    atom_id = _clean_string(atom.get("atom_id"))
+    root_kind = _clean_string(atom.get("derived_source_root_kind"))
+    run_rel = _clean_string(atom.get("derived_source_run_rel"))
+    source = _clean_string(atom.get("source"))
+    if (
+        atom_id is None
+        or root_kind is None
+        or run_rel is None
+        or source is None
+        or not atom_id.startswith("__derived__/")
+    ):
+        return []
+    root_kind = root_kind.replace("\\", "/").strip("/")
+    run_rel = run_rel.replace("\\", "/").strip("/")
+    if not root_kind or not run_rel or root_kind in {".", ".."}:
+        return []
+    if any(part in {"", ".", ".."} for part in run_rel.split("/")):
+        return []
+    parts = atom_id.rsplit(":", 2)
+    if (
+        len(parts) != 3
+        or parts[1] != source
+        or not parts[2].isdigit()
+        or not parts[0].startswith(f"__derived__/{root_kind}/")
+    ):
+        return []
+    return [f"{root_kind}/{run_rel}:{source}:{parts[2]}"]
+
+
 def _atom_supporting_case_ids(atom: Mapping[str, Any]) -> list[str]:
     """Return deterministic complete memberships for one dispositioned atom."""
 
@@ -1025,8 +1069,35 @@ def normalize_atom_lineage(
             parent_case_id = by_fingerprint.get(parent_fingerprint)
 
         case_id = _clean_string(atom.get("case_id"))
-        persisted_atom_case_id = by_atom.get(atom_id) if atom_id is not None else None
-        persisted_memberships = atom_memberships.get(atom_id, []) if atom_id is not None else []
+        registry_identities = list(
+            dict.fromkeys(
+                [
+                    *([atom_id] if atom_id is not None else []),
+                    *_derived_source_atom_id_aliases(atom),
+                ]
+            )
+        )
+        persisted_primary_case_ids = list(
+            dict.fromkeys(
+                by_atom[identity]
+                for identity in registry_identities
+                if identity in by_atom
+            )
+        )
+        persisted_memberships = sorted(
+            {
+                case_id
+                for identity in registry_identities
+                for case_id in atom_memberships.get(identity, [])
+            }
+        )
+        persisted_atom_case_id = (
+            persisted_primary_case_ids[0]
+            if len(persisted_primary_case_ids) == 1
+            else persisted_memberships[0]
+            if not persisted_primary_case_ids and len(persisted_memberships) == 1
+            else None
+        )
         if (
             evidence_role in _DERIVED_EVIDENCE_ROLES
             and parent_case_id is None

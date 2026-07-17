@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T03:05:55.5124993Z",
-    "current_run_id": "stage3-attempt17-running-223416",
+    "as_of": "2026-07-17T04:15:43.8791796Z",
+    "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Stage 3 accepted; resume binding blocked",
-        "detail": "The exact retained candidate is the authenticated one-of-21 canonical prefix. A 1,583.3-second full bundle check verified the protected source evidence but correctly rejected the old development-worktree pipeline binding after the pipeline changed",
+        "value": "Bounded Stage 1/2 exposed one case-identity defect",
+        "detail": "A three-observation Terra slice completed mechanics and provenance, but two exact historical observations lost their durable case membership after re-ingestion. The general alias correction now passes 192 affected tests; the same bounded slice has not yet been rerun.",
         "tone": "warn"
       },
       {
         "label": "Current lifecycle outcome",
-        "value": "Research accepted; no change required",
-        "detail": "Seventeen persisted research attempts used 18 actual Codex calls in one retained session and produced accepted evidence_sufficient / already_addressed research; no implementation is required and live behavior remains unverified",
+        "value": "Active; no duplicate work exported",
+        "detail": "No new problem, priority decision, Stage 3 dossier, option, plan, ticket, implementation, or Docker work was produced. The existing mitigated maintenance case remains canonical while the identity correction is verified.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No full shadow cycle, Stage 4 result, ticket, implementation, or delivered PR is claimed for this case",
+        "detail": "No full export-disabled shadow cycle is claimed. Component mechanics are being validated at small scale before corpus volume is increased.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Stabilize execution revision; route no-change",
-        "detail": "Commit the exact cross-volume Git correction, create a clean execution worktree at that revision, seal the same evidence corpus there, carry the accepted prefix forward, then execute no-change routing and continue case 2",
+        "value": "Rerun the same three-observation Stage 1/2 slice",
+        "detail": "Checkpoint the general atom-identity correction, run it from a clean exact revision, and require the two known observations to bind to the maintenance case while the third receives an honest model disposition.",
         "tone": "warn"
       }
     ],
@@ -2361,22 +2361,22 @@
           "summary": "Seventeen persisted research attempts used 18 actual Codex calls in one signed-in session. Five bounded continuations and five model-free executable replays occurred; no full Stage 3 restart. Fourteen zero-model preflights are retained separately."
         },
         "label": "Codex model_messages configuration case",
-        "scope": "Current canonical case from its first Stage 3 dispatch through same-author correction, deterministic replay, and authenticated canonical-prefix import; no upstream rerun or downstream implementation",
+        "scope": "Canonical case from its first Stage 3 dispatch through same-author correction, deterministic replay, authenticated canonical-prefix import, and clean exact-revision qualification preparation; no new Stage 1/2 model run or downstream implementation",
         "timing": {
           "start_at": "2026-07-16T16:58:38.578029Z",
-          "end_at": null,
-        "elapsed_seconds": 36436.9344703,
-          "coverage": "active",
-        "display": "10 h 7 m 16.00 s as of 03:05:55Z",
-          "note": "Observed lifecycle wall time from the first Stage 3 launch through the current import-provenance correction. Supporting records retain every attempt, replay, test, and orchestration interval."
+          "end_at": "2026-07-17T03:50:54.7342636Z",
+          "elapsed_seconds": 39136.1562346,
+          "coverage": "complete",
+          "display": "10 h 52 m 16.16 s",
+          "note": "Observed lifecycle wall time from the first Stage 3 launch through clean exact-revision qualification preparation and held-out corpus sealing. Supporting records retain every attempt, replay, test, and orchestration interval."
         },
-      "furthest_stage": "Stage 3 accepted and canonically imported; sealed resume blocked by stale development-worktree binding",
-      "current_state": "Research accepted: evidence_sufficient / already_addressed at code-and-test level; live behavior remains unverified. The first clean execution root exposed BDS-099: qualification Git probes lacked exact command-local trust on cross-volume worktrees. The general helper correction, direct argv regression, real U: head and clean-status probes, and the complete 22-test qualification-transaction module now pass. AN-04 records one superseded long-path fixture failure; the 336.1-second short-path rerun is green. Stage 4+ remains idle pending the corrected immutable execution checkpoint.",
+        "furthest_stage": "Stage 3 accepted; clean qualification input and held-out manifest sealed",
+        "current_state": "Research remains accepted as evidence_sufficient / already_addressed at code-and-test level; live behavior remains unverified. The immutable U: execution root is clean at 338a373f, model-free preparation sealed 2,833 non-IDEA atoms, and currentness-v4 independently partitions all 2,833 before Stage 1: 2,823 non-actionable and 10 ambiguous, with zero actionable. The 52 runner maintenance observations are genuine July 4-8 pre-mitigation evidence and are bound to the existing mitigated case; recurrence remains not run. Stage 1 has not started and labels remain outside every model-readable workspace.",
         "outcome": "Research accepted; no implementation required; live behavior unverified",
         "errors": {
-        "count": 36,
+          "count": 37,
           "count_kind": "deduplicated_clusters",
-        "summary": "Thirty-one material research-quality, controller, evaluator, and workflow defects, four run anomalies, and one recovered receipt-instrumentation defect. BDS-098 is one sealed pipeline-binding gap despite three related verifier messages; BDS-099 is one cross-volume Git-helper defect. AN-04 is one superseded test-path anomaly; BDS-086 is excluded.",
+          "summary": "Thirty-one material research-quality, controller, evaluator, and workflow defects, five run/supervisor anomalies, and one recovered receipt-instrumentation defect. AN-05 is one bounded supervisor Git-invocation error; it is not a pipeline defect and did not trigger a broad rerun. BDS-086 is excluded.",
           "cluster_ids": [
             "RQ-01",
             "RQ-02",
@@ -2407,13 +2407,14 @@
             "WF-03",
             "WF-04",
             "AN-01",
-        "AN-02",
-        "AN-03",
-          "BDS-096",
-          "BDS-097",
-          "BDS-098",
-          "BDS-099",
-          "AN-04"
+            "AN-02",
+            "AN-03",
+            "BDS-096",
+            "BDS-097",
+            "BDS-098",
+            "BDS-099",
+            "AN-04",
+            "AN-05"
           ]
         },
         "automatic_self_corrections": {
@@ -2428,9 +2429,9 @@
           ]
         },
         "supervisor_interventions": {
-        "count": 28,
+          "count": 29,
           "count_kind": "deduplicated_clusters",
-        "summary": "Twenty-four material supervision clusters, the bounded BDS-086 efficiency cleanup, two test-environment recoveries (AN-03 and AN-04), and the nonblocking BDS-097 receipt correction. BDS-098 and BDS-099 change execution custody, not dossier claims, and no intervention restarted the author.",
+          "summary": "Twenty-four material supervision clusters, the bounded BDS-086 efficiency cleanup, three bounded environment/invocation recoveries (AN-03 through AN-05), and the nonblocking BDS-097 receipt correction. AN-05 reran only two Git custody checks; no intervention restarted the author.",
           "cluster_ids": [
             "BDS-077",
             "BDS-078",
@@ -2453,18 +2454,19 @@
             "BDS-093",
             "WF-03",
             "BDS-094",
-        "BDS-095",
-        "AN-03",
-          "BDS-096",
-          "BDS-097",
-          "BDS-098",
-          "BDS-099",
-          "AN-04"
+            "BDS-095",
+            "AN-03",
+            "BDS-096",
+            "BDS-097",
+            "BDS-098",
+            "BDS-099",
+            "AN-04",
+            "AN-05"
           ]
         },
-      "next_action": "Commit the BDS-099 command-local Git correction, create and verify a clean immutable U: execution root at that exact commit, then seal the corpus and carry forward the authenticated Stage 3 prefix without another author turn.",
+        "next_action": "Run the smallest real Stage 1/2 frontier from bundle ab044c48 with manifest db23db17 withheld; inspect mining and grouping, then carry forward the authenticated Stage 3 prefix only if its ordering and evidence assignment remain compatible.",
         "tone": "warn",
-      "data_quality": "Author receipt SHA 6B793479...; authored candidate SHA cc7be3b2... unchanged; persisted-evidence replay 494.117582 seconds with 4/4 required reads; combined affected suite 621 passed and one expected skip in 376.708514 seconds; canonical import receipt SHA 2AA1039C..., duration 18.832644 seconds, manifest 51ed7053...; full bundle verification 1,583.3 seconds with only BDS-098 findings; BDS-099 full module 22/22 in 336.1 seconds after one AN-04 path rerun",
+        "data_quality": "Author receipt SHA 6B793479...; authored candidate SHA cc7be3b2... unchanged; persisted-evidence replay 494.117582 seconds with 4/4 required reads; combined affected suite 621 passed and one expected skip in 376.708514 seconds; canonical import receipt SHA 2AA1039C..., duration 18.832644 seconds, manifest 51ed7053...; BDS-099 full module 22/22 in 336.1 seconds; clean bundle content SHA ab044c48..., 2,833 atoms, 32 protected paths, preparation 1,417.7 seconds; held-out manifest content SHA db23db17..., file SHA 033690A7..., zero validation errors, 33 label groups",
         "source_ids": [
           "stage3_attempt17_running_223416",
           "stage3_attempt17_bds091_full_suite_231122",
@@ -2472,6 +2474,8 @@
           "stage3_attempt17_isolated_progression_replay_231458",
           "stage3_attempt17_canonical_import_021210",
           "stage3_canonical_resume_bundle_check_20260717",
+          "qualification_prepare_338a373f_20260717",
+          "qualification_manifest_v4_338a373f_20260717",
           "stage3_attempt17_preflight_223237",
           "stage3_attempt16_independent_audit_220953",
           "backlog_depth_supervision_issue_ledger"
@@ -2560,6 +2564,142 @@
           "stage3_attempt17_progression_replay_230318",
           "stage3_attempt17_isolated_progression_replay_231458",
           "stage3_attempt17_running_223416",
+          "backlog_depth_supervision_issue_ledger"
+        ]
+      },
+      {
+        "run_id": "qualification-prepare-338a373f-031020",
+        "entry_kind": "supporting_activity",
+        "parent_run_id": "stage3-attempt17-running-223416",
+        "label": "Clean exact-revision qualification preparation",
+        "scope": "Model-free extraction and sealing of the current non-IDEA corpus against immutable execution commit 338a373f; no Stage 1-6 model, ticket export, implementation, or Docker activity",
+        "timing": {
+          "start_at": null,
+          "end_at": null,
+          "elapsed_seconds": 1417.7,
+          "coverage": "complete",
+          "display": "1417.7 s",
+          "note": "Exact completed-process duration observed by the supervisor. The bundle itself is content-addressed but does not retain process start/end timestamps."
+        },
+        "furthest_stage": "Qualification input bundle prepared",
+        "current_state": "Preparation sealed 2,833 eligible non-IDEA atoms, 32 protected paths, clean Git status, execution commit 338a373f, source research ref e0527e23, and the current case registry. Stage 1 has not started; held-out label reconciliation is the next gate.",
+        "outcome": "Preparation passed; model work correctly withheld",
+        "errors": {
+          "count": 0,
+          "count_kind": "preparation failures",
+          "summary": "The preparation command exited successfully and produced the expected content-addressed bundle."
+        },
+        "automatic_self_corrections": {
+          "count": 0,
+          "count_kind": "automatic repairs",
+          "summary": "No repair was required during this preparation run."
+        },
+        "supervisor_interventions": {
+          "count": 0,
+          "count_kind": "corrective interventions",
+          "summary": "Normal launch and evidence review are orchestration, not a correction or intervention."
+        },
+        "next_action": "Seal current held-out labels, then start the smallest real Stage 1/2 frontier from this exact bundle.",
+        "tone": "good",
+        "data_quality": "Content-addressed bundle at U:/usertest_backlog_qualification/338a373f_20260717T031020Z; content SHA ab044c48...; file SHA 122353AD...; 2,833 atoms; 32 protected paths; clean-status SHA e3b0c442...; exact supervisor-observed duration 1,417.7 seconds",
+        "source_ids": [
+          "qualification_prepare_338a373f_20260717"
+        ]
+      },
+      {
+        "run_id": "qualification-manifest-v4-338a373f-034400",
+        "entry_kind": "supporting_activity",
+        "parent_run_id": "stage3-attempt17-running-223416",
+        "label": "Currentness-v4 held-out corpus sealing",
+        "scope": "Output-blind carryforward of exact v3 evidence identities, semantic rebinding of two operational aggregates, and currentness adjudication of 52 new maintenance observations; no Stage 1-6 model, ticket, implementation, or Docker activity",
+        "timing": {
+          "start_at": null,
+          "end_at": null,
+          "elapsed_seconds": 9.8,
+          "coverage": "measured_substeps",
+          "display": "3.0 s build + 5.6 s validation + 1.2 s bounded Git rerun",
+          "note": "Completed-process durations for manifest build, independent validation/idempotence wrapper, and the two-command corrected Git custody rerun."
+        },
+        "furthest_stage": "Held-out manifest sealed and independently validated",
+        "current_state": "The exact 2,833-atom denominator is fully partitioned into 2,823 non-actionable and 10 ambiguous atoms across 33 groups. The 52 maintenance observations are retained as real pre-mitigation support for the existing mitigated case. Labels remain withheld from model stages.",
+        "outcome": "Manifest valid; Stage 1 cleared to start",
+        "errors": {
+          "count": 1,
+          "count_kind": "supervisor invocation errors",
+          "summary": "AN-05: the combined validation wrapper used raw Git in the cross-volume worktree after manifest validation had passed; Git rejected ownership. This was not a qualification-helper defect."
+        },
+        "automatic_self_corrections": {
+          "count": 0,
+          "count_kind": "automatic repairs",
+          "summary": "The deterministic manifest build required no repair."
+        },
+        "supervisor_interventions": {
+          "count": 1,
+          "count_kind": "bounded corrective reruns",
+          "summary": "Reran only the two failed Git custody commands with exact command-local safe.directory; no manifest or pipeline stage was repeated."
+        },
+        "next_action": "Start the smallest real Stage 1/2 frontier with the manifest SHA supplied only to the qualification controller, not to model workspaces.",
+        "tone": "good",
+        "data_quality": "Manifest content SHA db23db17... and file SHA 033690A7...; receipt file SHA 73078740...; 2,833/2,833 atoms; 33 groups; zero manifest errors; idempotent rebuild; exact execution head 338a373f and empty tracked status",
+        "source_ids": [
+          "qualification_manifest_v4_338a373f_20260717",
+          "backlog_depth_supervision_issue_ledger"
+        ]
+      },
+      {
+        "run_id": "qualification-cycle-338a373f-20260717",
+        "entry_kind": "lifecycle_run",
+        "lifecycle_id": "pipeline-cycle:338a373f:20260717",
+        "lifecycle_kind": "pipeline_cycle",
+        "rework": {
+          "author_invocations": 2,
+          "continuation_launches": 0,
+          "stage_reruns": 0,
+          "full_restarts": 0,
+          "summary": "One bounded Stage 1 primary review and one independent coverage/depth review ran in the initial component execution. No author continuation, stage rerun, or full-cycle restart has occurred; the corrected rerun is pending."
+        },
+        "label": "Clean exact-revision backlog qualification cycle",
+        "scope": "Reconciled non-IDEA evidence custody, held-out currentness sealing, canonical case lifecycle materialization, and bounded maintenance Stage 1/2 component validation; exports, Stage 3+, tickets, implementation, and Docker disabled",
+        "timing": {
+          "start_at": "2026-07-17T03:10:20Z",
+          "end_at": null,
+          "elapsed_seconds": 3923.8791796,
+          "coverage": "active",
+          "display": "1 h 5 m 23.88 s as of 04:15:43Z",
+          "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifest, preflight, component execution, tests, and correction intervals separately."
+        },
+        "furthest_stage": "Bounded Stage 1/2 component completed; semantic correction under test",
+        "current_state": "The exact-revision input was initially sealed at 2,833 non-IDEA atoms and the historical maintenance outcome was materialized into a 24-case registry. A 105.378-second Terra Stage 1/2 slice then passed subscription and invocation provenance but exposed BDS-100: content-addressed re-ingestion did not resolve two durable historical atom identities. The general structured alias correction now binds those two observations to the existing mitigated case and leaves only the genuinely unbound observation eligible. Two focused tests and the complete 192-test affected lineage/ingestion/mining surface pass. A corrected evidence preparation is still running; no full corpus model stage has started.",
+        "outcome": "Active; bounded semantic defect found and corrected locally; clean-revision rerun pending",
+        "errors": {
+          "count": 2,
+          "count_kind": "deduplicated_clusters",
+          "summary": "BDS-100 is one pipeline identity defect found by semantic review. AN-05 is one bounded supervisor Git invocation error after manifest validation; it is not a pipeline defect.",
+          "cluster_ids": [
+            "BDS-100",
+            "AN-05"
+          ]
+        },
+        "automatic_self_corrections": {
+          "count": 0,
+          "count_kind": "deduplicated_clusters",
+          "summary": "Neither the pipeline nor model required an automatic correction in this cycle so far. The identity correction is supervisor-implemented pipeline work and is counted under interventions."
+        },
+        "supervisor_interventions": {
+          "count": 2,
+          "count_kind": "deduplicated_clusters",
+          "summary": "AN-05 reran only two Git custody checks. BDS-100 added a general structured identity alias and affected tests after the bounded semantic audit found that exact historical evidence was not updating its case.",
+          "cluster_ids": [
+            "AN-05",
+            "BDS-100"
+          ]
+        },
+        "next_action": "Finish the model-free corrected preparation, checkpoint BDS-100, create a clean exact-revision execution root, and rerun only the same three-observation Stage 1/2 component before increasing volume.",
+        "tone": "warn",
+        "data_quality": "Qualification bundle ab044c48... at clean 338a373f; held-out manifest db23db17...; reconciled case graph 24 cases with maintenance state mitigated and idempotent outcome sync; signed-in Terra component duration 105.378 seconds with two verified model invocations, zero Stage 3/export/Docker; BDS-100 preflight partitions 2 supports_case and 1 unresolved; 192 affected tests pass; exact artifact paths retained in the issue ledger",
+        "source_ids": [
+          "qualification_prepare_338a373f_20260717",
+          "qualification_manifest_v4_338a373f_20260717",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -7356,6 +7496,51 @@
       "stage_invocation_count": 0,
       "docker_invocation_count": 0,
       "limitations": "The diagnostic did not write its own receipt, so this source is a faithful supervisor transcription of the completed shell result. It has the exact reported duration and errors but no independently captured process-start timestamp."
+    },
+    {
+      "id": "qualification_prepare_338a373f_20260717",
+      "path": "U:/usertest_backlog_qualification/338a373f_20260717T031020Z/prepare_output/ab044c482eea8c826b026320552f0d3f9f73e2d12d5518e87f563363cf6b6fa3/qualification_input_bundle.json",
+      "kind": "clean_exact_revision_qualification_input_bundle",
+      "file_sha256": "122353AD646798D60D32C379A85D410E22F36B6FFCD5D96FFF73380638729D30",
+      "content_sha256": "ab044c482eea8c826b026320552f0d3f9f73e2d12d5518e87f563363cf6b6fa3",
+      "pipeline_git_head": "338a373fa02a1aa3d81b0463e846063f5e075aa1",
+      "pipeline_git_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "eligible_non_idea_atom_count": 2833,
+      "protected_path_count": 32,
+      "duration_seconds": 1417.7,
+      "duration_capture_kind": "supervisor_observation_from_completed_process_result",
+      "model_invocation_count": 0,
+      "stage_invocation_count": 0,
+      "ticket_mutation_count": 0,
+      "docker_invocation_count": 0,
+      "limitations": "The bundle is the primary evidence for corpus content and pipeline custody. The 1,417.7-second duration comes from the completed shell result because the bundle does not record its own process timestamps. This is preparation evidence only; Stage 1 has not run and no benchmark score or downstream outcome is claimed."
+    },
+    {
+      "id": "qualification_manifest_v4_338a373f_20260717",
+      "path": "U:/usertest_backlog_qualification/338a373f_20260717T031020Z/custody/qualification_corpus_manifest_v4.json",
+      "kind": "sealed_output_blind_currentness_manifest",
+      "file_sha256": "033690A71187C11C7B36C041E609C8149F2D02BD6D77430ED22E5EB7F959DFEE",
+      "content_sha256": "db23db170974168aa74d2eed080b37bb266919fce8c1e0243698734c4a10c424",
+      "build_receipt_path": "U:/usertest_backlog_qualification/338a373f_20260717T031020Z/custody/qualification_corpus_manifest_v4_build_receipt.json",
+      "build_receipt_file_sha256": "730787402C3D7355E9A9AE6A4BF0AE6ECC4AD3339F8C94C005ED028728AA6791",
+      "eligible_atom_count": 2833,
+      "label_group_count": 33,
+      "atom_classification_counts": {
+        "actionable": 0,
+        "non_actionable": 2823,
+        "ambiguous": 10,
+        "unknown": 0
+      },
+      "new_maintenance_observation_count": 52,
+      "maintenance_observation_window": "2026-07-04T16:16:42Z/2026-07-08T21:29:42Z",
+      "maintenance_current_disposition": "mitigated_recurrence_not_run",
+      "labels_withheld_from_model_stages": true,
+      "manifest_validation_errors": [],
+      "model_invocation_count": 0,
+      "stage_invocation_count": 0,
+      "ticket_mutation_count": 0,
+      "docker_invocation_count": 0,
+      "limitations": "This is a currentness denominator, not a claim that ambiguous atoms are harmless or that mitigated cases are resolved. The 52 maintenance observations are explicitly retained as real historical support for the existing mitigated case; they are non-actionable only as evidence for a new case because every observation predates the fix and recurrence has not run."
     },
     {
       "id": "executive_summary",

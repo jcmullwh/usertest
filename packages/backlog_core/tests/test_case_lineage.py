@@ -1403,6 +1403,81 @@ def test_persisted_primary_for_multi_case_source_atom_survives_order_and_normali
     assert updated["atom_id_to_case_ids"][atom_id] == ["case:a", "case:z"]
 
 
+def test_content_addressed_reingested_atom_resolves_durable_source_registry_alias() -> None:
+    durable_atom_id = (
+        "usertest_implement/usertest/20260704T161642Z/codex/0:"
+        "maintenance_image_cleanup:1"
+    )
+    content_addressed_atom_id = (
+        "__derived__/usertest_implement/"
+        + "9cca0cb22f63f143b8049249083a669b47e02f17899c6bb162e8fc1eb7e23eef"
+        + ":maintenance_image_cleanup:1"
+    )
+    registry = {
+        "schema_version": 1,
+        "cases": {
+            "case:maintenance": {
+                "case_id": "case:maintenance",
+                "state": "mitigated",
+                "evidence_atom_ids": [durable_atom_id],
+            }
+        },
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {durable_atom_id: "case:maintenance"},
+        "atom_id_to_case_ids": {durable_atom_id: ["case:maintenance"]},
+        "ticket_fingerprint_to_case_id": {},
+    }
+    normalized = normalize_atom_lineage(
+        [
+            _atom(
+                content_addressed_atom_id,
+                source="maintenance_image_cleanup",
+                evidence_role="observation",
+                origin_stage="runner_maintenance_image_cleanup",
+                disposition="unresolved",
+                derived_source_root_kind="usertest_implement",
+                derived_source_run_rel="usertest/20260704T161642Z/codex/0",
+            )
+        ],
+        case_registry=registry,
+        strict_new_output=True,
+    )
+
+    assert normalized[0]["case_id"] == "case:maintenance"
+    assert normalized[0]["supporting_case_ids"] == ["case:maintenance"]
+    assert normalized[0]["disposition"] == "supports_case"
+    assert normalized[0]["disposition_receipt"]["source"] == "case_registry_membership"
+    assert eligible_problem_mining_atoms(normalized) == []
+
+
+def test_content_addressed_alias_requires_matching_structured_source_identity() -> None:
+    durable_atom_id = "usertest_implement/usertest/run/codex/0:confusion_point:1"
+    registry = {
+        "schema_version": 1,
+        "cases": {"case:known": {"case_id": "case:known", "state": "active"}},
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {durable_atom_id: "case:known"},
+        "atom_id_to_case_ids": {durable_atom_id: ["case:known"]},
+        "ticket_fingerprint_to_case_id": {},
+    }
+    normalized = normalize_atom_lineage(
+        [
+            _atom(
+                "__derived__/usertest_implement/" + "a" * 64 + ":confusion_point:1",
+                source="different_source",
+                derived_source_root_kind="usertest_implement",
+                derived_source_run_rel="usertest/run/codex/0",
+            )
+        ],
+        case_registry=registry,
+        strict_new_output=True,
+    )
+
+    assert normalized[0]["case_id"] is None
+    assert normalized[0]["disposition"] == "unresolved"
+    assert eligible_problem_mining_atoms(normalized) == normalized
+
+
 def test_derived_evidence_cannot_be_assigned_to_multiple_canonical_cases() -> None:
     atom_id = "target/research/agent/1:confusion_point:1"
     atoms = normalize_atom_lineage(

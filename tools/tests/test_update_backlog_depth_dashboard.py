@@ -233,21 +233,21 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     )
 
     lifecycle_runs = mod._lifecycle_runs(dashboard)
-    assert len(lifecycle_runs) == 11
-    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 11
+    assert len(lifecycle_runs) == 12
+    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 12
     assert mod._entry_count(dashboard, "supporting_activity") >= 1
     assert mod._entry_count(dashboard, "baseline") == 1
     assert dashboard["current_run_id"] == lifecycle_runs[-1]["run_id"]
     current = lifecycle_runs[-1]
-    assert current["lifecycle_id"] == "case:131290268e2889891e0c"
-    assert current["timing"]["start_at"] == "2026-07-16T16:58:38.578029Z"
-    assert current["rework"]["author_invocations"] == 18
-    assert current["rework"]["continuation_launches"] == 5
-    assert current["rework"]["stage_reruns"] == 5
+    assert current["lifecycle_id"] == "pipeline-cycle:338a373f:20260717"
+    assert current["timing"]["start_at"] == "2026-07-17T03:10:20Z"
+    assert current["rework"]["author_invocations"] == 2
+    assert current["rework"]["continuation_launches"] == 0
+    assert current["rework"]["stage_reruns"] == 0
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 36
-    assert current["automatic_self_corrections"]["count"] == 4
-    assert current["supervisor_interventions"]["count"] == 28
+    assert current["errors"]["count"] == 2
+    assert current["automatic_self_corrections"]["count"] == 0
+    assert current["supervisor_interventions"]["count"] == 2
 
     rendered = mod._render_dashboard(dashboard)
     html_text = mod.DEFAULT_HTML.read_text(encoding="utf-8")
