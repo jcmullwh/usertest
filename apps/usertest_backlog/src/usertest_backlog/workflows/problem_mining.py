@@ -2506,6 +2506,7 @@ def _run_problem_mining_job_with_response_retry(
     initial_manifest: dict[str, Any],
     resume_session_id: str | None = None,
     attempt_number_base: int = 0,
+    initial_attempt_tag: str | None = None,
     prior_normalized_events_paths: tuple[Path, ...] = (),
     additional_record_validation: Callable[
         [Sequence[Mapping[str, Any]]], list[str]
@@ -2565,7 +2566,7 @@ def _run_problem_mining_job_with_response_retry(
         repo_root=repo_root,
         stage_artifacts_dir=stage_artifacts_dir,
         base_tag=base_tag,
-        attempt_tag=base_tag,
+        attempt_tag=initial_attempt_tag or base_tag,
         attempt_number=attempt_number_base + 1,
         prompt=prompt,
         prompt_atoms=prompt_atoms,
@@ -7258,6 +7259,11 @@ def continue_problem_mining_from_independent_feedback(
             initial_manifest=dict(review_manifest_raw),
             resume_session_id=review_session,
             attempt_number_base=len(review_attempt_history),
+            initial_attempt_tag=(
+                f"{original_tag}_coverage_depth_review_external_correction_"
+                f"{len(review_attempt_history) + 1:03d}_"
+                f"{str(feedback.get('content_sha256') or '')[:12]}"
+            ),
         )
         dependent_failure = dependent_review_run.get("failure")
         if isinstance(dependent_failure, Exception):

@@ -752,6 +752,67 @@ def test_primary_response_correction_resumes_same_session_and_retains_first_atte
     )
 
 
+def test_problem_mining_retry_accepts_distinct_initial_attempt_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atom = _atom()
+    prompt_atoms = _atoms_for_problem_mining_prompt([atom])
+    workspace = tmp_path / "workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=prompt_atoms,
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:one"],
+        source_root=tmp_path,
+    )
+    calls: list[dict[str, object]] = []
+
+    def _fake_run_stage_prompt_json(**kwargs: object) -> str:
+        calls.append(dict(kwargs))
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=_valid_problem_mining_response(),
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        _fake_run_stage_prompt_json,
+    )
+
+    result = _run_problem_mining_job_with_response_retry(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts",
+        base_tag="problem_mining_001_coverage_depth_review",
+        initial_attempt_tag=(
+            "problem_mining_001_coverage_depth_review_external_correction_002_aaaaaaaaaaaa"
+        ),
+        prompt="Apply the independent correction.",
+        prompt_atoms=prompt_atoms,
+        assigned_atom_ids=["atom:one"],
+        max_records_per_miner=20,
+        eligible_atom_ids=["atom:one"],
+        template_name="adversarial:problem_miner_default.md",
+        record_contract_error_prefix="problem_mining_contract_invalid",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        initial_workspace_dir=workspace,
+        initial_manifest=manifest,
+        attempt_number_base=1,
+    )
+
+    expected_tag = (
+        "problem_mining_001_coverage_depth_review_external_correction_002_aaaaaaaaaaaa"
+    )
+    assert result["failure"] is None
+    assert [str(call["tag"]) for call in calls] == [expected_tag]
+    assert result["attempt_history"][0]["attempt_number"] == 2
+    assert result["attempt_history"][0]["attempt_tag"] == expected_tag
+    assert result["receipt"]["tag"] == "problem_mining_001_coverage_depth_review"
+    assert result["receipt"]["successful_attempt_tag"] == expected_tag
+
+
 def test_problem_mining_workspace_rejects_stale_unmanifested_files(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -6374,6 +6435,9 @@ def test_primary_miner_correction_requires_retained_independent_rereview(
     assert result["status"] == "corrected"
     assert direct_calls[0]["resume_session_id"] == primary_session
     assert len(rereview_calls) == 1
+    assert rereview_calls[0]["initial_attempt_tag"] == (
+        "problem_mining_001_coverage_depth_review_external_correction_002_dddddddddddd"
+    )
     assert composite_calls[0]["primary_records"] == [corrected_record]
     assert composite_calls[0]["review_records"] == [corrected_record]
     assert result["attempt_record"]["dependent_coverage_review_attempt_history"]
