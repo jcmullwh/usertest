@@ -831,6 +831,13 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: `git worktree add --detach` created the `c8eefa80` execution root successfully, but the immediately chained `git -C` verification commands returned Git's dubious-ownership error because U: does not record ownership and that new path had not yet been registered. No pipeline or model call ran.
 - Containment and result: the exact path was added to Git's safe-directory list and then verified clean at `c8eefa801d9162975cebe35e08676c63f8785c2c`. The later `73a6e2e1` root registered the path before its first `git -C` verification, so the mistake did not recur.
 
+### AN-15 - One-turn supervisor helper saved the objective-best dossier instead of the advancing forward frontier
+
+- Status: `closed_model_free_frontier_recovery_and_helper_correction`
+- Classification: one supervisor diagnostic-helper error, not a product, model, or pipeline-stage failure
+- Exact evidence: the same signed-in Terra author completed attempt 6 in 285.361 seconds, resolved the prior 41-finding authored frontier, and reached one output-contract mismatch before the deeper evidence verifier could run on that candidate. `continuation_result.json` correctly retained both representations: `dossier` was the older objective-best claim set with 41 findings, while `forward_dossier` and `forward_validation_errors` contained the safe advancing candidate and its single remaining falsification-result mismatch. The throw-away helper wrote only `result["dossier"]` to `continued_dossier.json`, so blindly resuming that file would have discarded the author's measured progress even though the pipeline adapter exposed it correctly.
+- Containment and result: the exact one-finding candidate was recovered model-free from the retained continuation result, combined only with its authenticated runner-owned assignment and six-attempt history, and matched back to attempt 6's model-owned projection. The helper now also writes `forward_resumable_dossier.json` whenever a paused continuation exposes an advancing forward frontier. No author call, pipeline-stage restart, source mutation, or retained-artifact deletion was used for recovery.
+
 ### BDS-082 - Attempt-14 preflight validated an authored projection as a persisted dossier
 
 - Status: `closed_model_free_preflight`
