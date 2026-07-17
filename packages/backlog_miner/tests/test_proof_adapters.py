@@ -296,6 +296,11 @@ def _basis_context(
     atom = {
         "acceptance_text": "A completed run returns the durable ready record.",
         "expected_status": "ready",
+        "operational_candidate_prompt_projection": {
+            "evidence_shapes": [
+                {"preflight_shell_capability": {"state": "blocked"}}
+            ]
+        },
     }
     return PositiveBasisContext(
         semantic_claim={
@@ -334,6 +339,52 @@ def test_authenticated_semantic_citation_accepts_non_expected_field_for_review()
     assert result.basis is not None
     assert result.basis["semantic_review_required"] is True
     assert result.basis["semantic_attestation"] == "authenticated_citation_only"
+
+
+def test_authenticated_semantic_citation_resolves_restricted_list_index_path() -> None:
+    result = AuthenticatedSemanticCitationBasisAdapter().bind(
+        _basis_context(
+            kind="authenticated_semantic_citation",
+            field_path=(
+                "$.operational_candidate_prompt_projection.evidence_shapes[0]"
+                ".preflight_shell_capability.state"
+            ),
+        )
+    )
+
+    assert result.diagnostics == ()
+    assert result.basis is not None
+    assert result.basis["cited_value_sha256"] == canonical_json_sha256("blocked")
+
+
+def test_authenticated_semantic_citation_rejects_unresolved_list_index_path() -> None:
+    result = AuthenticatedSemanticCitationBasisAdapter().bind(
+        _basis_context(
+            kind="authenticated_semantic_citation",
+            field_path=(
+                "$.operational_candidate_prompt_projection.evidence_shapes[1]"
+                ".preflight_shell_capability.state"
+            ),
+        )
+    )
+
+    assert result.basis is None
+    assert result.diagnostics == ("authenticated_semantic_citation_unresolved",)
+
+
+def test_authenticated_semantic_citation_rejects_ambiguous_list_path_syntax() -> None:
+    result = AuthenticatedSemanticCitationBasisAdapter().bind(
+        _basis_context(
+            kind="authenticated_semantic_citation",
+            field_path=(
+                "$.operational_candidate_prompt_projection.evidence_shapes[-1]"
+                ".preflight_shell_capability.state"
+            ),
+        )
+    )
+
+    assert result.basis is None
+    assert result.diagnostics == ("authenticated_semantic_citation_unresolved",)
 
 
 def test_exact_value_basis_remains_mechanical_and_rejects_narrative_field() -> None:

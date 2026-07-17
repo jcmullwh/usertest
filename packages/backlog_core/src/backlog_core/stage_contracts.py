@@ -6211,6 +6211,67 @@ def _validate_typed_mechanism_evidence(
             if isinstance(raw.get("implementation_touchpoints"), list)
             else []
         )
+        adapter_target_locators = [
+            str(target["locator"])
+            for target in adapter_targets
+            if isinstance(target, dict)
+            and _is_nonempty_string(target.get("node_id"))
+            and _is_nonempty_string(target.get("kind"))
+            and _is_nonempty_string(target.get("locator"))
+            and target.get("runner_attested") is True
+            and _valid_sha256(target.get("evidence_sha256"))
+        ]
+        expected_locator_mappings: list[dict[str, Any]] = []
+        mapped_adapter_symbols: set[str] = set()
+        for locator in adapter_target_locators:
+            mapped = [
+                symbol
+                for symbol in mechanism_symbol_list
+                if symbol == locator
+                or any(
+                    isinstance(touchpoint, Mapping)
+                    and touchpoint.get("runner_attested") is True
+                    and touchpoint.get("causal_locator") == locator
+                    and symbol
+                    in (
+                        touchpoint.get("symbols")
+                        if isinstance(touchpoint.get("symbols"), list)
+                        else []
+                    )
+                    for touchpoint in adapter_touchpoints
+                )
+            ]
+            if mapped:
+                mapped_adapter_symbols.update(mapped)
+                expected_locator_mappings.append(
+                    {
+                        "causal_locator": locator,
+                        "mechanism_symbols": mapped,
+                        "runner_attested": True,
+                    }
+                )
+        expected_adapter_code_path_pairs: set[tuple[Any, Any]] = set()
+        for symbol in mechanism_symbol_list:
+            touchpoint_paths = {
+                touchpoint.get("path")
+                for touchpoint in adapter_touchpoints
+                if isinstance(touchpoint, Mapping)
+                and touchpoint.get("runner_attested") is True
+                and touchpoint.get("causal_locator") in adapter_target_locators
+                and symbol
+                in (
+                    touchpoint.get("symbols")
+                    if isinstance(touchpoint.get("symbols"), list)
+                    else []
+                )
+                and _is_nonempty_string(touchpoint.get("path"))
+            }
+            if touchpoint_paths:
+                expected_adapter_code_path_pairs.update(
+                    (symbol, path) for path in touchpoint_paths
+                )
+            elif symbol in adapter_target_locators:
+                expected_adapter_code_path_pairs.add((symbol, symbol))
         supplied_executed_consumer = raw.get("executed_consumer")
         supplied_consumer_identity = (
             supplied_executed_consumer.get("consumer_identity")
@@ -6287,18 +6348,14 @@ def _validate_typed_mechanism_evidence(
         )
         adapter_touchpoints_valid = (
             evidence_type == "adapter_proof"
-            and code_path_pairs == {(symbol, symbol) for symbol in mechanism_symbol_list}
-            and {
-                target.get("locator")
-                for target in adapter_targets
-                if isinstance(target, dict)
-                and _is_nonempty_string(target.get("node_id"))
-                and _is_nonempty_string(target.get("kind"))
-                and _is_nonempty_string(target.get("locator"))
-                and target.get("runner_attested") is True
-                and _valid_sha256(target.get("evidence_sha256"))
-            }
-            == set(mechanism_symbol_list)
+            and bool(adapter_target_locators)
+            and len(adapter_target_locators) == len(adapter_targets)
+            and len(expected_locator_mappings) == len(adapter_target_locators)
+            and mapped_adapter_symbols == set(mechanism_symbol_list)
+            and code_path_pairs == expected_adapter_code_path_pairs
+            and isinstance(raw.get("mechanism_link"), Mapping)
+            and raw.get("mechanism_link", {}).get("causal_locator_mappings")
+            == expected_locator_mappings
             and isinstance(adapter_proof, Mapping)
             and adapter_touchpoints == adapter_proof_touchpoints
             and raw.get("causal_target")

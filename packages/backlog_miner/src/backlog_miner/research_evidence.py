@@ -7888,6 +7888,80 @@ def _adapter_executed_consumer_receipt(
     )
 
 
+def _adapter_mechanism_symbol_bindings(
+    proof: Mapping[str, Any],
+    *,
+    hypothesis_symbols: Sequence[str],
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map causal locators to the inspected code symbols they actually exercise.
+
+    Proof-adapter interventions may target a value within a production symbol (for example,
+    ``resolve:probe_result``) while hypotheses correctly retain the inspected function symbol.
+    Treating those two identifiers as interchangeable loses the distinction; requiring literal
+    equality makes valid field-level causal controls impossible.  A non-exact locator is accepted
+    only through a runner-attested implementation touchpoint whose causal locator is exact and
+    whose inspected symbol belongs to the hypothesis.
+    """
+
+    graph = proof.get("mechanism_graph")
+    nodes_raw = graph.get("nodes") if isinstance(graph, Mapping) else None
+    root_node_id = graph.get("root_node_id") if isinstance(graph, Mapping) else None
+    outcome_node_id = graph.get("outcome_node_id") if isinstance(graph, Mapping) else None
+    mechanism_nodes = [
+        dict(node)
+        for node in (nodes_raw if isinstance(nodes_raw, list) else [])
+        if isinstance(node, Mapping)
+        and node.get("node_id") not in {root_node_id, outcome_node_id}
+        and _text(node.get("locator")) is not None
+    ]
+    adapter_evidence = proof.get("adapter_evidence")
+    touchpoints_raw = (
+        adapter_evidence.get("implementation_touchpoints")
+        if isinstance(adapter_evidence, Mapping)
+        and isinstance(adapter_evidence.get("implementation_touchpoints"), list)
+        else []
+    )
+    touchpoints = [dict(value) for value in touchpoints_raw if isinstance(value, Mapping)]
+    declared = list(dict.fromkeys(hypothesis_symbols))
+    bindings: list[dict[str, Any]] = []
+    covered: set[str] = set()
+    for node in mechanism_nodes:
+        locator = str(node["locator"])
+        direct = [symbol for symbol in declared if symbol == locator]
+        touchpoint_symbols = [
+            symbol
+            for symbol in declared
+            if any(
+                touchpoint.get("runner_attested") is True
+                and _text(touchpoint.get("causal_locator")) == locator
+                and symbol
+                in {
+                    str(value)
+                    for value in (
+                        touchpoint.get("symbols")
+                        if isinstance(touchpoint.get("symbols"), list)
+                        else []
+                    )
+                    if _text(value) is not None
+                }
+                for touchpoint in touchpoints
+            )
+        ]
+        mapped = list(dict.fromkeys([*direct, *touchpoint_symbols]))
+        if not mapped:
+            return [], [], touchpoints
+        covered.update(mapped)
+        bindings.append(
+            {
+                "causal_locator": locator,
+                "mechanism_symbols": mapped,
+                "runner_attested": True,
+            }
+        )
+    verified_symbols = [symbol for symbol in declared if symbol in covered]
+    return verified_symbols, bindings, touchpoints
+
+
 def _adapter_mechanism_evidence_receipt(
     proof: Mapping[str, Any],
     *,
@@ -7908,7 +7982,13 @@ def _adapter_mechanism_evidence_receipt(
         and _text(node.get("locator")) is not None
     ]
     locators = [str(node["locator"]) for node in mechanism_nodes]
-    if not locators or set(locators) != set(hypothesis_symbols):
+    verified_symbols, locator_bindings, implementation_touchpoints = (
+        _adapter_mechanism_symbol_bindings(
+            proof,
+            hypothesis_symbols=hypothesis_symbols,
+        )
+    )
+    if not locators or not verified_symbols or len(locator_bindings) != len(locators):
         return None
     locator_by_node = {
         str(node["node_id"]): str(node["locator"])
@@ -7928,6 +8008,88 @@ def _adapter_mechanism_evidence_receipt(
         and str(edge.get("from_node_id")) in locator_by_node
         and str(edge.get("to_node_id")) in locator_by_node
     ]
+    for binding in locator_bindings:
+        locator = str(binding["causal_locator"])
+        if locator not in verified_symbols:
+            continue
+        for symbol in binding["mechanism_symbols"]:
+            if symbol == locator:
+                continue
+            touchpoint_ids = sorted(
+                str(touchpoint["touchpoint_id"])
+                for touchpoint in implementation_touchpoints
+                if touchpoint.get("runner_attested") is True
+                and touchpoint.get("causal_locator") == locator
+                and symbol
+                in (
+                    touchpoint.get("symbols")
+                    if isinstance(touchpoint.get("symbols"), list)
+                    else []
+                )
+                and _text(touchpoint.get("touchpoint_id")) is not None
+            )
+            if not touchpoint_ids:
+                continue
+            edge_basis = {
+                "proof_receipt_id": proof.get("proof_receipt_id"),
+                "intervention_id": proof.get("intervention_id"),
+                "causal_locator": locator,
+                "mapped_mechanism_symbol": symbol,
+                "implementation_touchpoint_ids": touchpoint_ids,
+                "positive_outcome": proof.get("positive_outcome"),
+            }
+            directed_edges.append(
+                {
+                    "from_locator": locator,
+                    "to_locator": symbol,
+                    "kind": "adapter_intervention_to_shared_production_touchpoint",
+                    "runner_attested": True,
+                    "evidence_sha256": _canonical_json_sha256(edge_basis),
+                }
+            )
+    touchpoint_code_paths = {
+        symbol: {
+            "symbol": symbol,
+            "path": str(touchpoint["path"]),
+            "node_id": next(
+                (
+                    str(node.get("node_id"))
+                    for node in mechanism_nodes
+                    if node.get("locator") == touchpoint.get("causal_locator")
+                ),
+                None,
+            ),
+            "node_kind": "implementation_touchpoint",
+            "evidence_sha256": touchpoint.get("evidence_sha256"),
+        }
+        for touchpoint in implementation_touchpoints
+        if _text(touchpoint.get("path")) is not None
+        for symbol in (
+            touchpoint.get("symbols")
+            if isinstance(touchpoint.get("symbols"), list)
+            else []
+        )
+        if symbol in verified_symbols
+    }
+    direct_code_paths = {
+        str(node["locator"]): {
+            "symbol": str(node["locator"]),
+            "path": str(node["locator"]),
+            "node_id": node.get("node_id"),
+            "node_kind": node.get("kind"),
+            "evidence_sha256": node.get("evidence_sha256"),
+        }
+        for node in mechanism_nodes
+        if str(node["locator"]) in verified_symbols
+    }
+    code_paths = [
+        (touchpoint_code_paths | direct_code_paths).get(symbol)
+        if symbol not in touchpoint_code_paths
+        else touchpoint_code_paths[symbol]
+        for symbol in verified_symbols
+    ]
+    if any(not isinstance(value, Mapping) for value in code_paths):
+        return None
     link: dict[str, Any] = {
         "verification_method": "runner_causal_proof_adapter_v1",
         "adapter_id": proof.get("adapter_id"),
@@ -7935,17 +8097,9 @@ def _adapter_mechanism_evidence_receipt(
         "proof_receipt_id": proof.get("proof_receipt_id"),
         "intervention_id": proof.get("intervention_id"),
         "entrypoint": locators[0],
-        "code_path": [
-            {
-                "symbol": str(node["locator"]),
-                "path": str(node["locator"]),
-                "node_id": node.get("node_id"),
-                "node_kind": node.get("kind"),
-                "evidence_sha256": node.get("evidence_sha256"),
-            }
-            for node in mechanism_nodes
-        ],
+        "code_path": [dict(value) for value in code_paths if isinstance(value, Mapping)],
         "verified_directed_edges": directed_edges,
+        "causal_locator_mappings": locator_bindings,
     }
     link["mechanism_link_sha256"] = _canonical_json_sha256(link)
     observations = proof.get("observations")
@@ -8003,13 +8157,6 @@ def _adapter_mechanism_evidence_receipt(
     target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
     if target is None:
         return None
-    adapter_evidence = proof.get("adapter_evidence")
-    implementation_touchpoints = (
-        adapter_evidence.get("implementation_touchpoints")
-        if isinstance(adapter_evidence, Mapping)
-        and isinstance(adapter_evidence.get("implementation_touchpoints"), list)
-        else []
-    )
     executed_consumer = _adapter_executed_consumer_receipt(
         proof,
         clean_replays=clean_replays,
@@ -8027,7 +8174,7 @@ def _adapter_mechanism_evidence_receipt(
     receipt: dict[str, Any] = {
         "evidence_type": "adapter_proof",
         "hypothesis_id": proof.get("hypothesis_id"),
-        "mechanism_symbols": locators,
+        "mechanism_symbols": verified_symbols,
         "mechanism_targets": mechanism_nodes,
         "code_paths": link["code_path"],
         "experiment_ids": experiment_ids,
@@ -8049,7 +8196,14 @@ def _adapter_mechanism_evidence_receipt(
                 "kind": source_root.get("root_kind"),
                 "origin_atom_ids": sorted(set(origin_atom_ids)),
                 "source_root_sha256": source_root.get("source_root_sha256"),
-                "root_mechanism_symbol": locators[0],
+                "root_mechanism_symbol": next(
+                    (
+                        symbol
+                        for symbol in verified_symbols
+                        if symbol in locators
+                    ),
+                    verified_symbols[0],
+                ),
                 "runner_attested": True,
             }
         ],
@@ -8280,12 +8434,14 @@ def _typed_mechanism_evidence_receipts(
                 if experiment_id is not None
                 and isinstance((replay := clean_replays.get(experiment_id)), Mapping)
             )
-            if (
-                uses_research_harness
-                and (
-                    not isinstance(adapter_receipt, Mapping)
-                    or not isinstance(adapter_receipt.get("executed_consumer"), Mapping)
+            if uses_research_harness and not isinstance(adapter_receipt, Mapping):
+                errors.append(
+                    "proof_adapter_mechanism_binding_unverified:"
+                    f"{hypothesis_id}:{proof.get('proof_receipt_id') or 'unknown'}"
                 )
+                continue
+            if uses_research_harness and not isinstance(
+                adapter_receipt.get("executed_consumer"), Mapping
             ):
                 errors.append(
                     "proof_adapter_harness_dependency_unverified:"
@@ -12351,12 +12507,18 @@ def _falsification_attempt_receipts(
                 if isinstance(intervention_receipt, dict)
                 else None
             )
-            proof_symbols = (
-                list(mechanism_symbols)
-                if isinstance(proof_receipt, Mapping)
+            proof_symbols = None
+            if (
+                isinstance(proof_receipt, Mapping)
                 and proof_receipt.get("hypothesis_id") == hypothesis_id
-                else None
-            )
+            ):
+                verified_proof_symbols, _locator_bindings, _touchpoints = (
+                    _adapter_mechanism_symbol_bindings(
+                        proof_receipt,
+                        hypothesis_symbols=mechanism_symbols,
+                    )
+                )
+                proof_symbols = verified_proof_symbols or None
             verified_intervention_symbols = intervention_symbols or proof_symbols
             required_relationship_symbols = relationship_symbols or verified_intervention_symbols
             intervention_covers_pair = bool(

@@ -512,25 +512,25 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat warn">
+            <div class="stat good">
               <span class="label">Current pipeline state</span>
-              <span class="value">One case complete; second verifier-clean but blocked</span>
-              <span class="detail">The Windows case remains complete at already_addressed/not_required. The Docker-shell case completed Stage 3 authoring and verification with zero final findings, but current actionability remains undetermined because the signed-in agent could not access the Docker engine for a faithful preflight replay. It did not enter optioning.</span>
+              <span class="value">Two bounded Stage 3 cases complete; second Stage 4 disposition pending</span>
+              <span class="detail">The Windows case remains already_addressed/not_required. The Docker-shell case now has a persisted verifier-clean Stage 3 terminal result: evidence_sufficient, already_addressed, partial at the honest live-runtime boundary. It correctly produced no option or ticket. Its deterministic Stage 4 not_required lifecycle record is the next narrow step.</span>
             </div>
             <div class="stat good">
               <span class="label">Current Stage 3 throughput</span>
-              <span class="value">1 no-change complete / 1 honest blocked</span>
-              <span class="detail">The Docker-shell author used eight gpt-5.6-terra calls over 2,378.99 seconds. Same-author correction progressed from five output-contract findings to five deeper evidence findings, then two, then zero. The final blocked disposition preserved two material unknowns instead of generating a shallow plan.</span>
+              <span class="value">2 / 2 bounded cases reached honest no-change research dispositions</span>
+              <span class="detail">Since the prior dashboard checkpoint, 15 additional Terra calls stayed in the original author session and one author correction reduced an 11-finding frontier to 10. Three general evaluator corrections then reduced unchanged attempt 32 from 10 to 4 to 2 to 0. The zero-error terminal transition made no model call.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">No full export-disabled shadow cycle is claimed. The smallest eight-source component has accepted canonical Stage 1/2 output, one completed no-change case, and one verifier-clean Stage 3 case that still requires faithful current-runtime evidence. The whole cycle is not complete.</span>
+              <span class="detail">No export-disabled full shadow cycle is claimed. The current cycle has accepted Stage 1/2 and two bounded no-change case dispositions, but it has not processed the remaining actionable queue through optioning, planning, implementation, and outcomes.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Run faithful Docker preflight replay</span>
-              <span class="detail">Resume from the retained Docker-shell Stage 3 frontier and use a system-owned clean replay of the actual Docker-backed Codex preflight. Do not restart Stage 1/2 or generate options until that replay establishes current actionability and the precise runtime failure mechanism.</span>
+              <span class="value">Materialize Docker Stage 4 not_required, then take the next actionable case</span>
+              <span class="detail">Do not restart Stage 1/2 or ask the Docker-shell researcher for more work. Run the deterministic no-change Stage 4 boundary from the terminal dossier, then resume the accepted case graph at the next real requires_change case using the same component-first scale ladder.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -660,19 +660,19 @@
               </tr>
               <tr class="ops-current">
                 <td><strong>Clean exact-revision backlog qualification cycle</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>9 h 49 m 49.41 s as of 13:00:09Z</strong><span class="ops-kind">active</span></td>
-                <td><span class="tag warn">Stage 4 completed for one bounded no-change case; second case completed Stage 3 at blocked/partial</span><span class="ops-detail">The exact 2,854-atom input and 24-case graph remain accepted. The Windows case remains complete at evidence_sufficient/partial/already_addressed and Stage 4 not_required. The…</span></td>
-                <td><strong>First bounded case completed at no-change; second case safely stopped at verifier-clean blocked research; cycle remains active</strong></td>
-                <td><strong>29</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Sixteen product defects are counted: BDS-100 through BDS-115. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. The Docker-shell model findings were…</span></td>
-                <td><strong>11</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Eleven nondeterministic quality clusters improved automatically. The Docker-shell cluster used same-author feedback to reach zero findings and an honest blocked disposition in…</span></td>
-                <td><strong>41</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Forty-one deduplicated interventions remain. Launching and observing the intended Docker-shell component is normal pipeline operation, not a corrective intervention; no…</span></td>
-                <td><strong>44</strong> author calls; 20 continuations; 4 stage reruns; 0 full restarts<span class="ops-detail">Forty-four author calls are counted: the prior thirty-six plus eight Docker-shell Terra calls. Twenty continuation launches comprise the prior thirteen plus seven same-session…</span></td>
-                <td>Resume from the retained Docker-shell Stage 3 frontier with a system-owned faithful Docker-backed Codex preflight replay; do not restart Stage 1/2 or enter optioning until…</td>
+                <td><strong>14 h 20 m 40.0 s as of 17:31:00Z</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag good">Stage 4 completed for Windows; Docker-shell terminal Stage 3 complete</span><span class="ops-detail">The exact 2,854-atom input and 24-case graph remain accepted. The Windows case remains evidence_sufficient/partial/already_addressed with Stage 4 not_required. The Docker-shell…</span></td>
+                <td><strong>Two bounded cases have honest no-change research dispositions; Docker Stage 4 lifecycle materialization remains</strong></td>
+                <td><strong>34</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Twenty-one product defects are counted: BDS-100 through BDS-120. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. Model-authored validation findings are…</span></td>
+                <td><strong>12</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Twelve nondeterministic quality clusters improved automatically. In the new Docker-shell segment, the same author made one genuine 11-to-10 correction; later equal-count safe…</span></td>
+                <td><strong>46</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Forty-six deduplicated interventions are counted. The five new clusters are the raw shell-probe context transport, nested path verification, list-index citation resolution,…</span></td>
+                <td><strong>59</strong> author calls; 24 continuations; 10 stage reruns; 0 full restarts<span class="ops-detail">Fifty-nine author calls are counted: the prior forty-four plus fifteen additional same-session Docker-shell Terra calls. Four additional bounded continuation launches and six…</span></td>
+                <td>Run the deterministic Stage 4 not_required boundary from the terminal Docker-shell dossier, then select the next accepted requires_change case. Do not restart Stage 1/2 or…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-17T13:00:09.4050485Z. Showing 12 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-17T17:31:00Z. Showing 12 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

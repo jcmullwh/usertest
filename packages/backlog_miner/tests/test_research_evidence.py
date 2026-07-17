@@ -885,6 +885,140 @@ def test_falsification_attempt_binding_rejects_unrelated_refuting_experiment() -
     )
 
 
+def test_falsification_adapter_binds_declared_causal_link_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = {
+        "experiment_id": "exp-baseline",
+        "scenario_kind": "controlled_replay",
+        "addresses_atom_ids": ["atom:one"],
+        "command": "python tools/replay.py failed",
+        "result": "The failed probe blocks dispatch.",
+        "outcome": "supports",
+        "exit_code": 0,
+        "observable_assertion": {
+            "source": "stdout",
+            "operator": "contains",
+            "expected": "blocked",
+        },
+        "artifact_refs": ["artifact:source"],
+    }
+    challenge = {
+        **baseline,
+        "experiment_id": "exp-challenge",
+        "scenario_kind": "control",
+        "command": "python tools/replay.py passed",
+        "result": "The passed probe permits dispatch.",
+        "observable_assertion": {
+            "source": "stdout",
+            "operator": "contains",
+            "expected": "available",
+        },
+        "control_relationship": {
+            "supports_experiment_id": "exp-baseline",
+            "controlled_variable": "probe_result",
+            "expected_difference": "Only the probe result changes from failed to passed.",
+            "mechanism_symbols": ["core.resolve"],
+        },
+    }
+    statement = "The parser result reaches the resolver and controls dispatch."
+    dossier = {
+        "research_status": "evidence_sufficient",
+        "experiments": [baseline, challenge],
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": "h1",
+                "statement": statement,
+                "mechanism_symbols": ["core.parse", "core.resolve"],
+                "supporting_evidence": ["exp-baseline", "exp-challenge"],
+                "counterevidence": [],
+                "falsification_attempts": [
+                    {
+                        "attempt_id": "attempt:passed-probe-still-blocked",
+                        "hypothesis_id": "h1",
+                        "claim": statement,
+                        "baseline_experiment_id": "exp-baseline",
+                        "challenge_experiment_id": "exp-challenge",
+                        "disproof_condition": {
+                            "source": "stdout",
+                            "operator": "not_contains",
+                            "expected": "available",
+                        },
+                        "outcome": "survived",
+                    }
+                ],
+            }
+        ],
+    }
+    proof = {
+        "proof_receipt_id": "causal_proof:" + "d" * 64,
+        "hypothesis_id": "h1",
+        "observations": {
+            "baseline": {"experiment_id": "exp-baseline"},
+            "challenge": {"experiment_id": "exp-challenge"},
+        },
+        "intervention": {
+            "target": "core.resolve:probe_result",
+            "baseline_experiment_id": "exp-baseline",
+            "challenge_experiment_id": "exp-challenge",
+        },
+        "mechanism_graph": {
+            "root_node_id": "proof:root",
+            "outcome_node_id": "proof:outcome",
+            "nodes": [
+                {"node_id": "proof:root", "kind": "source", "locator": "origin"},
+                {
+                    "node_id": "proof:mechanism",
+                    "kind": "argument",
+                    "locator": "core.resolve:probe_result",
+                },
+                {
+                    "node_id": "proof:outcome",
+                    "kind": "outcome",
+                    "locator": "stdout",
+                },
+            ],
+            "edges": [],
+        },
+        "adapter_evidence": {
+            "implementation_touchpoints": [
+                {
+                    "causal_locator": "core.resolve:probe_result",
+                    "path": "src/core.py",
+                    "symbols": ["core.resolve"],
+                    "runner_attested": True,
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(mod, "validate_causal_proof_receipt", lambda _proof: [])
+    errors: list[str] = []
+
+    receipts = mod._falsification_attempt_receipts(
+        dossier,
+        clean_replays={
+            experiment["experiment_id"]: _falsification_replay(experiment)
+            for experiment in (baseline, challenge)
+        },
+        mechanism_evidence=[
+            {
+                "mechanism_evidence_id": "mechanism_evidence:resolver-control",
+                "hypothesis_id": "h1",
+                "experiment_ids": ["exp-baseline", "exp-challenge"],
+                "mechanism_symbols": ["core.resolve"],
+            }
+        ],
+        falsification_interventions=[],
+        deterministic_closures=[],
+        proof_adapter_receipts=[proof],
+        errors=errors,
+    )
+
+    assert errors == []
+    assert receipts["h1"][0]["outcome"] == "survived"
+    assert receipts["h1"][0]["mechanism_symbols"] == ["core.resolve"]
+
+
 def _git(command: list[str], *, cwd: Path) -> str:
     return subprocess.run(
         ["git", *command],
@@ -6331,6 +6465,210 @@ def _authenticated_adapter_harness_replays(
     return replays, entrypoint
 
 
+def test_adapter_mechanism_maps_field_locator_to_inspected_function_symbol(
+    tmp_path: Path,
+) -> None:
+    symbol = "runner_core.execution_backend.cleanup_local_maintenance_images"
+    locator = symbol + ":active_image_refs"
+    replays, _entrypoint = _authenticated_adapter_harness_replays(
+        tmp_path,
+        source="""import runner_core.execution_backend as backend
+
+def test_baseline():
+    return backend.cleanup_local_maintenance_images
+
+def test_challenge():
+    return backend.cleanup_local_maintenance_images
+""",
+    )
+    touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "b" * 64,
+        "causal_locator": locator,
+        "path": "packages/runner_core/src/runner_core/execution_backend.py",
+        "symbols": [symbol],
+        "relationship": "The field-level control is consumed by this function.",
+        "runner_attested": True,
+        "inspected_content_sha256": "c" * 64,
+        "evidence_sha256": "b" * 64,
+    }
+    proof = {
+        "adapter_id": "structured_replay.v1",
+        "adapter_version": "1",
+        "hypothesis_id": "hypothesis:cleanup",
+        "proof_receipt_id": "causal_proof:" + "d" * 64,
+        "intervention_id": "intervention:" + "e" * 64,
+        "observations": {
+            "baseline": {"experiment_id": "experiment:baseline"},
+            "challenge": {"experiment_id": "experiment:challenge"},
+        },
+        "intervention": {"kind": "argument", "target": locator},
+        "source_root": {
+            "root_kind": "origin_symptom",
+            "origin_atom_ids": ["atom:cleanup"],
+            "source_root_sha256": "f" * 64,
+        },
+        "mechanism_graph": {
+            "root_node_id": "proof:root",
+            "outcome_node_id": "proof:outcome",
+            "nodes": [
+                {"node_id": "proof:root", "kind": "source", "locator": "origin"},
+                {
+                    "node_id": "proof:mechanism",
+                    "kind": "command",
+                    "locator": locator,
+                    "runner_attested": True,
+                    "evidence_sha256": "1" * 64,
+                },
+                {"node_id": "proof:outcome", "kind": "outcome", "locator": "stdout"},
+            ],
+            "edges": [],
+        },
+        "adapter_evidence": {"implementation_touchpoints": [touchpoint]},
+        "artifacts": [],
+        "positive_outcome": {"passed": True},
+    }
+    atom_bindings = [
+        {
+            "experiment_id": "experiment:baseline",
+            "atom_id": "atom:cleanup",
+            "match_kind": "adapter_declared_symptom",
+        }
+    ]
+
+    receipt = mod._adapter_mechanism_evidence_receipt(
+        proof,
+        hypothesis_symbols=[symbol],
+        atom_bindings=atom_bindings,
+        clean_replays=replays,
+    )
+
+    assert receipt is not None
+    assert receipt["mechanism_symbols"] == [symbol]
+    assert receipt["causal_target"] == locator
+    assert receipt["code_paths"] == [
+        {
+            "symbol": symbol,
+            "path": touchpoint["path"],
+            "node_id": "proof:mechanism",
+            "node_kind": "implementation_touchpoint",
+            "evidence_sha256": touchpoint["evidence_sha256"],
+        }
+    ]
+    assert receipt["mechanism_link"]["causal_locator_mappings"] == [
+        {
+            "causal_locator": locator,
+            "mechanism_symbols": [symbol],
+            "runner_attested": True,
+        }
+    ]
+    assert receipt["executed_consumer"]["consumer_identity"]["runner_attested"] is True
+    assert [binding["root_mechanism_symbol"] for binding in receipt["causal_root_bindings"]] == [
+        symbol
+    ]
+
+
+def test_adapter_mechanism_connects_exact_intervention_to_shared_touchpoint(
+    tmp_path: Path,
+) -> None:
+    parser_symbol = "agent_adapters.shell_probe._codex_marker_source"
+    resolver_symbol = "runner_core.shell_capability._resolve_shell_capability"
+    replays, _entrypoint = _authenticated_adapter_harness_replays(
+        tmp_path,
+        source="""import runner_core.shell_capability as capability
+
+def test_baseline():
+    return capability._resolve_shell_capability
+
+def test_challenge():
+    return capability._resolve_shell_capability
+""",
+    )
+    touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "b" * 64,
+        "causal_locator": parser_symbol,
+        "path": "packages/runner_core/src/runner_core/shell_capability.py",
+        "symbols": [resolver_symbol],
+        "relationship": "Both intervention sides carry the result through the resolver.",
+        "runner_attested": True,
+        "inspected_content_sha256": "c" * 64,
+        "evidence_sha256": "b" * 64,
+    }
+    proof = {
+        "adapter_id": "structured_replay.v1",
+        "adapter_version": "1",
+        "hypothesis_id": "hypothesis:probe",
+        "proof_receipt_id": "causal_proof:" + "d" * 64,
+        "intervention_id": "intervention:" + "e" * 64,
+        "observations": {
+            "baseline": {"experiment_id": "experiment:baseline"},
+            "challenge": {"experiment_id": "experiment:challenge"},
+        },
+        "intervention": {"kind": "implementation_revision", "target": parser_symbol},
+        "source_root": {
+            "root_kind": "origin_symptom",
+            "origin_atom_ids": ["atom:probe"],
+            "source_root_sha256": "f" * 64,
+        },
+        "mechanism_graph": {
+            "root_node_id": "proof:root",
+            "outcome_node_id": "proof:outcome",
+            "nodes": [
+                {"node_id": "proof:root", "kind": "source", "locator": "origin"},
+                {
+                    "node_id": "proof:mechanism",
+                    "kind": "command",
+                    "locator": parser_symbol,
+                    "runner_attested": True,
+                    "evidence_sha256": "1" * 64,
+                },
+                {"node_id": "proof:outcome", "kind": "outcome", "locator": "stdout"},
+            ],
+            "edges": [],
+        },
+        "adapter_evidence": {"implementation_touchpoints": [touchpoint]},
+        "artifacts": [],
+        "positive_outcome": {"passed": True},
+    }
+    atom_bindings = [
+        {
+            "experiment_id": "experiment:baseline",
+            "atom_id": "atom:probe",
+            "match_kind": "adapter_declared_symptom",
+        }
+    ]
+
+    receipt = mod._adapter_mechanism_evidence_receipt(
+        proof,
+        hypothesis_symbols=[parser_symbol, resolver_symbol],
+        atom_bindings=atom_bindings,
+        clean_replays=replays,
+    )
+
+    assert receipt is not None
+    assert receipt["mechanism_symbols"] == [parser_symbol, resolver_symbol]
+    assert [binding["root_mechanism_symbol"] for binding in receipt["causal_root_bindings"]] == [
+        parser_symbol
+    ]
+    assert receipt["mechanism_link"]["verified_directed_edges"] == [
+        {
+            "from_locator": parser_symbol,
+            "to_locator": resolver_symbol,
+            "kind": "adapter_intervention_to_shared_production_touchpoint",
+            "runner_attested": True,
+            "evidence_sha256": receipt["mechanism_link"]["verified_directed_edges"][0][
+                "evidence_sha256"
+            ],
+        }
+    ]
+    connected, symbols, _trace, disconnected = mod._rooted_support_connectivity(
+        [receipt],
+        hypothesis_symbols=[parser_symbol, resolver_symbol],
+    )
+    assert connected == [receipt]
+    assert symbols == {parser_symbol, resolver_symbol}
+    assert disconnected == []
+
+
 def test_adapter_harness_dependency_identity_ignores_controlled_call_arguments(
     tmp_path: Path,
 ) -> None:
@@ -6573,6 +6911,27 @@ def test_non_python_research_harness_is_unverified_not_repository_consumer(
         "inspected_content_sha256": "c" * 64,
         "evidence_sha256": "b" * 64,
     }
+    proof["source_root"] = {
+        "root_kind": "origin_symptom",
+        "origin_atom_ids": ["atom:runtime"],
+        "source_root_sha256": "f" * 64,
+    }
+    proof["mechanism_graph"] = {
+        "root_node_id": "proof:root",
+        "outcome_node_id": "proof:outcome",
+        "nodes": [
+            {"node_id": "proof:root", "kind": "source", "locator": "origin"},
+            {
+                "node_id": "proof:mechanism",
+                "kind": "function",
+                "locator": "runtime.backend.mechanism",
+            },
+            {"node_id": "proof:outcome", "kind": "outcome", "locator": "stdout"},
+        ],
+        "edges": [],
+    }
+    proof["adapter_evidence"] = {"implementation_touchpoints": [touchpoint]}
+    proof["positive_outcome"] = {"passed": True}
 
     assert (
         mod._adapter_executed_consumer_receipt(
@@ -6600,7 +6959,13 @@ def test_non_python_research_harness_is_unverified_not_repository_consumer(
         strong_controls=[],
         falsification_interventions=[],
         deterministic_closures=[],
-        atom_bindings=[],
+        atom_bindings=[
+            {
+                "experiment_id": experiment_ids[0],
+                "atom_id": "atom:runtime",
+                "match_kind": "adapter_declared_symptom",
+            }
+        ],
         errors=errors,
         proof_adapter_receipts=[proof],
     )

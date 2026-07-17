@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T13:00:09.4050485Z",
+    "as_of": "2026-07-17T17:31:00Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "One case complete; second verifier-clean but blocked",
-        "detail": "The Windows case remains complete at already_addressed/not_required. The Docker-shell case completed Stage 3 authoring and verification with zero final findings, but current actionability remains undetermined because the signed-in agent could not access the Docker engine for a faithful preflight replay. It did not enter optioning.",
-        "tone": "warn"
+        "value": "Two bounded Stage 3 cases complete; second Stage 4 disposition pending",
+        "detail": "The Windows case remains already_addressed/not_required. The Docker-shell case now has a persisted verifier-clean Stage 3 terminal result: evidence_sufficient, already_addressed, partial at the honest live-runtime boundary. It correctly produced no option or ticket. Its deterministic Stage 4 not_required lifecycle record is the next narrow step.",
+        "tone": "good"
       },
       {
         "label": "Current Stage 3 throughput",
-        "value": "1 no-change complete / 1 honest blocked",
-        "detail": "The Docker-shell author used eight gpt-5.6-terra calls over 2,378.99 seconds. Same-author correction progressed from five output-contract findings to five deeper evidence findings, then two, then zero. The final blocked disposition preserved two material unknowns instead of generating a shallow plan.",
+        "value": "2 / 2 bounded cases reached honest no-change research dispositions",
+        "detail": "Since the prior dashboard checkpoint, 15 additional Terra calls stayed in the original author session and one author correction reduced an 11-finding frontier to 10. Three general evaluator corrections then reduced unchanged attempt 32 from 10 to 4 to 2 to 0. The zero-error terminal transition made no model call.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No full export-disabled shadow cycle is claimed. The smallest eight-source component has accepted canonical Stage 1/2 output, one completed no-change case, and one verifier-clean Stage 3 case that still requires faithful current-runtime evidence. The whole cycle is not complete.",
+        "detail": "No export-disabled full shadow cycle is claimed. The current cycle has accepted Stage 1/2 and two bounded no-change case dispositions, but it has not processed the remaining actionable queue through optioning, planning, implementation, and outcomes.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Run faithful Docker preflight replay",
-        "detail": "Resume from the retained Docker-shell Stage 3 frontier and use a system-owned clean replay of the actual Docker-backed Codex preflight. Do not restart Stage 1/2 or generate options until that replay establishes current actionability and the precise runtime failure mechanism.",
+        "value": "Materialize Docker Stage 4 not_required, then take the next actionable case",
+        "detail": "Do not restart Stage 1/2 or ask the Docker-shell researcher for more work. Run the deterministic no-change Stage 4 boundary from the terminal dossier, then resume the accepted case graph at the next real requires_change case using the same component-first scale ladder.",
         "tone": "warn"
       }
     ],
@@ -2652,29 +2652,29 @@
         "lifecycle_id": "pipeline-cycle:338a373f:20260717",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 44,
-          "continuation_launches": 20,
-          "stage_reruns": 4,
+          "author_invocations": 59,
+          "continuation_launches": 24,
+          "stage_reruns": 10,
           "full_restarts": 0,
-          "summary": "Forty-four author calls are counted: the prior thirty-six plus eight Docker-shell Terra calls. Twenty continuation launches comprise the prior thirteen plus seven same-session Docker-shell corrections. The Docker-shell case remained in one Stage 3 execution and one author session; it did not restart Stage 1/2 or the full cycle. The four earlier stage-local reruns remain unchanged."
+          "summary": "Fifty-nine author calls are counted: the prior forty-four plus fifteen additional same-session Docker-shell Terra calls. Four additional bounded continuation launches and six model-free Stage 3 evidence replays were used; Stage 1/2 and the full cycle were not restarted. The final zero-error materialization used no model call."
         },
         "label": "Clean exact-revision backlog qualification cycle",
-        "scope": "Reconciled non-IDEA evidence custody, output-blind currentness, canonical lifecycle materialization, accepted Stage 1/2, one completed Windows no-change case, and one verifier-clean but runtime-blocked Docker-shell Stage 3 case; Stage 5/6, exports, tickets, implementation, and Docker object mutation disabled",
+        "scope": "Reconciled non-IDEA evidence custody, accepted exact Stage 1/2, one completed Windows no-change lifecycle, and one terminal verifier-clean Docker-shell Stage 3 no-change case; automated export remains disabled and no Docker object mutation or removal was authorized",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 35389.4050485,
+          "elapsed_seconds": 51640.0,
           "coverage": "active",
-          "display": "9 h 49 m 49.41 s as of 13:00:09Z",
-          "note": "Wall time begins at creation of the retained qualification-cycle root. The Docker-shell Stage 3 component itself ran for 2,378.986616 seconds; supporting records preserve preparation, reconciliation, preflights, tests, and correction intervals separately."
+          "display": "14 h 20 m 40.0 s as of 17:31:00Z",
+          "note": "Wall time begins at creation of the retained qualification-cycle root. Model-free verifier replays are retained as supporting stage-local runs; their durations do not represent new author work."
         },
-        "furthest_stage": "Stage 4 completed for one bounded no-change case; second case completed Stage 3 at blocked/partial",
-        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows case remains complete at evidence_sufficient/partial/already_addressed and Stage 4 not_required. The Docker-shell case ran from its verified three-atom assignment in one signed-in gpt-5.6-terra author session. Eight model reports over 2,378.986616 seconds corrected five output-contract findings, then five evidence findings, then two, to zero without a stage or full-cycle restart. Its compiled dossier is verifier-clean, blocked/partial, and actionability undetermined: production resolver controls establish that a failed shell probe maps to blocked/shell_probe_failed despite allowed policy, while current Docker engine access was denied inside the author workspace and the precise original failure diagnostic is unavailable. It did not enter Stage 4. The receipt explicitly reports verified_existing_without_model_invocation=false and reused_verified_dossier_without_model_invocation=false; this was authored research, not a zero-call replay. No export, ticket, implementation, or Docker object mutation occurred.",
-        "outcome": "First bounded case completed at no-change; second case safely stopped at verifier-clean blocked research; cycle remains active",
+        "furthest_stage": "Stage 4 completed for Windows; Docker-shell terminal Stage 3 complete",
+        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows case remains evidence_sufficient/partial/already_addressed with Stage 4 not_required. The Docker-shell case now establishes that the historical parser omitted command_execution.aggregated_output, causing successful shell probes to be classified failed and blocked despite allowed policy; the target revision already contains the parser fix. Unchanged attempt 32 passed the current evidence verifier with zero findings and materialized as terminal attempt 34. The dossier remains partial only because live Docker behavior was not executed; that boundary does not make an already-addressed code defect actionable. No option, plan, export, ticket, implementation, Docker mutation, or removal occurred.",
+        "outcome": "Two bounded cases have honest no-change research dispositions; Docker Stage 4 lifecycle materialization remains",
         "errors": {
-          "count": 29,
+          "count": 34,
           "count_kind": "deduplicated_clusters",
-          "summary": "Sixteen product defects are counted: BDS-100 through BDS-115. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. The Docker-shell model findings were corrected research-output feedback, not new pipeline-defect clusters.",
+          "summary": "Twenty-one product defects are counted: BDS-100 through BDS-120. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. Model-authored validation findings are not inflated into separate product-defect clusters.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2692,6 +2692,11 @@
             "BDS-113",
             "BDS-114",
             "BDS-115",
+            "BDS-116",
+            "BDS-117",
+            "BDS-118",
+            "BDS-119",
+            "BDS-120",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2708,14 +2713,14 @@
           ]
         },
         "automatic_self_corrections": {
-          "count": 11,
+          "count": 12,
           "count_kind": "deduplicated_clusters",
-          "summary": "Eleven nondeterministic quality clusters improved automatically. The Docker-shell cluster used same-author feedback to reach zero findings and an honest blocked disposition in eight model calls. Removing an optional unauthenticated falsification attempt was accepted as an evidence-backed revision; useful controls, blockers, and material unknowns were preserved."
+          "summary": "Twelve nondeterministic quality clusters improved automatically. In the new Docker-shell segment, the same author made one genuine 11-to-10 correction; later equal-count safe work was retained and regressions quarantined. The remaining 10-to-0 improvement came from evaluator corrections and is counted as supervision, not automatic model success."
         },
         "supervisor_interventions": {
-          "count": 41,
+          "count": 46,
           "count_kind": "deduplicated_clusters",
-          "summary": "Forty-one deduplicated interventions remain. Launching and observing the intended Docker-shell component is normal pipeline operation, not a corrective intervention; no supervisor content correction or code change was needed during this Stage 3 run.",
+          "summary": "Forty-six deduplicated interventions are counted. The five new clusters are the raw shell-probe context transport, nested path verification, list-index citation resolution, causal-locator/connected-support binding, and causal-subset plus zero-error materialization corrections. Routine observation and test execution are not counted as interventions.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2757,52 +2762,22 @@
             "stage3_terminal_rematerialization_after_BDS113",
             "BDS-114",
             "stage4_no_change_disposition",
-            "BDS-115"
+            "BDS-115",
+            "BDS-116",
+            "BDS-117",
+            "BDS-118",
+            "BDS-119",
+            "BDS-120"
           ]
         },
-        "next_action": "Resume from the retained Docker-shell Stage 3 frontier with a system-owned faithful Docker-backed Codex preflight replay; do not restart Stage 1/2 or enter optioning until current actionability and the runtime failure mechanism are established.",
-        "tone": "warn",
-        "data_quality": "The Docker-shell receipt is exact: eight signed-in Terra model report directories, nine research-attempt records including one verifier-feedback record, 2,378.986616 seconds, final evidence verification status verified with zero errors, blocked/partial disposition, unchanged source inputs, and no Docker invocation enabled by the component. Runner completion is reported separately from case readiness. The host can currently reach Docker Desktop, but that supervisor observation is not yet treated as Stage 3 evidence.",
+        "next_action": "Run the deterministic Stage 4 not_required boundary from the terminal Docker-shell dossier, then select the next accepted requires_change case. Do not restart Stage 1/2 or generate a plan for this already-addressed case.",
+        "tone": "good",
+        "data_quality": "The terminal receipt exact-binds source attempt 32, its ten prior findings, an empty replacement frontier, verifier-finalized dossier, attempt 34, unchanged source files, zero model/upstream/downstream/Docker invocations, and signed-in ChatGPT subscription provenance. The Stage 3 affected suites collected 357 tests with one expected skip; all passed. The 495-test backlog_core package passed. Full-cycle qualification and live Docker outcome proof remain absent.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
-          "qualification_prepare_c1b44df8_20260717",
-          "qualification_prepare_8a047703_20260717",
-          "sealed_execution_lineage_8a047703_20260717",
-          "qualification_manifest_v5_8a047703_20260717",
-          "qualification_manifest_v4_338a373f_20260717",
           "stage12_multisource_8_live_8a047703_20260717",
-          "stage12_multisource_8_context_preflight_8a047703_20260717",
-          "stage12_multisource_8_context_live_8a047703_20260717",
-          "stage12_relation_split_correction_preflight_8a047703_20260717",
-          "stage12_relation_split_correction_live_8a047703_20260717",
-          "stage12_relation_split_correction_preflight_6df385b0_20260717",
-          "stage12_relation_split_correction_live_6df385b0_20260717",
-          "stage12_relation_identity_preflight_209166cd_20260717",
-          "stage12_relation_identity_live_209166cd_20260717",
-          "stage12_relation_reuse_preflight_5f0f277a_20260717",
-          "stage12_relation_reuse_live_5f0f277a_20260717",
-          "stage3_windows_reassessment_preflight_5f0f277a_20260717",
-          "stage3_windows_reassessment_live_5f0f277a_20260717",
-          "stage3_windows_reassessment_termination_5f0f277a_20260717",
-          "stage3_windows_retained_output_replay_abcd5307_20260717",
-          "stage3_windows_expanded_assignment_preflight_c8eefa80_20260717",
-          "stage3_windows_expanded_assignment_live_c8eefa80_20260717",
-          "stage3_windows_primary_support_correction_c8eefa80_20260717",
-          "stage3_windows_descriptive_scenario_replay_73a6e2e1_20260717",
-          "stage3_windows_evidence_cluster_correction_73a6e2e1_20260717",
-          "stage3_windows_falsification_correction_73a6e2e1_20260717",
-          "stage3_windows_deep_evidence_correction_73a6e2e1_20260717",
-          "stage3_windows_available_evidence_completion_09cad0d4_20260717",
-          "stage3_windows_complete_assigned_context_feedback_09cad0d4_20260717",
-          "stage3_windows_complete_assigned_context_result_09cad0d4_20260717",
-          "stage3_windows_context_binding_feedback_09cad0d4_20260717",
-          "stage3_windows_context_binding_result_09cad0d4_20260717",
-          "stage3_windows_transformed_source_replay_42584988_20260717",
-          "stage3_windows_positive_control_feedback_42584988_20260717",
-          "stage3_windows_positive_control_result_42584988_20260717",
-          "stage3_windows_persisted_predicate_replay_5a325478_20260717",
           "stage3_windows_predicate_attestation_replay_e6099be7_20260717",
-          "stage3_docker_shell_live_cd685b6c_20260717",
+          "stage3_docker_shell_terminal_materialization_20260717",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -5082,9 +5057,18 @@
       "id": "backlog_depth_supervision_issue_ledger",
       "path": "docs/design/backlog-depth-supervision-issue-ledger.md",
       "kind": "supervision_issue_and_test_evidence_ledger",
-      "file_sha256_at_dashboard_snapshot": "7FD719294E76FF4DA4D363AA028FC004BB83B2FD7AD4AB94EBC891646A493844",
-      "as_of": "2026-07-16T23:46:26Z",
-      "limitations": "Records supervisor-discovered defects and correction evidence through BDS-092, including the terminal BDS-091 replay and the orphaned dashboard-search interference. It is a supervision record, not a substitute for exact run, outcome-role, ticket, verifier, or replay artifacts."
+      "file_sha256_at_dashboard_snapshot": "48D94B1B62BF36C4CE2E6F08FBD68F87E83E688E4F698A803D8A66E3F35F566C",
+      "as_of": "2026-07-17T17:31:00Z",
+      "limitations": "Records supervisor-discovered defects and correction evidence through BDS-120, including the exact Docker-shell zero-error rescore and terminal Stage 3 materialization. It is a supervision record, not a substitute for exact run, outcome-role, ticket, verifier, or replay artifacts."
+    },
+    {
+      "id": "stage3_docker_shell_terminal_materialization_20260717",
+      "path": "U:\\usertest_backlog_qualification\\29da0ebe_20260717T132700Z\\component_frontiers\\stage3_docker_shell_terminal_materialization_20260717T175000Z\\receipt.json",
+      "kind": "authenticated_zero_error_stage3_rescore_materialization",
+      "file_sha256": "60AC014A8E2DE6A9D5B4DD5AC622EB8A3798954595D4BCA1DB951FFE1CD624B5",
+      "byte_length": 3131,
+      "measured_at": "2026-07-17T17:30:29.984017Z",
+      "limitations": "Proves unchanged attempt 32 materialized as terminal attempt 34 with zero replacement findings, zero model/upstream/downstream/Docker invocations, persisted-evidence verification, and signed-in ChatGPT provenance. The case is already_addressed with an honest partial live-runtime boundary; it is not live Docker proof or a full-cycle qualification."
     },
     {
       "id": "maintenance_stage3_final_continuation",
