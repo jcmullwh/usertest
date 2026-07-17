@@ -4495,7 +4495,24 @@ def _run_problem_mining_stage(
 def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
     """Return the evidence-bearing case packet shown to the relation reviewer."""
 
-    return {
+    evidence_atom_ids = _coerce_string_list(item.get("evidence_atom_ids"))
+    case_id = _coerce_string(item.get("case_id"))
+    provisional_group = item.get("provisional_same_cause_group")
+    case_owned_evidence_atom_ids: list[str] | None = None
+    if case_id is not None and isinstance(provisional_group, Mapping):
+        facets = provisional_group.get("member_facets")
+        if isinstance(facets, list):
+            for raw_facet in facets:
+                if not isinstance(raw_facet, Mapping):
+                    continue
+                if _coerce_string(raw_facet.get("case_id")) != case_id:
+                    continue
+                case_owned_evidence_atom_ids = _coerce_string_list(
+                    raw_facet.get("evidence_atom_ids")
+                )
+                break
+
+    preview = {
         "problem_id": item.get("problem_id"),
         "case_id": item.get("case_id"),
         "title": item.get("title"),
@@ -4503,7 +4520,11 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
         "user_impact": item.get("user_impact"),
         "canonical_symptoms": item.get("canonical_symptoms") or [],
         "evidence_summary": item.get("evidence_summary"),
-        "evidence_atom_ids": item.get("evidence_atom_ids") or [],
+        "evidence_atom_ids": (
+            case_owned_evidence_atom_ids
+            if case_owned_evidence_atom_ids is not None
+            else evidence_atom_ids
+        ),
         "root_cause_status": item.get("root_cause_status") or "unestablished",
         "verified_mechanism_sha256": item.get("verified_mechanism_sha256"),
         "verified_causal_signature_sha256": item.get(
@@ -4520,6 +4541,13 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
         "carried_forward": bool(item.get("_carried_forward_case")),
         "candidate_only": bool(item.get("_relation_candidate_only")),
     }
+    if (
+        case_owned_evidence_atom_ids is not None
+        and evidence_atom_ids != case_owned_evidence_atom_ids
+    ):
+        preview["research_packet_evidence_atom_ids"] = evidence_atom_ids
+        preview["evidence_scope"] = "case_owned_provisional_facet"
+    return preview
 
 
 def _verified_relation_edges_from_case_registry(

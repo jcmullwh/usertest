@@ -4920,6 +4920,42 @@ def test_relation_review_repairs_structural_errors_in_exact_reviewer_session(
     assert invalid not in correction_prompt
 
 
+def test_relation_preview_separates_case_evidence_from_provisional_packet() -> None:
+    preview = _relation_case_preview(
+        {
+            "problem_id": "problem:a",
+            "case_id": "case:a",
+            "evidence_atom_ids": ["atom:a", "atom:b"],
+            "case_identity_status": "provisional_same_cause",
+            "provisional_same_cause_group": {
+                "schema_version": 1,
+                "status": "research_hypothesis",
+                "group_id": "cause:provisional",
+                "member_case_ids": ["case:a", "case:b"],
+                "member_problem_ids": ["problem:a", "problem:b"],
+                "member_facets": [
+                    {
+                        "case_id": "case:a",
+                        "problem_id": "problem:a",
+                        "evidence_atom_ids": ["atom:a"],
+                        "source_evidence_atom_ids": ["atom:a"],
+                    },
+                    {
+                        "case_id": "case:b",
+                        "problem_id": "problem:b",
+                        "evidence_atom_ids": ["atom:b"],
+                        "source_evidence_atom_ids": ["atom:b"],
+                    },
+                ],
+            },
+        }
+    )
+
+    assert preview["evidence_atom_ids"] == ["atom:a"]
+    assert preview["research_packet_evidence_atom_ids"] == ["atom:a", "atom:b"]
+    assert preview["evidence_scope"] == "case_owned_provisional_facet"
+
+
 def test_relation_review_retries_fresh_until_codex_author_session_exists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

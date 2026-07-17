@@ -928,13 +928,38 @@ def canonicalize_problem_cases(
                 return value.casefold()
             return None
 
+        def case_owned_identity_evidence(case_id: str) -> set[str]:
+            """Return evidence owned by one facet, excluding packet expansion.
+
+            A persisted provisional same-cause group is carried as one research
+            packet.  Upstream attachment may therefore place every member's atoms
+            on each active member record so the eventual packet is complete.  That
+            runner-created overlap is not independent evidence that the case
+            identities are already equivalent.  Prefer the immutable member facet
+            projection when it is available; genuine shared source evidence still
+            overlaps there.
+            """
+
+            item = by_case[case_id]
+            provisional_group = item.get("provisional_same_cause_group")
+            if isinstance(provisional_group, Mapping):
+                facets = provisional_group.get("member_facets")
+                if isinstance(facets, list):
+                    for raw_facet in facets:
+                        if not isinstance(raw_facet, Mapping):
+                            continue
+                        if _clean_relation_string(raw_facet.get("case_id")) != case_id:
+                            continue
+                        return set(
+                            _clean_relation_string_list(
+                                raw_facet.get("evidence_atom_ids")
+                            )
+                        )
+            return set(_clean_relation_string_list(item.get("evidence_atom_ids")))
+
         def objective_identity_edge(left: str, right: str, *, action: str) -> bool:
-            left_evidence = set(
-                _clean_relation_string_list(by_case[left].get("evidence_atom_ids"))
-            )
-            right_evidence = set(
-                _clean_relation_string_list(by_case[right].get("evidence_atom_ids"))
-            )
+            left_evidence = case_owned_identity_evidence(left)
+            right_evidence = case_owned_identity_evidence(right)
             if left_evidence.intersection(right_evidence):
                 return True
             relation_edge = tuple(sorted((left, right)))

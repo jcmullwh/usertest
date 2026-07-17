@@ -33,6 +33,12 @@ candidate neighborhoods provided. You receive:
   `provisional_same_cause_group`, cite every member facet's `source_evidence_atom_ids`;
   without that evidence-complete falsification the runner retains the prior hypothesis.
 - Base decisions on evidence, not on surface-level title similarity alone.
+- `evidence_atom_ids` is the source evidence owned by that case identity. When a
+  provisional group is carried forward, `research_packet_evidence_atom_ids` may also
+  appear so downstream research receives every member observation. That combined
+  packet is not a shared-identity edge merely because it appears on multiple members;
+  use the case-owned evidence and `provisional_same_cause_group.member_facets` when
+  deciding whether observations are actually shared.
 - At this pre-research stage, model judgment and cross-case citations do not establish
   causal identity. Use `merge` or `alias` only when the packets expose an objective
   identity edge: the cases share an exact source atom, or a persisted registry

@@ -402,6 +402,32 @@ def test_reciprocal_disjoint_same_cause_is_one_provisional_research_unit() -> No
     assert "same_cause_group_id" not in unit
 
 
+def test_provisional_packet_expansion_does_not_self_verify_case_identity() -> None:
+    prior_unit = _provisional_same_cause_unit()
+    provisional_group = prior_unit["provisional_same_cause_group"]
+    items = [
+        _case("problem:a", "case:a", ["atom:a", "atom:b"]),
+        _case("problem:b", "case:b", ["atom:b", "atom:a"]),
+    ]
+    for item in items:
+        item["case_identity_status"] = "provisional_same_cause"
+        item["case_identity_candidate_ids"] = ["case:a", "case:b"]
+        item["provisional_same_cause_group"] = provisional_group
+
+    result = canonicalize_problem_cases(
+        items,
+        _reciprocal_same_cause_decisions(),
+        strict_review=True,
+    )
+
+    assert len(result) == 1
+    unit = result[0]
+    assert unit["case_identity_status"] == "provisional_same_cause"
+    assert unit["case_identity_candidate_ids"] == ["case:a", "case:b"]
+    assert "absorbed_case_ids" not in unit
+    assert "same_cause_group_id" not in unit
+
+
 def test_reciprocal_provisional_group_normalizes_nondeterministic_group_names() -> None:
     """Equivalent members survive different names from independent model batches."""
 
