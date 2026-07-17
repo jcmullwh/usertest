@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from backlog_miner.proof_adapters.base import (
     build_receipt,
     observed_value,
 )
+from backlog_miner.proof_adapters.structured import StructuredReplayAdapter
 
 
 def test_builtin_registry_only_advertises_live_wired_adapters() -> None:
@@ -113,6 +115,93 @@ def test_well_formed_but_false_positive_predicate_has_explicit_diagnostic() -> N
 
     assert result.receipts == ()
     assert result.diagnostics == ("proof_adapter_positive_predicate_not_satisfied:equals",)
+
+
+def test_structured_replay_receipt_is_stable_across_selector_key_order(
+    tmp_path: Path,
+) -> None:
+    baseline_stdout = tmp_path / "baseline.json"
+    challenge_stdout = tmp_path / "challenge.json"
+    baseline_stdout.write_text('{"other":"bad","status":"bad"}', encoding="utf-8")
+    challenge_stdout.write_text('{"other":"good","status":"good"}', encoding="utf-8")
+
+    def replay(experiment_id: str, stdout: Path) -> dict[str, object]:
+        inputs: dict[str, object] = {
+            "schema_version": 1,
+            "source_experiment_id": experiment_id,
+            "runner_approved": True,
+            "environment": {},
+            "disposable_state_paths": [],
+        }
+        inputs["replay_inputs_sha256"] = canonical_json_sha256(inputs)
+        return {
+            "executed_argv": ["runner", "verify"],
+            "exit_code": 0,
+            "execution_isolation": {"platform": "windows"},
+            "stdout_path": str(stdout),
+            "stdout_sha256": sha256(stdout.read_bytes()).hexdigest(),
+            "stderr_sha256": sha256(b"").hexdigest(),
+            "replay_inputs": inputs,
+        }
+
+    clean_replays = {
+        "experiment:baseline": replay("experiment:baseline", baseline_stdout),
+        "experiment:challenge": replay("experiment:challenge", challenge_stdout),
+    }
+
+    def build(challenge_selector: dict[str, str]) -> dict[str, object]:
+        context = ProofAdapterContext(
+            case_id="case:test",
+            problem_id="problem:test",
+            hypothesis_id="hypothesis:test",
+            claim={
+                "baseline_experiment_id": "experiment:baseline",
+                "challenge_experiment_id": "experiment:challenge",
+                "intervention": {
+                    "kind": "config",
+                    "target": "runner.config",
+                    "predicted_polarity": "bad_to_good",
+                },
+                "observations": {
+                    "baseline": {"source": "stdout_json", "json_pointer": "/status"},
+                    "challenge": challenge_selector,
+                },
+                "positive_outcome": {
+                    "predicate": {"kind": "equals", "expected": "good"},
+                },
+            },
+            experiments={},
+            clean_replays=clean_replays,
+            source_root={
+                "root_kind": "immutable_source_command",
+                "origin_atom_ids": ["atom:test"],
+                "positive_basis": {
+                    "basis_kind": "origin_exact_value",
+                    "basis_sha256": "a" * 64,
+                },
+            },
+            planning_workspace=None,
+            atom_bindings=[],
+            symbol_receipts=[],
+            artifact_receipts=[],
+            services={},
+        )
+        result = StructuredReplayAdapter().build(context)
+        assert result.diagnostics == ()
+        return result.receipts[0]
+
+    source_first = build({"source": "stdout_json", "json_pointer": "/status"})
+    pointer_first = build({"json_pointer": "/status", "source": "stdout_json"})
+    persisted = json.loads(json.dumps(source_first, sort_keys=True))
+    semantic_change = build({"json_pointer": "/other", "source": "stdout_json"})
+
+    assert source_first == pointer_first
+    assert source_first == persisted
+    assert source_first["proof_receipt_id"] == pointer_first["proof_receipt_id"]
+    assert source_first["proof_receipt_id"] != semantic_change["proof_receipt_id"]
+    assert source_first["positive_outcome"]["observation_source"] == (
+        '{"json_pointer":"/status","source":"stdout_json"}'
+    )
 
 
 def test_causal_contrast_role_is_opt_in_and_legacy_receipt_shape_is_unchanged() -> None:

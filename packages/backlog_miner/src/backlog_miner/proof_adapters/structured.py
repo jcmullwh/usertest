@@ -59,6 +59,12 @@ def _source_node(context: ProofAdapterContext) -> dict[str, Any]:
     )
 
 
+def _observation_source_text(spec: Mapping[str, Any]) -> str:
+    """Render a selector without making mapping insertion order part of the proof."""
+
+    return json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 class StructuredReplayAdapter:
     adapter_id = "structured_replay.v1"
     adapter_version = "1"
@@ -98,7 +104,7 @@ class StructuredReplayAdapter:
         outcome = runner_node(
             node_id="proof:outcome",
             kind="outcome",
-            locator=str(specs[1]),
+            locator=_observation_source_text(specs[1]),
             evidence={"value": challenge_value, "sha256": challenge_hash},
         )
         nodes = [source, mechanism, outcome]
@@ -128,7 +134,7 @@ class StructuredReplayAdapter:
             challenge_observed=challenge_value,
             challenge_observed_sha256=challenge_hash,
             challenge_selector=dict(specs[1]),
-            observation_source=str(specs[1]),
+            observation_source=_observation_source_text(specs[1]),
             nodes=nodes,
             edges=edges,
             artifacts=artifact_receipts(

@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T11:13:42.731020Z",
+    "as_of": "2026-07-17T11:35:43.447776Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Stage 3 verifier-clean; terminal persistence next",
-        "detail": "The exact Windows case retains all 25 signed atoms and one Terra author session. Attempt 12 corrected its positive control and support set. The final 73.852-second exact replay at e6099be7 used zero model calls and produced zero validation errors after a 553-test affected gate passed 552 with one expected skip.",
-        "tone": "good"
+        "value": "Stage 3 persisted; persistence verifier correction active",
+        "detail": "The exact Windows case was materialized through the production Stage 3 reuse path with zero model calls. Its immediate Stage contract is clean, but Stage 4 preflight exposed insertion-order-dependent causal-proof identity during downstream persistence revalidation. BDS-113 is corrected locally; the exact replay is next.",
+        "tone": "warn"
       },
       {
         "label": "Current lifecycle outcome",
-        "value": "First case correctly stops at Stage 3",
-        "detail": "The dossier is evidence_sufficient, partial, and already_addressed. Its one remaining unknown is explicitly nonmaterial and limited to future runtime versions. The evidence receipt is verified with 25 atom bindings, one mechanism-evidence record, one proof-adapter receipt, and zero errors. It must not enter optioning.",
-        "tone": "good"
+        "value": "No-change result valid; parking artifact pending",
+        "detail": "The dossier remains evidence_sufficient, partial, and already_addressed with one explicitly nonmaterial future-runtime unknown. It should generate no solution options, but the normal lifecycle still requires a Stage 4 zero-option not_required provenance artifact before the case is parked.",
+        "tone": "warn"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No full export-disabled shadow cycle is claimed. The smallest eight-source component has accepted canonical Stage 1/2 output, and its first Stage 3 case now has a verifier-clean terminal disposition. This is component progress, not a qualified full cycle.",
+        "detail": "No full export-disabled shadow cycle is claimed. The smallest eight-source component has accepted canonical Stage 1/2 output, and its first Stage 3 case has a substantively valid no-change disposition. Persistence revalidation and the required Stage 4 parking artifact remain incomplete.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Persist the already-addressed outcome",
-        "detail": "Materialize the verifier-clean Stage 3 dossier through the normal workflow and confirm the case closes without Stage 4, export, or a ticket. Then advance the next bounded canonical case rather than restarting Stage 1/2.",
+        "value": "Replay proof; emit Stage 4 not_required",
+        "detail": "Re-mint the exact retained proof with canonical selector serialization, require downstream persisted-evidence verification to return zero findings, then use the production Stage 4 path to emit one not_required outcome, zero options, and zero model calls.",
         "tone": "warn"
       }
     ],
@@ -2663,18 +2663,18 @@
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 29002.73102,
+          "elapsed_seconds": 30323.447776,
           "coverage": "active",
-          "display": "8 h 3 m 22.73 s as of 11:13:42Z",
+          "display": "8 h 25 m 23.45 s as of 11:35:43Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifests, preflights, component executions, tests, and correction intervals separately."
         },
-        "furthest_stage": "Single-case Stage 3 causal evidence verification after accepted Stage 1/2",
-        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and the Terra researcher remains the sole model author. Attempt 12 corrected the positive challenge predicate and removed the context inventory from primary mechanism support while retaining every assigned atom and experiment. It minted one proof-adapter receipt and one mechanism-evidence record. Two persistence mismatches within BDS-112 were then corrected without another model call: the Stage contract now retains predicate-declared symptom atoms and links the distinct runner attestation to its declaration through content hashes and shared immutable fields. The complete affected gate at e6099be7 collected 553 tests; 552 passed and one expected skip in 203.7 seconds. The final exact replay completed in 73.852 seconds with zero model calls, zero validation errors, an unchanged source dossier, signed-in ChatGPT provenance, and no upstream/downstream or Docker activity. The dossier is evidence_sufficient/partial/already_addressed with one explicitly nonmaterial future-runtime unknown. Stage 4+, export, ticketing, implementation, and Docker remain disabled while the terminal outcome is materialized through the normal workflow.",
-        "outcome": "Stage 3 verifier-clean; already_addressed terminal disposition awaiting workflow persistence",
+        "furthest_stage": "Stage 4 no-change preflight after production Stage 3 materialization",
+        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and the Terra researcher remains the sole model author; attempt 12 remains the final model call. The retained evidence_sufficient/partial/already_addressed dossier was materialized through the production Stage 3 reuse path with zero new model calls and preserved all 24 cases. Before optioning, downstream persisted-evidence revalidation correctly stopped: Python str(dict) had made the proof receipt depend on selector key insertion order, so sorted JSON persistence changed one string and cascaded into five verifier findings. BDS-113 now canonicalizes those selector strings. The focused adapter module passes nine tests, and the full 562-test causal-proof/research gate passed 561 with one expected skip in 232.5 seconds. Exact model-free replay and Stage 4 not_required materialization remain pending; export, ticketing, implementation, and Docker remain disabled.",
+        "outcome": "Substantively valid already_addressed result; persistence replay and Stage 4 zero-option parking artifact pending",
         "errors": {
-          "count": 25,
+          "count": 27,
           "count_kind": "deduplicated_clusters",
-          "summary": "Thirteen product defects are counted: BDS-100 through BDS-112. Twelve supervisor/observability errors are counted: AN-05 through AN-16. The two persistence mismatches exposed after attempt 12 are part of BDS-112's incomplete transformed-source integration, not new independent defect clusters. The current Stage 3 dossier has zero validation errors.",
+          "summary": "Fourteen product defects are counted: BDS-100 through BDS-113. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. BDS-113 is one root persistence defect although it emitted five downstream codes; four were cascading hash changes. AN-17 groups the two Stage 4 helper-boundary mistakes as one supervisor mechanics cluster.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2689,6 +2689,7 @@
             "BDS-110",
             "BDS-111",
             "BDS-112",
+            "BDS-113",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2700,7 +2701,8 @@
             "AN-13",
             "AN-14",
             "AN-15",
-            "AN-16"
+            "AN-16",
+            "AN-17"
           ]
         },
         "automatic_self_corrections": {
@@ -2709,9 +2711,9 @@
           "summary": "Ten nondeterministic quality clusters improved automatically. The prior nine remain; attempt 12 corrected the positive challenge predicate and primary support set in the same author session, removing the prior eight dependent findings and enabling runner-owned proof generation. The subsequent persistence corrections were supervisor code interventions, not automatic model corrections."
         },
         "supervisor_interventions": {
-          "count": 33,
+          "count": 36,
           "count_kind": "deduplicated_clusters",
-          "summary": "Thirty-three deduplicated interventions are counted. The prior 31 remain; two were added for the exact zero-model persistence replays at 5a325478 and e6099be7. Both BDS-112 code corrections remain one product-defect intervention cluster. Audits without an action are not counted.",
+          "summary": "Thirty-six deduplicated interventions are counted. The prior 33 remain; one production Stage 3 terminal-materialization action, one AN-17 Stage 4 helper correction cluster, and one BDS-113 canonical-persistence correction cluster were added. Preflight retries and the five cascading verifier codes are not multiplied into separate interventions.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2745,12 +2747,15 @@
             "stage3_transformed_source_model_free_replay",
             "stage3_positive_control_feedback_launch",
             "stage3_persisted_predicate_model_free_replay",
-            "stage3_predicate_attestation_model_free_replay"
+            "stage3_predicate_attestation_model_free_replay",
+            "stage3_terminal_materialization",
+            "AN-17",
+            "BDS-113"
           ]
         },
-        "next_action": "Materialize the verifier-clean already_addressed dossier through the normal Stage 3 workflow, prove that no Stage 4 optioning/export occurs, and then advance the next bounded canonical case without restarting accepted Stage 1/2 work.",
+        "next_action": "Replay the exact retained dossier with canonical proof serialization, require downstream persistence verification to return zero findings, then emit the production Stage 4 not_required artifact with zero options and zero model calls before advancing the next bounded case.",
         "tone": "warn",
-        "data_quality": "Attempt 12 receipt SHA 1B36E3B6... records 196.466 seconds, the original author session, signed-in ChatGPT, one model call, and five persistence findings after its substantive correction. The first persistence replay receipt SHA 267A53B3... records 71.845 seconds, zero model calls, removal of the atom mismatch, and four remaining dependent mechanism findings. The authoritative final receipt SHA 411DFD36... records 73.852 seconds and zero validation errors. Source dossier SHA 43D29CAC... remained unchanged; final continued dossier SHA is 5D351E6B....",
+        "data_quality": "Attempt 12 and both exact BDS-112 replay receipts remain retained. Production Stage 3 materialization is at U:\\usertest_backlog_qualification\\e6099be7_20260717T113000Z\\component_frontiers\\stage3_windows_terminal_materialization_live_20260717T113100Z and used zero model calls. Direct downstream revalidation reproduced the same five BDS-113 findings against both raw and lineage-enriched persisted dossiers. The 562-test correction gate is green; exact post-correction replay evidence is not yet claimed.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_prepare_c1b44df8_20260717",

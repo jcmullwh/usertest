@@ -512,25 +512,25 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat good">
+            <div class="stat warn">
               <span class="label">Current pipeline state</span>
-              <span class="value">Stage 3 verifier-clean; terminal persistence next</span>
-              <span class="detail">The exact Windows case retains all 25 signed atoms and one Terra author session. Attempt 12 corrected its positive control and support set. The final 73.852-second exact replay at e6099be7 used zero model calls and produced zero validation errors after a 553-test affected gate passed 552 with one expected skip.</span>
+              <span class="value">Stage 3 persisted; persistence verifier correction active</span>
+              <span class="detail">The exact Windows case was materialized through the production Stage 3 reuse path with zero model calls. Its immediate Stage contract is clean, but Stage 4 preflight exposed insertion-order-dependent causal-proof identity during downstream persistence revalidation. BDS-113 is corrected locally; the exact replay is next.</span>
             </div>
-            <div class="stat good">
+            <div class="stat warn">
               <span class="label">Current lifecycle outcome</span>
-              <span class="value">First case correctly stops at Stage 3</span>
-              <span class="detail">The dossier is evidence_sufficient, partial, and already_addressed. Its one remaining unknown is explicitly nonmaterial and limited to future runtime versions. The evidence receipt is verified with 25 atom bindings, one mechanism-evidence record, one proof-adapter receipt, and zero errors. It must not enter optioning.</span>
+              <span class="value">No-change result valid; parking artifact pending</span>
+              <span class="detail">The dossier remains evidence_sufficient, partial, and already_addressed with one explicitly nonmaterial future-runtime unknown. It should generate no solution options, but the normal lifecycle still requires a Stage 4 zero-option not_required provenance artifact before the case is parked.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">No full export-disabled shadow cycle is claimed. The smallest eight-source component has accepted canonical Stage 1/2 output, and its first Stage 3 case now has a verifier-clean terminal disposition. This is component progress, not a qualified full cycle.</span>
+              <span class="detail">No full export-disabled shadow cycle is claimed. The smallest eight-source component has accepted canonical Stage 1/2 output, and its first Stage 3 case has a substantively valid no-change disposition. Persistence revalidation and the required Stage 4 parking artifact remain incomplete.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Persist the already-addressed outcome</span>
-              <span class="detail">Materialize the verifier-clean Stage 3 dossier through the normal workflow and confirm the case closes without Stage 4, export, or a ticket. Then advance the next bounded canonical case rather than restarting Stage 1/2.</span>
+              <span class="value">Replay proof; emit Stage 4 not_required</span>
+              <span class="detail">Re-mint the exact retained proof with canonical selector serialization, require downstream persisted-evidence verification to return zero findings, then use the production Stage 4 path to emit one not_required outcome, zero options, and zero model calls.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -660,19 +660,19 @@
               </tr>
               <tr class="ops-current">
                 <td><strong>Clean exact-revision backlog qualification cycle</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>8 h 3 m 22.73 s as of 11:13:42Z</strong><span class="ops-kind">active</span></td>
-                <td><span class="tag warn">Single-case Stage 3 causal evidence verification after accepted Stage 1/2</span><span class="ops-detail">The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and the Terra researcher remains the sole model…</span></td>
-                <td><strong>Stage 3 verifier-clean; already_addressed terminal disposition awaiting workflow persistence</strong></td>
-                <td><strong>25</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Thirteen product defects are counted: BDS-100 through BDS-112. Twelve supervisor/observability errors are counted: AN-05 through AN-16. The two persistence mismatches exposed…</span></td>
+                <td><strong>8 h 25 m 23.45 s as of 11:35:43Z</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Stage 4 no-change preflight after production Stage 3 materialization</span><span class="ops-detail">The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and the Terra researcher remains the sole model…</span></td>
+                <td><strong>Substantively valid already_addressed result; persistence replay and Stage 4 zero-option parking artifact pending</strong></td>
+                <td><strong>27</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Fourteen product defects are counted: BDS-100 through BDS-113. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. BDS-113 is one root persistence defect…</span></td>
                 <td><strong>10</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Ten nondeterministic quality clusters improved automatically. The prior nine remain; attempt 12 corrected the positive challenge predicate and primary support set in the same…</span></td>
-                <td><strong>33</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Thirty-three deduplicated interventions are counted. The prior 31 remain; two were added for the exact zero-model persistence replays at 5a325478 and e6099be7. Both BDS-112 code…</span></td>
+                <td><strong>36</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Thirty-six deduplicated interventions are counted. The prior 33 remain; one production Stage 3 terminal-materialization action, one AN-17 Stage 4 helper correction cluster, and…</span></td>
                 <td><strong>36</strong> author calls; 13 continuations; 2 stage reruns; 0 full restarts<span class="ops-detail">Thirty-six author calls and thirteen externally launched continuations are counted. The Windows Stage 3 case used one gpt-5.6-terra author session; attempt 12 was the final model…</span></td>
-                <td>Materialize the verifier-clean already_addressed dossier through the normal Stage 3 workflow, prove that no Stage 4 optioning/export occurs, and then advance the next bounded…</td>
+                <td>Replay the exact retained dossier with canonical proof serialization, require downstream persistence verification to return zero findings, then emit the production Stage 4…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-17T11:13:42.731020Z. Showing 12 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-17T11:35:43.447776Z. Showing 12 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">
