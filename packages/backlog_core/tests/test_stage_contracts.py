@@ -3282,6 +3282,24 @@ def test_advancing_research_still_requires_complete_atom_coverage_and_support() 
     assert any("primary_hypothesis_missing_supporting_experiment" in error for error in errors)
 
 
+def test_descriptive_scenario_kind_can_support_primary_hypothesis() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("evidence_verification", None)
+    dossier["experiments"][0]["scenario_kind"] = (
+        "deterministic production mechanism classification"
+    )
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert not any(
+        "primary_hypothesis_missing_supporting_experiment" in error
+        for error in errors
+    )
+
+
 def test_partial_research_relaxation_keeps_claim_integrity_checks() -> None:
     dossier = _historical_rich_partial_output_dossier()
     dossier["experiments"][0]["artifact_refs"].append("artifact:missing")

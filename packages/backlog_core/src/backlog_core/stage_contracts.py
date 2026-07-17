@@ -2134,11 +2134,6 @@ def _validate_research_evidence_links(item: dict[str, Any], *, pid: str) -> list
         for experiment in (experiments if isinstance(experiments, list) else [])
         if isinstance(experiment, dict) and _is_nonempty_string(experiment.get("experiment_id"))
     }
-    experiment_scenarios = {
-        str(experiment.get("experiment_id")): str(experiment.get("scenario_kind"))
-        for experiment in (experiments if isinstance(experiments, list) else [])
-        if isinstance(experiment, dict) and _is_nonempty_string(experiment.get("experiment_id"))
-    }
     experiments_by_id = {
         str(experiment.get("experiment_id")): experiment
         for experiment in (experiments if isinstance(experiments, list) else [])
@@ -2415,35 +2410,10 @@ def _validate_research_evidence_links(item: dict[str, Any], *, pid: str) -> list
                 f"research_dossier_refuted_hypothesis_missing_disproved_attempt: "
                 f"{pid}: {hypothesis_id}"
             )
-        advancing_scenarios = {
-            "original_replay",
-            "faithful_replay",
-            "static_trace",
-            "live_runtime",
-        }
         supporting_experiment_ids = [
             ref
             for ref in support_refs
             if experiment_outcomes.get(ref) == "supports"
-            and (
-                experiment_scenarios.get(ref) in advancing_scenarios
-                or any(
-                    _declared_proof_adapter_for_pair(
-                        item,
-                        hypothesis_id=hypothesis_id,
-                        baseline_experiment_id=str(attempt.get("baseline_experiment_id") or ""),
-                        challenge_experiment_id=str(attempt.get("challenge_experiment_id") or ""),
-                    )
-                    is not None
-                    and ref
-                    in {
-                        attempt.get("baseline_experiment_id"),
-                        attempt.get("challenge_experiment_id"),
-                    }
-                    for attempt in attempts
-                    if isinstance(attempt, dict)
-                )
-            )
         ]
         # The first hypothesis is the implementation-driving mechanism.  Later
         # hypotheses are explicit alternatives and may be supported/refuted by
