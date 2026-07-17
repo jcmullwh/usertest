@@ -64,6 +64,36 @@ def test_persisted_attempt_rescore_receipt_is_rehashed_even_for_invocation_failu
     ]
 
 
+def test_persisted_attempt_promotion_receipt_is_rehashed_even_for_invocation_failure(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "promotion.json"
+    receipt.write_text('{"status":"authenticated"}\n', encoding="utf-8")
+    dossier = {
+        "research_attempts": [
+            {
+                "attempt_kind": "evidence_verification_promotion",
+                "outcome": "invocation_failed",
+                "repair_progress": {
+                    "replay_receipt_path": str(receipt),
+                    "replay_receipt_sha256": sha256(receipt.read_bytes()).hexdigest(),
+                },
+            }
+        ]
+    }
+
+    assert mod._persisted_research_attempt_errors(dossier) == []
+
+    receipt.write_text('{"status":"changed"}\n', encoding="utf-8")
+    assert mod._persisted_research_attempt_errors(dossier) == [
+        "research_attempt_promotion_receipt_changed:0"
+    ]
+    receipt.unlink()
+    assert mod._persisted_research_attempt_errors(dossier) == [
+        "research_attempt_promotion_receipt_missing:0"
+    ]
+
+
 def test_assignment_verifier_accepts_exact_whitelisted_nested_run_context(
     tmp_path: Path,
 ) -> None:

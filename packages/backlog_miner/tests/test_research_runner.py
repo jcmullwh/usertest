@@ -2988,6 +2988,60 @@ def test_substantive_coverage_loss_is_general_and_evidence_backed_revision_is_al
     assert supported_basis == ["hypothesis_counterevidence_added"]
 
 
+def test_readiness_adjudicated_noncompeting_alternative_removal_is_progress() -> None:
+    baseline = _established_substantive_frontier()
+    baseline["research_status"] = "evidence_sufficient"
+    baseline["actionability_assessment"] = {
+        "disposition": "already_addressed",
+        "evidence_refs": ["experiment:primary"],
+    }
+    baseline["evidence_boundaries"] = ["No live runtime proof was performed."]
+    baseline["root_cause_hypotheses"][1]["disposition"] = "plausible"
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["evidence_boundaries"].append(
+        "The adjacent mechanism is retained as non-attribution context only."
+    )
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=["unresolved_alternative_hypothesis_not_materialized"],
+    )
+
+    assert unsupported_loss == []
+    assert basis == [
+        "readiness_adjudicated_noncompeting_alternative_removed[hypothesis:secondary]"
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["no_boundary", "primary_changed", "support_removed"])
+def test_readiness_adjudication_does_not_excuse_silent_research_loss(mutation: str) -> None:
+    baseline = _established_substantive_frontier()
+    baseline["research_status"] = "evidence_sufficient"
+    baseline["actionability_assessment"] = {"disposition": "already_addressed"}
+    baseline["evidence_boundaries"] = ["Existing boundary"]
+    baseline["root_cause_hypotheses"][1]["disposition"] = "plausible"
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["evidence_boundaries"].append("Adjacent mechanism is non-competing.")
+    if mutation == "no_boundary":
+        corrected["evidence_boundaries"] = list(baseline["evidence_boundaries"])
+    elif mutation == "primary_changed":
+        corrected["root_cause_hypotheses"][0]["statement"] = "Changed primary"
+    else:
+        corrected["experiments"] = []
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=["unresolved_alternative_hypothesis_not_materialized"],
+    )
+
+    assert unsupported_loss
+    assert basis == []
+
+
 def test_verifier_rejected_direct_support_can_be_reclassified_without_false_regression() -> None:
     aggregate_atom = "operational_failure:aggregate"
     occurrence_atoms = ["run:one", "run:two"]
@@ -9159,6 +9213,189 @@ def test_verified_zero_error_rescore_completes_without_model_invocation(
     assert terminal["validation_error_rescore"]["source_validation_errors"] == source_errors
     assert terminal["repair_progress"]["model_invocation_count"] == 0
     assert len(persisted) == 1
+
+
+def _promotion_materialization_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, object], Path, str]:
+    revision = "f" * 40
+    session_id = "11111111-1111-4111-8111-111111111111"
+    selected_candidate = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "complete",
+        "reproduction_status": "reproduced",
+        "phase": "selected",
+    }
+    selected_run = tmp_path / "selected-run"
+    selected_run.mkdir()
+    selected = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="repair_contract_invalid",
+        run_dir=selected_run,
+        report_path=selected_run / "report.json",
+        validation_errors=[],
+        attempted_dossier=selected_candidate,
+        attempt_kind="evidence_verification_research_continuation",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+    )
+    regression_candidate = {**selected_candidate, "phase": "regressed"}
+    regression_run = tmp_path / "regression-run"
+    regression_run.mkdir()
+    regression = mod._research_attempt_record(
+        attempt_number=2,
+        outcome="repair_contract_invalid",
+        run_dir=regression_run,
+        report_path=regression_run / "report.json",
+        validation_errors=["regression:finding"],
+        attempted_dossier=regression_candidate,
+        attempt_kind="evidence_verification_research_continuation",
+        source_attempt_sha256=selected["attempt_sha256"],
+        authorized_paths=["extensions.backlog_repro_research"],
+        baseline_dossier_sha256=selected["attempted_dossier_sha256"],
+        baseline_projection_sha256="a" * 64,
+        repair_contract_sha256="b" * 64,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+        repair_progress={"decision": "continue", "reason": "regressed"},
+    )
+    assignment = {"expected_atom_ids": ["atom:one"], "status": "complete"}
+    retained: dict[str, object] = {
+        **selected_candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "research_attempts": [selected, regression],
+    }
+    prepared: dict[str, object] = {
+        **selected_candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+    }
+    copied_run = tmp_path / "copied-run"
+    copied_run.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    verification = {
+        "status": "verified",
+        "errors": [],
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "run_dir": str(copied_run),
+        "planning_workspace_dir": str(workspace),
+        "claims_sha256": research_claims_sha256(prepared),
+    }
+    verification["receipt_sha256"] = evidence_verification_sha256(verification)
+    prepared_path = tmp_path / "promotion-prepared.json"
+    _write_json(prepared_path, prepared)
+    replay = {
+        "kind": "stage3_selected_model_free_evidence_replay",
+        "state": "completed",
+        "source_run_unchanged": True,
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "attempt_count": 2,
+        "current_attempt_sha256": selected["attempt_sha256"],
+        "candidate_dossier_sha256": selected["attempted_dossier_sha256"],
+        "copied_run": str(copied_run),
+        "raw_error_count": 0,
+        "errors": [],
+        "model_invocation_count": 0,
+        "stage1_or_stage2_invocation_count": 0,
+        "downstream_invocation_count": 0,
+        "docker_invocation_count": 0,
+        "verified_prepared_dossier": str(prepared_path),
+        "verified_prepared_dossier_sha256": sha256(prepared_path.read_bytes()).hexdigest(),
+        "verification": verification,
+    }
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    replay_path = tmp_path / "promotion-replay.json"
+    _write_json(replay_path, replay)
+    return retained, replay_path, str(selected["attempt_sha256"])
+
+
+def test_materialize_verified_attempt_promotion_preserves_later_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained, replay_path, selected_sha256 = _promotion_materialization_fixture(tmp_path)
+    persisted: list[dict[str, object]] = []
+
+    def verify_persisted(dossier: dict[str, object]) -> tuple[bool, list[str]]:
+        persisted.append(dossier)
+        return True, []
+
+    monkeypatch.setattr(mod, "verify_persisted_research_evidence", verify_persisted)
+
+    result = mod.materialize_verified_research_attempt_promotion(
+        dossier=retained,
+        selected_attempt_sha256=selected_sha256,
+        replay_receipt_path=replay_path,
+        progression_defect_ids=["BDS-test"],
+        reason="verified_prior_author_result_after_progression_defect",
+    )
+
+    assert result["status"] == "corrected"
+    assert result["model_invocation_count"] == 0
+    attempts = result["dossier"]["research_attempts"]
+    assert len(attempts) == 3
+    terminal = attempts[-1]
+    assert terminal["attempt_kind"] == "evidence_verification_promotion"
+    assert terminal["source_attempt_sha256"] == selected_sha256
+    assert terminal["attempted_dossier"] == attempts[0]["attempted_dossier"]
+    assert terminal["repair_progress"]["superseded_attempt_sha256s"] == [
+        attempts[1]["attempt_sha256"]
+    ]
+    assert terminal["repair_progress"]["model_invocation_count"] == 0
+    assert len(persisted) == 1
+
+
+@pytest.mark.parametrize("mutation", ["model_call", "candidate_hash", "authored_claims"])
+def test_materialize_verified_attempt_promotion_rejects_changed_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    retained, replay_path, selected_sha256 = _promotion_materialization_fixture(tmp_path)
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    if mutation == "model_call":
+        replay["model_invocation_count"] = 1
+    elif mutation == "candidate_hash":
+        replay["candidate_dossier_sha256"] = "0" * 64
+    else:
+        prepared_path = Path(replay["verified_prepared_dossier"])
+        prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
+        prepared["phase"] = "different"
+        _write_json(prepared_path, prepared)
+        replay["verified_prepared_dossier_sha256"] = sha256(
+            prepared_path.read_bytes()
+        ).hexdigest()
+        replay["verification"]["claims_sha256"] = research_claims_sha256(prepared)
+        replay["verification"]["receipt_sha256"] = evidence_verification_sha256(
+            replay["verification"]
+        )
+    replay.pop("receipt_sha256")
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    _write_json(replay_path, replay)
+    monkeypatch.setattr(mod, "verify_persisted_research_evidence", lambda dossier: (True, []))
+
+    expected = (
+        "authored_claims_changed"
+        if mutation == "authored_claims"
+        else "replay_custody_invalid"
+    )
+    with pytest.raises(ValueError, match=expected):
+        mod.materialize_verified_research_attempt_promotion(
+            dossier=retained,
+            selected_attempt_sha256=selected_sha256,
+            replay_receipt_path=replay_path,
+            progression_defect_ids=["BDS-test"],
+            reason="verified_prior_author_result_after_progression_defect",
+        )
 
 
 @pytest.mark.parametrize(

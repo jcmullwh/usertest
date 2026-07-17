@@ -11,6 +11,7 @@ These tests assert observable behavior for each stage parser:
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from hashlib import sha256
 
 import pytest
@@ -1457,6 +1458,44 @@ def test_verified_falsification_projection_uses_paired_intervention_for_challeng
         for evidence in retained_evidence
         if baseline_id in evidence["experiment_ids"]
     )
+
+
+def test_verified_falsification_projection_accepts_attested_causal_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossier = _valid_dossier()
+    receipt, _intervention = _helper_parameter_intervention_fixture(dossier)
+    hypothesis = dossier["root_cause_hypotheses"][0]
+    hypothesis["mechanism_symbols"] = [
+        "parser.parse_record",
+        "parser.load_record",
+    ]
+    attempt = hypothesis["falsification_attempts"][0]
+    receipt["proof_adapter_receipts"] = [
+        {
+            "hypothesis_id": hypothesis["hypothesis_id"],
+            "intervention": {
+                "baseline_experiment_id": attempt["baseline_experiment_id"],
+                "challenge_experiment_id": attempt["challenge_experiment_id"],
+            },
+            "adapter_evidence": {
+                "implementation_touchpoints": [
+                    {"symbols": ["parser.parse_record"]},
+                ],
+            },
+            "intervention_id": "intervention:causal-subset",
+            "proof_receipt_id": "causal_proof:causal-subset",
+        }
+    ]
+    monkeypatch.setattr(contracts, "validate_causal_proof_receipt", lambda _receipt: [])
+
+    projected = contracts.verified_hypothesis_falsification_attempts(
+        dossier,
+        hypothesis_id=hypothesis["hypothesis_id"],
+    )
+
+    assert len(projected) == 1
+    assert projected[0]["mechanism_symbols"] == ["parser.parse_record"]
 
 
 @pytest.mark.parametrize(
@@ -3825,6 +3864,52 @@ def test_research_attempt_rescore_authenticates_replaced_error_frontier() -> Non
     ]
 
 
+def test_research_attempt_rescore_accepts_zero_model_terminal_transition() -> None:
+    attempts, rescore = _rescore_attempt_chain()
+    terminal = attempts[1]
+    terminal.pop("validation_error_rescore")
+    terminal.update(
+        {
+            "attempt_kind": "evidence_verification_rescore",
+            "outcome": "evidence_verification_rescore_valid",
+            "validation_errors": [],
+            "validation_errors_before": [],
+            "validation_errors_after": [],
+            "authorized_paths": [],
+            "baseline_projection_sha256": None,
+            "repair_contract_sha256": None,
+            "repair_progress": {
+                "decision": "accepted",
+                "reason": "authenticated_zero_error_evaluator_rescore",
+                "model_invocation_count": 0,
+            },
+        }
+    )
+    authored_sha256 = contracts.research_attempt_sha256(terminal)
+    terminal["attempt_sha256"] = authored_sha256
+    rescore.update(
+        {
+            "replacement_validation_errors": [],
+            "authored_attempt_sha256": authored_sha256,
+        }
+    )
+    rescore["rescore_sha256"] = _fixture_json_sha256(
+        {key: value for key, value in rescore.items() if key != "rescore_sha256"}
+    )
+    terminal["validation_error_rescore"] = rescore
+    terminal["attempt_sha256"] = contracts.research_attempt_sha256(terminal)
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert parsed[0]["research_attempts"][-1]["attempt_kind"] == (
+        "evidence_verification_rescore"
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -3863,6 +3948,114 @@ def test_research_attempt_rescore_rejects_any_changed_binding(mutation: str) -> 
     _refresh_receipt_hashes(dossier)
 
     with pytest.raises(ValueError, match="research_attempt_rescore_invalid"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def _promotion_attempt_chain() -> list[dict[str, object]]:
+    attempts, _ = _rescore_attempt_chain()
+    initial, selected = attempts
+    session_id = str(selected["agent_session_id"])
+    regression_dossier = {"phase": "regressed"}
+    regression: dict[str, object] = {
+        "attempt_number": 3,
+        "attempt_kind": "evidence_verification_research_continuation",
+        "outcome": "repair_contract_invalid",
+        "run_dir": "C:/retained/promotion-3",
+        "report_path": "C:/retained/promotion-3/report.json",
+        "validation_errors": ["regression:finding"],
+        "validation_errors_before": initial["validation_errors_after"],
+        "validation_errors_after": ["regression:finding"],
+        "attempted_dossier": regression_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(regression_dossier),
+        "source_attempt_sha256": initial["attempt_sha256"],
+        "authorized_paths": ["extensions.backlog_repro_research"],
+        "baseline_dossier_sha256": initial["attempted_dossier_sha256"],
+        "baseline_projection_sha256": "d" * 64,
+        "repair_contract_sha256": "e" * 64,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": session_id,
+        "attempt_wall_seconds": 15.0,
+        "repair_progress": {
+            "decision": "continue",
+            "reason": "substantive_research_regression_requires_same_author_resolution",
+        },
+        "attempt_artifacts": deepcopy(selected["attempt_artifacts"]),
+    }
+    regression["attempt_sha256"] = contracts.research_attempt_sha256(regression)
+    progress = {
+        "decision": "accepted",
+        "reason": "verified_prior_author_result_after_progression_defect",
+        "model_invocation_count": 0,
+        "selected_attempt_sha256": selected["attempt_sha256"],
+        "selected_attempted_dossier_sha256": selected["attempted_dossier_sha256"],
+        "superseded_attempt_sha256s": [regression["attempt_sha256"]],
+        "progression_defect_ids": ["BDS-test"],
+        "replay_receipt_path": "C:/retained/promotion-replay.json",
+        "replay_receipt_sha256": "f" * 64,
+        "replay_receipt_self_sha256": "a" * 64,
+    }
+    promotion: dict[str, object] = {
+        "attempt_number": 4,
+        "attempt_kind": "evidence_verification_promotion",
+        "outcome": "evidence_verification_promotion_valid",
+        "run_dir": "C:/retained/promotion-4",
+        "report_path": "C:/retained/promotion-4/report.json",
+        "validation_errors": [],
+        "validation_errors_before": [],
+        "validation_errors_after": [],
+        "attempted_dossier": deepcopy(selected["attempted_dossier"]),
+        "attempted_dossier_sha256": selected["attempted_dossier_sha256"],
+        "source_attempt_sha256": selected["attempt_sha256"],
+        "authorized_paths": [],
+        "baseline_dossier_sha256": selected["attempted_dossier_sha256"],
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": session_id,
+        "attempt_wall_seconds": 0.0,
+        "repair_progress": progress,
+        "attempt_artifacts": deepcopy(selected["attempt_artifacts"]),
+    }
+    promotion["attempt_sha256"] = contracts.research_attempt_sha256(promotion)
+    return [initial, selected, regression, promotion]
+
+
+def test_research_attempt_promotion_preserves_and_supersedes_later_regression() -> None:
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = _promotion_attempt_chain()
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    terminal = parsed[0]["research_attempts"][-1]
+    assert terminal["attempt_kind"] == "evidence_verification_promotion"
+    assert terminal["repair_progress"]["superseded_attempt_sha256s"] == [
+        parsed[0]["research_attempts"][-2]["attempt_sha256"]
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["superseded", "candidate", "session"])
+def test_research_attempt_promotion_rejects_changed_custody(mutation: str) -> None:
+    attempts = _promotion_attempt_chain()
+    terminal = attempts[-1]
+    if mutation == "superseded":
+        terminal["repair_progress"]["superseded_attempt_sha256s"] = ["0" * 64]
+    elif mutation == "candidate":
+        terminal["attempted_dossier"] = {"phase": "different"}
+        terminal["attempted_dossier_sha256"] = _fixture_json_sha256(
+            terminal["attempted_dossier"]
+        )
+    else:
+        terminal["observed_agent_session_id"] = "11111111-1111-4111-8111-111111111111"
+    terminal["attempt_sha256"] = contracts.research_attempt_sha256(terminal)
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError, match="promotion_attempt_binding_invalid"):
         parse_research_dossier_list(json.dumps([dossier]))
 
 

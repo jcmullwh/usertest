@@ -889,6 +889,8 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
         "repair_contract_invalid",
         "repair_scope_rejected",
         "evidence_verification_invalid",
+        "evidence_verification_rescore_valid",
+        "evidence_verification_promotion_valid",
         "external_wait",
     }
     valid_attempt_kinds = {
@@ -898,6 +900,8 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
         "evidence_verification_feedback",
         "evidence_verification_dossier_repair",
         "evidence_verification_research_continuation",
+        "evidence_verification_rescore",
+        "evidence_verification_promotion",
     }
     errors: list[str] = []
     seen_numbers: set[int] = set()
@@ -1032,6 +1036,69 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                 ):
                     errors.append(
                         f"research_dossier_evidence_verification_feedback_invalid: "
+                        f"{pid}: index={index}"
+                    )
+            elif attempt_kind == "evidence_verification_rescore":
+                progress = attempt.get("repair_progress")
+                if (
+                    not _valid_sha256(source_attempt_sha256)
+                    or not _valid_sha256(baseline_dossier_sha256)
+                    or baseline_projection_sha256 is not None
+                    or repair_contract_sha256 is not None
+                    or authorized_paths != []
+                    or attempt.get("validation_errors_before") != []
+                    or attempt.get("validation_errors_after") != []
+                    or attempt.get("outcome") != "evidence_verification_rescore_valid"
+                    or not isinstance(attempt.get("validation_error_rescore"), dict)
+                    or not isinstance(progress, dict)
+                    or progress.get("decision") != "accepted"
+                    or not _is_nonempty_string(progress.get("reason"))
+                    or progress.get("model_invocation_count") != 0
+                ):
+                    errors.append(
+                        f"research_dossier_evidence_verification_rescore_invalid: "
+                        f"{pid}: index={index}"
+                    )
+            elif attempt_kind == "evidence_verification_promotion":
+                progress = attempt.get("repair_progress")
+                superseded = (
+                    progress.get("superseded_attempt_sha256s")
+                    if isinstance(progress, dict)
+                    else None
+                )
+                defect_ids = (
+                    progress.get("progression_defect_ids")
+                    if isinstance(progress, dict)
+                    else None
+                )
+                if (
+                    not _valid_sha256(source_attempt_sha256)
+                    or not _valid_sha256(baseline_dossier_sha256)
+                    or baseline_projection_sha256 is not None
+                    or repair_contract_sha256 is not None
+                    or authorized_paths != []
+                    or attempt.get("validation_errors_before") != []
+                    or attempt.get("validation_errors_after") != []
+                    or attempt.get("outcome") != "evidence_verification_promotion_valid"
+                    or not isinstance(progress, dict)
+                    or progress.get("decision") != "accepted"
+                    or not _is_nonempty_string(progress.get("reason"))
+                    or progress.get("model_invocation_count") != 0
+                    or progress.get("selected_attempt_sha256")
+                    != source_attempt_sha256
+                    or progress.get("selected_attempted_dossier_sha256")
+                    != baseline_dossier_sha256
+                    or not _is_nonempty_string(progress.get("replay_receipt_path"))
+                    or not _valid_sha256(progress.get("replay_receipt_sha256"))
+                    or not isinstance(superseded, list)
+                    or not superseded
+                    or any(not _valid_sha256(item) for item in superseded)
+                    or not isinstance(defect_ids, list)
+                    or not defect_ids
+                    or any(not _is_nonempty_string(item) for item in defect_ids)
+                ):
+                    errors.append(
+                        f"research_dossier_evidence_verification_promotion_invalid: "
                         f"{pid}: index={index}"
                     )
             else:
@@ -1294,6 +1361,8 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                 "evidence_verification_feedback",
                 "evidence_verification_dossier_repair",
                 "evidence_verification_research_continuation",
+                "evidence_verification_rescore",
+                "evidence_verification_promotion",
             }
             for kind in kinds[1:]
         ):
@@ -1376,6 +1445,43 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                             f"research_dossier_repair_attempt_source_session_mismatch: "
                             f"{pid}: index={index}"
                         )
+                    if attempt.get("attempt_kind") == "evidence_verification_rescore" and (
+                        attempt.get("agent_session_id")
+                        != source_attempt.get("agent_session_id")
+                        or attempt.get("observed_agent_session_id")
+                        != source_attempt.get("observed_agent_session_id")
+                        or attempt.get("resumed_from_session_id")
+                        != source_attempt.get("agent_session_id")
+                    ):
+                        errors.append(
+                            f"research_dossier_rescore_attempt_source_session_mismatch: "
+                            f"{pid}: index={index}"
+                        )
+                    if attempt.get("attempt_kind") == "evidence_verification_promotion":
+                        progress = attempt.get("repair_progress")
+                        source_index = value.index(source_attempt)
+                        superseded_hashes = [
+                            prior.get("attempt_sha256")
+                            for prior in value[source_index + 1 : index]
+                            if isinstance(prior, dict)
+                        ]
+                        if (
+                            attempt.get("attempted_dossier")
+                            != source_attempt.get("attempted_dossier")
+                            or attempt.get("agent_session_id")
+                            != source_attempt.get("agent_session_id")
+                            or attempt.get("observed_agent_session_id")
+                            != source_attempt.get("observed_agent_session_id")
+                            or attempt.get("resumed_from_session_id")
+                            != source_attempt.get("agent_session_id")
+                            or not isinstance(progress, dict)
+                            or progress.get("superseded_attempt_sha256s")
+                            != superseded_hashes
+                        ):
+                            errors.append(
+                                f"research_dossier_promotion_attempt_binding_invalid: "
+                                f"{pid}: index={index}"
+                            )
             attempt_hash = attempt.get("attempt_sha256")
             if isinstance(attempt_hash, str):
                 prior_hashes.add(attempt_hash)
@@ -2699,6 +2805,32 @@ def verified_hypothesis_falsification_attempts(
         challenge_receipt = receipt_experiments.get(str(challenge_id))
         intervention_receipt = interventions.get((hypothesis_id, str(attempt_id)))
         proof_receipt = proof_by_pair.get((hypothesis_id, str(baseline_id), str(challenge_id)))
+        proof_adapter_evidence = (
+            proof_receipt.get("adapter_evidence", {})
+            if isinstance(proof_receipt, Mapping)
+            else {}
+        )
+        proof_symbols = {
+            str(symbol)
+            for touchpoint in (
+                proof_adapter_evidence.get("implementation_touchpoints", [])
+                if isinstance(proof_adapter_evidence, Mapping)
+                else []
+            )
+            if isinstance(touchpoint, Mapping)
+            for symbol in touchpoint.get("symbols", [])
+            if isinstance(symbol, str) and symbol.strip()
+        }
+        expected_symbol_set = {
+            str(symbol)
+            for symbol in (expected_symbols if isinstance(expected_symbols, list) else [])
+            if isinstance(symbol, str) and symbol.strip()
+        }
+        proof_covers_pair = bool(
+            isinstance(proof_receipt, Mapping)
+            and proof_symbols
+            and proof_symbols.issubset(expected_symbol_set)
+        )
         baseline_artifacts_raw = (
             baseline.get("artifact_refs") if isinstance(baseline, dict) else None
         )
@@ -2712,16 +2844,48 @@ def verified_hypothesis_falsification_attempts(
             )
             if isinstance(value, str)
         }
+        intervention_shared_symbols = {
+            str(symbol)
+            for symbol in (
+                intervention_receipt.get("shared_verified_mechanism_symbols", [])
+                if isinstance(intervention_receipt, dict)
+                else []
+            )
+            if isinstance(symbol, str) and symbol.strip()
+        }
+        intervention_baseline_symbols = {
+            str(symbol)
+            for symbol in (
+                intervention_receipt.get("baseline_verified_mechanism_symbols", [])
+                if isinstance(intervention_receipt, dict)
+                else []
+            )
+            if isinstance(symbol, str) and symbol.strip()
+        }
+        intervention_challenge_symbols = {
+            str(symbol)
+            for symbol in (
+                intervention_receipt.get("challenge_verified_mechanism_symbols", [])
+                if isinstance(intervention_receipt, dict)
+                else []
+            )
+            if isinstance(symbol, str) and symbol.strip()
+        }
         intervention_covers_pair = bool(
             isinstance(intervention_receipt, dict)
             and intervention_receipt.get("baseline_experiment_id") == baseline_id
             and intervention_receipt.get("challenge_experiment_id") == challenge_id
-            and intervention_receipt.get("baseline_verified_mechanism_symbols")
-            == expected_symbols
-            and intervention_receipt.get("challenge_verified_mechanism_symbols")
-            == expected_symbols
-            and intervention_receipt.get("shared_verified_mechanism_symbols")
-            == expected_symbols
+            and intervention_shared_symbols
+            and intervention_baseline_symbols == intervention_shared_symbols
+            and intervention_challenge_symbols == intervention_shared_symbols
+            and intervention_shared_symbols.issubset(expected_symbol_set)
+        )
+        causal_symbols = (
+            proof_symbols
+            if proof_covers_pair
+            else intervention_shared_symbols
+            if intervention_covers_pair
+            else expected_symbol_set
         )
         challenge_artifacts = {
             value
@@ -2772,8 +2936,13 @@ def verified_hypothesis_falsification_attempts(
             or (
                 str(challenge_id) not in mechanism_evidence_ids
                 and not intervention_covers_pair
+                and not proof_covers_pair
             )
-            or str(baseline_id) not in mechanism_evidence_ids
+            or (
+                str(baseline_id) not in mechanism_evidence_ids
+                and not intervention_covers_pair
+                and not proof_covers_pair
+            )
             or challenge_receipt.get("assertion_passed") is not True
             or baseline_receipt.get("assertion_passed") is not True
             or (
@@ -2789,10 +2958,19 @@ def verified_hypothesis_falsification_attempts(
             continue
         if challenge.get("scenario_kind") == "control":
             relationship = challenge.get("control_relationship")
+            relationship_symbols = {
+                str(symbol)
+                for symbol in (
+                    relationship.get("mechanism_symbols", [])
+                    if isinstance(relationship, dict)
+                    else []
+                )
+                if isinstance(symbol, str) and symbol.strip()
+            }
             if (
                 not isinstance(relationship, dict)
                 or relationship.get("supports_experiment_id") != baseline_id
-                or relationship.get("mechanism_symbols") != expected_symbols
+                or relationship_symbols != causal_symbols
             ):
                 continue
         observed_assertion = challenge.get("observable_assertion")
@@ -2842,7 +3020,7 @@ def verified_hypothesis_falsification_attempts(
                     else mechanism_evidence_ids.get(str(challenge_id), set())
                 ),
                 "mechanism_symbols": (
-                    list(expected_symbols) if isinstance(expected_symbols, list) else []
+                    sorted(causal_symbols)
                 ),
                 "intervention_receipt_id": (
                     intervention_receipt.get("intervention_receipt_id")

@@ -14406,6 +14406,16 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
     for attempt_index, attempt in enumerate(attempts):
         if not isinstance(attempt, dict):
             continue
+        if attempt.get("attempt_kind") == "evidence_verification_promotion":
+            progress_raw = attempt.get("repair_progress")
+            progress = progress_raw if isinstance(progress_raw, Mapping) else {}
+            replay_path_raw = _text(progress.get("replay_receipt_path"))
+            replay_path = Path(replay_path_raw) if replay_path_raw is not None else None
+            replay_sha256 = _text(progress.get("replay_receipt_sha256"))
+            if replay_path is None or not replay_path.is_file():
+                errors.append(f"research_attempt_promotion_receipt_missing:{attempt_index}")
+            elif replay_sha256 is None or _sha256_path(replay_path) != replay_sha256:
+                errors.append(f"research_attempt_promotion_receipt_changed:{attempt_index}")
         rescore_raw = attempt.get("validation_error_rescore")
         if rescore_raw is not None:
             rescore = rescore_raw if isinstance(rescore_raw, Mapping) else {}
