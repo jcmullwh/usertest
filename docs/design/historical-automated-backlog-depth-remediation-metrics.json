@@ -4,14 +4,14 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T11:46:13.183574Z",
+    "as_of": "2026-07-17T11:51:57.226362Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
         "value": "First bounded case parked correctly at Stage 4",
-        "detail": "The Windows case completed its exact model-free persistence replay, production Stage 3 materialization, and production Stage 4 no-change disposition. The final artifact records already_addressed, not_required, zero options, zero model calls, and no export, ticket, implementation, or Docker action.",
+        "detail": "The Windows research itself used 12 gpt-5.6-terra author calls in one session. Its later exact persistence replay, production Stage 3 rematerialization, and Stage 4 no-change disposition used zero additional model calls. The final artifact records already_addressed, not_required, zero options, and no export, ticket, implementation, or Docker action.",
         "tone": "good"
       },
       {
@@ -2663,13 +2663,13 @@
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 30953.183574,
+          "elapsed_seconds": 31297.226362,
           "coverage": "active",
-          "display": "8 h 35 m 53.18 s as of 11:46:13Z",
+          "display": "8 h 41 m 37.23 s as of 11:51:57Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifests, preflights, component executions, tests, and correction intervals separately."
         },
         "furthest_stage": "Stage 4 completed for one bounded no-change case after accepted Stage 1/2",
-        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and the Terra researcher remains the sole model author; attempt 12 remains the final model call. BDS-113's exact 69.751-second replay at ef356030 used zero model calls and downstream persisted-evidence verification returned ready=true with zero errors. Production Stage 3 rematerialized the evidence_sufficient/partial/already_addressed dossier and preserved all 24 cases. BDS-114 then corrected the Stage 4 boundary so its own runner lineage is removed before strict authored-contract revalidation; the complete 69-test planning-depth module passed. The exact production Stage 4 result at 4f58c693 completed in 6.833 seconds with not_required, zero options, zero rejected options, zero model calls, unchanged inputs, and the same 24 cases. Stage 5/6, export, ticketing, implementation, and Docker were not invoked. The next bounded accepted case can advance without restarting Stage 1/2.",
+        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and one Terra author session; its research used 12 author calls and attempt 12 remains the final model call. BDS-113's exact 69.751-second replay at ef356030 used zero additional model calls and downstream persisted-evidence verification returned ready=true with zero errors. Production Stage 3 then rematerialized the evidence_sufficient/partial/already_addressed dossier without another author call and preserved all 24 cases. BDS-114 corrected the Stage 4 boundary so its own runner lineage is removed before strict authored-contract revalidation; the complete 69-test planning-depth module passed. The exact production Stage 4 result at 4f58c693 completed in 6.833 seconds with not_required, zero options, zero rejected options, zero Stage 4 model calls, unchanged inputs, and the same 24 cases. Stage 5/6, export, ticketing, implementation, and Docker were not invoked. The next bounded accepted case can advance without restarting Stage 1/2.",
         "outcome": "First bounded case completed at its correct no-change disposition; cycle remains active",
         "errors": {
           "count": 28,
@@ -2760,7 +2760,7 @@
         },
         "next_action": "Advance the next bounded canonical case from the accepted Stage 1/2 graph through Stage 3 and its correct downstream disposition without restarting the cycle.",
         "tone": "warn",
-        "data_quality": "BDS-113 replay receipt SHA 31B20563... records 69.751 seconds, zero model calls, unchanged source custody, and signed-in ChatGPT provenance; direct downstream verification returned no errors. Corrected production Stage 3 receipt SHA 861EE10B... records successful model-free materialization. Final Stage 4 receipt SHA A75C2B49... records 6.833 seconds, not_required, zero options/model calls, unchanged source hashes, 24 input/output cases, and no Stage 5/6/export/ticket/implementation/Docker action.",
+        "data_quality": "The cumulative case research history records 12 Terra author calls. BDS-113 replay receipt SHA 31B20563... records 69.751 seconds, zero additional model calls, unchanged source custody, and signed-in ChatGPT provenance; direct downstream verification returned no errors. Corrected production Stage 3 receipt SHA 861EE10B... records successful rematerialization without another author call. Final Stage 4 receipt SHA A75C2B49... records 6.833 seconds, not_required, zero Stage 4 options/model calls, unchanged source hashes, 24 input/output cases, and no Stage 5/6/export/ticket/implementation/Docker action.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_prepare_c1b44df8_20260717",
