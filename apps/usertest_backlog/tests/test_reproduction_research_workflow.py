@@ -19,6 +19,147 @@ from runner_core import RunnerConfig
 import usertest_backlog.workflows.reproduction_research as mod
 
 
+def test_provisional_same_cause_research_receives_every_member_source_atom(
+    tmp_path: Path,
+) -> None:
+    canonical_atom = {
+        "atom_id": "atom:canonical",
+        "source": "command_failure",
+        "text": "The historical Windows command failed before execution.",
+    }
+    member_atom = {
+        "atom_id": "atom:member",
+        "source": "command_failure",
+        "text": "A newer Windows command failed before execution.",
+    }
+    record = {
+        "case_id": "case:canonical",
+        "problem_id": "problem:canonical",
+        "case_identity_status": "provisional_same_cause",
+        "case_identity_candidate_ids": ["case:member", "case:canonical"],
+        "case_member_problem_ids": ["problem:member", "problem:canonical"],
+        "evidence_atom_ids": ["atom:canonical"],
+        "source_evidence_atom_ids": ["atom:canonical"],
+        "provisional_same_cause_group": {
+            "schema_version": 1,
+            "status": "research_hypothesis",
+            "group_id": "provisional:windows-command-failure",
+            "member_case_ids": ["case:member", "case:canonical"],
+            "member_problem_ids": ["problem:member", "problem:canonical"],
+            "member_facets": [
+                {
+                    "case_id": "case:member",
+                    "problem_id": "problem:member",
+                    "evidence_atom_ids": ["atom:member"],
+                    "source_evidence_atom_ids": ["atom:member"],
+                },
+                {
+                    "case_id": "case:canonical",
+                    "problem_id": "problem:canonical",
+                    "evidence_atom_ids": ["atom:canonical"],
+                    "source_evidence_atom_ids": ["atom:canonical"],
+                },
+            ],
+        },
+    }
+
+    [selected] = mod._build_selected_research_payloads(
+        repo_root=tmp_path,
+        selected_priority_decisions=[{"problem_id": "problem:canonical"}],
+        problem_records=[record],
+        atoms=[canonical_atom, member_atom],
+    )
+
+    assert selected["expected_evidence_atom_ids"] == [
+        "atom:canonical",
+        "atom:member",
+    ]
+    assert selected["provisional_same_cause_member_evidence_atom_ids"] == [
+        "atom:member",
+        "atom:canonical",
+    ]
+    assert [atom["atom_id"] for atom in selected["evidence_atoms"]] == [
+        "atom:canonical",
+        "atom:member",
+    ]
+    assignment = selected["evidence_assignment"]
+    assert assignment["status"] == "complete"
+    assert assignment["errors"] == []
+    assert assignment["provisional_same_cause_member_evidence_atom_ids"] == [
+        "atom:member",
+        "atom:canonical",
+    ]
+    assert [receipt["atom_id"] for receipt in assignment["atom_receipts"]] == [
+        "atom:canonical",
+        "atom:member",
+    ]
+
+
+def test_inconsistent_provisional_same_cause_evidence_blocks_assignment(
+    tmp_path: Path,
+) -> None:
+    canonical_atom = {
+        "atom_id": "atom:canonical",
+        "source": "command_failure",
+        "text": "The historical Windows command failed before execution.",
+    }
+    injected_atom = {
+        "atom_id": "atom:injected",
+        "source": "command_failure",
+        "text": "This atom must not enter through an inconsistent facet packet.",
+    }
+    record = {
+        "case_id": "case:canonical",
+        "problem_id": "problem:canonical",
+        "case_identity_status": "provisional_same_cause",
+        "case_identity_candidate_ids": ["case:member", "case:canonical"],
+        "case_member_problem_ids": ["problem:member", "problem:canonical"],
+        "evidence_atom_ids": ["atom:canonical"],
+        "source_evidence_atom_ids": ["atom:canonical"],
+        "provisional_same_cause_group": {
+            "schema_version": 1,
+            "status": "research_hypothesis",
+            "group_id": "provisional:windows-command-failure",
+            "member_case_ids": ["case:member", "case:canonical"],
+            # This contradicts the canonical record and the facet below.
+            "member_problem_ids": ["problem:other", "problem:canonical"],
+            "member_facets": [
+                {
+                    "case_id": "case:member",
+                    "problem_id": "problem:member",
+                    "evidence_atom_ids": ["atom:injected"],
+                    "source_evidence_atom_ids": ["atom:injected"],
+                },
+                {
+                    "case_id": "case:canonical",
+                    "problem_id": "problem:canonical",
+                    "evidence_atom_ids": ["atom:canonical"],
+                    "source_evidence_atom_ids": ["atom:canonical"],
+                },
+            ],
+        },
+    }
+
+    [selected] = mod._build_selected_research_payloads(
+        repo_root=tmp_path,
+        selected_priority_decisions=[{"problem_id": "problem:canonical"}],
+        problem_records=[record],
+        atoms=[canonical_atom, injected_atom],
+    )
+
+    assert selected["expected_evidence_atom_ids"] == ["atom:canonical"]
+    assert selected["provisional_same_cause_member_evidence_atom_ids"] == []
+    assert selected["evidence_assignment"]["status"] == "incomplete"
+    assert "atom:injected" not in {
+        receipt["atom_id"]
+        for receipt in selected["evidence_assignment"]["atom_receipts"]
+    }
+    assert any(
+        error.startswith("provisional_same_cause_group_invalid:")
+        for error in selected["evidence_assignment"]["errors"]
+    )
+
+
 def test_research_orchestration_passes_original_evidence_atoms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

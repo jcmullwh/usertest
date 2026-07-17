@@ -6005,6 +6005,7 @@ def _append_prompt_for_problem(
                 "case_evidence_atom_count",
                 "occurrence_evidence_atom_ids",
                 "occurrence_evidence_atom_count",
+                "provisional_same_cause_member_evidence_atom_ids",
                 "materialized_atom_count",
                 "materialized_receipt_count",
                 "materialization_sha256",
@@ -6064,6 +6065,7 @@ def _append_prompt_for_problem(
                 "assignment_sha256",
                 "case_evidence_atom_ids",
                 "occurrence_evidence_atom_ids",
+                "provisional_same_cause_member_evidence_atom_ids",
             )
         }
         compact_assignment.update(

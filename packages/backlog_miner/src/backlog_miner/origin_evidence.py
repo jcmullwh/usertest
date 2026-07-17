@@ -829,6 +829,11 @@ def _materialize_assigned_evidence(
         "case_evidence_atom_count": len(case_ids),
         "occurrence_evidence_atom_ids": sorted(occurrence_ids),
         "occurrence_evidence_atom_count": len(occurrence_ids),
+        "provisional_same_cause_member_evidence_atom_ids": sorted(
+            _string_list(
+                assignment.get("provisional_same_cause_member_evidence_atom_ids")
+            )
+        ),
         "materialized_atom_count": len(entries),
         "materialized_receipt_count": sum("receipt_file" in entry for entry in entries),
         "atoms": entries,
@@ -1578,6 +1583,11 @@ def _verify_materialized_assigned_evidence(
             ),
             "occurrence_evidence_atom_ids": sorted(
                 _string_list(assignment.get("occurrence_evidence_atom_ids"))
+            ),
+            "provisional_same_cause_member_evidence_atom_ids": sorted(
+                _string_list(
+                    assignment.get("provisional_same_cause_member_evidence_atom_ids")
+                )
             ),
         }
         assigned_projection = {

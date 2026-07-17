@@ -3459,6 +3459,31 @@ def _validate_evidence_assignment(item: dict[str, Any], *, pid: str) -> list[str
             require_nonempty=assignment_status == "complete",
         )
     )
+    provisional_member_raw = assignment.get(
+        "provisional_same_cause_member_evidence_atom_ids"
+    )
+    if provisional_member_raw is not None:
+        errors.extend(
+            _validate_string_list(
+                provisional_member_raw,
+                field="evidence_assignment_provisional_same_cause_member_evidence_atom_ids",
+                pid=pid,
+            )
+        )
+        provisional_member_ids = {
+            value
+            for value in (
+                provisional_member_raw
+                if isinstance(provisional_member_raw, list)
+                else []
+            )
+            if isinstance(value, str)
+            and value.strip()
+        }
+        if not provisional_member_ids.issubset(set(expected)):
+            errors.append(
+                f"research_evidence_assignment_provisional_member_atoms_unassigned: {pid}"
+            )
     receipts_raw = assignment.get("atom_receipts")
     receipts = receipts_raw if isinstance(receipts_raw, list) else []
     if not isinstance(receipts_raw, list) or (assignment_status == "complete" and not receipts):

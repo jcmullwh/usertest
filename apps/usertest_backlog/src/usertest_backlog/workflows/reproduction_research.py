@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from backlog_core import (
     SOURCE_EVIDENCE_PROJECTION_VERSION,
     operational_candidate_receipt_errors,
+    provisional_same_cause_group_errors,
     source_evidence_atom_projection,
     source_evidence_atom_sha256,
 )
@@ -489,6 +490,96 @@ def _initial_research_evidence_roles(
     return case_evidence_ids, occurrence_evidence_ids
 
 
+def _provisional_same_cause_source_evidence(
+    problem_record: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return the complete authenticated evidence boundary for a provisional group.
+
+    A provisional same-cause group is one research unit, not an alias.  Its member
+    facets preserve the evidence that made each candidate case independently real.
+    Stage 3 must receive that union or it can neither test the shared-mechanism
+    hypothesis nor clear it honestly.  Cross-check the runner-owned group against the
+    canonical record before trusting facet membership; inconsistent packets block the
+    assignment instead of silently narrowing or widening it.
+    """
+
+    if problem_record.get("case_identity_status") != "provisional_same_cause":
+        return [], []
+
+    case_id_raw = problem_record.get("case_id")
+    case_id = case_id_raw.strip() if isinstance(case_id_raw, str) else ""
+    group_raw = problem_record.get("provisional_same_cause_group")
+    group = group_raw if isinstance(group_raw, Mapping) else {}
+    errors = provisional_same_cause_group_errors(
+        group_raw,
+        owning_case_id=case_id or None,
+    )
+
+    def strings(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(
+                item.strip()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            )
+        )
+
+    record_case_ids = strings(problem_record.get("case_identity_candidate_ids"))
+    group_case_ids = strings(group.get("member_case_ids"))
+    if set(record_case_ids) != set(group_case_ids):
+        errors.append("provisional_same_cause_record_case_members_mismatch")
+
+    record_problem_ids = strings(problem_record.get("case_member_problem_ids"))
+    group_problem_ids = strings(group.get("member_problem_ids"))
+    if set(record_problem_ids) != set(group_problem_ids):
+        errors.append("provisional_same_cause_record_problem_members_mismatch")
+
+    facets_raw = group.get("member_facets")
+    facets = (
+        [dict(item) for item in facets_raw if isinstance(item, Mapping)]
+        if isinstance(facets_raw, list)
+        else []
+    )
+    facet_pairs: list[tuple[str, str]] = []
+    for facet in facets:
+        facet_case_raw = facet.get("case_id")
+        facet_problem_raw = facet.get("problem_id")
+        facet_case_id = (
+            facet_case_raw.strip() if isinstance(facet_case_raw, str) else ""
+        )
+        facet_problem_id = (
+            facet_problem_raw.strip() if isinstance(facet_problem_raw, str) else ""
+        )
+        if not facet_problem_id:
+            errors.append(
+                f"provisional_same_cause_facet_problem_missing:{facet_case_id or '(missing)'}"
+            )
+        facet_pairs.append((facet_case_id, facet_problem_id))
+    facet_problem_ids = [problem_id for _, problem_id in facet_pairs if problem_id]
+    if (
+        len(facet_pairs) != len(set(facet_pairs))
+        or set(facet_problem_ids) != set(group_problem_ids)
+        or len(facet_problem_ids) != len(group_problem_ids)
+    ):
+        errors.append("provisional_same_cause_facet_problem_members_mismatch")
+
+    if errors:
+        return [], list(
+            dict.fromkeys(
+                f"provisional_same_cause_group_invalid:{error}" for error in errors
+            )
+        )
+
+    evidence_atom_ids = [
+        atom_id
+        for facet in facets
+        for atom_id in strings(facet.get("source_evidence_atom_ids"))
+    ]
+    return list(dict.fromkeys(evidence_atom_ids)), []
+
+
 def _render_research_dossiers_markdown(
     research_dossiers: list[dict[str, Any]],
     *,
@@ -690,6 +781,10 @@ def _build_selected_research_payloads(
             if isinstance(source_ids_raw, list)
             else [atom_id for atom_id in all_evidence_ids if atom_id not in set(derived_ids)]
         )
+        provisional_member_evidence_ids, provisional_group_errors = (
+            _provisional_same_cause_source_evidence(rec)
+        )
+        evidence_ids.extend(provisional_member_evidence_ids)
         evidence_ids = list(dict.fromkeys(evidence_ids))
         case_evidence_ids, occurrence_evidence_ids = _initial_research_evidence_roles(
             evidence_ids,
@@ -714,6 +809,7 @@ def _build_selected_research_payloads(
             if atom_id not in occurrence_evidence_ids:
                 occurrence_evidence_ids.append(atom_id)
         evidence_lineage_errors.extend(split_lineage_errors)
+        evidence_lineage_errors.extend(provisional_group_errors)
         derived_ids = list(
             dict.fromkeys(
                 [
@@ -747,6 +843,9 @@ def _build_selected_research_payloads(
         )
         assignment["case_evidence_atom_ids"] = list(case_evidence_ids)
         assignment["occurrence_evidence_atom_ids"] = list(occurrence_evidence_ids)
+        assignment["provisional_same_cause_member_evidence_atom_ids"] = list(
+            provisional_member_evidence_ids
+        )
         missing_evidence_atom_ids.extend(assignment_missing)
         missing_evidence_atom_ids = list(dict.fromkeys(missing_evidence_atom_ids))
         assignment_errors = [
@@ -764,6 +863,9 @@ def _build_selected_research_payloads(
                 "expected_evidence_atom_ids": evidence_ids,
                 "case_evidence_atom_ids": case_evidence_ids,
                 "occurrence_evidence_atom_ids": occurrence_evidence_ids,
+                "provisional_same_cause_member_evidence_atom_ids": (
+                    provisional_member_evidence_ids
+                ),
                 "evidence_lineage_errors": evidence_lineage_errors,
                 "missing_evidence_atom_ids": missing_evidence_atom_ids,
                 "evidence_atoms": evidence_atoms,
