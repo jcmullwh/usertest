@@ -658,6 +658,16 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Required correction: resolve a content-addressed derived atom through a durable registry alias only when runner-authored root kind, run-relative path, structured source, and ordinal agree. Preserve exact current-ID precedence and all multi-case memberships; never use evidence prose, ticket wording, or fuzzy similarity as identity. Then rerun the same three-observation slice through production Stage 1/2 with the reconciled case graph.
 - Closure proof: focused positive and mismatch-negative lineage tests pass; the two exact historical aliases normalize to `supports_case` and are excluded from novel mining; the remaining genuinely unbound observation receives an honest disposition; the existing maintenance case remains canonical; no duplicate problem, priority decision, or ticket is produced; and full affected lineage/ingestion tests pass before the next sealed run.
 
+### BDS-101 - Stage 1 resealed valid observation membership as nonexistent derived-parent lineage
+
+- Status: `correction_in_progress_model_free_replay_pending`
+- Priority: evidence provenance integrity, honest case maintenance
+- Objective impact: BDS-100 correctly restored two observations to the canonical maintenance case, but Stage 1's final disposition pass overwrote their valid `case_registry_membership` receipts with `runner_parent_lineage` and the false rationale `attaches this derived atom to None`. The case and eligibility results were correct, but the persisted reason was factually wrong and could mislead later audit or correction logic.
+- Exact evidence: the exact-revision Terra rerun at `5e112a4e` completed in 88.605 seconds with two verified signed-in model invocations, zero Stage 1/2 contract errors, no Stage 3/export/Docker, zero problem records, and zero priority records. The maintenance case stayed `mitigated` and grew from three to five evidence IDs. Both new content-addressed IDs nevertheless carried `disposition_receipt.source=runner_parent_lineage` while `evidence_role=observation` and `parent_case_id=null`.
+- Root cause: `apply_atom_dispositions` unconditionally regenerated every uncited `supports_case` receipt as derived-parent lineage. It ignored the atom's evidence role and an already-valid disposition receipt from normalization.
+- Required correction: a new canonical problem citation may mint `canonical_problem_evidence`; otherwise preserve an already-valid matching receipt. Use `runner_parent_lineage` only for a derived research/implementation/verification atom with a real parent. For a source observation that lacks an earlier valid receipt but has durable membership, use `canonical_case_membership` with the actual supporting case IDs.
+- Closure proof: focused tests prove an alias-derived observation keeps its exact valid registry receipt through `apply_atom_dispositions`, ordinary derived-parent evidence still receives runner-parent provenance, ordinary canonical citations still receive canonical-problem provenance, and a model-free replay of the retained corrected Stage 1 result produces the same case/evidence/disposition output with truthful receipts and no model rerun.
+
 ### AN-04 - Deep pytest base path exceeded Git for Windows fixture path capacity
 
 - Status: `closed_environment_rerun_green`
@@ -672,6 +682,13 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: after the v4 manifest independently validated with zero errors, the combined validation wrapper invoked ordinary `git status` and `git rev-parse` from the cross-volume `U:` execution root. Both commands emitted the known `detected dubious ownership` message, causing the wrapper to exit 1 after the manifest validation and idempotence checks had already passed. The failure did not modify the manifest, bundle, execution root, Git configuration, or pipeline state.
 - Root cause: the supervisor command failed to use the exact command-local `git -c safe.directory=<resolved U: root> -C <root> ...` form already established by BDS-099. This was not a recurrence in the corrected qualification helper.
 - Containment and result: reran only the two failed custody checks with exact command-local trust. They returned head `338a373fa02a1aa3d81b0463e846063f5e075aa1` and empty tracked status in 1.2 seconds. No broader test, manifest build, model stage, or pipeline cycle was repeated.
+
+### AN-06 - Detached corrected preparation ended without a retained terminal receipt
+
+- Status: `contained_superseded_revision_no_same_run_retry`
+- Classification: one run-observability anomaly; product attribution unknown
+- Exact evidence: the model-free corrected preparation launched at 2026-07-17 04:00:15Z against clean execution commit `338a373f`, the reconciled atom ledger, and two additional implementation-evidence roots. It materialized only `prepare_work_reconciled/usertest.case_registry.json` at 04:06:14Z. Its Python process remained responsive while observed, later exited, and produced neither `prepare_output_reconciled` nor a terminal receipt. No matching Python/PowerShell application-error event was retained, and the original detached tool result did not retain the command's terminal stderr or exit code. Therefore the exact failure and completed wall time are unknown; they are not invented from polling snapshots.
+- Containment and result: no model, ticket, implementation, export, or Docker work was enabled, and the original inputs/work file remain untouched. BDS-100 subsequently required a new pipeline revision, so this preparation is superseded and will not be retried at `338a373f`. The next preparation must run at the new clean exact revision with terminal stdout/stderr and exit metadata retained by the launcher.
 
 ### BDS-082 - Attempt-14 preflight validated an authored projection as a persisted dossier
 

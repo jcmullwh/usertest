@@ -4,20 +4,20 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T04:15:43.8791796Z",
+    "as_of": "2026-07-17T04:27:28.6216536Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Bounded Stage 1/2 exposed one case-identity defect",
-        "detail": "A three-observation Terra slice completed mechanics and provenance, but two exact historical observations lost their durable case membership after re-ingestion. The general alias correction now passes 192 affected tests; the same bounded slice has not yet been rerun.",
+        "value": "Corrected Stage 1/2 behavior passed; receipt fix under test",
+        "detail": "The exact-revision rerun attached two known observations to the canonical maintenance case and honestly left one insufficient observation unresolved. Audit found one false receipt rationale after the correct disposition; its general correction now passes the full 205-test affected surface.",
         "tone": "warn"
       },
       {
         "label": "Current lifecycle outcome",
         "value": "Active; no duplicate work exported",
-        "detail": "No new problem, priority decision, Stage 3 dossier, option, plan, ticket, implementation, or Docker work was produced. The existing mitigated maintenance case remains canonical while the identity correction is verified.",
+        "detail": "No new problem, priority decision, Stage 3 dossier, option, plan, ticket, implementation, or Docker work was produced. The existing mitigated maintenance case remains canonical and its evidence set grew from three to five exact IDs.",
         "tone": "good"
       },
       {
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Rerun the same three-observation Stage 1/2 slice",
-        "detail": "Checkpoint the general atom-identity correction, run it from a clean exact revision, and require the two known observations to bind to the maintenance case while the third receives an honest model disposition.",
+        "value": "Replay the accepted Stage 1 result model-free",
+        "detail": "Checkpoint the receipt correction, apply the deterministic finalization to the retained authored decisions without another model turn, and verify truthful receipts plus identical case, evidence, and no-work output.",
         "tone": "warn"
       }
     ],
@@ -2652,32 +2652,34 @@
         "lifecycle_id": "pipeline-cycle:338a373f:20260717",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 2,
+          "author_invocations": 4,
           "continuation_launches": 0,
-          "stage_reruns": 0,
+          "stage_reruns": 1,
           "full_restarts": 0,
-          "summary": "One bounded Stage 1 primary review and one independent coverage/depth review ran in the initial component execution. No author continuation, stage rerun, or full-cycle restart has occurred; the corrected rerun is pending."
+          "summary": "The initial and corrected bounded Stage 1 executions each used one primary review and one independent coverage/depth review. The second execution was one targeted stage rerun after BDS-100; no author continuation or full-cycle restart occurred."
         },
         "label": "Clean exact-revision backlog qualification cycle",
         "scope": "Reconciled non-IDEA evidence custody, held-out currentness sealing, canonical case lifecycle materialization, and bounded maintenance Stage 1/2 component validation; exports, Stage 3+, tickets, implementation, and Docker disabled",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 3923.8791796,
+          "elapsed_seconds": 4628.6216536,
           "coverage": "active",
-          "display": "1 h 5 m 23.88 s as of 04:15:43Z",
+          "display": "1 h 17 m 8.62 s as of 04:27:28Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifest, preflight, component execution, tests, and correction intervals separately."
         },
-        "furthest_stage": "Bounded Stage 1/2 component completed; semantic correction under test",
-        "current_state": "The exact-revision input was initially sealed at 2,833 non-IDEA atoms and the historical maintenance outcome was materialized into a 24-case registry. A 105.378-second Terra Stage 1/2 slice then passed subscription and invocation provenance but exposed BDS-100: content-addressed re-ingestion did not resolve two durable historical atom identities. The general structured alias correction now binds those two observations to the existing mitigated case and leaves only the genuinely unbound observation eligible. Two focused tests and the complete 192-test affected lineage/ingestion/mining surface pass. A corrected evidence preparation is still running; no full corpus model stage has started.",
-        "outcome": "Active; bounded semantic defect found and corrected locally; clean-revision rerun pending",
+        "furthest_stage": "Corrected bounded Stage 1/2 semantics passed; final receipt correction under test",
+        "current_state": "At exact revision 5e112a4e, the corrected Terra slice processed only one genuinely unbound observation. Primary and independent review both found it insufficient to establish a defect; Stage 1 emitted zero problems, Stage 2 emitted zero priorities, invocation/subscription contracts passed, and no Stage 3/export/Docker work appeared. The canonical maintenance case stayed mitigated and gained the two content-addressed aliases, increasing its evidence set from three to five. Audit then found BDS-101: finalization replaced the two valid registry receipts with a false derived-parent rationale naming None. The deterministic receipt correction preserves valid provenance and passes the complete 205-test affected surface. The earlier broader corrected preparation ended without a bundle and is superseded by the new exact revision; no full corpus model stage has started.",
+        "outcome": "Active; intended case/no-work result achieved; truthful receipt replay pending",
         "errors": {
-          "count": 2,
+          "count": 4,
           "count_kind": "deduplicated_clusters",
-          "summary": "BDS-100 is one pipeline identity defect found by semantic review. AN-05 is one bounded supervisor Git invocation error after manifest validation; it is not a pipeline defect.",
+          "summary": "BDS-100 is one pipeline identity defect; BDS-101 is one receipt-provenance defect. AN-05 is one bounded supervisor Git invocation error. AN-06 is one superseded preparation with no retained terminal receipt and unknown product attribution.",
           "cluster_ids": [
             "BDS-100",
-            "AN-05"
+            "BDS-101",
+            "AN-05",
+            "AN-06"
           ]
         },
         "automatic_self_corrections": {
@@ -2686,17 +2688,18 @@
           "summary": "Neither the pipeline nor model required an automatic correction in this cycle so far. The identity correction is supervisor-implemented pipeline work and is counted under interventions."
         },
         "supervisor_interventions": {
-          "count": 2,
+          "count": 3,
           "count_kind": "deduplicated_clusters",
-          "summary": "AN-05 reran only two Git custody checks. BDS-100 added a general structured identity alias and affected tests after the bounded semantic audit found that exact historical evidence was not updating its case.",
+          "summary": "AN-05 reran only two Git custody checks. BDS-100 added structured identity aliases after the bounded audit found lost case membership. BDS-101 preserves valid receipts after audit found a false derived-parent explanation; it reuses the accepted authored decisions model-free.",
           "cluster_ids": [
             "AN-05",
-            "BDS-100"
+            "BDS-100",
+            "BDS-101"
           ]
         },
-        "next_action": "Finish the model-free corrected preparation, checkpoint BDS-100, create a clean exact-revision execution root, and rerun only the same three-observation Stage 1/2 component before increasing volume.",
+        "next_action": "Checkpoint BDS-101, replay only deterministic finalization against the retained corrected Stage 1 artifacts, verify truthful receipts and identical semantic output, then prepare the next exact-revision corpus before increasing volume.",
         "tone": "warn",
-        "data_quality": "Qualification bundle ab044c48... at clean 338a373f; held-out manifest db23db17...; reconciled case graph 24 cases with maintenance state mitigated and idempotent outcome sync; signed-in Terra component duration 105.378 seconds with two verified model invocations, zero Stage 3/export/Docker; BDS-100 preflight partitions 2 supports_case and 1 unresolved; 192 affected tests pass; exact artifact paths retained in the issue ledger",
+        "data_quality": "Qualification bundle ab044c48... at clean 338a373f; held-out manifest db23db17...; reconciled case graph 24 cases; exact 5e112a4e preflight partitions 2 supports_case and 1 unresolved; corrected signed-in Terra run 88.605 seconds with two verified invocations, zero problems/priorities/Stage 3/export/Docker, case evidence 3 to 5; BDS-101 deterministic replay produces truthful case_registry_membership receipts locally; 205 affected tests pass; exact artifact paths retained in the issue ledger",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_manifest_v4_338a373f_20260717",

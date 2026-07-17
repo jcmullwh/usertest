@@ -1778,16 +1778,41 @@ def apply_atom_dispositions(
 
         final_disposition = _clean_string(atom.get("disposition")) or "unresolved"
         if final_disposition == "supports_case":
-            atom = apply_atom_disposition_decision(
-                atom,
-                disposition=final_disposition,
-                source=("canonical_problem_evidence" if cited_cases else "runner_parent_lineage"),
-                rationale=(
-                    "Canonical problem mining cited this atom for case membership."
-                    if cited_cases
-                    else f"Runner-owned lineage attaches this derived atom to {parent_case}."
-                ),
-            )
+            if cited_cases:
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source="canonical_problem_evidence",
+                    rationale="Canonical problem mining cited this atom for case membership.",
+                )
+            elif prior_receipt_valid:
+                assert prior_receipt is not None
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source=str(prior_receipt["source"]),
+                    rationale=str(prior_receipt["rationale"]),
+                )
+            elif role in _DERIVED_EVIDENCE_ROLES and parent_case is not None:
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source="runner_parent_lineage",
+                    rationale=(
+                        f"Runner-owned lineage attaches this derived atom to {parent_case}."
+                    ),
+                )
+            else:
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source="canonical_case_membership",
+                    rationale=(
+                        "Canonical case membership assigns this atom to "
+                        + ", ".join(sorted(supporting_case_ids))
+                        + "."
+                    ),
+                )
         elif prior_receipt_valid:
             assert prior_receipt is not None
             atom = apply_atom_disposition_decision(

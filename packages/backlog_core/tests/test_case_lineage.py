@@ -1449,6 +1449,9 @@ def test_content_addressed_reingested_atom_resolves_durable_source_registry_alia
     assert normalized[0]["disposition_receipt"]["source"] == "case_registry_membership"
     assert eligible_problem_mining_atoms(normalized) == []
 
+    dispositioned = apply_atom_dispositions(normalized, [])
+    assert dispositioned[0]["disposition_receipt"] == normalized[0]["disposition_receipt"]
+
 
 def test_content_addressed_alias_requires_matching_structured_source_identity() -> None:
     durable_atom_id = "usertest_implement/usertest/run/codex/0:confusion_point:1"
