@@ -4,14 +4,14 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T11:51:57.226362Z",
+    "as_of": "2026-07-17T12:07:50.442822Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "First bounded case parked correctly at Stage 4",
-        "detail": "The Windows research itself used 12 gpt-5.6-terra author calls in one session. Its later exact persistence replay, production Stage 3 rematerialization, and Stage 4 no-change disposition used zero additional model calls. The final artifact records already_addressed, not_required, zero options, and no export, ticket, implementation, or Docker action.",
+        "value": "First case complete; second ready for Stage 3",
+        "detail": "The Windows case remains complete at its evidence-supported already_addressed/not_required disposition. The Docker-shell case retained the accepted Stage 1/2 frontier; its false missing-evidence block is corrected and the exact assignment now contains one verified current aggregate plus both underlying failures. No Docker-shell model call or downstream action has occurred yet.",
         "tone": "good"
       },
       {
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Advance the next accepted case",
-        "detail": "Keep the accepted Stage 1/2 graph and advance the next bounded canonical case through research and its correct disposition. Do not restart the cycle; retain the Windows no-change result as completed provenance.",
+        "value": "Run Docker-shell Stage 3",
+        "detail": "Keep the accepted Stage 1/2 graph and invoke the Docker-shell researcher on the verified three-atom assignment. Preserve signed-in subscription provenance, supervise focused same-author corrections, and let the evidence determine whether the case is actionable, blocked, mitigated, or already addressed.",
         "tone": "warn"
       }
     ],
@@ -2659,22 +2659,22 @@
           "summary": "Thirty-six author calls and thirteen externally launched continuations are counted. The Windows Stage 3 case used one gpt-5.6-terra author session; attempt 12 was the final model call. Four exact model-free replays/rematerializations followed. Four stage-local reruns are counted, including the corrected Stage 3 persistence materialization and the fresh Stage 4 run after a helper-only false failure. No full-cycle restart occurred."
         },
         "label": "Clean exact-revision backlog qualification cycle",
-        "scope": "Reconciled non-IDEA evidence custody, output-blind currentness, canonical lifecycle materialization, accepted Stage 1/2, one bounded canonical Windows Stage 3 reassessment, and its Stage 4 no-change disposition; Stage 5/6, exports, tickets, implementation, and Docker disabled",
+        "scope": "Reconciled non-IDEA evidence custody, output-blind currentness, canonical lifecycle materialization, accepted Stage 1/2, one completed Windows no-change case, and a verified Stage 3 assignment for the second Docker-shell case; Stage 5/6, exports, tickets, implementation, and Docker disabled",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 31297.226362,
+          "elapsed_seconds": 32250.442822,
           "coverage": "active",
-          "display": "8 h 41 m 37.23 s as of 11:51:57Z",
+          "display": "8 h 57 m 30.44 s as of 12:07:50Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifests, preflights, component executions, tests, and correction intervals separately."
         },
         "furthest_stage": "Stage 4 completed for one bounded no-change case after accepted Stage 1/2",
-        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and one Terra author session; its research used 12 author calls and attempt 12 remains the final model call. BDS-113's exact 69.751-second replay at ef356030 used zero additional model calls and downstream persisted-evidence verification returned ready=true with zero errors. Production Stage 3 then rematerialized the evidence_sufficient/partial/already_addressed dossier without another author call and preserved all 24 cases. BDS-114 corrected the Stage 4 boundary so its own runner lineage is removed before strict authored-contract revalidation; the complete 69-test planning-depth module passed. The exact production Stage 4 result at 4f58c693 completed in 6.833 seconds with not_required, zero options, zero rejected options, zero Stage 4 model calls, unchanged inputs, and the same 24 cases. Stage 5/6, export, ticketing, implementation, and Docker were not invoked. The next bounded accepted case can advance without restarting Stage 1/2.",
+        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows case remains complete at evidence_sufficient/partial/already_addressed and Stage 4 not_required; its research used 12 Terra author calls, while later verification and rematerialization used zero additional calls. The second accepted case, case:67d6969bca6f77c538fa, was blocked before research because its durable history retained an older operational aggregate revision absent from the current atom corpus. BDS-115 now selects the one verified cited current aggregate with the identical stable signature, preserves an explicit historical-to-current alias, and expands the assignment to both underlying run-failure atoms. The full 21-test Stage 3 workflow module passes, and the exact real-case projection is complete with three receipts, zero missing atoms, zero lineage errors, and no derived evidence. No Docker-shell model call, Stage 4-6 action, export, ticket, implementation, or Docker action has occurred yet.",
         "outcome": "First bounded case completed at its correct no-change disposition; cycle remains active",
         "errors": {
-          "count": 28,
+          "count": 29,
           "count_kind": "deduplicated_clusters",
-          "summary": "Fifteen product defects are counted: BDS-100 through BDS-114. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. BDS-113 remains one root persistence defect despite five cascading codes. BDS-114 is the distinct production Stage 4 lineage-envelope mismatch. AN-17 groups all throw-away Stage 4 helper mechanics mistakes as one supervisor cluster.",
+          "summary": "Sixteen product defects are counted: BDS-100 through BDS-115. Thirteen supervisor/observability errors are counted: AN-05 through AN-17. BDS-115 is one Stage 3 evidence-currentness defect; its prior missing-evidence symptom is not counted separately. Ordinary local test setup and fixture corrections are not pipeline error clusters.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2691,6 +2691,7 @@
             "BDS-112",
             "BDS-113",
             "BDS-114",
+            "BDS-115",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2712,9 +2713,9 @@
           "summary": "Ten nondeterministic quality clusters improved automatically. The prior nine remain; attempt 12 corrected the positive challenge predicate and primary support set in the same author session, removing the prior eight dependent findings and enabling runner-owned proof generation. The subsequent persistence corrections were supervisor code interventions, not automatic model corrections."
         },
         "supervisor_interventions": {
-          "count": 40,
+          "count": 41,
           "count_kind": "deduplicated_clusters",
-          "summary": "Forty deduplicated interventions are counted. The prior 36 remain; the exact BDS-113 replay, corrected Stage 3 rematerialization, BDS-114 production-boundary correction, and completed Stage 4 no-change disposition were added. Preflight retries, the helper's false contract assertion, and cascading verifier codes are not multiplied into separate intervention clusters.",
+          "summary": "Forty-one deduplicated interventions are counted. The prior forty remain; BDS-115 adds one evidence-currentness correction covering diagnosis, code, tests, and exact real-case projection. No model turn, stage rerun, or full-cycle restart is counted for that model-free correction.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2755,12 +2756,13 @@
             "stage3_canonical_persistence_model_free_replay",
             "stage3_terminal_rematerialization_after_BDS113",
             "BDS-114",
-            "stage4_no_change_disposition"
+            "stage4_no_change_disposition",
+            "BDS-115"
           ]
         },
-        "next_action": "Advance the next bounded canonical case from the accepted Stage 1/2 graph through Stage 3 and its correct downstream disposition without restarting the cycle.",
+        "next_action": "Run the Docker-shell case from its preserved Stage 3 frontier on the verified three-atom assignment, then advance only as far as its evidence-supported disposition without restarting Stage 1/2.",
         "tone": "warn",
-        "data_quality": "The cumulative case research history records 12 Terra author calls. BDS-113 replay receipt SHA 31B20563... records 69.751 seconds, zero additional model calls, unchanged source custody, and signed-in ChatGPT provenance; direct downstream verification returned no errors. Corrected production Stage 3 receipt SHA 861EE10B... records successful rematerialization without another author call. Final Stage 4 receipt SHA A75C2B49... records 6.833 seconds, not_required, zero Stage 4 options/model calls, unchanged source hashes, 24 input/output cases, and no Stage 5/6/export/ticket/implementation/Docker action.",
+        "data_quality": "The cumulative Windows research history records 12 Terra author calls; later replay/rematerialization added zero. The Docker-shell Stage 3 assignment is model-free current-state evidence, not a completed research result: assignment SHA 6aeb6207... binds the current aggregate, both source occurrences, and one explicit historical currentness alias. The complete 21-test workflow module and exact accepted-corpus projection are green. Stage 3 live authoring remains pending.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_prepare_c1b44df8_20260717",

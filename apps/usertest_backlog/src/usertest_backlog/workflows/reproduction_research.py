@@ -1,6 +1,7 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from backlog_core import (
@@ -41,6 +42,9 @@ from usertest_backlog.workflows.post_research_relations import (
 )
 
 _REPLAY_EXECUTOR_MODES = frozenset({"blocked", "docker", "platform_router", "trusted_host"})
+_OPERATIONAL_CANDIDATE_ID_RE = re.compile(
+    r"^operational_failure:(?P<signature>[0-9a-f]{64}):(?P<occurrence_set>[0-9a-f]{64})$"
+)
 
 # Canonical run-local context that Stage 3 hashes for every assigned origin atom.
 # Qualification source custody imports the same declaration; keep this as the single
@@ -466,6 +470,70 @@ def _expand_operational_candidate_evidence(
     return expanded_ids, occurrence_ids, errors
 
 
+def _select_current_operational_candidate_evidence(
+    *,
+    evidence_atom_ids: list[str],
+    atoms_by_id: Mapping[str, dict[str, Any]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Use the one verified current revision of a cited operational aggregate.
+
+    An operational candidate's stable failure signature identifies the case while its
+    second identity component identifies the exact occurrence-set revision.  The durable
+    case graph intentionally retains prior revision IDs, but a later atom corpus contains
+    only the currently materialized aggregate.  Requiring every historical revision to be
+    rematerialized makes an expanded occurrence set look like missing evidence and parks
+    Stage 3 before research can begin.
+
+    This adapter is deliberately narrow.  It replaces a missing prior revision only when
+    the same problem record already cites exactly one available candidate with the same
+    authenticated stable signature.  Different signatures, invalid receipts, and multiple
+    available revisions remain unresolved and therefore keep the assignment incomplete.
+    The returned alias records make the active/historical boundary explicit and hash-bound;
+    the historical atom ID remains in the durable case graph.
+    """
+
+    available_by_signature: dict[str, list[str]] = {}
+    for atom_id in evidence_atom_ids:
+        atom = atoms_by_id.get(atom_id)
+        match = _OPERATIONAL_CANDIDATE_ID_RE.fullmatch(atom_id)
+        if (
+            atom is None
+            or match is None
+            or atom.get("source") != "operational_failure_candidate"
+            or operational_candidate_receipt_errors(atom)
+        ):
+            continue
+        signature = match.group("signature")
+        if atom.get("operational_candidate_signature") != signature:
+            continue
+        available_by_signature.setdefault(signature, [])
+        if atom_id not in available_by_signature[signature]:
+            available_by_signature[signature].append(atom_id)
+
+    selected_ids: list[str] = []
+    aliases: list[dict[str, str]] = []
+    for atom_id in evidence_atom_ids:
+        selected_id = atom_id
+        if atom_id not in atoms_by_id:
+            match = _OPERATIONAL_CANDIDATE_ID_RE.fullmatch(atom_id)
+            if match is not None:
+                signature = match.group("signature")
+                available = available_by_signature.get(signature, [])
+                if len(available) == 1:
+                    selected_id = available[0]
+                    aliases.append(
+                        {
+                            "historical_atom_id": atom_id,
+                            "current_atom_id": selected_id,
+                            "candidate_signature": signature,
+                            "authority": ("verified_cited_operational_candidate_signature"),
+                        }
+                    )
+        if selected_id not in selected_ids:
+            selected_ids.append(selected_id)
+    return selected_ids, aliases
+
+
 def _initial_research_evidence_roles(
     evidence_atom_ids: list[str],
     *,
@@ -519,11 +587,7 @@ def _provisional_same_cause_source_evidence(
         if not isinstance(value, list):
             return []
         return list(
-            dict.fromkeys(
-                item.strip()
-                for item in value
-                if isinstance(item, str) and item.strip()
-            )
+            dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
         )
 
     record_case_ids = strings(problem_record.get("case_identity_candidate_ids"))
@@ -546,12 +610,8 @@ def _provisional_same_cause_source_evidence(
     for facet in facets:
         facet_case_raw = facet.get("case_id")
         facet_problem_raw = facet.get("problem_id")
-        facet_case_id = (
-            facet_case_raw.strip() if isinstance(facet_case_raw, str) else ""
-        )
-        facet_problem_id = (
-            facet_problem_raw.strip() if isinstance(facet_problem_raw, str) else ""
-        )
+        facet_case_id = facet_case_raw.strip() if isinstance(facet_case_raw, str) else ""
+        facet_problem_id = facet_problem_raw.strip() if isinstance(facet_problem_raw, str) else ""
         if not facet_problem_id:
             errors.append(
                 f"provisional_same_cause_facet_problem_missing:{facet_case_id or '(missing)'}"
@@ -567,15 +627,11 @@ def _provisional_same_cause_source_evidence(
 
     if errors:
         return [], list(
-            dict.fromkeys(
-                f"provisional_same_cause_group_invalid:{error}" for error in errors
-            )
+            dict.fromkeys(f"provisional_same_cause_group_invalid:{error}" for error in errors)
         )
 
     evidence_atom_ids = [
-        atom_id
-        for facet in facets
-        for atom_id in strings(facet.get("source_evidence_atom_ids"))
+        atom_id for facet in facets for atom_id in strings(facet.get("source_evidence_atom_ids"))
     ]
     return list(dict.fromkeys(evidence_atom_ids)), []
 
@@ -786,6 +842,12 @@ def _build_selected_research_payloads(
         )
         evidence_ids.extend(provisional_member_evidence_ids)
         evidence_ids = list(dict.fromkeys(evidence_ids))
+        evidence_ids, operational_candidate_currentness_aliases = (
+            _select_current_operational_candidate_evidence(
+                evidence_atom_ids=evidence_ids,
+                atoms_by_id=atoms_by_id,
+            )
+        )
         case_evidence_ids, occurrence_evidence_ids = _initial_research_evidence_roles(
             evidence_ids,
             atoms_by_id=atoms_by_id,
@@ -816,6 +878,11 @@ def _build_selected_research_payloads(
                     atom_id
                     for atom_id in [*derived_ids, *all_evidence_ids]
                     if atom_id not in set(evidence_ids)
+                    and atom_id
+                    not in {
+                        alias["historical_atom_id"]
+                        for alias in operational_candidate_currentness_aliases
+                    }
                 ]
             )
         )
@@ -846,6 +913,9 @@ def _build_selected_research_payloads(
         assignment["provisional_same_cause_member_evidence_atom_ids"] = list(
             provisional_member_evidence_ids
         )
+        assignment["operational_candidate_currentness_aliases"] = list(
+            operational_candidate_currentness_aliases
+        )
         missing_evidence_atom_ids.extend(assignment_missing)
         missing_evidence_atom_ids = list(dict.fromkeys(missing_evidence_atom_ids))
         assignment_errors = [
@@ -865,6 +935,9 @@ def _build_selected_research_payloads(
                 "occurrence_evidence_atom_ids": occurrence_evidence_ids,
                 "provisional_same_cause_member_evidence_atom_ids": (
                     provisional_member_evidence_ids
+                ),
+                "operational_candidate_currentness_aliases": (
+                    operational_candidate_currentness_aliases
                 ),
                 "evidence_lineage_errors": evidence_lineage_errors,
                 "missing_evidence_atom_ids": missing_evidence_atom_ids,
@@ -946,10 +1019,9 @@ def _build_authenticated_stage3_single_case_prefix(
         raise ValueError("stage3_prefix_import_problem_order_mismatch")
     if dossier.get("case_id") != expected.get("case_id"):
         raise ValueError("stage3_prefix_import_case_mismatch")
-    if (
-        _persisted_source_evidence_assignment_sha256(dossier_assignment)
-        != _source_evidence_assignment_sha256(expected_assignment)
-    ):
+    if _persisted_source_evidence_assignment_sha256(
+        dossier_assignment
+    ) != _source_evidence_assignment_sha256(expected_assignment):
         raise ValueError("stage3_prefix_import_assignment_mismatch")
     if dossier.get("repo_revision") != resolved_repo_ref:
         raise ValueError("stage3_prefix_import_revision_mismatch")

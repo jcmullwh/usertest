@@ -19,6 +19,47 @@ from runner_core import RunnerConfig
 import usertest_backlog.workflows.reproduction_research as mod
 
 
+def _operational_test_record(run_id: str) -> dict[str, Any]:
+    return {
+        "run_rel": run_id,
+        "status": "error",
+        "agent_exit_code": 1,
+        "target_ref": {
+            "mission_id": "implement_maintenance_backlog_ticket_v1",
+            "report_schema_path": "configs/report_schemas/troubleshoot_v1.schema.json",
+        },
+        "error": {
+            "type": "AgentExecFailed",
+            "subtype": "disk_full",
+            "exit_code": 1,
+        },
+        "metrics": {},
+        "report_validation_errors": [],
+        "terminal_artifact_reads": {},
+    }
+
+
+def _operational_test_atom(run_id: str) -> dict[str, Any]:
+    return {
+        "atom_id": f"{run_id}:run_failure_event:1",
+        "run_id": run_id,
+        "run_rel": run_id,
+        "run_dir": f"runs/{run_id}",
+        "origin_run_id": run_id,
+        "source": "run_failure_event",
+        "text": "No space left on device while writing the implementation workspace.",
+        "status": "error",
+        "evidence_class": "observed",
+        "evidence_role": "implementation",
+        "origin_stage": "implementation",
+        "parent_case_id": None,
+        "case_id": None,
+        "supporting_case_ids": [],
+        "disposition": "unresolved",
+        "disposition_status": "pending",
+    }
+
+
 def test_provisional_same_cause_research_receives_every_member_source_atom(
     tmp_path: Path,
 ) -> None:
@@ -151,8 +192,7 @@ def test_inconsistent_provisional_same_cause_evidence_blocks_assignment(
     assert selected["provisional_same_cause_member_evidence_atom_ids"] == []
     assert selected["evidence_assignment"]["status"] == "incomplete"
     assert "atom:injected" not in {
-        receipt["atom_id"]
-        for receipt in selected["evidence_assignment"]["atom_receipts"]
+        receipt["atom_id"] for receipt in selected["evidence_assignment"]["atom_receipts"]
     }
     assert any(
         error.startswith("provisional_same_cause_group_invalid:")
@@ -348,6 +388,137 @@ def test_operational_candidate_research_receives_underlying_occurrence_evidence(
         [raw_atom_id],
         "recovered_operational_aggregate_v1",
     )
+
+
+def test_missing_operational_revision_uses_one_verified_cited_current_aggregate(
+    tmp_path: Path,
+) -> None:
+    first_run = "implementation/currentness/one"
+    second_run = "implementation/currentness/two"
+    first_atom = _operational_test_atom(first_run)
+    second_atom = _operational_test_atom(second_run)
+    [historical_candidate] = build_operational_failure_candidates(
+        [_operational_test_record(first_run)],
+        [first_atom],
+    )
+    [current_candidate] = build_operational_failure_candidates(
+        [_operational_test_record(first_run), _operational_test_record(second_run)],
+        [first_atom, second_atom],
+    )
+    historical_id = str(historical_candidate["atom_id"])
+    current_id = str(current_candidate["atom_id"])
+    signature = str(current_candidate["operational_candidate_signature"])
+
+    [selected] = mod._build_selected_research_payloads(
+        repo_root=tmp_path,
+        selected_priority_decisions=[{"problem_id": "problem:disk-full"}],
+        problem_records=[
+            {
+                "case_id": "case:disk-full",
+                "problem_id": "problem:disk-full",
+                "evidence_atom_ids": [historical_id, current_id],
+                "source_evidence_atom_ids": [historical_id, current_id],
+            }
+        ],
+        # The durable case graph retains historical_id, while this cycle's atom
+        # corpus contains only the expanded current aggregate and its occurrences.
+        atoms=[current_candidate, first_atom, second_atom],
+    )
+
+    expected_occurrences = sorted([str(first_atom["atom_id"]), str(second_atom["atom_id"])])
+    expected_alias = {
+        "historical_atom_id": historical_id,
+        "current_atom_id": current_id,
+        "candidate_signature": signature,
+        "authority": "verified_cited_operational_candidate_signature",
+    }
+    assert selected["expected_evidence_atom_ids"] == [current_id, *expected_occurrences]
+    assert selected["case_evidence_atom_ids"] == [current_id]
+    assert selected["occurrence_evidence_atom_ids"] == expected_occurrences
+    assert selected["missing_evidence_atom_ids"] == []
+    assert selected["derived_evidence_atom_ids"] == []
+    assert selected["operational_candidate_currentness_aliases"] == [expected_alias]
+    assignment = selected["evidence_assignment"]
+    assert assignment["status"] == "complete"
+    assert assignment["errors"] == []
+    assert assignment["operational_candidate_currentness_aliases"] == [expected_alias]
+    assert assignment["assignment_sha256"] == mod.evidence_assignment_sha256(assignment)
+
+
+def test_missing_operational_revision_is_not_replaced_by_a_different_signature(
+    tmp_path: Path,
+) -> None:
+    historical_run = "implementation/currentness/historical"
+    other_run = "implementation/currentness/other"
+    historical_atom = _operational_test_atom(historical_run)
+    other_atom = _operational_test_atom(other_run)
+    [historical_candidate] = build_operational_failure_candidates(
+        [_operational_test_record(historical_run)],
+        [historical_atom],
+    )
+    other_record = _operational_test_record(other_run)
+    other_record["error"] = {
+        "type": "AgentConfigInvalid",
+        "subtype": "invalid_agent_config",
+        "code": "codex_model_messages_missing",
+    }
+    [other_candidate] = build_operational_failure_candidates(
+        [other_record],
+        [other_atom],
+    )
+    historical_id = str(historical_candidate["atom_id"])
+    other_id = str(other_candidate["atom_id"])
+
+    [selected] = mod._build_selected_research_payloads(
+        repo_root=tmp_path,
+        selected_priority_decisions=[{"problem_id": "problem:disk-full"}],
+        problem_records=[
+            {
+                "case_id": "case:disk-full",
+                "problem_id": "problem:disk-full",
+                "source_evidence_atom_ids": [historical_id, other_id],
+            }
+        ],
+        atoms=[other_candidate, other_atom],
+    )
+
+    assert selected["operational_candidate_currentness_aliases"] == []
+    assert selected["evidence_assignment"]["status"] == "incomplete"
+    assert selected["missing_evidence_atom_ids"] == [historical_id]
+    assert (
+        f"origin_evidence_unavailable:{historical_id}" in selected["evidence_assignment"]["errors"]
+    )
+
+
+def test_missing_operational_revision_remains_blocked_when_current_revision_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    runs = [f"implementation/currentness/{index}" for index in range(1, 4)]
+    records = [_operational_test_record(run_id) for run_id in runs]
+    atoms = [_operational_test_atom(run_id) for run_id in runs]
+    [historical_candidate] = build_operational_failure_candidates(records[:1], atoms[:1])
+    [two_occurrence_candidate] = build_operational_failure_candidates(records[:2], atoms[:2])
+    [three_occurrence_candidate] = build_operational_failure_candidates(records, atoms)
+    historical_id = str(historical_candidate["atom_id"])
+    two_id = str(two_occurrence_candidate["atom_id"])
+    three_id = str(three_occurrence_candidate["atom_id"])
+
+    [selected] = mod._build_selected_research_payloads(
+        repo_root=tmp_path,
+        selected_priority_decisions=[{"problem_id": "problem:disk-full"}],
+        problem_records=[
+            {
+                "case_id": "case:disk-full",
+                "problem_id": "problem:disk-full",
+                "source_evidence_atom_ids": [historical_id, two_id, three_id],
+            }
+        ],
+        atoms=[two_occurrence_candidate, three_occurrence_candidate, *atoms],
+    )
+
+    assert selected["operational_candidate_currentness_aliases"] == []
+    assert selected["evidence_assignment"]["status"] == "incomplete"
+    assert selected["missing_evidence_atom_ids"] == [historical_id]
 
 
 def test_split_child_research_receives_authenticated_original_occurrence_not_facet_prose(

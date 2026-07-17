@@ -11,7 +11,9 @@ import pytest
 
 
 def _load_module() -> ModuleType:
-    module_path = Path(__file__).resolve().parents[1] / "update_backlog_depth_dashboard.py"
+    module_path = (
+        Path(__file__).resolve().parents[1] / "update_backlog_depth_dashboard.py"
+    )
     spec = importlib.util.spec_from_file_location(
         "update_backlog_depth_dashboard", module_path
     )
@@ -245,9 +247,9 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["rework"]["continuation_launches"] == 13
     assert current["rework"]["stage_reruns"] == 4
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 28
+    assert current["errors"]["count"] == 29
     assert current["automatic_self_corrections"]["count"] == 10
-    assert current["supervisor_interventions"]["count"] == 40
+    assert current["supervisor_interventions"]["count"] == 41
 
     rendered = mod._render_dashboard(dashboard)
     html_text = mod.DEFAULT_HTML.read_text(encoding="utf-8")
@@ -275,9 +277,7 @@ def test_lifecycle_requires_unique_identity_and_rework() -> None:
     missing_rework = _run("current")
     missing_rework.pop("rework")
     with pytest.raises(mod.DashboardContractError, match=r"runs\[0\]\.rework"):
-        mod.validate_dashboard(
-            _dashboard(missing_rework), source_ids={"source-1"}
-        )
+        mod.validate_dashboard(_dashboard(missing_rework), source_ids={"source-1"})
 
 
 def test_deduplicated_cluster_ids_must_be_unique_and_match_count() -> None:
