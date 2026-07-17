@@ -180,6 +180,21 @@ def _restore_sealed_qualification_lineage(
     )
 
 
+def _qualification_case_registry_seed_path(
+    qualification_input_bundle: Mapping[str, Any],
+) -> Path:
+    """Return the verified sealed registry seed used for the entire execution."""
+
+    bundle_source = qualification_input_bundle.get("source_inputs")
+    bundle_source = bundle_source if isinstance(bundle_source, Mapping) else {}
+    registry_receipt = bundle_source.get("case_registry_seed")
+    registry_receipt = registry_receipt if isinstance(registry_receipt, Mapping) else {}
+    registry_seed_raw = _coerce_string(registry_receipt.get("path"))
+    if registry_seed_raw is None:
+        raise ValueError("Qualification input bundle is missing its registry seed.")
+    return Path(registry_seed_raw).resolve()
+
+
 def _qualification_correction_identity(
     *,
     source_pending_run_sha256: str,
@@ -6225,11 +6240,18 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             return 2
     try:
         registry_seed_raw = getattr(args, "qualification_case_registry_seed", None)
-        registry_source = (
-            registry_seed_raw.expanduser().resolve()
-            if qualification_prepare and isinstance(registry_seed_raw, Path)
-            else case_registry_json
-        )
+        if qualification_input_bundle is not None:
+            # A sealed execution must begin with the sealed historical graph.  Outcome
+            # reconciliation may then materialize authenticated cases that are absent
+            # from that older seed.  Loading the seed only after reconciliation would
+            # silently discard those cases immediately before atom-lineage restoration.
+            registry_source = _qualification_case_registry_seed_path(
+                qualification_input_bundle
+            )
+        elif qualification_prepare and isinstance(registry_seed_raw, Path):
+            registry_source = registry_seed_raw.expanduser().resolve()
+        else:
+            registry_source = case_registry_json
         case_registry = load_case_registry(registry_source)
     except ValueError as exc:
         print(f"[backlog] ERROR: {exc}", file=sys.stderr)
@@ -7003,19 +7025,13 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             if isinstance(bundled_atoms_raw, list)
             else []
         )
-        bundle_source = qualification_input_bundle.get("source_inputs")
-        bundle_source = bundle_source if isinstance(bundle_source, Mapping) else {}
-        registry_receipt = bundle_source.get("case_registry_seed")
-        registry_receipt = registry_receipt if isinstance(registry_receipt, Mapping) else {}
-        registry_seed_path = _coerce_string(registry_receipt.get("path"))
-        if registry_seed_path is None:
-            print("Qualification input bundle is missing its registry seed.", file=sys.stderr)
-            return 2
         try:
-            case_registry = load_case_registry(Path(registry_seed_path))
-            if preexisting_stage3_resume_document is None:
-                write_case_registry(case_registry_json, case_registry)
-        except (OSError, ValueError) as exc:
+            registry_seed_path = _qualification_case_registry_seed_path(
+                qualification_input_bundle
+            )
+            if registry_seed_path != registry_source:
+                raise ValueError("qualification registry seed changed during execution")
+        except ValueError as exc:
             print(f"[backlog] ERROR: qualification registry seed invalid: {exc}", file=sys.stderr)
             return 2
         # The qualification bundle deliberately stores decision-free evidence so its

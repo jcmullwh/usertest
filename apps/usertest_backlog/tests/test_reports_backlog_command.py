@@ -588,6 +588,31 @@ def test_qualification_execution_restores_sealed_case_membership_before_mining()
     assert eligible_problem_mining_atoms(restored) == []
 
 
+def test_qualification_execution_selects_the_sealed_registry_seed_before_sync(
+    tmp_path: Path,
+) -> None:
+    seed = tmp_path / "custody" / "case_registry_seed.json"
+    seed.parent.mkdir(parents=True)
+    seed.write_text('{"schema_version": 1, "cases": {}}\n', encoding="utf-8")
+
+    selected = staged_module._qualification_case_registry_seed_path(
+        {
+            "source_inputs": {
+                "case_registry_seed": {
+                    "path": str(seed),
+                }
+            }
+        }
+    )
+
+    assert selected == seed.resolve()
+
+
+def test_qualification_execution_requires_a_sealed_registry_seed() -> None:
+    with pytest.raises(ValueError, match="missing its registry seed"):
+        staged_module._qualification_case_registry_seed_path({"source_inputs": {}})
+
+
 def test_shadow_pipeline_rejects_invalid_export_gate_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
