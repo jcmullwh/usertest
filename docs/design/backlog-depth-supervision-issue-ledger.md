@@ -636,6 +636,23 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Required correction: checkpoint the verified pipeline into source control and run sealed qualification from a clean, immutable execution worktree at that exact commit. Bind the new qualification bundle and cycle to that execution root. Preserve the accepted Stage-3 proof through the authenticated prefix-import contract, with exact case/evidence/repository compatibility and no author rerun. Continue maintaining the dashboard in the development worktree so reporting cannot invalidate execution custody.
 - Closure proof: the clean execution root has the recorded commit at `HEAD`, empty tracked status, and a valid current qualification bundle; the accepted prefix imports with unchanged source evidence and verified native lineage; sealed resume reaches deterministic Stage 4 `not_required`, empty Stages 5-6, no ticket/model work for this case, and the case parks at `await_evidence` before case two dispatch.
 
+### BDS-099 - Qualification Git probes could not read an exact cross-volume execution worktree
+
+- Status: `focused_correction_green_new_execution_root_pending`
+- Priority: current-cycle mechanics and execution custody
+- Objective impact: BDS-098 requires qualification to run from an immutable worktree on `U:`, but qualification's private Git helper used ordinary `git -C` calls. Git for Windows rejected that worktree because its administrative directory is on `I:` and `U:` does not record ownership. Without correction, the clean-execution design would fail before qualification preparation despite valid repository custody.
+- Exact evidence: `git worktree add --detach U:\usertest_backlog_qualification\execution_roots\89331298 89331298` created the worktree, after which ordinary `git -C` verification failed with `detected dubious ownership`. The same exact root returned head `8933129870238a43baadccfd79b255eb7af7acdd` and an empty tracked status when invoked with command-local `-c safe.directory=U:/usertest_backlog_qualification/execution_roots/89331298`. No global Git configuration was changed, and the first execution root remains in place.
+- Correction: qualification Git probes now add only the exact resolved repository path through command-local `git -c safe.directory=<path> -C <path> ...`, matching the existing target-acquisition and outcome-verification security boundary. A direct argv regression proves the exact command, and a real cross-volume probe proves the helper reads the expected head and clean status.
+- Current verification: the focused regression and direct real `U:` helper probe pass. The complete qualification-transaction module then passed 22/22 in 336.1 seconds from a short Windows pytest base path; Ruff and diff checks pass. AN-04 records the superseded long-path harness failure separately.
+- Closure proof: the corrected implementation is committed; a new detached `U:` execution root at that commit returns the exact head and empty tracked status through the qualification helper; qualification preparation proceeds past repository Git binding without a global trust mutation.
+
+### AN-04 - Deep pytest base path exceeded Git for Windows fixture path capacity
+
+- Status: `closed_environment_rerun_green`
+- Classification: one test-environment anomaly, not a qualification product defect
+- Exact evidence: the first complete `test_qualification_transaction.py` run stopped after 12 passes in 178.8 seconds while fixture `_repo()` executed `git add .` beneath `I:\code\usertest_backlog_depth\.tmp\component_validation\runtime_tmp\pytest-of-jason\...`. Git failed opening the fixture copy's deeply nested sandbox `install_manifests.sh`; the focused BDS-099 test and real cross-volume helper probe had already passed.
+- Containment and result: no product code was changed for the anomaly. The same complete module reran with a fresh shorter `--basetemp I:\code\.qtx97b` and passed 22/22 in 336.1 seconds. The failed run remains one anomaly and the successful rerun remains one validation run; neither is counted as multiple defects or a pipeline-stage restart.
+
 ### BDS-082 - Attempt-14 preflight validated an authored projection as a persisted dossier
 
 - Status: `closed_model_free_preflight`

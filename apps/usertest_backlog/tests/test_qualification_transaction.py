@@ -71,6 +71,32 @@ def _git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def test_qualification_git_uses_exact_command_local_safe_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "cross-volume-worktree"
+    repo.mkdir()
+    observed: list[str] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.extend(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="head\n", stderr="")
+
+    monkeypatch.setattr(transaction_module.subprocess, "run", run)
+
+    assert transaction_module._git_output(repo, "rev-parse", "HEAD") == "head"
+    assert observed == [
+        "git",
+        "-c",
+        f"safe.directory={repo.resolve().as_posix()}",
+        "-C",
+        str(repo),
+        "rev-parse",
+        "HEAD",
+    ]
+
+
 def _repo(tmp_path: Path, name: str = "repo") -> tuple[Path, str]:
     repo = tmp_path / name
     (repo / "apps" / "usertest_backlog" / "src").mkdir(parents=True)

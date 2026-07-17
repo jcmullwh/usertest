@@ -4,7 +4,7 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T02:50:17.0687949Z",
+    "as_of": "2026-07-17T03:05:55.5124993Z",
     "current_run_id": "stage3-attempt17-running-223416",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
@@ -29,7 +29,7 @@
       {
         "label": "Next delivery gate",
         "value": "Stabilize execution revision; route no-change",
-        "detail": "Checkpoint the verified pipeline, run qualification from a clean immutable execution worktree, carry the accepted prefix forward through authenticated custody, then execute the deterministic no-change route and continue case 2",
+        "detail": "Commit the exact cross-volume Git correction, create a clean execution worktree at that revision, seal the same evidence corpus there, carry the accepted prefix forward, then execute no-change routing and continue case 2",
         "tone": "warn"
       }
     ],
@@ -2365,18 +2365,18 @@
         "timing": {
           "start_at": "2026-07-16T16:58:38.578029Z",
           "end_at": null,
-        "elapsed_seconds": 35498.4907659,
+        "elapsed_seconds": 36436.9344703,
           "coverage": "active",
-        "display": "9 h 51 m 38.00 s as of 02:50:17Z",
+        "display": "10 h 7 m 16.00 s as of 03:05:55Z",
           "note": "Observed lifecycle wall time from the first Stage 3 launch through the current import-provenance correction. Supporting records retain every attempt, replay, test, and orchestration interval."
         },
       "furthest_stage": "Stage 3 accepted and canonically imported; sealed resume blocked by stale development-worktree binding",
-      "current_state": "Research accepted: evidence_sufficient / already_addressed at code-and-test level; live behavior remains unverified. The canonical authenticated import completed one of 21 cases with zero model or stage reruns. A full 1,583.3-second bundle verification found only three related pipeline-binding mismatches: pipeline files, Git-status digest, and runtime compatibility changed. Protected source evidence remained valid. Stage 4+ is idle while the verified implementation is checkpointed into a clean immutable execution worktree.",
+      "current_state": "Research accepted: evidence_sufficient / already_addressed at code-and-test level; live behavior remains unverified. The first clean execution root exposed BDS-099: qualification Git probes lacked exact command-local trust on cross-volume worktrees. The general helper correction, direct argv regression, real U: head and clean-status probes, and the complete 22-test qualification-transaction module now pass. AN-04 records one superseded long-path fixture failure; the 336.1-second short-path rerun is green. Stage 4+ remains idle pending the corrected immutable execution checkpoint.",
         "outcome": "Research accepted; no implementation required; live behavior unverified",
         "errors": {
-        "count": 34,
+        "count": 36,
           "count_kind": "deduplicated_clusters",
-        "summary": "Thirty material research-quality, controller, evaluator, and workflow defects, three run anomalies, and one recovered receipt-instrumentation defect. BDS-098 is one sealed pipeline-binding gap despite three related verifier messages. The 49 prior Git setup failures remain one AN-03 cluster; the separate BDS-086 efficiency defect is excluded.",
+        "summary": "Thirty-one material research-quality, controller, evaluator, and workflow defects, four run anomalies, and one recovered receipt-instrumentation defect. BDS-098 is one sealed pipeline-binding gap despite three related verifier messages; BDS-099 is one cross-volume Git-helper defect. AN-04 is one superseded test-path anomaly; BDS-086 is excluded.",
           "cluster_ids": [
             "RQ-01",
             "RQ-02",
@@ -2411,7 +2411,9 @@
         "AN-03",
           "BDS-096",
           "BDS-097",
-          "BDS-098"
+          "BDS-098",
+          "BDS-099",
+          "AN-04"
           ]
         },
         "automatic_self_corrections": {
@@ -2426,9 +2428,9 @@
           ]
         },
         "supervisor_interventions": {
-        "count": 26,
+        "count": 28,
           "count_kind": "deduplicated_clusters",
-        "summary": "Twenty-three material supervision clusters, the bounded BDS-086 efficiency cleanup, AN-03 test-environment recovery, and the nonblocking BDS-097 receipt correction. BDS-098 changes execution custody, not dossier claims, and no intervention restarted the author.",
+        "summary": "Twenty-four material supervision clusters, the bounded BDS-086 efficiency cleanup, two test-environment recoveries (AN-03 and AN-04), and the nonblocking BDS-097 receipt correction. BDS-098 and BDS-099 change execution custody, not dossier claims, and no intervention restarted the author.",
           "cluster_ids": [
             "BDS-077",
             "BDS-078",
@@ -2455,12 +2457,14 @@
         "AN-03",
           "BDS-096",
           "BDS-097",
-          "BDS-098"
+          "BDS-098",
+          "BDS-099",
+          "AN-04"
           ]
         },
-      "next_action": "Create a verified source checkpoint and clean immutable execution worktree, seal the same evidence corpus against that revision, carry forward the authenticated Stage 3 prefix, then execute the deterministic no-change route without another author turn.",
+      "next_action": "Commit the BDS-099 command-local Git correction, create and verify a clean immutable U: execution root at that exact commit, then seal the corpus and carry forward the authenticated Stage 3 prefix without another author turn.",
         "tone": "warn",
-      "data_quality": "Author receipt SHA 6B793479...; authored candidate SHA cc7be3b2... unchanged; accepted replay dossier SHA 49d8de88... and receipt SHA bf25923c...; persisted-evidence replay 494.117582 seconds with 4/4 required reads; combined affected suite 621 passed and one expected skip in 376.708514 seconds; canonical import receipt SHA 2AA1039C..., duration 18.832644 seconds, manifest 51ed7053...; full bundle verification 1,583.3 seconds with only the three BDS-098 pipeline-binding findings",
+      "data_quality": "Author receipt SHA 6B793479...; authored candidate SHA cc7be3b2... unchanged; persisted-evidence replay 494.117582 seconds with 4/4 required reads; combined affected suite 621 passed and one expected skip in 376.708514 seconds; canonical import receipt SHA 2AA1039C..., duration 18.832644 seconds, manifest 51ed7053...; full bundle verification 1,583.3 seconds with only BDS-098 findings; BDS-099 full module 22/22 in 336.1 seconds after one AN-04 path rerun",
         "source_ids": [
           "stage3_attempt17_running_223416",
           "stage3_attempt17_bds091_full_suite_231122",

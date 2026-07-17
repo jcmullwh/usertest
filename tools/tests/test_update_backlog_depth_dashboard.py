@@ -245,9 +245,9 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["rework"]["continuation_launches"] == 5
     assert current["rework"]["stage_reruns"] == 5
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 34
+    assert current["errors"]["count"] == 36
     assert current["automatic_self_corrections"]["count"] == 4
-    assert current["supervisor_interventions"]["count"] == 26
+    assert current["supervisor_interventions"]["count"] == 28
 
     rendered = mod._render_dashboard(dashboard)
     html_text = mod.DEFAULT_HTML.read_text(encoding="utf-8")

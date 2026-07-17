@@ -571,8 +571,16 @@ def _protected_path_manifest(path: Path, *, name: str) -> dict[str, Any]:
 
 
 def _git_output(repo: Path, *args: str) -> str:
+    safe_directory = repo.expanduser().resolve().as_posix()
     completed = subprocess.run(
-        ["git", "-C", str(repo), *args],
+        [
+            "git",
+            "-c",
+            f"safe.directory={safe_directory}",
+            "-C",
+            str(repo),
+            *args,
+        ],
         check=False,
         capture_output=True,
         text=True,
