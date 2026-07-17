@@ -1936,6 +1936,7 @@ def test_stage_contract_rejects_unbound_wrong_value_correction(tamper: str) -> N
     ("match_kind", "binding_role", "field_path"),
     [
         ("explicit_symptom_field_binding", "symptom", "$.exit_code"),
+        ("explicit_symptom_field_predicate_declaration", "symptom", "$.text"),
         ("explicit_command_field_binding", "command", "$.command"),
         ("explicit_corroborating_field_binding", "corroborating", "$.text"),
         ("explicit_context_field_binding", "context", "$.text"),

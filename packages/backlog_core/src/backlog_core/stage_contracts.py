@@ -3845,6 +3845,7 @@ def _derived_causal_root_bindings(
         "command_and_artifact_symptom_text",
         "faithful_artifact_symptom_text",
         "explicit_symptom_field_binding",
+        "explicit_symptom_field_predicate_declaration",
     }
     valid_symptom_bindings: list[dict[str, Any]] = []
     for binding in symptom_bindings:
@@ -7713,6 +7714,7 @@ def _validate_evidence_verification(item: dict[str, Any], *, pid: str) -> list[s
         }
         explicit_binding_roles = {
             "explicit_symptom_field_binding": "symptom",
+            "explicit_symptom_field_predicate_declaration": "symptom",
             "explicit_command_field_binding": "command",
             "explicit_corroborating_field_binding": "corroborating",
             "explicit_context_field_binding": "context",
