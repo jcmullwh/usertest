@@ -210,6 +210,30 @@ def lint_problem_miner_prompts_no_solution_fields(*, repo_root: Path) -> list[st
     return errors
 
 
+def lint_problem_miner_origin_index_read_order(*, repo_root: Path) -> list[str]:
+    """Require the Stage-1 miner to read both origin indexes in manifest order."""
+
+    path = repo_root / "configs" / "backlog_prompts" / "problem_miner_default.md"
+    if not path.exists():
+        return [f"missing_prompt: {path}"]
+
+    text = _read_text(path)
+    fields = (
+        "origin_attachment_evidence.manifest_file",
+        "run_context.index_file",
+        "assigned_evidence.index_file",
+    )
+    missing = [field for field in fields if field not in text]
+    if missing:
+        return [
+            f"problem_miner_prompt_missing_origin_index_fields: {path}: "
+            + ", ".join(missing)
+        ]
+    if not (text.index(fields[0]) < text.index(fields[1]) < text.index(fields[2])):
+        return [f"problem_miner_prompt_origin_index_order_invalid: {path}"]
+    return []
+
+
 def lint_repro_research_prompt_anti_implementation(*, repo_root: Path) -> list[str]:
     """Ensure the repro-research prompt states that implementation is not the goal.
 
@@ -434,6 +458,7 @@ def main(argv: list[str] | None = None) -> int:
     errors.extend(lint_miner_prompt_mentions_labeler(repo_root=repo_root))
     errors.extend(lint_stage_prompts_json_only(repo_root=repo_root))
     errors.extend(lint_problem_miner_prompts_no_solution_fields(repo_root=repo_root))
+    errors.extend(lint_problem_miner_origin_index_read_order(repo_root=repo_root))
     errors.extend(lint_repro_research_prompt_anti_implementation(repo_root=repo_root))
     errors.extend(lint_solution_selector_prompt_no_option_invention(repo_root=repo_root))
     errors.extend(lint_stage_prompts_no_banned_optimization_terms(repo_root=repo_root))

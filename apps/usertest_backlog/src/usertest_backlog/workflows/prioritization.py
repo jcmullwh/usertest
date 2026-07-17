@@ -12,6 +12,7 @@ from backlog_miner.prompt_correction import (
 from usertest_backlog.shared import *
 from usertest_backlog.workflows.downstream_hydration import (
     hydrate_retained_downstream_chain,
+    hydrate_retained_no_change_disposition,
 )
 from usertest_backlog.workflows.research_hydration import hydrate_retained_research_proof
 
@@ -25,7 +26,7 @@ _PRIORITY_FORBIDDEN_SOLUTION_FIELDS = frozenset(
     }
 )
 
-_RESEARCH_ROUTE_REVISION = "runner_research_route_v2"
+_RESEARCH_ROUTE_REVISION = "runner_research_route_v3"
 _RESEARCH_DISPATCH_ROUTES = frozenset(
     {"research_new", "research_update", "resume_prior", "reassess_actionability"}
 )
@@ -221,30 +222,56 @@ def _runner_research_route(record: Mapping[str, Any]) -> dict[str, Any]:
         else:
             hydrated, hydration_errors = hydrate_retained_research_proof(record)
             if hydrated is not None and not hydration_errors:
-                downstream_chain, downstream_errors = hydrate_retained_downstream_chain(
+                no_change, no_change_errors = hydrate_retained_no_change_disposition(
                     record,
                     research_dossier=hydrated,
                 )
-                if downstream_chain is not None and not downstream_errors:
-                    route = "await_outcome"
+                if no_change is not None and not no_change_errors:
+                    route = "await_evidence"
                     reason = (
-                        "The exact retained research, option, selection, and plan chain is "
-                        "content-bound, currently ready, and unchanged; no Stage 3-6 model "
-                        "work is needed until outcome or source evidence changes."
+                        "The exact current research proof and its content-bound zero-option "
+                        "Stage-4 disposition agree that no product change is currently "
+                        "required. The case remains nonterminal and waits without repeating "
+                        "Stages 3-6."
                     )
-                else:
+                    reconsider_when = (
+                        "A new source-evidence atom, changed case/source/research revision, "
+                        "or authenticated live-verification evidence changes the recorded "
+                        "frontier."
+                    )
+                elif no_change_errors:
                     route = "continue_downstream"
                     reason = (
-                        "The complete retained Stage-3 dossier is currently ready, but the "
-                        "full downstream chain is absent, stale, or unverified and will "
-                        "self-heal through the normal downstream path. First chain result: "
-                        + (
-                            downstream_errors[0]
-                            if downstream_errors
-                            else "downstream_chain_unavailable"
-                        )
-                        + "."
+                        "The current Stage-3 proof has a no-change actionability disposition, "
+                        "but its retained Stage-4 disposition is absent, stale, or unverified "
+                        "and will be rebuilt through the deterministic downstream path. First "
+                        "result: " + no_change_errors[0] + "."
                     )
+                else:
+                    downstream_chain, downstream_errors = hydrate_retained_downstream_chain(
+                        record,
+                        research_dossier=hydrated,
+                    )
+                    if downstream_chain is not None and not downstream_errors:
+                        route = "await_outcome"
+                        reason = (
+                            "The exact retained research, option, selection, and plan chain is "
+                            "content-bound, currently ready, and unchanged; no Stage 3-6 model "
+                            "work is needed until outcome or source evidence changes."
+                        )
+                    else:
+                        route = "continue_downstream"
+                        reason = (
+                            "The complete retained Stage-3 dossier is currently ready, but the "
+                            "full downstream chain is absent, stale, or unverified and will "
+                            "self-heal through the normal downstream path. First chain result: "
+                            + (
+                                downstream_errors[0]
+                                if downstream_errors
+                                else "downstream_chain_unavailable"
+                            )
+                            + "."
+                        )
             else:
                 route = "research_update"
                 reason = (
@@ -702,7 +729,37 @@ def _run_problem_prioritization_stage(
     correction_cost_since_progress = 0.0
     total_correction_cost = 0.0
 
-    if dry_run:
+    if not problem_records:
+        status = "completed_no_input"
+        correction_status = "not_required"
+        correction_metrics = {
+            "status": "not_required",
+            "reason": "no_problem_records",
+            "not_applicable": True,
+            "attempt_count": 0,
+            "correction_turn_count": 0,
+            "correction_invocation_failure_count": 0,
+            "correction_invocation_failure_cost_seconds": 0.0,
+            "accepted": None,
+            "accepted_good": None,
+            "accepted_bad": None,
+            "false_rejected": None,
+            "repaired": False,
+            "stalled": False,
+            "repairable_paused": False,
+            "initial_cost_seconds": 0.0,
+            "total_correction_cost_seconds": 0.0,
+            "total_elapsed_seconds": 0.0,
+            "best_error_count": 0,
+            "best_valid_item_count": 0,
+        }
+        (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
+        (run_out_dir / f"{tag}.response.txt").write_text(
+            "[skipped] stage-2 prioritizer received no problem records; "
+            "no model invocation was required.\n",
+            encoding="utf-8",
+        )
+    elif dry_run:
         status = "dry_run_heuristic"
         (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
         (run_out_dir / f"{tag}.response.txt").write_text(
@@ -1069,6 +1126,14 @@ def _run_problem_prioritization_stage(
             "prioritizer_attempt_history": correction_attempt_history,
             "prioritizer_correction_cost_since_progress": correction_cost_since_progress,
             "prioritizer_total_correction_cost": total_correction_cost,
+            **(
+                {
+                    "stage_status": "completed",
+                    "model_invocation_skipped": "no_problem_records",
+                }
+                if not problem_records
+                else {}
+            ),
             "prioritizer_fallback_decision_count": sum(
                 1 for decision in decisions if decision.get("model_priority_accepted") is not True
             ),

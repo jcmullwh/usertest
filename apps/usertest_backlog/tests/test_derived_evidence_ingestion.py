@@ -172,6 +172,27 @@ def _derived_record(
     }
 
 
+def _maintenance_cleanup_sidecar() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "cleanup_enabled": True,
+        "dry_run": False,
+        "repos_scanned": [
+            "usertest-maintenance",
+            "ghcr.io/jcmullwh/usertest-maintenance",
+        ],
+        "kept_tags": [
+            "usertest-maintenance:retained-a",
+            "ghcr.io/jcmullwh/usertest-maintenance:retained-a",
+            "usertest-maintenance:retained-b",
+            "ghcr.io/jcmullwh/usertest-maintenance:retained-b",
+        ],
+        "deleted_tags": [],
+        "deleted_image_ids": [],
+        "errors": [],
+    }
+
+
 @pytest.mark.parametrize("target_contract_schema_version", [2, 3])
 def test_direct_verified_parent_and_plan_provenance_are_authoritative(
     tmp_path: Path,
@@ -215,6 +236,92 @@ def test_direct_verified_parent_and_plan_provenance_are_authoritative(
     assert all(atom["derived_source_root_kind"] == "usertest_implement" for atom in result.atoms)
     assert any(atom["evidence_class"] == "proposal" for atom in result.atoms)
     assert eligible_problem_mining_atoms(result.atoms) == []
+
+
+@pytest.mark.parametrize(
+    ("mission_id", "expected_report_role"),
+    [
+        ("implement_backlog_ticket_v1", "implementation"),
+        ("review_backlog_implementation_pr_v1", "verification"),
+    ],
+)
+def test_runner_operational_sidecar_remains_independent_in_derived_history(
+    tmp_path: Path,
+    mission_id: str,
+    expected_report_role: str,
+) -> None:
+    case_id = "case:implementation-parent"
+    record = _derived_record(
+        tmp_path / "runs" / "usertest_implement" / "target_a" / mission_id,
+        ticket_ref=_verified_ticket_ref(
+            case_id=case_id,
+            plan_revision_id="planrev:sha256:" + "6" * 64,
+        ),
+        report={
+            "confusion_points": [
+                {"summary": "Agent-authored report evidence stays bound to its case."}
+            ]
+        },
+        mission_id=mission_id,
+    )
+    record["maintenance_image_cleanup"] = _maintenance_cleanup_sidecar()
+    record["maintenance_image_cleanup_read"] = {
+        "path": "sandbox/maintenance_image_cleanup.json",
+        "exists": True,
+        "decode_ok": True,
+        "parse_ok": True,
+        "error_phase": None,
+        "error_type": None,
+        "error_message": None,
+    }
+    record["maintenance_image_cleanup_artifact_ref"] = {
+        "path": "sandbox/maintenance_image_cleanup.json",
+        "exists": True,
+        "size_bytes": 512,
+        "sha256": "7" * 64,
+    }
+
+    result = ingest_derived_evidence_records(
+        [record],
+        source_root=tmp_path / "runs" / "usertest_implement",
+        repo_root=tmp_path,
+        atom_actions={},
+        case_registry=_case_registry(case_id),
+    )
+
+    observation = next(
+        atom for atom in result.atoms if atom["source"] == "maintenance_image_cleanup"
+    )
+    report_atoms = [
+        atom for atom in result.atoms if atom["source"] != "maintenance_image_cleanup"
+    ]
+    assert report_atoms
+    assert observation["origin_stage"] == "runner_maintenance_image_cleanup"
+    assert observation["evidence_role"] == "observation"
+    assert observation["evidence_class"] == "observed"
+    assert observation["lineage_authorities"] == ["runner_operational_sidecar"]
+    assert observation["parent_case_id"] is None
+    assert observation["case_id"] is None
+    assert observation["supporting_case_ids"] == []
+    assert observation["derived_from_atom_ids"] == []
+    assert observation["disposition"] == "unresolved"
+    assert observation["disposition_status"] == "pending"
+    assert observation["disposition_receipt"] is None
+    assert observation.get("lineage_mining_blocker") is None
+    assert "derived_parent_binding_status" not in observation
+    assert observation["derived_source_root_kind"] == "usertest_implement"
+    assert eligible_problem_mining_atoms(result.atoms) == [observation]
+    assert result.metadata["binding_atom_status_counts"] == {
+        "not_applicable_runner_observation": 1,
+        "verified": len(report_atoms),
+    }
+
+    assert all(atom["evidence_role"] == expected_report_role for atom in report_atoms)
+    assert all(atom["origin_stage"] == expected_report_role for atom in report_atoms)
+    assert all(atom["parent_case_id"] == case_id for atom in report_atoms)
+    assert all(atom["case_id"] == case_id for atom in report_atoms)
+    assert all(atom["disposition"] == "supports_case" for atom in report_atoms)
+    assert all(atom["disposition_status"] == "decided" for atom in report_atoms)
 
 
 def test_legacy_fingerprint_reconstructs_only_through_exact_atom_membership(
@@ -454,6 +561,7 @@ def _write_history_run(
     report: dict[str, Any] | None = None,
     error: dict[str, Any] | None = None,
     ticket_ref: dict[str, Any] | None = None,
+    maintenance_image_cleanup: dict[str, Any] | None = None,
     repo_input: str = "pip:agent-adapters",
 ) -> None:
     _write_json(
@@ -481,6 +589,11 @@ def _write_history_run(
         _write_json(run_dir / "error.json", error)
     if ticket_ref is not None:
         _write_json(run_dir / "ticket_ref.json", ticket_ref)
+    if maintenance_image_cleanup is not None:
+        _write_json(
+            run_dir / "sandbox" / "maintenance_image_cleanup.json",
+            maintenance_image_cleanup,
+        )
 
 
 def test_staged_backlog_reads_both_roots_without_polluting_primary_aggregates(
@@ -623,6 +736,139 @@ def test_staged_backlog_reads_both_roots_without_polluting_primary_aggregates(
     assert candidates[0]["operational_failure_class"] == "runner_exception"
     assert operational_candidate_receipt_errors(candidates[0]) == []
     assert ingestion["operational_failure_candidates"]["count"] == 1
+
+
+def test_staged_problem_mining_assigns_runner_sidecars_but_not_derived_report_prose(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    primary_root = tmp_path / "runs" / "usertest"
+    implementation_root = inferred_implementation_runs_root(primary_root)
+    _write_history_run(
+        primary_root / "target_a" / "20260710T000000Z" / "codex" / "0",
+        mission_id="complete_output_smoke",
+        commands_executed=1,
+        commands_failed=0,
+        report={"confusion_points": [{"summary": "Primary control observation."}]},
+    )
+    for timestamp, mission_id, fingerprint in (
+        ("20260710T010000Z", "implement_backlog_ticket_v1", "3" * 16),
+        ("20260710T020000Z", "review_backlog_implementation_pr_v1", "2" * 16),
+    ):
+        _write_history_run(
+            implementation_root / "target_a" / timestamp / "codex" / "0",
+            mission_id=mission_id,
+            commands_executed=2,
+            commands_failed=0,
+            report={
+                "confusion_points": [
+                    {
+                        "summary": (
+                            "Agent report prose remains derived from the enclosing mission."
+                        )
+                    }
+                ]
+            },
+            ticket_ref={"schema_version": 1, "fingerprint": fingerprint},
+            maintenance_image_cleanup=_maintenance_cleanup_sidecar(),
+        )
+
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    atom_actions_path.write_text(
+        yaml.safe_dump({"version": 1, "atoms": []}, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(primary_root),
+                "--target",
+                "target_a",
+                "--repo-input",
+                "pip:agent-adapters",
+                "--dry-run",
+                "--sample-size",
+                "0",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = primary_root / "target_a" / "_compiled"
+    atoms = [
+        json.loads(line)
+        for line in (compiled / "pip-agent-adapters.backlog.atoms.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line
+    ]
+    cleanup_atoms = [
+        atom
+        for atom in atoms
+        if atom.get("source") == "maintenance_image_cleanup"
+        and atom.get("derived_source_root_kind") == "usertest_implement"
+    ]
+    derived_report_atoms = [
+        atom
+        for atom in atoms
+        if atom.get("source") == "confusion_point"
+        and atom.get("derived_source_root_kind") == "usertest_implement"
+    ]
+    assert len(cleanup_atoms) == 2
+    assert len(derived_report_atoms) == 2
+    assert {
+        atom["evidence_role"] for atom in derived_report_atoms
+    } == {"implementation", "verification"}
+    assert all(
+        atom["origin_stage"] == "runner_maintenance_image_cleanup"
+        and atom["evidence_role"] == "observation"
+        and atom["lineage_authorities"] == ["runner_operational_sidecar"]
+        and atom["parent_case_id"] is None
+        and atom["case_id"] is not None
+        and atom["supporting_case_ids"] == [atom["case_id"]]
+        and atom["disposition"] == "supports_case"
+        and atom["disposition_status"] == "decided"
+        and atom.get("lineage_mining_blocker") is None
+        and "derived_parent_binding_status" not in atom
+        for atom in cleanup_atoms
+    )
+    assert all(
+        atom["lineage_mining_blocker"] == "derived_parent_binding_unavailable"
+        for atom in derived_report_atoms
+    )
+    post_decision_eligible_ids = {
+        atom["atom_id"] for atom in eligible_problem_mining_atoms(atoms)
+    }
+    cleanup_ids = {atom["atom_id"] for atom in cleanup_atoms}
+    derived_report_ids = {atom["atom_id"] for atom in derived_report_atoms}
+    assert cleanup_ids.isdisjoint(post_decision_eligible_ids)
+    assert derived_report_ids.isdisjoint(post_decision_eligible_ids)
+
+    workspace_docs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (
+            compiled
+            / "pip-agent-adapters.backlog_artifacts"
+            / "problem_mining"
+            / "problem_mining_001"
+        ).glob("workspace_*/atoms.json")
+    ]
+    assert workspace_docs
+    assigned_ids = {
+        atom_id
+        for doc in workspace_docs
+        for atom_id in doc["decision_eligible_atom_ids"]
+    }
+    assert cleanup_ids <= assigned_ids
+    assert derived_report_ids.isdisjoint(assigned_ids)
 
 
 def test_explicit_root_research_output_is_parented_on_the_next_cycle(
@@ -851,3 +1097,99 @@ def test_primary_research_runner_blocker_can_project_candidate_without_mining_pr
     assert len(candidates) == 1
     assert candidates[0]["source"] == "operational_failure_candidate"
     assert operational_candidate_receipt_errors(candidates[0]) == []
+
+
+def test_primary_research_missing_canonical_parent_is_retained_but_cannot_support_or_originate(
+    tmp_path: Path,
+) -> None:
+    missing_case_id = "case:runner-parent-not-in-seed"
+    primary_record = {
+        "run_dir": str(tmp_path / "primary" / "research"),
+        "run_rel": "target_a/20260710T040000Z/codex/0",
+        "status": "success",
+        "agent": "codex",
+        "target_ref": {
+            "mission_id": "backlog_repro_research",
+            "backlog_lineage": {
+                "evidence_role": "research",
+                "origin_stage": "repro_research",
+                "parent_case_id": missing_case_id,
+            },
+        },
+        "report": {
+            "kind": "troubleshoot_v1",
+            "failure_point": "Research prose must not manufacture its missing parent case.",
+        },
+    }
+    registry = _case_registry()
+    extracted = extract_backlog_atoms([primary_record], repo_root=tmp_path)["atoms"]
+    normalized = normalize_atom_lineage(
+        extracted,
+        case_registry=registry,
+        strict_new_output=True,
+    )
+
+    primary = annotate_primary_derived_evidence(
+        [primary_record],
+        normalized,
+        source_root=tmp_path / "primary",
+        case_registry=registry,
+    )
+
+    assert primary.atoms
+    assert registry["cases"] == {}
+    assert primary.metadata["binding_record_status_counts"] == {"parent_missing": 1}
+    assert all(atom["parent_case_id"] == missing_case_id for atom in primary.atoms)
+    assert all(atom["case_id"] is None for atom in primary.atoms)
+    assert all(atom["supporting_case_ids"] == [] for atom in primary.atoms)
+    assert all(
+        atom["derived_parent_binding_status"] == "parent_missing"
+        for atom in primary.atoms
+    )
+    assert all(
+        atom["lineage_mining_blocker"]
+        == "derived_parent_binding_parent_missing"
+        for atom in primary.atoms
+    )
+    assert all(atom["disposition"] == "unresolved" for atom in primary.atoms)
+    assert all(atom["disposition_status"] == "decided" for atom in primary.atoms)
+    assert eligible_problem_mining_atoms(primary.atoms) == []
+
+
+def test_primary_observation_remains_unresolved_and_eligible_after_derived_binding(
+    tmp_path: Path,
+) -> None:
+    primary_record = {
+        "run_dir": str(tmp_path / "primary" / "observation"),
+        "run_rel": "target_a/20260710T050000Z/codex/0",
+        "status": "success",
+        "agent": "codex",
+        "target_ref": {"mission_id": "complete_output_smoke"},
+        "report": {
+            "confusion_points": [
+                {"summary": "A runner observation must remain eligible for mining."}
+            ]
+        },
+    }
+    registry = _case_registry()
+    extracted = extract_backlog_atoms([primary_record], repo_root=tmp_path)["atoms"]
+    normalized = normalize_atom_lineage(
+        extracted,
+        case_registry=registry,
+        strict_new_output=True,
+    )
+
+    primary = annotate_primary_derived_evidence(
+        [primary_record],
+        normalized,
+        source_root=tmp_path / "primary",
+        case_registry=registry,
+    )
+
+    assert len(primary.atoms) == 1
+    observation = primary.atoms[0]
+    assert observation["evidence_role"] == "observation"
+    assert observation["disposition"] == "unresolved"
+    assert observation.get("lineage_mining_blocker") is None
+    assert "derived_parent_binding_status" not in observation
+    assert eligible_problem_mining_atoms(primary.atoms) == [observation]

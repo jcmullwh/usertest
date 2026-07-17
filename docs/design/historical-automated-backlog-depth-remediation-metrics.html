@@ -492,204 +492,176 @@
 <body>
   <div class="page">
     <header class="hero">
-      <p class="eyebrow">Measurement companion / evidence snapshot</p>
-      <h1>One outcome cycle is complete; the pipeline is not yet qualified</h1>
-      <p class="dek">The first real maintenance case reached merged implementation PR #213, and verification-only PR #215 made its immutable outcome commands executable without replacing implementation provenance. The exact original, live, and mitigation roles all passed in a 984.7-second centralized run. Terminal verification now also passes against both trusted evidence roots with zero errors and no role reruns. The durable result remains honestly bounded to <code>mitigated</code>, never <code>resolved</code>, with one researched residual risk. The next work is controller-change consolidation, affected-suite verification, and a remediation PR. Automated export remains disabled and full qualification remains 0/2.</p>
+      <p class="eyebrow">Measurement companion / operational run ledger</p>
+      <h1>Automated-backlog depth remediation</h1>
+      <p class="dek">The generated operational dashboard immediately below is the current source of truth for run duration, pipeline state, encountered errors, automatic recovery, supervisor intervention, disposition, and next action. Detailed sections below it are retained historical evidence snapshots and are explicitly time-bounded; they must not override the live dashboard.</p>
       <div class="meta">
-        <span class="pill">Operational snapshot: July 16, 2026 04:52Z</span>
-        <span class="pill">Branch: codex/backlog-depth-remediation</span>
-        <span class="pill">Export: disabled</span>
-        <span class="pill">Overall: not qualified</span>
+        <span class="pill">Current status: generated below</span>
+        <span class="pill">Scope: automated non-IDEA backlog</span>
+        <span class="pill">Export: disabled until qualified</span>
+        <span class="pill">Detailed evidence: historical snapshots</span>
       </div>
     </header>
 
     <div class="layout">
       <main>
         <!-- BEGIN GENERATED OPERATIONAL DASHBOARD -->
-        <section id="operational-dashboard">
+        <section id="status-change">
+          <span id="operational-dashboard" aria-hidden="true"></span>
           <h2>Operational progress dashboard</h2>
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
-          <div class="notice info"><strong>Counting rule:</strong> One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.</div>
+          <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat info">
+            <div class="stat warn">
               <span class="label">Current pipeline state</span>
-              <span class="value">Shadow cycle 1 initializing</span>
-              <span class="detail">PR #216 merged to dev at e0527e23 after exact-head CI and same-session system review passed; automated export remains disabled</span>
+              <span class="value">Stage 3 accepted; resume binding blocked</span>
+              <span class="detail">The exact retained candidate is the authenticated one-of-21 canonical prefix. A 1,583.3-second full bundle check verified the protected source evidence but correctly rejected the old development-worktree pipeline binding after the pipeline changed</span>
             </div>
             <div class="stat good">
-              <span class="label">Current case disposition</span>
-              <span class="value">Mitigated; provenance verified</span>
-              <span class="detail">The durable case remains mitigated with one legitimate residual risk; it is not resolved, but its terminal provenance is now verified</span>
+              <span class="label">Current lifecycle outcome</span>
+              <span class="value">Research accepted; no change required</span>
+              <span class="detail">Seventeen persisted research attempts used 18 actual Codex calls in one retained session and produced accepted evidence_sufficient / already_addressed research; no implementation is required and live behavior remains unverified</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">No complete qualifying shadow cycle; automated export remains disabled</span>
+              <span class="detail">No full shadow cycle, Stage 4 result, ticket, implementation, or delivered PR is claimed for this case</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Complete shadow cycle 1</span>
-              <span class="detail">Run the full post-merge pipeline with exports disabled, then inspect evidence coverage, causal research, plans, dispositions, errors, and intervention burden</span>
+              <span class="value">Stabilize execution revision; route no-change</span>
+              <span class="detail">Checkpoint the verified pipeline, run qualification from a clean immutable execution worktree, carry the accepted prefix forward through authenticated custody, then execute the deterministic no-change route and continue case 2</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
             <table class="ops-table">
-              <thead><tr><th>Cycle</th><th>Time</th><th>Reached / state</th><th>Outcome</th><th>Errors or blockers</th><th>Automatic self-correction</th><th>Supervisor intervention</th><th>Next action</th></tr></thead>
+              <thead><tr><th>Lifecycle</th><th>Time</th><th>Reached / state</th><th>Outcome</th><th>Error clusters</th><th>Automatic repairs</th><th>Supervisor interventions</th><th>Restarts / rework</th><th>Next gate</th></tr></thead>
               <tbody>
               <tr class="">
-                <td><strong>Retained historical baseline</strong><span class="ops-detail"><code>historical-retained-corpus</code><br>Two July automated-backlog corpora; baseline audit rather than a timed execution</span></td>
-                <td><strong>Unknown</strong><span class="ops-kind">unknown</span><span class="ops-detail">The retained corpus has no trustworthy end-to-end timing receipt.</span></td>
-                <td><span class="tag bad">Tickets</span><span class="ops-detail">Historical comparison only; artifacts reached plans and tickets without depth controls.</span></td>
-                <td><strong>Depth model failed</strong><span class="ops-detail">Evidence: partial historical corpus</span></td>
-                <td><strong>5</strong> <span class="ops-kind">systemic categories</span><span class="ops-detail">Selective atom coverage; missing high-severity dispositions; derived-evidence feedback; same-cause decisions discarded; partial research advanced with no outcome provenance.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">not retained</span><span class="ops-detail">Historical artifacts do not distinguish automatic repair from regeneration.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">not retained</span><span class="ops-detail">No reliable intervention ledger exists for these historical runs.</span></td>
-                <td>Use only as a failure baseline; do not infer historical solve rate.<span class="ops-sources">Sources: historical_research, historical_change_plans, historical_relation_review</span></td>
-              </tr>
-              <tr class="">
-                <td><strong>Live shadow 1</strong><span class="ops-detail"><code>shadow-c03ed318</code><br>Export-disabled full shadow on 133 eligible source atoms</span></td>
-                <td><strong>Unknown</strong><span class="ops-kind">unknown</span><span class="ops-detail">The cataloged shadow receipt is unavailable in the current worktree; no duration is claimed.</span></td>
+                <td><strong>Live shadow 1</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>Unknown</strong><span class="ops-kind">unknown</span></td>
                 <td><span class="tag bad">Problem mining</span><span class="ops-detail">Stopped before canonical cases or research; export qualification failed.</span></td>
-                <td><strong>Failed; zero usable throughput</strong><span class="ops-detail">Evidence: partial retained summary; primary path currently unavailable</span></td>
-                <td><strong>3</strong> <span class="ops-kind">failed mining jobs</span><span class="ops-detail">All three mining jobs failed verification; all 133 atoms remained explicitly unresolved.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">observed recoveries</span><span class="ops-detail">No mining job recovered within the retained cycle.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">unknown</span><span class="ops-detail">The retained summary does not encode supervisor actions.</span></td>
-                <td>Historical: mining mechanics required correction before another shadow.<span class="ops-sources">Sources: shadow_1, shadow_1_mining_receipt</span></td>
+                <td><strong>Failed; zero usable throughput</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Legacy lifecycle rework was not retained in comparable units.</span></td>
+                <td>Historical: mining mechanics required correction before another shadow.</td>
               </tr>
               <tr class="">
-                <td><strong>Live shadow 2</strong><span class="ops-detail"><code>shadow-1f57437e</code><br>Export-disabled full shadow on the same 133 eligible-source denominator</span></td>
-                <td><strong>Unknown</strong><span class="ops-kind">unknown</span><span class="ops-detail">The cataloged shadow receipt is unavailable in the current worktree; no duration is claimed.</span></td>
+                <td><strong>Live shadow 2</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>Unknown</strong><span class="ops-kind">unknown</span></td>
                 <td><span class="tag warn">Stage 3</span><span class="ops-detail">15 canonical cases reached research; none passed the evidence gate.</span></td>
-                <td><strong>Failed; mining improved, accepted research zero</strong><span class="ops-detail">Evidence: partial retained summary; primary path currently unavailable</span></td>
-                <td><strong>16</strong> <span class="ops-kind">gating failures</span><span class="ops-detail">One of three mining jobs failed, then 15 of 15 research dossiers were rejected. Rejection is safe but yielded no plans.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">unknown</span><span class="ops-detail">Raw research volume is retained, but correction-cycle identity is not.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">unknown</span><span class="ops-detail">The retained summary does not encode supervisor actions.</span></td>
-                <td>Historical: validate Stage 3 correction mechanics narrowly before another full shadow.<span class="ops-sources">Sources: shadow_2, shadow_2_mining_receipt, shadow_2_research</span></td>
+                <td><strong>Failed; mining improved, accepted research zero</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Legacy lifecycle rework was not retained in comparable units.</span></td>
+                <td>Historical: validate Stage 3 correction mechanics narrowly before another full shadow.</td>
               </tr>
               <tr class="">
-                <td><strong>Controlled Stage 3 subscription run</strong><span class="ops-detail"><code>controlled-stage3-cdd666f</code><br>One controlled case, two direct signed-in Codex attempts</span></td>
-                <td><strong>1,234.35 s</strong><span class="ops-kind">measured_substeps</span><span class="ops-detail">Sum of the retained 549.29 s and 685.06 s model attempts; orchestration gaps are excluded.</span></td>
+                <td><strong>Controlled Stage 3 subscription run</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>1,234.35 s</strong><span class="ops-kind">measured_substeps</span></td>
                 <td><span class="tag bad">Stage 3</span><span class="ops-detail">Both invalid dossiers blocked; signed-in subscription provenance passed.</span></td>
-                <td><strong>Failed safely</strong><span class="ops-detail">Evidence: exact attempt receipts</span></td>
-                <td><strong>2</strong> <span class="ops-kind">invalid final dossiers</span><span class="ops-detail">Attempt 1 mislabeled an ancillary diagnostic as a positive control; attempt 2 cited origin evidence that contradicted its alternative hypothesis.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">same-frontier repairs</span><span class="ops-detail">The two attempts did not complete an accepted in-place correction.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">retained content interventions</span><span class="ops-detail">This controlled run measured raw outputs; later design work changed correction behavior.</span></td>
-                <td>Historical: feed exact findings back to the same author rather than discard on first error.<span class="ops-sources">Sources: stage3_result, stage3_attempt_1, stage3_attempt_2</span></td>
+                <td><strong>Failed safely</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Legacy lifecycle rework was not retained in comparable units.</span></td>
+                <td>Historical: feed exact findings back to the same author rather than discard on first error.</td>
               </tr>
               <tr class="">
-                <td><strong>Sealed qualification v1</strong><span class="ops-detail"><code>sealed-a0-cycle001</code><br>Exact-revision sealed cycle; labels later invalidated by output-blind audit</span></td>
-                <td><strong>Unknown</strong><span class="ops-kind">unknown</span><span class="ops-detail">Eight substantive Stage 3 invocations are known, but complete cycle wall time is not retained here.</span></td>
+                <td><strong>Sealed qualification v1</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>Unknown</strong><span class="ops-kind">unknown</span></td>
                 <td><span class="tag bad">Stage 3</span><span class="ops-detail">Cycle stopped; no accepted research, plan, ticket, or valid qualification score.</span></td>
-                <td><strong>Incomplete and not qualified</strong><span class="ops-detail">Evidence: partial cycle plus invalidated labels</span></td>
-                <td><strong>2</strong> <span class="ops-kind">terminal invalid dossiers</span><span class="ops-detail">Same-author frontier improved 38 to 4 findings; fresh-author frontier improved 4 to 1. The v1 benchmark labels were later invalidated independently.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">exact count unavailable</span><span class="ops-detail">Progress is proven by finding frontiers, but the retained summary does not map every correction turn.</span></td>
-                <td><strong>1</strong> <span class="ops-kind">material later adjudication</span><span class="ops-detail">Output-blind audit invalidated the v1 labels; this prevents a misleading precision or recall claim.</span></td>
-                <td>Historical: rebuild sealed labels and rerun without reusing v1 actionability scores.<span class="ops-sources">Sources: sealed_a0_initial_stage3_run, backlog_depth_supervision_issue_ledger</span></td>
+                <td><strong>Incomplete and not qualified</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Legacy lifecycle rework was not retained in comparable units.</span></td>
+                <td>Historical: rebuild sealed labels and rerun without reusing v1 actionability scores.</td>
               </tr>
               <tr class="">
-                <td><strong>Corrected v2 diagnostic recovery</strong><span class="ops-detail"><code>corrected-v2-9f6-recovery</code><br>Model-free preparation plus boundary-local Stage 3 proof recovery</span></td>
-                <td><strong>3,649.03 s</strong><span class="ops-kind">measured_substeps</span><span class="ops-detail">Exact model-free preparation time only; later verifier integrations and replay time are not included.</span></td>
+                <td><strong>Corrected v2 diagnostic recovery</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>3,649.03 s</strong><span class="ops-kind">measured_substeps</span></td>
                 <td><span class="tag warn">Stage 3</span><span class="ops-detail">Stopped with five bound evidence findings; no downstream work.</span></td>
-                <td><strong>Incomplete; useful local recovery</strong><span class="ops-detail">Evidence: partial exact-revision receipts</span></td>
-                <td><strong>5</strong> <span class="ops-kind">final verifier findings</span><span class="ops-detail">Two primary unread-symbol gaps and three dependent causal or falsification findings remained after 30 to 10 to 5 recovery.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">model turns</span><span class="ops-detail">The measured 30 to 10 to 5 improvement came from deterministic replay and verifier integration with zero model calls.</span></td>
-                <td><strong>2</strong> <span class="ops-kind">explicit verifier integrations</span><span class="ops-detail">Two proof-verifier integrations preserved cumulative evidence instead of restarting the cycle.</span></td>
-                <td>Historical: resolve only the five bound gaps, then run a fresh exact-revision cycle.<span class="ops-sources">Sources: qualification_manifest_v2, qualification_input_bundle_9f6</span></td>
+                <td><strong>Incomplete; useful local recovery</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Legacy lifecycle rework was not retained in comparable units.</span></td>
+                <td>Historical: resolve only the five bound gaps, then run a fresh exact-revision cycle.</td>
               </tr>
               <tr class="">
-                <td><strong>Storage split child research</strong><span class="ops-detail"><code>storage-children-stage3</code><br>Checkout-acquisition ENOSPC and Claude provider-write ENOSPC child cases</span></td>
-                <td><strong>3,774.10 s</strong><span class="ops-kind">measured_substeps</span><span class="ops-detail">Sum of five retained model execution durations; wait and supervision time between executions is excluded.</span></td>
+                <td><strong>Storage split child research</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>3,774.10 s</strong><span class="ops-kind">measured_substeps</span></td>
                 <td><span class="tag good">Stage 3</span><span class="ops-detail">Both children retained as honest partial or blocked research; neither entered optioning.</span></td>
-                <td><strong>Useful non-ready evidence</strong><span class="ops-detail">Evidence: exact measured model substeps; incomplete calendar coverage</span></td>
-                <td><strong>2</strong> <span class="ops-kind">material evidence blockers</span><span class="ops-detail">Mechanical findings were repaired to zero, but each child still lacked evidence needed to establish a safe implementable mechanism.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">not discretely retained</span><span class="ops-detail">Each child author corrected output or evidence packaging in place, but the retained frontiers do not cleanly separate automatic verifier loops from the two supervisor-directed semantic followups.</span></td>
-                <td><strong>2</strong> <span class="ops-kind">semantic feedback cycles</span><span class="ops-detail">One focused semantic followup per child; the source-context Claude replay reused the same session.</span></td>
-                <td>Leave non-ready until new evidence arrives; do not manufacture plans from missing cause data.<span class="ops-sources">Sources: latest_checkout_child_initial_research, latest_checkout_child_semantic_followup, latest_claude_child_initial_research, latest_claude_child_semantic_followup, latest_claude_child_source_context_run</span></td>
+                <td><strong>Useful non-ready evidence</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Legacy lifecycle rework was not retained in comparable units.</span></td>
+                <td>Leave non-ready until new evidence arrives; do not manufacture plans from missing cause data.</td>
               </tr>
               <tr class="">
-                <td><strong>Maintenance-image Stage 3</strong><span class="ops-detail"><code>maintenance-stage3-overrun</code><br>One real positive maintenance-image case across the supervised same-case research history</span></td>
-                <td><strong>10,885.20 s</strong><span class="ops-kind">measured_substeps</span><span class="ops-detail">Sum of 62 completed Terra reports; the interrupted 63rd run and controller gaps are excluded.</span></td>
-                <td><span class="tag bad">Stage 3 -&gt; 4</span><span class="ops-detail">Attempt 19 was causally sufficient; handoff occurred, but the controller kept researching.</span></td>
-                <td><strong>Valid research with pathological overrun</strong><span class="ops-detail">Evidence: exact completed-report timing; incomplete intervention accounting</span></td>
-                <td><strong>2</strong> <span class="ops-kind">controller defects</span><span class="ops-detail">Stop policy missed causal sufficiency, and a Stage 5 design gap was misrouted back into Stage 3. Forty-seven post-sufficiency reports consumed 8,219.07 s.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">not meaningfully countable</span><span class="ops-detail">Report count is not correction count; repeated generations after sufficiency are waste, not self-healing success.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">incompletely retained</span><span class="ops-detail">Many supervised turns occurred, but the exact intervention ledger was not yet enforced.</span></td>
-                <td>Controller must stop on a causally sufficient frontier and route solution-proof gaps downstream.<span class="ops-sources">Sources: maintenance_stage3_final_dossier, maintenance_stage3_supervised_turn48, maintenance_stage3_supervised_turn49_interrupted, backlog_depth_supervision_issue_ledger</span></td>
+                <td><strong>Maintenance image accumulation case</strong><span class="ops-kind">case</span></td>
+                <td><strong>Unknown</strong><span class="ops-kind">unknown</span></td>
+                <td><span class="tag good">Terminal outcome verified</span><span class="ops-detail">Research, implementation, original-scenario verification, live mitigation verification, and terminal provenance all completed. The case remains mitigated with one researched…</span></td>
+                <td><strong>Mitigated; terminal provenance verified</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Detailed Stage 3 through outcome-correction activity is retained below, but no comparable case-wide rework total is inferred.</span></td>
+                <td>Retain this terminal case outcome; controller qualification continues in its own lifecycle.</td>
               </tr>
               <tr class="">
-                <td><strong>Maintenance optioning, selection, and planning</strong><span class="ops-detail"><code>maintenance-planning-stage4-6</code><br>One real case from Stage 4 through semantically audited Stage 6 plan</span></td>
-                <td><strong>At least 353.20 s</strong><span class="ops-kind">measured_substeps</span><span class="ops-detail">Includes exact 52.2016 s optioner and about 301 s final planner correction only; Stage 5 and earlier rework wall time is not summed.</span></td>
-                <td><span class="tag good">Stage 6</span><span class="ops-detail">One exact ready-for-ticket plan after independent semantic audit and same-planner repair.</span></td>
-                <td><strong>Decision-complete plan produced</strong><span class="ops-detail">Evidence: exact artifacts; partial timing coverage</span></td>
-                <td><strong>6</strong> <span class="ops-kind">material categories</span><span class="ops-detail">Two false lifecycle rejections, one descendant-process leak, and three Stage 6 semantic defects. All planning defects were corrected before ticket readiness.</span></td>
-                <td><strong>7</strong> <span class="ops-kind">explicit same-author correction actions</span><span class="ops-detail">Count is one Stage 4 repair, three option revisions, and three final falsifier corrections. The separate two-turn planner repair followed supervisor audit and is not counted as automatic.</span></td>
-                <td><strong>3</strong> <span class="ops-kind">material interventions</span><span class="ops-detail">Stage-boundary correction, orphan-process containment, and independent Stage 6 semantic audit.</span></td>
-                <td>Historical checkpoint: propagate the exact plan contract through export without rerunning model stages.<span class="ops-sources">Sources: maintenance_stage4_lifecycle_rework_options, maintenance_stage5_outcome_boundary_final_selection, maintenance_stage6_final_plan, maintenance_stage6_semantic_audit</span></td>
+                <td><strong>Controller remediation integration and qualification</strong><span class="ops-kind">delivery</span></td>
+                <td><strong>3 h 40 m 24 s</strong><span class="ops-kind">complete</span></td>
+                <td><span class="tag good">Merged to dev after exact-head CI and same-session system approval</span><span class="ops-detail">PR #216 merged to dev as e0527e23 at exact head f6c93c97. The same Terra reviewer session that requested two provenance/reporting corrections continued on the corrected head and…</span></td>
+                <td><strong>Controller remediation merged; post-merge shadow qualification required</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Legacy delivery activity was not retained in comparable rework units.</span></td>
+                <td>Use the merged controller as the baseline for export-disabled shadow cycle 1; do not reopen this integration row for later shadow results.</td>
               </tr>
               <tr class="">
-                <td><strong>Ticket export and implementation preflight</strong><span class="ops-detail"><code>maintenance-ticket-export-preflight</code><br>Exact Stage 2-6 chain exported once, then selected by usertest implement</span></td>
-                <td><strong>Unknown</strong><span class="ops-kind">unknown</span><span class="ops-detail">No complete export-to-preflight wall receipt is retained.</span></td>
-                <td><span class="tag warn">Implementation preflight</span><span class="ops-detail">One additive ticket exported; retained replay asset transport blocked before any model turn.</span></td>
-                <td><strong>Ticket produced; implementation safely paused</strong><span class="ops-detail">Evidence: exact export and preflight receipts; timing unknown</span></td>
-                <td><strong>2</strong> <span class="ops-kind">deterministic contract defects</span><span class="ops-detail">Exporter disagreed with the accepted staged fail-first contract, then implementation transported command text without its retained assets.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">model corrections</span><span class="ops-detail">Both defects occurred before a paid model turn; no plan or research rerun was needed.</span></td>
-                <td><strong>2</strong> <span class="ops-kind">pipeline code corrections</span><span class="ops-detail">Aligned outcome-role validation, then added content-addressed retained-asset transport and revalidation.</span></td>
-                <td>Run the unchanged ticket with the staged original-scenario bundle in a fresh implementation workspace.<span class="ops-sources">Sources: maintenance_ticket_export, maintenance_ticket_materialization_receipt, maintenance_exported_local_plan, maintenance_implementation_asset_staging</span></td>
+                <td><strong>Post-merge full shadow cycle 1</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>1 h 8 m 8.9 s measured</strong><span class="ops-kind">measured_substeps</span></td>
+                <td><span class="tag warn">Stage 2 complete; Stage 3 dispatch interrupted</span><span class="ops-detail">Stopped at a preserved checkpoint after 14 completed model attempts and six same-session corrections. Post-stop audit found the seven new-research and fourteen reassessment…</span></td>
+                <td><strong>Stopped before 21 cases entered broad research; no qualification credit</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Detailed attempt and correction activity remains retained, but no comparable lifecycle-wide rework total is inferred.</span></td>
+                <td>Historical stopped checkpoint. BDS-065 correction and small replay continue in the following current row; do not mutate this row with later results.</td>
               </tr>
               <tr class="">
-                <td><strong>Implementation, review, and PR #213</strong><span class="ops-detail"><code>maintenance-implementation-pr213</code><br>One real ticket from first implementation run through merge on codex/backlog-depth-remediation</span></td>
-                <td><strong>10 h 27 m 4 s</strong><span class="ops-kind">complete</span><span class="ops-detail">Calendar start-to-merge. Linked run intervals cover 7,213 s; 30,411 s outside them includes CI, queues, review, supervision, and missing telemetry, not proven idle time.</span></td>
-                <td><span class="tag warn">Merged PR</span><span class="ops-detail">PR #213 merged at 2221377f; original scenario later passed, but mandatory live commands were not executable.</span></td>
-                <td><strong>Implemented, tests verified, not outcome verified</strong><span class="ops-detail">Evidence: complete calendar endpoints; partial correction attribution</span></td>
-                <td><strong>18</strong> <span class="ops-kind">telemetry correction cycles</span><span class="ops-detail">Six are proven system self-corrections and 12 have unknown origin. Explicit waste included three initial no-code turns and three controller failures.</span></td>
-                <td><strong>6</strong> <span class="ops-kind">proven system cycles</span><span class="ops-detail">Same work was retained across corrections; the remaining 12 cycles cannot be honestly attributed from current telemetry.</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">not reliably attributable</span><span class="ops-detail">At least one model-free adoption/review action is explicit; the full total is not derivable from the linked run artifacts.</span></td>
-                <td>Historical checkpoint: mandatory outcome commands must be proven executable before merge.<span class="ops-sources">Sources: maintenance_implementation_initial_attempts, maintenance_implementation_final_report, maintenance_pull_request_213, maintenance_pull_request_adoption_20260715T180528368226Z, maintenance_pr213_pipeline_efficiency, maintenance_pr213_merge</span></td>
-              </tr>
-              <tr class="">
-                <td><strong>PR #213 post-merge outcome roles</strong><span class="ops-detail"><code>maintenance-postmerge-outcome-213</code><br>Exact merged commit 2221377f; unchanged original scenario followed by mandatory live role</span></td>
-                <td><strong>About 12.2 s</strong><span class="ops-kind">artifact_window</span><span class="ops-detail">Artifact-directory start through final live-role write; not a runner-recorded elapsed field.</span></td>
-                <td><span class="tag bad">Outcome gate</span><span class="ops-detail">Original scenario passed; live role failed immediately because its exact path and node did not exist.</span></td>
-                <td><strong>Unverified; correction required</strong><span class="ops-detail">Evidence: exact outcome-role artifacts; elapsed inferred from artifact timestamps</span></td>
-                <td><strong>1</strong> <span class="ops-kind">root contract defect</span><span class="ops-detail">The plan named nonexistent live and mitigation test nodes. Four failed live predicates are consequences of this one command-executability defect.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">same-run repairs</span><span class="ops-detail">Outcome progression stopped and preserved the unverified disposition.</span></td>
-                <td><strong>1</strong> <span class="ops-kind">content correction route</span><span class="ops-detail">The defect was recorded as BDS-048 and routed to the same implementation author.</span></td>
-                <td>Make the exact mandatory commands executable, verify them, merge a correction, and replay all roles on the new merge commit.<span class="ops-sources">Sources: maintenance_pr213_postmerge_original_role, maintenance_pr213_postmerge_live_role, backlog_depth_supervision_issue_ledger</span></td>
-              </tr>
-              <tr class="">
-                <td><strong>Outcome correction and PR #215</strong><span class="ops-detail"><code>maintenance-outcome-correction-pr215</code><br>Same-author correction from failed post-merge role through merged verification amendment, passing exact roles, and verified terminal provenance</span></td>
-                <td><strong>3 h 50 m 1.9 s</strong><span class="ops-kind">complete</span><span class="ops-detail">Complete wall time from the 01:02:14Z failed-role artifact through the 04:52:15Z terminal-provenance closure observation. The corrected centralized outcome run consumed 984.7 s and ended about 04:20:40Z; terminal closure reused the retained roles and ran none again.</span></td>
-                <td><span class="tag good">Terminal outcome verified</span><span class="ops-detail">The durable ticket and ledger agree on mitigated with evidence counts 1 test / 2 original / 1 live / 1 mitigation and only the researched mitigation residual. The direct verifier returned verified=true, provenance_status=verified, errors=[] with both trusted roots. Terminal progression returned starting/final/expected=mitigated, status=complete, complete=true, roles_run=[], detail=null. BDS-054 is closed locally without rerunning the expensive roles.</span></td>
-                <td><strong>Mitigated; terminal provenance verified</strong><span class="ops-detail">Evidence: exact PR/commit state, durable ticket and ledger, exact outcome-role artifacts, complete wall-time endpoints, direct verifier output, terminal progression result, and focused-suite transcript</span></td>
-                <td><strong>7</strong> <span class="ops-kind">material system defect categories</span><span class="ops-detail">The prior four were candidate-binding nondeterminism, missing safe-partial-success control, descendant-process cancellation leakage, and missing verification-amendment provenance. Three later defects were Windows newline amplification causing false plan drift (BDS-052), retention of a disproven transient blocker (BDS-053), and bypass/failure of terminal provenance verification (BDS-054).</span></td>
-                <td><strong>Unknown</strong> <span class="ops-kind">not discretely retained</span><span class="ops-detail">The same author made in-turn mechanical repairs, but the log does not consistently separate those automatic loops. The two top-level repair turns followed focused supervisor feedback and are not counted as automatic.</span></td>
-                <td><strong>12</strong> <span class="ops-kind">explicit interventions</span><span class="ops-detail">The prior five were false-green feedback, duplicate-process/orphan-container containment, safe-partial-control feedback, manual ready transition, and BDS-050 amendment routing. Six more were BDS-052 newline/provenance repair, three supervisor-command/setup corrections (unavailable GetRelativePath, Python -c quote loss, and omitted trusted U: runs root), BDS-053 stale-blocker reconciliation, and BDS-054 terminal-verifier routing. The twelfth was today&#x27;s initial focused-suite invocation without repository PYTHONPATH: collection failed before tests, then the corrected invocation passed all 49 tests.</span></td>
-                <td>Historical checkpoint: controller changes were consolidated immediately afterward. Preserve this completed outcome row; qualification and PR work continue in the next lifecycle row.<span class="ops-sources">Sources: maintenance_outcome_correction_session, maintenance_outcome_correction_git, maintenance_pull_request_215, maintenance_pull_request_215_ci, maintenance_pull_request_215_merge, maintenance_pr215_outcome_original_role, maintenance_pr215_outcome_live_role, maintenance_pr215_outcome_mitigation_role, maintenance_completed_outcome_ticket, maintenance_outcome_ledger, maintenance_outcome_progression_session, maintenance_terminal_provenance_closure_session, backlog_depth_supervision_issue_ledger</span></td>
-              </tr>
-              <tr class="">
-                <td><strong>Controller remediation integration and qualification</strong><span class="ops-detail"><code>controller-remediation-integration</code><br>Consolidated causal-depth, self-healing, planning, delivery, and outcome contracts plus the system-authored maintenance implementation; changed-project qualification and exact-head system review before merge</span></td>
-                <td><strong>3 h 40 m 24 s</strong><span class="ops-kind">complete</span><span class="ops-detail">Complete wall time from the completed PR #215 outcome row through the guarded merge of PR #216.</span></td>
-                <td><span class="tag good">Merged to dev after exact-head CI and same-session system approval</span><span class="ops-detail">PR #216 merged to dev as e0527e23 at exact head f6c93c97. The same Terra reviewer session that requested two provenance/reporting corrections continued on the corrected head and returned approved with confidence 0.94 and zero findings. Both CI triggers are green: 80/80 observed checks representing 40 unique jobs run twice. One push-trigger Windows job initially passed all 27 package tests but failed in GitHub post-job cleanup without an error; the identical PR job and a targeted rerun passed, so no code was changed. The durable maintenance case remains mitigated with verified terminal provenance, not resolved. Shadow qualification remains 0/2.</span></td>
-                <td><strong>Controller remediation merged; post-merge shadow qualification required</strong><span class="ops-detail">Evidence: Exact git/GitHub merge and CI state; initial and same-session correction review artifacts; exact focused, broad, isolated-Docker, outcome, and subscription receipts; complete wall-time endpoints and explicit intervention ledger</span></td>
-                <td><strong>9</strong> <span class="ops-kind">high-level integration, runtime, and review categories encountered</span><span class="ops-detail">Five integration categories were synthetic fixture/contract drift, semantic reconciliation, supervisor/result-capture instability, one production postprocessing regression, and missed isolated-package CI boundaries. A stale installed review runtime selected obsolete npm Codex and misclassified the rejection as a shell failure. Review found a missing versioned plan and an ambiguous historical/current presentation boundary. The ninth category was a transient GitHub-hosted Windows post-job cleanup failure after all package tests passed.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">automatic pipeline corrections</span><span class="ops-detail">This remains controller integration and review qualification. The model reviewer diagnosed findings but did not automatically modify or correct the branch; every recovery and correction was supervisor-owned.</span></td>
-                <td><strong>31</strong> <span class="ops-kind">explicit material interventions</span><span class="ops-detail">The first 26 interventions covered semantic integration, shared evidence/fixture corrections, stable qualification, the production postprocessing repair, draft publication, CI correction, runtime diagnosis/rerouting, controller review, versioning the selected plan, and clarifying the outcome evidence boundary. Five terminal actions remained: commit/push the review correction, resume the same reviewer with focused delta evidence, diagnose the cleanup-only CI failure, rerun only that job, and perform the documented ready/guarded-merge transition.</span></td>
-                <td>Use the merged controller as the baseline for export-disabled shadow cycle 1; do not reopen this integration row for later shadow results.<span class="ops-sources">Sources: controller_remediation_integration_git, controller_remediation_integration_session, controller_remediation_pr216, backlog_depth_supervision_issue_ledger</span></td>
+                <td><strong>Bounded Stage 1/2 maintenance qualification</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>3 h 27 m 36.01 s</strong><span class="ops-kind">complete</span></td>
+                <td><span class="tag good">Stage 2 complete; false problem retracted and lifecycle reconciliation verified</span><span class="ops-detail">The same author retracted the unsupported maintenance problem. Stage 1 now independently verifies, Stage 2 completes empty without a model, and the retraction plus canonical…</span></td>
+                <td><strong>No actionable case; corrected Stage 1/2 result verified</strong></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> <span class="ops-kind">legacy unreconciled</span><span class="ops-detail">Detailed evidence remains in JSON; no cross-run cluster total is inferred.</span></td>
+                <td><strong>Unknown</strong> author calls; Unknown continuations; Unknown stage reruns; Unknown full restarts<span class="ops-detail">Detailed author and controller activity is retained as supporting provenance; no comparable lifecycle-wide rework total is inferred.</span></td>
+                <td>Retain as completed component proof; broader production qualification remains a separate lifecycle.</td>
               </tr>
               <tr class="ops-current">
-                <td><strong>Post-merge full shadow cycle 1</strong><span class="ops-detail"><code>postmerge-shadow-cycle-1</code><br>First full automated non-IDEA backlog cycle on merged controller revision e0527e23, with ticket export disabled and every eligible evidence item required to reach an explicit disposition</span></td>
-                <td><strong>1 m 19 s so far</strong><span class="ops-kind">active</span><span class="ops-detail">Active wall time from the merge of PR #216 through post-merge branch and dashboard initialization.</span></td>
-                <td><span class="tag info">Post-merge baseline initialized</span><span class="ops-detail">The qualification branch is based exactly on merged dev revision e0527e23. Automated export remains disabled. No Stage 1-6 model work has yet run in this cycle, so it has produced neither good nor bad throughput and has consumed no model correction turns.</span></td>
-                <td><strong>In progress; no qualification credit</strong><span class="ops-detail">Evidence: Exact PR merge commit, local branch base, and active wall-time endpoints; no model or stage result is claimed before execution</span></td>
-                <td><strong>0</strong> <span class="ops-kind">high-level error categories encountered</span><span class="ops-detail">No shadow-cycle execution has started, so there are no cycle findings yet.</span></td>
-                <td><strong>0</strong> <span class="ops-kind">automatic pipeline corrections</span><span class="ops-detail">No model stage has started.</span></td>
-                <td><strong>1</strong> <span class="ops-kind">explicit material interventions so far</span><span class="ops-detail">Fetched the exact merged dev revision and initialized a clean qualification branch/current dashboard row.</span></td>
-                <td>Run post-merge preflight and the complete export-disabled shadow pipeline from workspace-current source with gpt-5.6-terra and the verified signed-in host Codex subscription route; inspect stage outputs before granting cycle credit.<span class="ops-sources">Sources: controller_remediation_integration_git, controller_remediation_pr216, controller_remediation_integration_session, backlog_depth_supervision_issue_ledger</span></td>
+                <td><strong>Codex model_messages configuration case</strong><span class="ops-kind">case</span></td>
+                <td><strong>9 h 51 m 38.00 s as of 02:50:17Z</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Stage 3 accepted and canonically imported; sealed resume blocked by stale development-worktree binding</span><span class="ops-detail">Research accepted: evidence_sufficient / already_addressed at code-and-test level; live behavior remains unverified. The canonical authenticated import completed one of 21 cases…</span></td>
+                <td><strong>Research accepted; no implementation required; live behavior unverified</strong></td>
+                <td><strong>34</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Thirty material research-quality, controller, evaluator, and workflow defects, three run anomalies, and one recovered receipt-instrumentation defect. BDS-098 is one sealed…</span></td>
+                <td><strong>4</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Initial automatic repair loop, attempt-14 tool recovery, attempt-16 same-session envelope repair, and importer NameError self-fix.</span></td>
+                <td><strong>26</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Twenty-three material supervision clusters, the bounded BDS-086 efficiency cleanup, AN-03 test-environment recovery, and the nonblocking BDS-097 receipt correction. BDS-098…</span></td>
+                <td><strong>18</strong> author calls; 5 continuations; 5 stage reruns; 0 full restarts<span class="ops-detail">Seventeen persisted research attempts used 18 actual Codex calls in one signed-in session. Five bounded continuations and five model-free executable replays occurred; no full…</span></td>
+                <td>Create a verified source checkpoint and clean immutable execution worktree, seal the same evidence corpus against that revision, carry forward the authenticated Stage 3 prefix,…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-16T08:33:58Z. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-17T02:50:17.0687949Z. Showing 11 lifecycle runs; detailed JSON provenance retains 45 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">
@@ -1664,8 +1636,8 @@
           <div class="notice warn"><strong>Current real-case result:</strong> the two storage children remain a historical 0/2-ready subset. Across the three genuine positive Stage 3 units, checkout is justified non-ready, Claude remains mixed, and maintenance is causally sufficient under the corrected boundary. Maintenance is the one real Stage 4 handoff and now has one canonical option, one final Stage 5 selection, one semantically audited Stage 6 plan, one exported ticket, and one same-author draft PR. BDS-036 and BDS-037 are closed. Eight commits each passed the unchanged original-scenario replay; the final runner gate passed 435 <code>runner_core</code> tests with one skip, ten application tests, and collect-only for three isolated-DIND tests. The branch is pushed and PR #213 is open/draft; a model-free receipt adopts it into <code>awaiting_review</code> while leaving the ticket in the ready folder. No Docker test body, recurrence result, completed review, or OutcomeRecord exists. Qualification remains 0/2 and automated export remains disabled.</div>
         </section>
 
-        <section id="status-change">
-          <h2>What improved, worsened, and stayed unresolved</h2>
+        <section id="historical-status-change">
+          <h2>Historical July 15 snapshot: what had improved, worsened, and stayed unresolved</h2>
           <div class="table-wrap">
             <table>
               <thead><tr><th>Area</th><th>Direction</th><th>Evidence-bounded assessment</th></tr></thead>
@@ -1981,14 +1953,15 @@
         <a href="#stage3">Earlier controlled Stage 3</a>
         <a href="#component-stage3">Component-first Stage 3</a>
         <a href="#terra-actionable-stage3">Actionable Terra Stage 3</a>
-        <a href="#status-change">Improved / worsened</a>
+        <a href="#status-change">Current operational dashboard</a>
+        <a href="#historical-status-change">Historical improved / worsened</a>
         <a href="#ticket-outcomes">Tickets and outcomes</a>
         <a href="#next-gates">Next gates</a>
         <a href="#sources">Sources</a>
       </nav>
     </div>
 
-    <footer>Historical automated-backlog depth remediation - operational dashboard July 16, 2026 03:18Z; detailed evidence sections retain their recorded snapshots</footer>
+    <footer>Historical automated-backlog depth remediation — current operational dashboard above; detailed evidence sections retain their recorded point-in-time snapshots.</footer>
   </div>
 </body>
 </html>

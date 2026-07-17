@@ -41,12 +41,21 @@ from usertest_backlog.workflows.qualification import (
     qualification_source_correction_findings,
     qualification_source_correction_findings_errors,
 )
+from usertest_backlog.workflows.qualification_run_manifest import (
+    SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND,
+    build_semantic_run_evidence_manifest,
+    collect_atom_artifact_specs,
+    collect_outcome_artifact_paths,
+    semantic_manifest_base_projection,
+    verify_semantic_run_evidence_manifest,
+)
 from usertest_backlog.workflows.shadow_validation import (
     qualification_accepted_outputs,
     validate_pending_shadow_run,
 )
 
-QUALIFICATION_INPUT_BUNDLE_SCHEMA_VERSION = 1
+QUALIFICATION_INPUT_BUNDLE_SCHEMA_VERSION = 2
+_LEGACY_QUALIFICATION_INPUT_BUNDLE_SCHEMA_VERSION = 1
 QUALIFICATION_ADJUDICATION_TEMPLATE_SCHEMA_VERSION = 1
 
 
@@ -147,23 +156,107 @@ def _tree_manifest(
     }
 
 
+def _validated_additional_evidence_roots(
+    roots: Iterable[Path],
+    *,
+    source_runs_dir: Path,
+    target: str | None,
+) -> list[Path]:
+    """Return explicit canonical run roots outside the inferred source pair.
+
+    Qualification preparation must not recursively discover archives or moved storage.
+    Each additional root is therefore an absolute operator-selected ``runs`` root with
+    the same immediate target/timestamp/agent/seed layout consumed by
+    ``iter_report_history``.  Selecting a narrow canonical root is the performance
+    boundary; the selected tree itself remains fully content-addressed so newly added
+    evidence readers cannot silently escape the seal.
+    """
+
+    primary = source_runs_dir.expanduser().resolve()
+    inferred_implementation = primary.parent / "usertest_implement"
+    selected: set[Path] = set()
+    for raw_root in roots:
+        expanded = raw_root.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError(
+                f"qualification_additional_evidence_root_not_absolute:{raw_root}"
+            )
+        root = expanded.resolve()
+        if root in {primary, inferred_implementation}:
+            raise ValueError(
+                f"qualification_additional_evidence_root_duplicates_inferred:{root}"
+            )
+        if not root.is_dir():
+            raise ValueError(f"qualification_additional_evidence_root_missing:{root}")
+        pattern = (
+            f"{target}/*/*/*/target_ref.json"
+            if isinstance(target, str) and target.strip()
+            else "*/*/*/*/target_ref.json"
+        )
+        if next(root.glob(pattern), None) is None:
+            raise ValueError(
+                f"qualification_additional_evidence_root_not_canonical:{root}"
+            )
+        selected.add(root)
+    return sorted(selected, key=lambda item: item.as_posix())
+
+
 def capture_qualification_source_snapshot(
     source_runs_dir: Path,
-) -> dict[str, dict[str, Any]]:
-    """Capture the exact source trees before atom extraction begins."""
+    *,
+    target: str | None = None,
+    additional_evidence_runs_dirs: Iterable[Path] = (),
+    atoms: Sequence[Mapping[str, Any]] = (),
+    repo_root: Path | None = None,
+    outcome_documents: Sequence[Any] = (),
+) -> dict[str, Any]:
+    """Capture only evidence that can change extracted atoms or trusted outcomes."""
 
     source_runs_dir = source_runs_dir.expanduser().resolve()
+    implementation_root = (source_runs_dir.parent / "usertest_implement").resolve()
+    additional_roots = _validated_additional_evidence_roots(
+        additional_evidence_runs_dirs,
+        source_runs_dir=source_runs_dir,
+        target=target,
+    )
+    roots = [source_runs_dir, implementation_root, *additional_roots]
+    atom_specs = collect_atom_artifact_specs(
+        atoms,
+        repo_root=(repo_root or source_runs_dir.parent).expanduser().resolve(),
+        roots=roots,
+    )
+    outcome_paths = collect_outcome_artifact_paths(
+        outcome_documents,
+        roots=roots,
+    )
     return {
-        "source_runs": _tree_manifest(
+        "source_runs": build_semantic_run_evidence_manifest(
             source_runs_dir,
             name="source_runs",
-            ignored_directory_names={"maintenance_venv_copies"},
+            target_slug=target,
+            root_role="primary",
+            atom_artifact_specs=atom_specs[source_runs_dir],
+            outcome_artifact_paths=outcome_paths[source_runs_dir],
         ),
-        "implementation_runs": _tree_manifest(
-            source_runs_dir.parent / "usertest_implement",
+        "implementation_runs": build_semantic_run_evidence_manifest(
+            implementation_root,
             name="implementation_runs",
-            ignored_directory_names={"maintenance_venv_copies"},
+            target_slug=target,
+            root_role="implementation",
+            atom_artifact_specs=atom_specs[implementation_root],
+            outcome_artifact_paths=outcome_paths[implementation_root],
         ),
+        "additional_evidence_runs": [
+            build_semantic_run_evidence_manifest(
+                root,
+                name=f"additional_evidence_runs:{index:04d}",
+                target_slug=target,
+                root_role="retained",
+                atom_artifact_specs=atom_specs[root],
+                outcome_artifact_paths=outcome_paths[root],
+            )
+            for index, root in enumerate(additional_roots, start=1)
+        ],
     }
 
 
@@ -604,6 +697,9 @@ def capture_qualification_preparation_snapshot(
     source_runs_dir: Path,
     atom_actions_path: Path,
     case_registry_seed_path: Path,
+    target: str | None = None,
+    additional_evidence_runs_dirs: Iterable[Path] = (),
+    atoms: Sequence[Mapping[str, Any]] = (),
     protected_paths: Iterable[Path] = (),
     owner_roots: Iterable[Path] = (),
 ) -> dict[str, Any]:
@@ -617,11 +713,18 @@ def capture_qualification_preparation_snapshot(
     if not repo_input.is_dir():
         raise ValueError(f"qualification_input_repo_missing:{repo_input}")
 
-    source_snapshot = capture_qualification_source_snapshot(source_runs_dir)
     ledger_receipt = _file_receipt(atom_actions_path, name="copied_atom_actions")
     registry_receipt = _file_receipt(case_registry_seed_path, name="case_registry_seed")
     ledger_document = _load_structured_document(atom_actions_path)
     registry_document = _load_structured_document(case_registry_seed_path)
+    source_snapshot = capture_qualification_source_snapshot(
+        source_runs_dir,
+        target=target,
+        additional_evidence_runs_dirs=additional_evidence_runs_dirs,
+        atoms=atoms,
+        repo_root=repo_root,
+        outcome_documents=(ledger_document, registry_document),
+    )
     all_owner_roots = {
         repo_root,
         repo_input,
@@ -676,6 +779,24 @@ def capture_qualification_preparation_snapshot(
     return snapshot
 
 
+def _semantic_source_value_base_equal(prior: Any, observed: Any) -> bool:
+    if isinstance(prior, Mapping) and isinstance(observed, Mapping):
+        if (
+            prior.get("manifest_kind") == SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND
+            and observed.get("manifest_kind") == SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND
+        ):
+            return semantic_manifest_base_projection(prior) == (
+                semantic_manifest_base_projection(observed)
+            )
+        return dict(prior) == dict(observed)
+    if isinstance(prior, list) and isinstance(observed, list):
+        return len(prior) == len(observed) and all(
+            _semantic_source_value_base_equal(left, right)
+            for left, right in zip(prior, observed, strict=True)
+        )
+    return prior == observed
+
+
 def extend_qualification_preparation_snapshot(
     snapshot: Mapping[str, Any],
     *,
@@ -685,6 +806,9 @@ def extend_qualification_preparation_snapshot(
     source_runs_dir: Path,
     atom_actions_path: Path,
     case_registry_seed_path: Path,
+    target: str | None = None,
+    additional_evidence_runs_dirs: Iterable[Path] = (),
+    atoms: Sequence[Mapping[str, Any]] = (),
     protected_paths: Iterable[Path] = (),
     owner_roots: Iterable[Path] = (),
 ) -> dict[str, Any]:
@@ -697,6 +821,9 @@ def extend_qualification_preparation_snapshot(
         source_runs_dir=source_runs_dir,
         atom_actions_path=atom_actions_path,
         case_registry_seed_path=case_registry_seed_path,
+        target=target,
+        additional_evidence_runs_dirs=additional_evidence_runs_dirs,
+        atoms=atoms,
         protected_paths=protected_paths,
         owner_roots=owner_roots,
     )
@@ -710,11 +837,19 @@ def extend_qualification_preparation_snapshot(
     for key in (
         "source_runs",
         "implementation_runs",
+        "additional_evidence_runs",
         "atom_actions",
         "case_registry_seed",
     ):
-        if prior_source.get(key) != observed_source.get(key):
-            label = "source" if key in {"source_runs", "implementation_runs"} else key
+        if not _semantic_source_value_base_equal(
+            prior_source.get(key), observed_source.get(key)
+        ):
+            label = (
+                "source"
+                if key
+                in {"source_runs", "implementation_runs", "additional_evidence_runs"}
+                else key
+            )
             raise ValueError(f"qualification_input_{label}_changed_during_extraction")
     observed_git = {
         item.get("root"): item
@@ -749,6 +884,7 @@ def build_qualification_input_bundle(
     case_registry_seed_path: Path,
     target: str | None,
     breadth_profile: str,
+    additional_evidence_runs_dirs: Iterable[Path] = (),
     protected_paths: Iterable[Path] = (),
     owner_roots: Iterable[Path] = (),
     extraction_metadata: Mapping[str, Any] | None = None,
@@ -772,33 +908,29 @@ def build_qualification_input_bundle(
         source_runs_dir=source_runs_dir,
         atom_actions_path=atom_actions_path,
         case_registry_seed_path=case_registry_seed_path,
+        target=target,
+        additional_evidence_runs_dirs=additional_evidence_runs_dirs,
+        atoms=atoms,
         protected_paths=protected_paths,
         owner_roots=owner_roots,
     )
     if preparation_input_snapshot is not None:
-        frozen_snapshot = {
+        prior_snapshot = {
             key: value for key, value in preparation_input_snapshot.items()
         }
-        if observed_snapshot != frozen_snapshot:
-            frozen_source = frozen_snapshot.get("source_inputs")
-            observed_source = observed_snapshot.get("source_inputs")
-            frozen_source = frozen_source if isinstance(frozen_source, Mapping) else {}
-            observed_source = observed_source if isinstance(observed_source, Mapping) else {}
-            if any(
-                frozen_source.get(key) != observed_source.get(key)
-                for key in ("source_runs", "implementation_runs")
-            ):
-                raise ValueError("qualification_input_source_changed_during_extraction")
+        if observed_snapshot != prior_snapshot:
             raise ValueError("qualification_input_changed_during_extraction")
+        frozen_snapshot = prior_snapshot
     else:
         frozen_snapshot = observed_snapshot
     if source_input_snapshot is not None:
-        legacy_source = {
-            key: dict(item) for key, item in source_input_snapshot.items()
-        }
+        legacy_source = dict(source_input_snapshot)
         frozen_source = frozen_snapshot.get("source_inputs")
         frozen_source = frozen_source if isinstance(frozen_source, Mapping) else {}
-        if any(frozen_source.get(key) != value for key, value in legacy_source.items()):
+        if any(
+            not _semantic_source_value_base_equal(frozen_source.get(key), value)
+            for key, value in legacy_source.items()
+        ):
             raise ValueError("qualification_input_source_changed_during_extraction")
 
     frozen_scope = frozen_snapshot.get("scope")
@@ -834,6 +966,7 @@ def build_qualification_input_bundle(
             for key in (
                 "source_runs",
                 "implementation_runs",
+                "additional_evidence_runs",
                 "atom_actions",
                 "case_registry_seed",
                 "owner_roots",
@@ -892,6 +1025,16 @@ def _verify_tree_manifest(manifest: Mapping[str, Any], *, name: str) -> list[str
     return []
 
 
+def _verify_run_evidence_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    name: str,
+) -> list[str]:
+    if manifest.get("manifest_kind") == SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND:
+        return verify_semantic_run_evidence_manifest(manifest, name=name)
+    return _verify_tree_manifest(manifest, name=name)
+
+
 def qualification_input_bundle_errors(
     value: Any,
     *,
@@ -900,7 +1043,11 @@ def qualification_input_bundle_errors(
     if not isinstance(value, Mapping):
         return ["qualification_input_bundle_invalid"]
     errors: list[str] = []
-    if value.get("schema_version") != QUALIFICATION_INPUT_BUNDLE_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        _LEGACY_QUALIFICATION_INPUT_BUNDLE_SCHEMA_VERSION,
+        QUALIFICATION_INPUT_BUNDLE_SCHEMA_VERSION,
+    }:
         errors.append("qualification_input_bundle_schema_invalid")
     if value.get("contract_kind") != "qualification_input_bundle":
         errors.append("qualification_input_bundle_kind_invalid")
@@ -937,16 +1084,74 @@ def qualification_input_bundle_errors(
                 or corpus.get("receipts_sha256") != _canonical_hash(receipts)
             ):
                 errors.append("qualification_input_bundle_atom_corpus_mismatch")
-    if not verify_files:
-        return list(dict.fromkeys(errors))
     source = value.get("source_inputs")
     source = source if isinstance(source, Mapping) else {}
+    run_manifests = [
+        source.get("source_runs"),
+        source.get("implementation_runs"),
+    ]
+    additional_contract_raw = source.get("additional_evidence_runs", [])
+    if isinstance(additional_contract_raw, list):
+        run_manifests.extend(additional_contract_raw)
+    if schema_version == QUALIFICATION_INPUT_BUNDLE_SCHEMA_VERSION and any(
+        not isinstance(manifest, Mapping)
+        or manifest.get("manifest_kind") != SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND
+        for manifest in run_manifests
+    ):
+        errors.append("qualification_input_semantic_manifest_required")
+    if not verify_files:
+        return list(dict.fromkeys(errors))
     for key in ("source_runs", "implementation_runs"):
         manifest = source.get(key)
         if not isinstance(manifest, Mapping):
             errors.append(f"qualification_input_tree_receipt_missing:{key}")
         else:
-            errors.extend(_verify_tree_manifest(manifest, name=key))
+            errors.extend(_verify_run_evidence_manifest(manifest, name=key))
+    additional_raw = source.get("additional_evidence_runs", [])
+    additional = additional_raw if isinstance(additional_raw, list) else []
+    if not isinstance(additional_raw, list) or any(
+        not isinstance(item, Mapping) for item in additional
+    ):
+        errors.append("qualification_input_additional_evidence_roots_invalid")
+    else:
+        additional_roots: list[str] = []
+        inferred_roots = {
+            _text(source.get(key, {}).get("root"))
+            for key in ("source_runs", "implementation_runs")
+            if isinstance(source.get(key), Mapping)
+        }
+        target = _text(scope.get("target"))
+        for index, manifest in enumerate(additional):
+            root_raw = _text(manifest.get("root"))
+            expected_name = f"additional_evidence_runs:{index + 1:04d}"
+            if manifest.get("name") != expected_name or root_raw is None:
+                errors.append(
+                    f"qualification_input_additional_evidence_root_receipt_invalid:{index}"
+                )
+                continue
+            root = Path(root_raw)
+            pattern = (
+                f"{target}/*/*/*/target_ref.json"
+                if target is not None
+                else "*/*/*/*/target_ref.json"
+            )
+            if (
+                not root.is_absolute()
+                or root_raw in inferred_roots
+                or next(root.glob(pattern), None) is None
+            ):
+                errors.append(
+                    f"qualification_input_additional_evidence_root_scope_invalid:{index}"
+                )
+            additional_roots.append(str(root.resolve()))
+            errors.extend(
+                _verify_run_evidence_manifest(
+                    manifest,
+                    name=f"additional_evidence_runs:{index}",
+                )
+            )
+        if len(additional_roots) != len(set(additional_roots)):
+            errors.append("qualification_input_additional_evidence_roots_duplicated")
     for key in ("atom_actions", "case_registry_seed"):
         receipt = source.get(key)
         if not isinstance(receipt, Mapping):
@@ -1425,6 +1630,9 @@ def _cmd_reports_qualification_prepare(args: argparse.Namespace) -> int:
         qualification_prepare_out=args.out_root,
         qualification_case_registry_seed=args.case_registry_seed,
         qualification_protected_path=args.protected_path,
+        qualification_additional_evidence_runs_dir=(
+            args.additional_evidence_runs_dir
+        ),
         labelers=3,
         policy_config=None,
         no_policy=False,

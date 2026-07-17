@@ -804,6 +804,116 @@ def _relation_application_errors(stage1: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _has_valid_qualification_evidence_retraction(
+    case_id: str,
+    raw_case: Mapping[str, Any],
+) -> bool:
+    """Recognize a runner-proven evidence retraction, not a lifecycle outcome.
+
+    A Stage-1 qualification correction can prove that the source evidence never
+    established the case. That is categorically different from implementing and
+    resolving a valid case, so it has no outcome record. The exception remains
+    narrow: the embedded receipt must be intact and bound to the exact superseded
+    case state and revision currently being validated.
+    """
+
+    state = _text(raw_case.get("state")) or "active"
+    if (
+        state != "superseded"
+        or _text(raw_case.get("superseded_reason"))
+        != "qualification_evidence_retracted"
+        or raw_case.get("source_evidence_atom_ids") != []
+    ):
+        return False
+    case_revision_raw = raw_case.get("case_revision")
+    if (
+        not isinstance(case_revision_raw, int)
+        or isinstance(case_revision_raw, bool)
+        or case_revision_raw < 1
+    ):
+        return False
+    receipts_raw = raw_case.get("evidence_retraction_receipts")
+    if not isinstance(receipts_raw, list):
+        return False
+
+    for receipt_raw in receipts_raw:
+        if not isinstance(receipt_raw, Mapping):
+            continue
+        receipt = dict(receipt_raw)
+        supplied_hash = _text(receipt.get("content_sha256"))
+        expected_hash = _canonical_hash(
+            {
+                key: value
+                for key, value in receipt.items()
+                if key != "content_sha256"
+            }
+        )
+        if supplied_hash is None or supplied_hash.casefold() != expected_hash:
+            continue
+        prior_revision = receipt.get("prior_case_revision")
+        resulting_revision = receipt.get("resulting_case_revision")
+        if (
+            receipt.get("schema_version") != 1
+            or receipt.get("producer") != "usertest_backlog.problem_mining"
+            or receipt.get("receipt_kind") != "case_evidence_retraction"
+            or _text(receipt.get("case_id")) != case_id
+            or _text(receipt.get("resulting_state")) != state
+            or not isinstance(prior_revision, int)
+            or isinstance(prior_revision, bool)
+            or prior_revision < 0
+            or not isinstance(resulting_revision, int)
+            or isinstance(resulting_revision, bool)
+            or resulting_revision != case_revision_raw
+            or resulting_revision != max(1, prior_revision + 1)
+            or _text(receipt.get("prior_state")) is None
+            or receipt.get("remaining_source_evidence_atom_ids") != []
+        ):
+            continue
+        retracted_raw = receipt.get("retracted_atom_ids")
+        retracted_atom_ids = _clean_string_set(retracted_raw)
+        if (
+            not retracted_atom_ids
+            or not isinstance(retracted_raw, list)
+            or retracted_raw != sorted(retracted_atom_ids)
+        ):
+            continue
+        disposition_hashes_raw = receipt.get(
+            "disposition_receipt_sha256_by_atom_id"
+        )
+        if (
+            not isinstance(disposition_hashes_raw, Mapping)
+            or set(disposition_hashes_raw) != retracted_atom_ids
+            or any(
+                not _valid_sha256(value)
+                for value in disposition_hashes_raw.values()
+            )
+        ):
+            continue
+        if any(
+            not _valid_sha256(receipt.get(field))
+            for field in (
+                "qualification_feedback_sha256",
+                "corrected_author_response_sha256",
+                "author_workspace_manifest_sha256",
+                "source_problem_mining_evidence_receipt_file_sha256",
+                "source_problem_mining_evidence_receipt_sha256",
+            )
+        ):
+            continue
+        if any(
+            retracted_atom_ids.intersection(_clean_string_set(raw_case.get(field)))
+            for field in (
+                "evidence_atom_ids",
+                "source_evidence_atom_ids",
+                "derived_evidence_atom_ids",
+                "occurrence_evidence_atom_ids",
+            )
+        ):
+            continue
+        return True
+    return False
+
+
 def _terminal_outcome_errors(
     case_registry: dict[str, Any],
     *,
@@ -857,7 +967,11 @@ def _terminal_outcome_errors(
                 continue
             if outcome.get("case_id") == case_id and outcome.get("state") == state:
                 valid_records.append(outcome)
-        if state in _CASE_TERMINAL_OUTCOMES and not valid_records:
+        if (
+            state in _CASE_TERMINAL_OUTCOMES
+            and not valid_records
+            and not _has_valid_qualification_evidence_retraction(str(case_id), raw_case)
+        ):
             errors.append(f"terminal_case_missing_validated_outcome:{case_id}:{state}")
     return errors
 

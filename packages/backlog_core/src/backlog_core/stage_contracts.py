@@ -766,6 +766,87 @@ def _validate_artifact_refs(value: Any, *, pid: str) -> list[str]:
     return errors
 
 
+_RESEARCH_ATTEMPT_RESCORE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "contract_kind",
+        "source_attempt_sha256",
+        "source_attempted_dossier_sha256",
+        "source_validation_errors",
+        "replacement_validation_errors",
+        "reason",
+        "evaluator_defect_ids",
+        "rescore_receipt_path",
+        "rescore_receipt_sha256",
+        "authored_attempt_sha256",
+        "rescore_sha256",
+    }
+)
+
+
+def _research_attempt_rescore_errors(
+    attempt: dict[str, Any],
+    *,
+    source_attempt: dict[str, Any],
+    pid: str,
+    index: int,
+) -> tuple[bool, list[str]]:
+    """Validate the sole authenticated exception to exact prior-error equality."""
+
+    rescore_raw = attempt.get("validation_error_rescore")
+    if rescore_raw is None:
+        return False, []
+    prefix = f"research_dossier_research_attempt_rescore_invalid: {pid}: index={index}"
+    if not isinstance(rescore_raw, dict):
+        return False, [prefix + ":not_object"]
+    rescore = rescore_raw
+    errors: list[str] = []
+    if set(rescore) != _RESEARCH_ATTEMPT_RESCORE_FIELDS:
+        errors.append(prefix + ":field_shape")
+    source_errors = source_attempt.get("validation_errors_after")
+    replacement_errors = attempt.get("validation_errors_before")
+    if (
+        rescore.get("schema_version") != 1
+        or rescore.get("contract_kind") != "research_validation_error_rescore"
+        or rescore.get("source_attempt_sha256") != source_attempt.get("attempt_sha256")
+        or rescore.get("source_attempt_sha256") != attempt.get("source_attempt_sha256")
+        or rescore.get("source_attempted_dossier_sha256")
+        != source_attempt.get("attempted_dossier_sha256")
+        or rescore.get("source_validation_errors") != source_errors
+        or rescore.get("replacement_validation_errors") != replacement_errors
+        or source_errors == replacement_errors
+    ):
+        errors.append(prefix + ":source_or_frontier_binding")
+    if not _is_nonempty_string(rescore.get("reason")):
+        errors.append(prefix + ":reason")
+    defect_ids = rescore.get("evaluator_defect_ids")
+    if (
+        not isinstance(defect_ids, list)
+        or not defect_ids
+        or any(not _is_nonempty_string(item) for item in defect_ids)
+    ):
+        errors.append(prefix + ":evaluator_defect_ids")
+    if not _is_nonempty_string(rescore.get("rescore_receipt_path")) or not _valid_sha256(
+        rescore.get("rescore_receipt_sha256")
+    ):
+        errors.append(prefix + ":receipt")
+    rescore_without_hash = {
+        key: value for key, value in rescore.items() if key != "rescore_sha256"
+    }
+    if rescore.get("rescore_sha256") != _canonical_sha256(rescore_without_hash):
+        errors.append(prefix + ":self_hash")
+    authored_sha256 = rescore.get("authored_attempt_sha256")
+    authored_attempt = {
+        key: value for key, value in attempt.items() if key != "validation_error_rescore"
+    }
+    authored_attempt["attempt_sha256"] = authored_sha256
+    if not _valid_sha256(authored_sha256) or research_attempt_sha256(
+        authored_attempt
+    ) != authored_sha256:
+        errors.append(prefix + ":authored_attempt_hash")
+    return not errors, errors
+
+
 def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
     """Validate runner-owned, non-advancing research-attempt provenance."""
     if value is None:
@@ -794,6 +875,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
         "resumed_from_session_id",
         "attempt_wall_seconds",
         "repair_progress",
+        "validation_error_rescore",
         "attempt_artifacts",
         "attempt_sha256",
     }
@@ -1182,6 +1264,11 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                 )
         if attempt.get("attempt_sha256") != research_attempt_sha256(attempt):
             errors.append(f"research_dossier_research_attempt_hash_mismatch: {pid}: index={index}")
+        if index == 0 and attempt.get("validation_error_rescore") is not None:
+            errors.append(
+                f"research_dossier_research_attempt_rescore_invalid: {pid}: "
+                f"index={index}:source_missing"
+            )
         attempt_hash = attempt.get("attempt_sha256")
         if isinstance(attempt_hash, str):
             attempts_by_hash[attempt_hash] = attempt
@@ -1238,6 +1325,13 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         f"research_dossier_research_attempt_source_not_prior: {pid}: index={index}"
                     )
                 else:
+                    rescore_valid, rescore_errors = _research_attempt_rescore_errors(
+                        attempt,
+                        source_attempt=source_attempt,
+                        pid=pid,
+                        index=index,
+                    )
+                    errors.extend(rescore_errors)
                     # A feedback record is the runner's immutable transition from the
                     # source attempt's existing error frontier into the combined
                     # verifier/independent-review frontier. It deliberately has no
@@ -1265,7 +1359,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                     )
                     if not legacy_feedback_replacement and attempt.get(
                         "validation_errors_before"
-                    ) != source_attempt.get("validation_errors_after"):
+                    ) != source_attempt.get("validation_errors_after") and not rescore_valid:
                         errors.append(
                             f"research_dossier_research_attempt_prior_errors_mismatch: "
                             f"{pid}: index={index}"

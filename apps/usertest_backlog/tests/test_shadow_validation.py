@@ -3917,6 +3917,99 @@ def test_shadow_invariants_reject_terminal_case_without_validated_outcome(
     assert report["failures"] == ["terminal_case_missing_validated_outcome:case:closed:resolved"]
 
 
+def _qualification_evidence_retracted_case(case_id: str) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "producer": "usertest_backlog.problem_mining",
+        "receipt_kind": "case_evidence_retraction",
+        "case_id": case_id,
+        "prior_case_revision": 2,
+        "prior_state": "active",
+        "retracted_atom_ids": ["atom:retracted"],
+        "remaining_source_evidence_atom_ids": [],
+        "disposition_receipt_sha256_by_atom_id": {
+            "atom:retracted": "f" * 64,
+        },
+        "qualification_feedback_sha256": "a" * 64,
+        "corrected_author_response_sha256": "b" * 64,
+        "author_workspace_manifest_sha256": "c" * 64,
+        "source_problem_mining_evidence_receipt_file_sha256": "d" * 64,
+        "source_problem_mining_evidence_receipt_sha256": "e" * 64,
+        "resulting_state": "superseded",
+        "resulting_case_revision": 3,
+    }
+    receipt["content_sha256"] = sha256(
+        json.dumps(
+            receipt,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "case_id": case_id,
+        "state": "superseded",
+        "superseded_reason": "qualification_evidence_retracted",
+        "case_revision": 3,
+        "evidence_atom_ids": [],
+        "source_evidence_atom_ids": [],
+        "derived_evidence_atom_ids": [],
+        "occurrence_evidence_atom_ids": [],
+        "evidence_retraction_receipts": [receipt],
+        "plan_outcomes": {},
+    }
+
+
+def test_shadow_invariants_accept_hash_bound_qualification_evidence_retraction(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["case_registry"]["cases"]["case:retracted"] = (
+        _qualification_evidence_retracted_case("case:retracted")
+    )
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is True
+    assert report["failures"] == []
+
+
+def test_shadow_invariants_reject_tampered_qualification_evidence_retraction(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    retracted_case = _qualification_evidence_retracted_case("case:retracted")
+    retracted_case["evidence_retraction_receipts"][0]["content_sha256"] = "0" * 64
+    inputs["case_registry"]["cases"]["case:retracted"] = retracted_case
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert report["failures"] == [
+        "terminal_case_missing_validated_outcome:case:retracted:superseded"
+    ]
+
+
+def test_shadow_invariants_still_require_outcome_for_ordinary_superseded_case(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["case_registry"]["cases"]["case:ordinary"] = {
+        "case_id": "case:ordinary",
+        "state": "superseded",
+        "case_revision": 2,
+        "superseded_reason": "implementation_replaced",
+        "plan_outcomes": {},
+    }
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert report["failures"] == [
+        "terminal_case_missing_validated_outcome:case:ordinary:superseded"
+    ]
+
+
 def test_shadow_relation_check_uses_action_specific_target_fields(tmp_path: Path) -> None:
     inputs = _passing_inputs(tmp_path)
     decisions: list[dict[str, object]] = [

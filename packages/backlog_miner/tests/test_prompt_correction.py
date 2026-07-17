@@ -465,6 +465,35 @@ def test_pre_author_equivalent_failure_pauses_with_all_receipts() -> None:
     assert len(acquisition.attempts) == 2
 
 
+def test_pre_author_repeated_regression_retains_best_and_all_nonprogress_cost() -> None:
+    initial = _observation(
+        "best initial",
+        ["transport:a"],
+        keys=["valid:a"],
+        cost=1.0,
+        session_id=None,
+    )
+    worse = _observation(
+        "worse repeated",
+        ["transport:a", "transport:b"],
+        cost=2.5,
+        session_id=None,
+    )
+
+    acquisition = acquire_author_session(
+        initial=initial,
+        invoke_fresh=lambda _number: worse,
+    )
+
+    assert acquisition.status == (
+        "repairable_paused:author_session_acquisition_repeated"
+    )
+    assert acquisition.current is worse
+    assert acquisition.best is initial
+    assert acquisition.cost_since_progress == 5.0
+    assert acquisition.total_cost == 6.0
+
+
 def test_pre_author_duration_never_becomes_a_fresh_retry_budget() -> None:
     initial = _observation(
         "first-failure",
@@ -577,6 +606,118 @@ def test_pre_author_equivalent_invocation_exception_pauses_on_recurrence() -> No
         acquisition.invocation_failures[0].failure_identity
         == acquisition.invocation_failures[1].failure_identity
     )
+
+
+def test_pre_author_distinct_transport_text_pauses_when_session_acquisition_does_not_advance(
+) -> None:
+    initial = _observation("initial failure", ["transport:initial"], session_id=None)
+    calls: list[int] = []
+
+    def invoke(number: int) -> CorrectionObservation[str]:
+        calls.append(number)
+        raise RuntimeError(
+            "failed to initialize app server at codex-arg0"
+            f"nonce-{number}"
+        )
+
+    acquisition = acquire_author_session(initial=initial, invoke_fresh=invoke)
+
+    assert acquisition.status == (
+        "repairable_paused:author_session_acquisition_nonadvancing"
+    )
+    assert calls == [2, 3]
+    assert len(acquisition.attempts) == 1
+    assert len(acquisition.invocation_failures) == 2
+    assert (
+        acquisition.invocation_failures[0].failure_identity
+        != acquisition.invocation_failures[1].failure_identity
+    )
+
+
+def test_pre_author_distinct_sessionless_outputs_pause_without_false_progress() -> None:
+    initial = _observation("initial failure", ["transport:initial"], session_id=None)
+    calls: list[int] = []
+
+    def invoke(number: int) -> CorrectionObservation[str]:
+        calls.append(number)
+        return _observation(
+            f"empty response with nonce {number}",
+            [f"transport:nonce-{number}"],
+            session_id=None,
+        )
+
+    acquisition = acquire_author_session(initial=initial, invoke_fresh=invoke)
+
+    assert acquisition.status == (
+        "repairable_paused:author_session_acquisition_nonadvancing"
+    )
+    assert calls == [2, 3]
+    assert len(acquisition.attempts) == 3
+
+
+def test_pre_author_real_frontier_progress_resets_nonadvancing_boundary() -> None:
+    initial = _observation(
+        "initial failure",
+        ["transport:a", "transport:b", "transport:c"],
+        session_id=None,
+    )
+    candidates = iter(
+        [
+            _observation(
+                "one fewer error",
+                ["transport:a", "transport:b"],
+                session_id=None,
+            ),
+            _observation(
+                "first plateau after progress",
+                ["transport:a", "transport:b"],
+                session_id=None,
+            ),
+            _observation(
+                "second plateau after progress",
+                ["transport:a", "transport:b"],
+                session_id=None,
+            ),
+            _observation("valid", []),
+        ]
+    )
+
+    acquisition = acquire_author_session(
+        initial=initial,
+        invoke_fresh=lambda _number: next(candidates),
+    )
+
+    assert acquisition.status == "acquired"
+    assert len(acquisition.attempts) == 5
+
+
+def test_pre_author_error_count_oscillation_does_not_fake_progress() -> None:
+    initial = _observation("one error", ["transport:a"], session_id=None)
+    candidates = iter(
+        [
+            _observation(
+                "regressed to two",
+                ["transport:a", "transport:b"],
+                session_id=None,
+            ),
+            _observation(
+                "returned to prior minimum with a new nonce",
+                ["transport:nonce"],
+                session_id=None,
+            ),
+        ]
+    )
+
+    acquisition = acquire_author_session(
+        initial=initial,
+        invoke_fresh=lambda _number: next(candidates),
+    )
+
+    assert acquisition.status == (
+        "repairable_paused:author_session_acquisition_nonadvancing"
+    )
+    assert len(acquisition.attempts) == 3
+    assert acquisition.best is initial
 
 
 def test_transient_exact_session_invocation_exception_retries_same_author() -> None:

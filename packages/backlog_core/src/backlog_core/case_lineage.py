@@ -3097,7 +3097,12 @@ def _update_optioning_stage_summary(
             ),
             research_dossier_sha256=_clean_string(current_research.get("full_dossier_sha256")),
         ),
-        "problem_id": _clean_string(records[0].get("problem_id")) if records else None,
+        "case_id": _clean_string(entry.get("case_id")),
+        "problem_id": (
+            _clean_string(records[0].get("problem_id"))
+            if records
+            else _clean_string(outcome.get("problem_id"))
+        ),
         "optioning_status": status,
         "option_ids": [
             option_id
@@ -3114,6 +3119,12 @@ def _update_optioning_stage_summary(
             )
         ),
     }
+    summary["optioning_outcome_count"] = len(auxiliary_records)
+    if len(auxiliary_records) == 1:
+        # A zero-option outcome is a real Stage-4 disposition, not an option record.
+        # Retain its exact identity so later cycles can authenticate the full artifact
+        # rather than treating every empty option set as a cache miss.
+        summary["optioning_outcome_sha256"] = _canonical_content_sha256(outcome)
     actionability_disposition = _clean_string(
         outcome.get("research_actionability_disposition")
     )

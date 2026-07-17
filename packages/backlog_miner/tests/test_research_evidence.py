@@ -35,6 +35,35 @@ def _required_powershell_executable() -> str:
     pytest.skip("PowerShell replay tests require pwsh or powershell.exe")
 
 
+def test_persisted_attempt_rescore_receipt_is_rehashed_even_for_invocation_failure(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "rescore.json"
+    receipt.write_text('{"status":"authenticated"}\n', encoding="utf-8")
+    dossier = {
+        "research_attempts": [
+            {
+                "outcome": "invocation_failed",
+                "validation_error_rescore": {
+                    "rescore_receipt_path": str(receipt),
+                    "rescore_receipt_sha256": sha256(receipt.read_bytes()).hexdigest(),
+                },
+            }
+        ]
+    }
+
+    assert mod._persisted_research_attempt_errors(dossier) == []
+
+    receipt.write_text('{"status":"changed"}\n', encoding="utf-8")
+    assert mod._persisted_research_attempt_errors(dossier) == [
+        "research_attempt_rescore_receipt_changed:0"
+    ]
+    receipt.unlink()
+    assert mod._persisted_research_attempt_errors(dossier) == [
+        "research_attempt_rescore_receipt_missing:0"
+    ]
+
+
 def test_required_powershell_executable_prefers_cross_platform_pwsh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6688,6 +6717,33 @@ def test_attested_research_pytest_shared_helper_delta_is_verified(tmp_path: Path
     assert attempts["h1"][0]["intervention_receipt_id"] == receipts[0][
         "intervention_receipt_id"
     ]
+
+
+def test_attested_research_pytest_shared_helper_accepts_utf8_bom(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    dossier, replays = _attested_research_pytest_control(workspace)
+    harness = workspace / ".usertest_research" / "test_probe.py"
+    harness.write_bytes(b"\xef\xbb\xbf" + harness.read_bytes())
+    for replay in replays.values():
+        authorization = dict(replay["command_authorization"])
+        authorization.pop("authorization_sha256")
+        authorization["entrypoint_sha256"] = mod._sha256_path(harness)
+        replay["command_authorization"] = mod._command_authorization_receipt(authorization)
+    planning_workspace = tmp_path / "planning"
+    _git(["clone", str(workspace), str(planning_workspace)], cwd=tmp_path)
+    errors: list[str] = []
+
+    receipts = mod._falsification_intervention_receipts(
+        dossier,
+        clean_replays=replays,
+        planning_workspace=planning_workspace,
+        symbol_receipts=[{"symbol": "core.classify", "path": "src/core.py"}],
+        errors=errors,
+    )
+
+    assert errors == []
+    assert len(receipts) == 1
+    assert receipts[0]["shared_verified_mechanism_symbols"] == ["core.classify"]
 
 
 @pytest.mark.parametrize("authorization_change", ["missing", "wrong_sha"])

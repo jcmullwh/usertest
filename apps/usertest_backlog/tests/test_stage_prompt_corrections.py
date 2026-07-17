@@ -9,6 +9,7 @@ import pytest
 from backlog_miner.pipeline import (
     _write_model_invocation_manifest,
     load_pipeline_prompt_manifest,
+    verify_stage_model_invocation_contract,
 )
 
 from usertest_backlog.workflows.prioritization import (
@@ -79,6 +80,89 @@ def _priority_decision(problem_id: str, atom_id: str) -> dict[str, Any]:
         "evidence_atom_ids_used": [atom_id],
         "priority_status": "prioritized",
     }
+
+
+def test_stage2_empty_input_completes_without_model_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    manifest = load_pipeline_prompt_manifest(repo_root / "configs" / "backlog_prompts")
+
+    def unexpected_run_stage_prompt_json(**_kwargs: Any) -> None:
+        pytest.fail("empty stage-2 input must not invoke a model")
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.prioritization.run_stage_prompt_json",
+        unexpected_run_stage_prompt_json,
+    )
+    artifacts_dir = tmp_path / "artifacts"
+    out_json = tmp_path / "prioritized.json"
+    out_md = tmp_path / "prioritized.md"
+
+    doc = _run_problem_prioritization_stage(
+        atoms=[],
+        problem_records=[],
+        pipeline_manifest=manifest,
+        artifacts_dir=artifacts_dir,
+        out_json=out_json,
+        out_md=out_md,
+        agent="codex",
+        model="gpt-5.6-terra",
+        cfg=object(),  # type: ignore[arg-type]
+        dry_run=False,
+        stage_guidance_text="Prioritize every canonical problem.",
+    )
+
+    assert doc["items"] == []
+    meta = doc["input_meta"]
+    assert meta["stage_status"] == "completed"
+    assert meta["prioritizer_status"] == "completed_no_input"
+    assert meta["prioritizer_error"] is None
+    assert meta["model_invocation_skipped"] == "no_problem_records"
+    assert meta["prioritizer_correction_status"] == "not_required"
+    assert meta["prioritizer_correction_metrics"] == {
+        "status": "not_required",
+        "reason": "no_problem_records",
+        "not_applicable": True,
+        "attempt_count": 0,
+        "correction_turn_count": 0,
+        "correction_invocation_failure_count": 0,
+        "correction_invocation_failure_cost_seconds": 0.0,
+        "accepted": None,
+        "accepted_good": None,
+        "accepted_bad": None,
+        "false_rejected": None,
+        "repaired": False,
+        "stalled": False,
+        "repairable_paused": False,
+        "initial_cost_seconds": 0.0,
+        "total_correction_cost_seconds": 0.0,
+        "total_elapsed_seconds": 0.0,
+        "best_error_count": 0,
+        "best_valid_item_count": 0,
+    }
+    assert meta["prioritizer_attempt_history"] == []
+    assert meta["prioritizer_correction_cost_since_progress"] == 0.0
+    assert meta["prioritizer_total_correction_cost"] == 0.0
+    contract = meta["model_invocation_contract"]
+    assert contract["invocation_expected"] is False
+    assert contract["manifests"] == []
+    assert verify_stage_model_invocation_contract(doc) == []
+
+    assert json.loads(out_json.read_text(encoding="utf-8")) == doc
+    assert "No prioritization decisions produced" in out_md.read_text(encoding="utf-8")
+    run_out_dir = (
+        artifacts_dir
+        / "problem_prioritization"
+        / "problem_prioritization_001"
+    )
+    assert (run_out_dir / "problem_prioritization_001.prompt.txt").is_file()
+    response = (
+        run_out_dir / "problem_prioritization_001.response.txt"
+    ).read_text(encoding="utf-8")
+    assert "no model invocation was required" in response
+    assert not (run_out_dir / "problem_prioritization_001.workspace").exists()
 
 
 def test_stage2_repairs_missing_decision_in_exact_author_session(

@@ -11,6 +11,7 @@ from uuid import uuid4
 from backlog_core import assess_research_readiness, build_operational_failure_candidates
 from backlog_miner.research_evidence import BlockedReplayExecutor
 from backlog_miner.research_runner import (
+    _resolve_repo_ref,
     _valid_stage3_research_compatibility_contract,
     _validated_completed_stage3_checkpoint,
     stage3_research_compatibility_contract,
@@ -81,6 +82,10 @@ from usertest_backlog.workflows.qualification_repair_runtime import (
     plan_qualification_repair_route_groups,
     run_stage456_qualification_repairs,
 )
+from usertest_backlog.workflows.qualification_run_manifest import (
+    SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND,
+    extend_semantic_manifest_atom_closure,
+)
 from usertest_backlog.workflows.qualification_transaction import (
     build_qualification_input_bundle,
     capture_qualification_preparation_snapshot,
@@ -92,7 +97,9 @@ from usertest_backlog.workflows.qualification_transaction import (
 )
 from usertest_backlog.workflows.reproduction_research import (
     _atomic_write_research_json,
+    _build_authenticated_stage3_single_case_prefix,
     _configured_replay_executor,
+    _render_research_dossiers_markdown,
     _run_repro_research_stage,
 )
 from usertest_backlog.workflows.research_hydration import hydrate_retained_research_proof
@@ -961,6 +968,231 @@ def _persist_case_registry_stage_lineage(
     return updated
 
 
+def _persist_authenticated_stage3_single_case_prefix(
+    *,
+    repo_root: Path,
+    repo_input: str | None,
+    research_ref: str | None,
+    target_slug: str | None,
+    upstream_paths: Mapping[str, Path],
+    research_json: Path,
+    research_md: Path,
+    imported_dossier: Mapping[str, Any],
+    agent: str,
+    model: str | None,
+    validation_error_rescore: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist one authenticated Stage-3 dossier as the canonical resume prefix."""
+
+    required_paths = {
+        "atoms",
+        "problem_records",
+        "problem_mining_evidence",
+        "prioritized_problems",
+        "case_registry",
+    }
+    if not required_paths <= set(upstream_paths):
+        raise ValueError("stage3_prefix_import_upstream_paths_invalid")
+    canonical_paths = {name: upstream_paths[name] for name in required_paths}
+    if not isinstance(repo_input, str) or not repo_input.strip():
+        raise ValueError("stage3_prefix_import_repo_input_missing")
+    if not isinstance(research_ref, str) or not research_ref.strip():
+        raise ValueError("stage3_prefix_import_research_ref_missing")
+    resolved_repo_ref = _resolve_repo_ref(repo_input, research_ref)
+
+    try:
+        atoms = load_atoms_jsonl(canonical_paths["atoms"])
+        stage2_seed_raw = json.loads(
+            canonical_paths["prioritized_problems"].read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(
+            f"stage3_prefix_import_upstream_unreadable:{type(exc).__name__}"
+        ) from exc
+    if not isinstance(stage2_seed_raw, dict):
+        raise ValueError("stage3_prefix_import_priority_document_not_object")
+    stage2_seed_items_raw = stage2_seed_raw.get("items")
+    stage2_seed_items = (
+        stage2_seed_items_raw if isinstance(stage2_seed_items_raw, list) else []
+    )
+    selected_seed = sorted(
+        (
+            item
+            for item in stage2_seed_items
+            if isinstance(item, Mapping)
+            and item.get("selected_for_research") is True
+            and isinstance(item.get("problem_id"), str)
+        ),
+        key=_research_dispatch_sort_key,
+    )
+    if not selected_seed:
+        raise ValueError("stage3_prefix_import_selection_empty")
+    selected_problem_ids = [str(item["problem_id"]) for item in selected_seed]
+    initial_upstream = _stage3_resume_upstream_contract(
+        paths=canonical_paths,
+        source_atoms=atoms,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        research_ref=research_ref,
+        selected_problem_ids=selected_problem_ids,
+    )
+    stage1, stage2, case_registry = _load_stage3_resume_upstream(
+        stage3_document={"input_meta": {"resume_upstream": initial_upstream}},
+        expected_paths=canonical_paths,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        research_ref=research_ref,
+        current_atoms=atoms,
+    )
+    stage1_items_raw = stage1.get("items")
+    problem_records = (
+        [dict(item) for item in stage1_items_raw if isinstance(item, Mapping)]
+        if isinstance(stage1_items_raw, list)
+        else []
+    )
+    stage2_items_raw = stage2.get("items")
+    selected = sorted(
+        (
+            dict(item)
+            for item in stage2_items_raw
+            if isinstance(item, Mapping)
+            and item.get("selected_for_research") is True
+            and isinstance(item.get("problem_id"), str)
+        ),
+        key=_research_dispatch_sort_key,
+    ) if isinstance(stage2_items_raw, list) else []
+
+    prior_stage_document: dict[str, Any] | None = None
+    if research_json.is_file():
+        try:
+            prior_raw = json.loads(research_json.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"stage3_prefix_import_prior_unreadable:{type(exc).__name__}"
+            ) from exc
+        if not isinstance(prior_raw, dict):
+            raise ValueError("stage3_prefix_import_prior_not_object")
+        prior_stage_document = prior_raw
+        _load_stage3_resume_upstream(
+            stage3_document=prior_stage_document,
+            expected_paths=canonical_paths,
+            target_slug=target_slug,
+            repo_input=repo_input,
+            research_ref=research_ref,
+            current_atoms=atoms,
+        )
+
+    candidate = _build_authenticated_stage3_single_case_prefix(
+        repo_root=repo_root,
+        selected_priority_decisions=selected,
+        problem_records=problem_records,
+        atoms=atoms,
+        imported_dossier=imported_dossier,
+        resolved_repo_ref=resolved_repo_ref,
+        repo_input=repo_input,
+        target_slug=target_slug,
+        agent=agent,
+        model=model,
+        artifacts={"research_json": str(research_json), "research_md": str(research_md)},
+        prior_stage_document=prior_stage_document,
+        validation_error_rescore=validation_error_rescore,
+    )
+
+    candidate_meta_raw = candidate.get("input_meta")
+    candidate_meta = (
+        dict(candidate_meta_raw) if isinstance(candidate_meta_raw, Mapping) else {}
+    )
+    candidate_meta["resume_upstream"] = initial_upstream
+    candidate["input_meta"] = candidate_meta
+
+    # Validate the current Stage-1/2 corpus and registry binding before the first write.
+    _load_stage3_resume_upstream(
+        stage3_document=candidate,
+        expected_paths=canonical_paths,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        research_ref=research_ref,
+        current_atoms=atoms,
+    )
+
+    persisted, _ = _persist_downstream_case_lineage(
+        stage_doc=candidate,
+        out_json=research_json,
+        problem_cases=[dict(item) for item in problem_records],
+    )
+    updated_registry = _persist_case_registry_stage_lineage(
+        case_registry=dict(case_registry),
+        case_registry_path=canonical_paths["case_registry"],
+        stage_doc=persisted,
+    )
+    final_upstream = _stage3_resume_upstream_contract(
+        paths=canonical_paths,
+        source_atoms=atoms,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        research_ref=research_ref,
+        selected_problem_ids=selected_problem_ids,
+    )
+    persisted_meta_raw = persisted.get("input_meta")
+    persisted_meta = (
+        dict(persisted_meta_raw) if isinstance(persisted_meta_raw, Mapping) else {}
+    )
+    persisted_meta["resume_upstream"] = final_upstream
+    persisted["input_meta"] = persisted_meta
+    _atomic_write_research_json(research_json, persisted)
+
+    try:
+        final_stage_raw = json.loads(research_json.read_text(encoding="utf-8"))
+        final_registry_raw = json.loads(
+            canonical_paths["case_registry"].read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"stage3_prefix_import_final_unreadable:{type(exc).__name__}") from exc
+    if not isinstance(final_stage_raw, dict) or not isinstance(final_registry_raw, dict):
+        raise ValueError("stage3_prefix_import_final_not_object")
+    compatibility = stage3_research_compatibility_contract(agent=agent)
+    if (
+        _stage3_completed_progress(
+            final_stage_raw,
+            expected_compatibility_contract=compatibility,
+        )
+        is None
+    ):
+        raise ValueError("stage3_prefix_import_final_progress_invalid")
+    _load_stage3_resume_upstream(
+        stage3_document=final_stage_raw,
+        expected_paths=canonical_paths,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        research_ref=research_ref,
+        current_atoms=atoms,
+    )
+    if final_registry_raw != updated_registry:
+        raise ValueError("stage3_prefix_import_final_registry_changed")
+    final_items_raw = final_stage_raw.get("items")
+    final_items = (
+        [item for item in final_items_raw if isinstance(item, dict)]
+        if isinstance(final_items_raw, list)
+        else []
+    )
+    records_by_id = {
+        str(item.get("problem_id")): dict(item)
+        for item in problem_records
+        if isinstance(item.get("problem_id"), str)
+    }
+    title = research_json.stem.removesuffix(".research") or "Research"
+    research_md.parent.mkdir(parents=True, exist_ok=True)
+    research_md.write_text(
+        _render_research_dossiers_markdown(
+            final_items,
+            problem_records_by_id=records_by_id,
+            title=f"{title} – Research Dossiers",
+        ),
+        encoding="utf-8",
+    )
+    return final_stage_raw, final_registry_raw
+
+
 def _merge_reused_downstream_stage_document(
     *,
     stage: str,
@@ -1126,12 +1358,54 @@ def _sync_case_registry_outcomes(
     cases = cases_raw if isinstance(cases_raw, dict) else {}
     plans_by_case: dict[str, dict[str, dict[str, Any]]] = {}
     legacy_latest_by_case: dict[str, tuple[str, str]] = {}
+    atom_ids_by_case: dict[str, set[str]] = {}
+    verified_identities_by_case: dict[str, dict[str, dict[str, Any]]] = {}
+    conflicting_case_identities: set[str] = set()
     invalid_outcome_records = 0
     provenance_failed_outcome_records = 0
-    for entry in atom_actions.values():
+
+    def retain_verified_identity(
+        *,
+        case_id: str,
+        revision_id: str,
+        outcome_verification: Mapping[str, Any] | None,
+        normalized_outcome: Mapping[str, Any] | None,
+    ) -> None:
+        if (
+            outcome_verification is None
+            or outcome_verification.get("verified") is not True
+            or outcome_verification.get("provenance_status") != "verified"
+            or normalized_outcome is None
+        ):
+            return
+        identity_raw = outcome_verification.get("verified_case_identity")
+        if (
+            not isinstance(identity_raw, Mapping)
+            or identity_raw.get("case_id") != case_id
+            or identity_raw.get("plan_revision_id") != revision_id
+        ):
+            return
+        candidate = {
+            "identity": dict(identity_raw),
+            "recorded_at": str(normalized_outcome["recorded_at"]),
+        }
+        identities = verified_identities_by_case.setdefault(case_id, {})
+        previous = identities.get(revision_id)
+        if previous is not None:
+            if previous.get("identity") != candidate["identity"]:
+                conflicting_case_identities.add(case_id)
+                return
+            if previous.get("recorded_at", "") >= candidate["recorded_at"]:
+                return
+        identities[revision_id] = candidate
+
+    for raw_atom_id, entry in atom_actions.items():
         case_id = _coerce_string(entry.get("case_id"))
         if case_id is None:
             continue
+        atom_id = _coerce_string(raw_atom_id) or _coerce_string(entry.get("atom_id"))
+        if atom_id is not None:
+            atom_ids_by_case.setdefault(case_id, set()).add(atom_id)
         plan_outcomes_raw = entry.get("plan_outcomes")
         if isinstance(plan_outcomes_raw, dict):
             case_plans = plans_by_case.setdefault(case_id, {})
@@ -1166,6 +1440,13 @@ def _sync_case_registry_outcomes(
                         ):
                             invalid_outcome_records += 1
                             normalized_outcome = None
+
+                retain_verified_identity(
+                    case_id=case_id,
+                    revision_id=revision_id,
+                    outcome_verification=outcome_verification,
+                    normalized_outcome=normalized_outcome,
+                )
 
                 if normalized_outcome is not None:
                     state = str(normalized_outcome["state"])
@@ -1235,6 +1516,23 @@ def _sync_case_registry_outcomes(
                 ):
                     invalid_outcome_records += 1
                     normalized_outcome = None
+        verified_identity_raw = (
+            outcome_verification.get("verified_case_identity")
+            if isinstance(outcome_verification, dict)
+            else None
+        )
+        revision_id = (
+            _coerce_string(verified_identity_raw.get("plan_revision_id"))
+            if isinstance(verified_identity_raw, Mapping)
+            else None
+        )
+        if revision_id is not None:
+            retain_verified_identity(
+                case_id=case_id,
+                revision_id=revision_id,
+                outcome_verification=outcome_verification,
+                normalized_outcome=normalized_outcome,
+            )
         raw_outcome_state = (_coerce_string(entry.get("last_outcome_state")) or "").lower()
         if normalized_outcome is not None:
             outcome_state = str(normalized_outcome["state"])
@@ -1263,6 +1561,94 @@ def _sync_case_registry_outcomes(
     terminal = 0
     nonterminal = 0
     all_case_ids = set(plans_by_case) | set(legacy_latest_by_case)
+    missing_case_ids = {
+        case_id for case_id in all_case_ids if not isinstance(cases.get(case_id), dict)
+    }
+    materialization_records: list[dict[str, Any]] = []
+    materialization_context: dict[str, dict[str, Any]] = {}
+    for case_id in sorted(missing_case_ids):
+        if case_id in conflicting_case_identities:
+            continue
+        identities_by_revision = verified_identities_by_case.get(case_id, {})
+        evidence_atom_ids = sorted(atom_ids_by_case.get(case_id, set()))
+        if not identities_by_revision or not evidence_atom_ids:
+            continue
+        ordered_identities = sorted(
+            identities_by_revision.items(),
+            key=lambda item: (item[1].get("recorded_at", ""), item[0]),
+        )
+        selected_revision_id, selected = ordered_identities[-1]
+        selected_identity_raw = selected.get("identity")
+        if not isinstance(selected_identity_raw, dict):
+            continue
+        selected_identity = dict(selected_identity_raw)
+        canonical_problem_id = _coerce_string(selected_identity.get("problem_id"))
+        if canonical_problem_id is None:
+            continue
+        member_problem_ids = sorted(
+            {
+                problem_id
+                for item in identities_by_revision.values()
+                for identity in [item.get("identity")]
+                if isinstance(identity, dict)
+                for problem_id in [_coerce_string(identity.get("problem_id"))]
+                if problem_id is not None
+            }
+        )
+        fingerprints = sorted(
+            {
+                fingerprint
+                for item in identities_by_revision.values()
+                for identity in [item.get("identity")]
+                if isinstance(identity, dict)
+                for fingerprint in [_coerce_string(identity.get("fingerprint"))]
+                if fingerprint is not None
+            }
+        )
+        materialization_records.append(
+            {
+                "case_id": case_id,
+                "problem_id": canonical_problem_id,
+                "canonical_problem_id": canonical_problem_id,
+                "case_member_problem_ids": member_problem_ids,
+                "evidence_atom_ids": evidence_atom_ids,
+                "source_evidence_atom_ids": evidence_atom_ids,
+                "ticket_fingerprints": fingerprints,
+                "case_state": "active",
+                "problem_status": "identified",
+                "root_cause_status": "unestablished",
+            }
+        )
+        materialization_context[case_id] = {
+            "schema_version": 1,
+            "source": "verified_plan_target_contract",
+            "context_status": "identity_only",
+            "selected_plan_revision_id": selected_revision_id,
+            "plan_revision_ids": sorted(identities_by_revision),
+            "evidence_atom_ids": evidence_atom_ids,
+            "verified_case_identity": selected_identity,
+        }
+    if materialization_records:
+        rebuilt_registry = build_case_registry(
+            materialization_records,
+            previous=case_registry,
+        )
+        rebuilt_cases_raw = rebuilt_registry.get("cases")
+        rebuilt_cases = rebuilt_cases_raw if isinstance(rebuilt_cases_raw, dict) else {}
+        for case_id, context in materialization_context.items():
+            raw_materialized_case = rebuilt_cases.get(case_id)
+            if not isinstance(raw_materialized_case, dict):
+                continue
+            materialized_case = dict(raw_materialized_case)
+            materialized_case["context_status"] = "identity_only"
+            materialized_case["identity_materialization"] = context
+            rebuilt_cases[case_id] = materialized_case
+        rebuilt_registry["cases"] = rebuilt_cases
+        case_registry.clear()
+        case_registry.update(rebuilt_registry)
+        cases = rebuilt_cases
+    materialized_cases = len(materialization_context)
+    unmaterializable_case_outcomes = len(missing_case_ids) - materialized_cases
     terminal_priority = {"superseded": 1, "duplicate": 2, "resolved": 3}
     for case_id in sorted(all_case_ids):
         raw_case = cases.get(case_id)
@@ -1399,6 +1785,10 @@ def _sync_case_registry_outcomes(
         "nonterminal_cases": nonterminal,
         "invalid_outcome_records": invalid_outcome_records,
         "provenance_failed_outcome_records": provenance_failed_outcome_records,
+        "missing_case_outcomes": len(missing_case_ids),
+        "materialized_cases": materialized_cases,
+        "unmaterializable_case_outcomes": unmaterializable_case_outcomes,
+        "conflicting_case_identities": len(conflicting_case_identities),
     }
 
 
@@ -1420,6 +1810,148 @@ def _outcome_trusted_runs_roots(
             key=lambda path: str(path),
         )
     )
+
+
+def _prepare_qualification_retained_records(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    source_manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Namespace one explicitly sealed retained root without path-derived identity.
+
+    The physical root remains provenance, while the logical record identity is based
+    on its canonical run coordinate and the content-sealed files beneath that run.
+    The separately recorded root digest seals the complete selected root without making
+    every atom ID churn when an unrelated run changes. Moving an unchanged retained run
+    therefore preserves atom identity; two divergent copies cannot silently collapse.
+    """
+
+    root_raw = _coerce_string(source_manifest.get("root"))
+    root_sha256 = _coerce_string(source_manifest.get("entries_sha256"))
+    if root_raw is None or not _qualification_valid_sha256(root_sha256):
+        raise ValueError("qualification_retained_evidence_manifest_invalid")
+
+    semantic_manifest = (
+        source_manifest.get("manifest_kind")
+        == SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND
+    )
+    run_receipts_by_rel: dict[str, str] = {}
+    entries: list[dict[str, Any]] = []
+    if semantic_manifest:
+        run_receipts_raw = source_manifest.get("run_receipts")
+        run_receipts = (
+            run_receipts_raw if isinstance(run_receipts_raw, list) else []
+        )
+        for receipt in run_receipts:
+            if not isinstance(receipt, Mapping):
+                raise ValueError("qualification_retained_evidence_manifest_invalid")
+            run_rel = _coerce_string(receipt.get("run_rel"))
+            digest = _coerce_string(receipt.get("receipt_sha256"))
+            if run_rel is None or not _qualification_valid_sha256(digest):
+                raise ValueError("qualification_retained_evidence_manifest_invalid")
+            if run_rel in run_receipts_by_rel:
+                raise ValueError("qualification_retained_evidence_manifest_invalid")
+            run_receipts_by_rel[run_rel] = digest
+    else:
+        entries_raw = source_manifest.get("entries")
+        entries = (
+            [dict(entry) for entry in entries_raw if isinstance(entry, Mapping)]
+            if isinstance(entries_raw, list)
+            else []
+        )
+    prepared: list[dict[str, Any]] = []
+    seen: dict[str, str] = {}
+    for raw_record in records:
+        record = dict(raw_record)
+        original_run_rel = _coerce_string(record.get("run_rel"))
+        if original_run_rel is None:
+            raise ValueError("qualification_retained_evidence_run_rel_missing")
+        if semantic_manifest:
+            run_receipt_sha256 = run_receipts_by_rel.get(original_run_rel)
+            if run_receipt_sha256 is None:
+                raise ValueError("qualification_retained_evidence_run_receipt_missing")
+        else:
+            run_prefix = original_run_rel.replace("\\", "/").strip("/") + "/"
+            run_entries = [
+                {
+                    **entry,
+                    "path": str(entry.get("path") or "")[len(run_prefix) :],
+                }
+                for entry in entries
+                if str(entry.get("path") or "").replace("\\", "/").startswith(
+                    run_prefix
+                )
+            ]
+            if not run_entries:
+                raise ValueError("qualification_retained_evidence_run_receipt_missing")
+            run_receipt_sha256 = _qualification_canonical_sha256(run_entries)
+        record_identity = _qualification_canonical_sha256(
+            {
+                "source_kind": "retained_usertest_runs",
+                "run_rel": original_run_rel,
+                "run_receipt_sha256": run_receipt_sha256,
+            }
+        )
+        namespaced_run_rel = f"__retained__/usertest/{record_identity}"
+        prior = seen.get(namespaced_run_rel)
+        if prior is not None and prior != original_run_rel:
+            raise ValueError("qualification_retained_evidence_record_identity_conflict")
+        seen[namespaced_run_rel] = original_run_rel
+        record.update(
+            {
+                "run_rel": namespaced_run_rel,
+                "retained_evidence_source_root": str(Path(root_raw).resolve()),
+                "retained_evidence_source_root_sha256": root_sha256,
+                "retained_evidence_source_run_rel": original_run_rel,
+                "retained_evidence_source_run_sha256": run_receipt_sha256,
+                "retained_evidence_source_record_sha256": record_identity,
+            }
+        )
+        prepared.append(record)
+    return prepared
+
+
+def _annotate_qualification_retained_atoms(
+    atoms: Sequence[Mapping[str, Any]],
+    *,
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    records_by_run = {
+        str(record["run_rel"]): record
+        for record in records
+        if _coerce_string(record.get("run_rel")) is not None
+    }
+    annotated: list[dict[str, Any]] = []
+    for raw_atom in atoms:
+        atom = dict(raw_atom)
+        record = records_by_run.get(str(atom.get("run_rel") or ""), {})
+        for key in (
+            "retained_evidence_source_root",
+            "retained_evidence_source_root_sha256",
+            "retained_evidence_source_run_rel",
+            "retained_evidence_source_run_sha256",
+            "retained_evidence_source_record_sha256",
+        ):
+            value = record.get(key)
+            if value is not None:
+                atom[key] = value
+        annotated.append(atom)
+    return annotated
+
+
+def _qualification_additional_source_roots(
+    source_inputs: Mapping[str, Any],
+) -> tuple[Path, ...]:
+    manifests_raw = source_inputs.get("additional_evidence_runs")
+    manifests = manifests_raw if isinstance(manifests_raw, list) else []
+    roots = {
+        Path(root).resolve()
+        for item in manifests
+        if isinstance(item, Mapping)
+        for root in [_coerce_string(item.get("root"))]
+        if root is not None
+    }
+    return tuple(sorted(roots, key=lambda path: str(path)))
 
 
 def _qualification_correction_metrics(
@@ -5311,6 +5843,22 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         configured_runs_dir=cfg.runs_dir,
         implementation_runs_root=implementation_runs_root,
     )
+    qualification_additional_source_roots: tuple[Path, ...] = ()
+    if qualification_input_bundle is not None:
+        bundle_source_raw = qualification_input_bundle.get("source_inputs")
+        bundle_source = bundle_source_raw if isinstance(bundle_source_raw, Mapping) else {}
+        qualification_additional_source_roots = _qualification_additional_source_roots(
+            bundle_source
+        )
+        outcome_trusted_runs_roots = tuple(
+            sorted(
+                {
+                    *outcome_trusted_runs_roots,
+                    *qualification_additional_source_roots,
+                },
+                key=lambda path: str(path),
+            )
+        )
     target_slug: str | None = None
     if isinstance(args.target, str) and args.target.strip():
         target_slug = str(args.target).strip()
@@ -5621,14 +6169,33 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             # evidence must cause a normal fresh Stage 3 rather than aborting the new cycle.
             completed_stage3_resume_candidate = retained_research_raw
     qualification_source_snapshot: dict[str, Any] | None = None
+    qualification_additional_evidence_runs_dirs: list[Path] = []
     if qualification_prepare:
         seed_raw = getattr(args, "qualification_case_registry_seed", None)
         protected_raw = getattr(args, "qualification_protected_path", [])
+        additional_evidence_raw = getattr(
+            args,
+            "qualification_additional_evidence_runs_dir",
+            [],
+        )
         protected_paths = (
             [path for path in protected_raw if isinstance(path, Path)]
             if isinstance(protected_raw, list)
             else []
         )
+        qualification_additional_evidence_runs_dirs = (
+            [path for path in additional_evidence_raw if isinstance(path, Path)]
+            if isinstance(additional_evidence_raw, list)
+            else []
+        )
+        if len(qualification_additional_evidence_runs_dirs) != len(
+            additional_evidence_raw if isinstance(additional_evidence_raw, list) else []
+        ):
+            print(
+                "Qualification additional evidence roots must be filesystem paths.",
+                file=sys.stderr,
+            )
+            return 2
         if repo_input is None or not isinstance(seed_raw, Path):
             print(
                 "Qualification preparation requires local --repo-input and an explicit "
@@ -5644,6 +6211,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 source_runs_dir=runs_dir,
                 atom_actions_path=atom_actions_path,
                 case_registry_seed_path=seed_raw,
+                target=target_slug,
+                additional_evidence_runs_dirs=(
+                    qualification_additional_evidence_runs_dirs
+                ),
                 protected_paths=protected_paths,
             )
         except (OSError, ValueError) as exc:
@@ -5691,6 +6262,92 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         case_registry=case_registry,
     )
     primary_raw_atoms = primary_derived_evidence.atoms
+    additional_evidence_metadata: list[dict[str, Any]] = []
+    if qualification_prepare and qualification_source_snapshot is not None:
+        source_inputs_raw = qualification_source_snapshot.get("source_inputs")
+        source_inputs = (
+            source_inputs_raw if isinstance(source_inputs_raw, Mapping) else {}
+        )
+        manifests_raw = source_inputs.get("additional_evidence_runs")
+        manifests = manifests_raw if isinstance(manifests_raw, list) else []
+        for manifest_raw in manifests:
+            if not isinstance(manifest_raw, Mapping):
+                raise ValueError("qualification_retained_evidence_manifest_invalid")
+            manifest = dict(manifest_raw)
+            root_raw = _coerce_string(manifest.get("root"))
+            if root_raw is None:
+                raise ValueError("qualification_retained_evidence_manifest_invalid")
+            source_root = Path(root_raw).resolve()
+            retained_records = list(
+                iter_report_history(
+                    source_root,
+                    target_slug=target_slug,
+                    repo_input=repo_input,
+                    embed="none",
+                )
+            )
+            if (
+                manifest.get("manifest_kind")
+                == SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND
+            ):
+                preview_doc = extract_backlog_atoms(retained_records, repo_root=repo_root)
+                preview_raw = preview_doc.get("atoms")
+                preview_atoms = (
+                    [item for item in preview_raw if isinstance(item, dict)]
+                    if isinstance(preview_raw, list)
+                    else []
+                )
+                # Retained-record identity is derived from the finalized per-run
+                # semantic receipt.  Preview extraction discovers attachment refs;
+                # the ordinary namespaced extraction below remains the authoritative
+                # atom production pass.
+                manifest = extend_semantic_manifest_atom_closure(
+                    manifest,
+                    atoms=preview_atoms,
+                    repo_root=repo_root,
+                )
+            retained_records = _prepare_qualification_retained_records(
+                retained_records,
+                source_manifest=manifest,
+            )
+            retained_doc = extract_backlog_atoms(retained_records, repo_root=repo_root)
+            retained_atoms_raw = retained_doc.get("atoms")
+            retained_atoms = (
+                [item for item in retained_atoms_raw if isinstance(item, dict)]
+                if isinstance(retained_atoms_raw, list)
+                else []
+            )
+            retained_atoms = normalize_atom_lineage(
+                retained_atoms,
+                case_registry=case_registry,
+                strict_new_output=True,
+            )
+            retained_derived = annotate_primary_derived_evidence(
+                retained_records,
+                retained_atoms,
+                source_root=source_root,
+                case_registry=case_registry,
+            )
+            retained_atoms = _annotate_qualification_retained_atoms(
+                retained_derived.atoms,
+                records=retained_records,
+            )
+            records.extend(retained_records)
+            primary_raw_atoms.extend(retained_atoms)
+            additional_evidence_metadata.append(
+                {
+                    "kind": "retained_usertest",
+                    "path": str(source_root),
+                    "source_root_sha256": manifest.get("entries_sha256"),
+                    "records_seen": len(retained_records),
+                    "atoms_ingested": len(retained_atoms),
+                    "derived_records": retained_derived.metadata.get(
+                        "derived_records",
+                        0,
+                    ),
+                    "derived_atoms": retained_derived.metadata.get("derived_atoms", 0),
+                }
+            )
     primary_atom_ids = {
         atom_id
         for atom in primary_raw_atoms
@@ -5757,6 +6414,11 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 source_runs_dir=runs_dir,
                 atom_actions_path=atom_actions_path,
                 case_registry_seed_path=seed_raw,
+                target=target_slug,
+                additional_evidence_runs_dirs=(
+                    qualification_additional_evidence_runs_dirs
+                ),
+                atoms=primary_raw_atoms,
                 protected_paths=protected_paths,
                 owner_roots=owner_roots,
             )
@@ -5791,6 +6453,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             runs_dir,
             stage_runs_dir,
             artifacts_dir,
+            *qualification_additional_source_roots,
         ]
         prior_label_paths = (
             _prior_qualification_label_paths(explicit_shadow_state_path)
@@ -5935,6 +6598,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             "records_seen": len(records),
             "derived_records": primary_derived_evidence.metadata["derived_records"],
         },
+        *additional_evidence_metadata,
         *derived_evidence_meta["source_roots"],
     ]
     raw_atoms = [
@@ -6258,6 +6922,23 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             else []
         )
         try:
+            assert qualification_source_snapshot is not None
+            qualification_source_snapshot = extend_qualification_preparation_snapshot(
+                qualification_source_snapshot,
+                repo_root=repo_root,
+                repo_input=Path(repo_input),
+                research_ref=research_ref or "",
+                source_runs_dir=runs_dir,
+                atom_actions_path=atom_actions_path,
+                case_registry_seed_path=seed_raw,
+                target=target_slug,
+                additional_evidence_runs_dirs=(
+                    qualification_additional_evidence_runs_dirs
+                ),
+                atoms=atoms,
+                protected_paths=protected_paths,
+                owner_roots=owner_roots,
+            )
             bundle = build_qualification_input_bundle(
                 atoms=atoms,
                 repo_root=repo_root,
@@ -6268,6 +6949,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 case_registry_seed_path=seed_raw,
                 target=target_slug,
                 breadth_profile=breadth_profile,
+                additional_evidence_runs_dirs=(
+                    qualification_additional_evidence_runs_dirs
+                ),
                 protected_paths=protected_paths,
                 owner_roots=owner_roots,
                 extraction_metadata={
@@ -6280,6 +6964,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                         "reopened_status_counts": reopened_status_counts,
                     },
                     "source_record_count": len(records),
+                    "additional_evidence_ingestion": additional_evidence_metadata,
                     "derived_evidence_ingestion": derived_evidence_meta,
                 },
                 preparation_input_snapshot=qualification_source_snapshot,

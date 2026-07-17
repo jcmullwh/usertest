@@ -372,6 +372,38 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
         target_ref["repo_input"] = str(repo_root)
         _write_json(target_ref_path, target_ref)
     (source_runs.parent / "usertest_implement").mkdir(parents=True)
+    retained_runs = tmp_path / "retained-component-validation" / "stage_runs"
+    retained_run = (
+        retained_runs / "target_a" / "20260103T000000Z" / "codex" / "0"
+    )
+    _write_json(
+        retained_run / "target_ref.json",
+        {
+            "repo_input": str(repo_root),
+            "agent": "codex",
+            "mission_id": "backlog_repro_research",
+            "backlog_lineage": {
+                "evidence_role": "research",
+                "origin_stage": "repro_research",
+                "parent_case_id": "case:retained-research",
+            },
+        },
+    )
+    _write_json(retained_run / "effective_run_spec.json", {})
+    _write_json(
+        retained_run / "report.json",
+        {
+            "schema_version": 1,
+            "kind": "troubleshoot_v1",
+            "status": "success",
+            "confidence": 0.9,
+            "goal": "Establish a retained causal mechanism.",
+            "failure_point": (
+                "The retained control proves a causal failure outside the inferred roots."
+            ),
+            "recommended_fix_path": [],
+        },
+    )
 
     atom_actions_path = tmp_path / "custody" / "atom_actions.yaml"
     case_registry_seed = tmp_path / "custody" / "case_registry.json"
@@ -380,7 +412,12 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
         case_registry_seed,
         {
             "schema_version": 1,
-            "cases": {},
+            "cases": {
+                "case:retained-research": {
+                    "case_id": "case:retained-research",
+                    "case_state": "active",
+                }
+            },
             "problem_id_to_case_id": {},
             "atom_id_to_case_id": {},
             "atom_id_to_case_ids": {},
@@ -437,6 +474,8 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
                 research_ref,
                 "--source-runs-dir",
                 str(source_runs),
+                "--additional-evidence-runs-dir",
+                str(retained_runs),
                 "--atom-actions-yaml",
                 str(atom_actions_path),
                 "--case-registry-seed",
@@ -460,6 +499,57 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
     assert bundle["scope"]["research_ref"] == research_ref.casefold()
     assert bundle["atom_corpus"]["count"] == len(bundle["atoms"])
     assert bundle["atom_corpus"]["count"] > 0
+    retained_manifests = bundle["source_inputs"]["additional_evidence_runs"]
+    assert len(retained_manifests) == 1
+    assert retained_manifests[0]["root"] == str(retained_runs.resolve())
+    retained_atoms = [
+        atom
+        for atom in bundle["atoms"]
+        if atom.get("retained_evidence_source_root") == str(retained_runs.resolve())
+    ]
+    assert retained_atoms
+    assert all(atom["evidence_role"] == "research" for atom in retained_atoms)
+    assert len({atom["atom_id"] for atom in retained_atoms}) == len(retained_atoms)
+    assert all(
+        str(atom["atom_id"]).startswith("__retained__/usertest/")
+        for atom in retained_atoms
+    )
+    assert all(
+        atom["parent_case_id"] == "case:retained-research"
+        for atom in retained_atoms
+    )
+    assert all(
+        atom.get("lineage_mining_blocker")
+        in {None, "runner_terminal_context_only"}
+        for atom in retained_atoms
+    )
+    assert any(
+        atom.get("lineage_mining_blocker") is None
+        and "causal failure outside the inferred roots" in str(atom.get("text"))
+        for atom in retained_atoms
+    )
+    assert all(
+        atom.get("derived_parent_binding_status") in {"verified", "reconstructed"}
+        for atom in retained_atoms
+    )
+    assert not any(
+        atom.get("derived_source_root_kind") == "usertest_implement"
+        for atom in retained_atoms
+    )
+    assert any(
+        "causal failure outside the inferred roots" in str(atom.get("text"))
+        for atom in retained_atoms
+    )
+    assert all(
+        atom["retained_evidence_source_root_sha256"]
+        == retained_manifests[0]["entries_sha256"]
+        for atom in retained_atoms
+    )
+    assert all(
+        isinstance(atom.get("retained_evidence_source_run_sha256"), str)
+        and len(atom["retained_evidence_source_run_sha256"]) == 64
+        for atom in retained_atoms
+    )
     assert not (work_dir / "prepared.backlog.json").exists()
     command_output = capsys.readouterr().out
     assert '"model_invocations": 0' in command_output

@@ -22,7 +22,12 @@ from backlog_miner.research_evidence import (
     TrustedHostReplayExecutor,
 )
 from backlog_miner.research_runner import (
+    _authenticate_assignment_source_classifications,
     _completed_prefix_checkpoint,
+    _materialize_terminal_research_validation_error_rescore,
+    _persisted_source_evidence_assignment_sha256,
+    _resume_completed_prefix_from_stage_document,
+    _source_evidence_assignment_sha256,
     _valid_stage3_research_compatibility_contract,
     _validated_completed_stage3_checkpoint,
     completed_stage3_checkpoint,
@@ -35,6 +40,25 @@ from usertest_backlog.workflows.post_research_relations import (
 )
 
 _REPLAY_EXECUTOR_MODES = frozenset({"blocked", "docker", "platform_router", "trusted_host"})
+
+# Canonical run-local context that Stage 3 hashes for every assigned origin atom.
+# Qualification source custody imports the same declaration; keep this as the single
+# source of truth instead of duplicating the list in the snapshot implementation.
+ORIGIN_EVIDENCE_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = (
+    "preflight.json",
+    "agent_attempts.json",
+    "settings_ref.json",
+    "effective_run_spec.json",
+    "report.json",
+    "error.json",
+    "report_validation_errors.json",
+    "normalized_events.jsonl",
+    "raw_events.jsonl",
+    "metrics.json",
+    "workspace_ref.json",
+    "target_ref.json",
+    "run_meta.json",
+)
 
 
 def _atomic_write_research_json(path: Path, document: Mapping[str, Any]) -> None:
@@ -327,21 +351,7 @@ def _origin_artifact_receipts(atom: dict[str, Any], *, repo_root: Path) -> list[
         # references onto each atom.  Hash the canonical full streams when they
         # exist so research receives the actual diagnostic, not only an excerpt.
         candidates.extend([run_dir / "agent_stderr.txt", run_dir / "agent_last_message.txt"])
-    for name in (
-        "preflight.json",
-        "agent_attempts.json",
-        "settings_ref.json",
-        "effective_run_spec.json",
-        "report.json",
-        "error.json",
-        "report_validation_errors.json",
-        "normalized_events.jsonl",
-        "raw_events.jsonl",
-        "metrics.json",
-        "workspace_ref.json",
-        "target_ref.json",
-        "run_meta.json",
-    ):
+    for name in ORIGIN_EVIDENCE_RUN_ARTIFACT_RELATIVE_PATHS:
         candidates.append(run_dir / name)
 
     receipts: list[dict[str, Any]] = []
@@ -621,45 +631,29 @@ def _render_research_dossiers_markdown(
     return "\n".join(lines)
 
 
-def _run_repro_research_stage(
+def _build_selected_research_payloads(
     *,
     repo_root: Path,
-    repo_input: str | None,
-    repo_ref: str | None,
-    target_slug: str | None,
-    selected_priority_decisions: list[dict[str, Any]],
-    problem_records: list[dict[str, Any]],
-    atoms: list[dict[str, Any]],
-    artifacts_dir: Path,
-    out_json: Path,
-    out_md: Path,
-    agent: str,
-    model: str | None,
-    cfg: RunnerConfig,
-    dry_run: bool,
-    replay_timeout_seconds: float,
-    replay_executor: ReplayExecutor,
-    replay_executor_metadata: dict[str, Any],
-    resume_stage_document: Mapping[str, Any] | None = None,
-    reused_research_dossiers: Sequence[dict[str, Any]] = (),
-    resume_upstream_contract: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run stage 3 reproduce-plus-research and write the stage artifacts."""
-    import json as _json
+    selected_priority_decisions: Sequence[Mapping[str, Any]],
+    problem_records: Sequence[Mapping[str, Any]],
+    atoms: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the exact ordered Stage-3 assignments used by dispatch and resume."""
 
     records_by_id: dict[str, dict[str, Any]] = {
-        str(item.get("problem_id")): item
+        str(item.get("problem_id")): dict(item)
         for item in problem_records
-        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+        if isinstance(item, Mapping) and isinstance(item.get("problem_id"), str)
     }
     atoms_by_id: dict[str, dict[str, Any]] = {
-        str(item.get("atom_id")): item
+        str(item.get("atom_id")): dict(item)
         for item in atoms
-        if isinstance(item, dict) and isinstance(item.get("atom_id"), str)
+        if isinstance(item, Mapping) and isinstance(item.get("atom_id"), str)
     }
 
     selected_payloads: list[dict[str, Any]] = []
-    for dec in selected_priority_decisions:
+    for decision in selected_priority_decisions:
+        dec = dict(decision)
         pid = dec.get("problem_id")
         if not isinstance(pid, str) or not pid.strip():
             continue
@@ -761,24 +755,202 @@ def _run_repro_research_stage(
         assignment["status"] = "incomplete" if assignment_errors else "complete"
         assignment["errors"] = assignment_errors
         assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
-        payload = {
-            "case_id": case_id,
-            "problem_id": pid,
-            "problem_record": rec,
-            "priority_decision": dec,
-            "expected_evidence_atom_ids": evidence_ids,
-            "case_evidence_atom_ids": case_evidence_ids,
-            "occurrence_evidence_atom_ids": occurrence_evidence_ids,
-            "evidence_lineage_errors": evidence_lineage_errors,
-            "missing_evidence_atom_ids": missing_evidence_atom_ids,
-            "evidence_atoms": evidence_atoms,
-            # Prior research/implementation output is context, never a mandatory
-            # symptom to reproduce and never an independent new problem source.
-            "derived_evidence_atom_ids": derived_ids,
-            "derived_evidence_atoms": derived_evidence_atoms,
-            "evidence_assignment": assignment,
-        }
-        selected_payloads.append(payload)
+        selected_payloads.append(
+            {
+                "case_id": case_id,
+                "problem_id": pid,
+                "problem_record": rec,
+                "priority_decision": dec,
+                "expected_evidence_atom_ids": evidence_ids,
+                "case_evidence_atom_ids": case_evidence_ids,
+                "occurrence_evidence_atom_ids": occurrence_evidence_ids,
+                "evidence_lineage_errors": evidence_lineage_errors,
+                "missing_evidence_atom_ids": missing_evidence_atom_ids,
+                "evidence_atoms": evidence_atoms,
+                # Prior research/implementation output is context, never a mandatory
+                # symptom to reproduce and never an independent new problem source.
+                "derived_evidence_atom_ids": derived_ids,
+                "derived_evidence_atoms": derived_evidence_atoms,
+                "evidence_assignment": assignment,
+            }
+        )
+    return selected_payloads
+
+
+def _build_authenticated_stage3_single_case_prefix(
+    *,
+    repo_root: Path,
+    selected_priority_decisions: Sequence[Mapping[str, Any]],
+    problem_records: Sequence[Mapping[str, Any]],
+    atoms: Sequence[Mapping[str, Any]],
+    imported_dossier: Mapping[str, Any],
+    resolved_repo_ref: str | None,
+    repo_input: str | None,
+    target_slug: str | None,
+    agent: str,
+    model: str | None,
+    artifacts: Mapping[str, Any],
+    prior_stage_document: Mapping[str, Any] | None = None,
+    validation_error_rescore: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Authenticate one completed dossier as the next resumable Stage-3 prefix item."""
+
+    selected_payloads = _build_selected_research_payloads(
+        repo_root=repo_root,
+        selected_priority_decisions=selected_priority_decisions,
+        problem_records=problem_records,
+        atoms=atoms,
+    )
+    compatibility = stage3_research_compatibility_contract(agent=agent)
+    completed = _resume_completed_prefix_from_stage_document(
+        prior_stage_document,
+        selected_problems=selected_payloads,
+        resolved_repo_ref=resolved_repo_ref,
+        expected_compatibility_contract=compatibility,
+    )
+    if len(completed) >= len(selected_payloads):
+        raise ValueError("stage3_prefix_import_has_no_next_case")
+
+    dossier = (
+        _materialize_terminal_research_validation_error_rescore(
+            imported_dossier,
+            validation_error_rescore=validation_error_rescore,
+        )
+        if isinstance(validation_error_rescore, Mapping)
+        else dict(imported_dossier)
+    )
+    expected = selected_payloads[len(completed)]
+    expected_assignment_raw = expected.get("evidence_assignment")
+    expected_assignment = (
+        expected_assignment_raw if isinstance(expected_assignment_raw, Mapping) else {}
+    )
+    expected_atoms = [
+        atom
+        for field in ("evidence_atoms", "derived_evidence_atoms")
+        for atom in (expected.get(field) if isinstance(expected.get(field), list) else [])
+        if isinstance(atom, Mapping)
+    ]
+    expected_assignment = _authenticate_assignment_source_classifications(
+        expected_assignment,
+        atoms=expected_atoms,
+    )
+    dossier_assignment_raw = dossier.get("evidence_assignment")
+    dossier_assignment = (
+        dossier_assignment_raw if isinstance(dossier_assignment_raw, Mapping) else {}
+    )
+    verification_raw = dossier.get("evidence_verification")
+    verification = verification_raw if isinstance(verification_raw, Mapping) else {}
+    if dossier.get("problem_id") != expected.get("problem_id"):
+        raise ValueError("stage3_prefix_import_problem_order_mismatch")
+    if dossier.get("case_id") != expected.get("case_id"):
+        raise ValueError("stage3_prefix_import_case_mismatch")
+    if (
+        _persisted_source_evidence_assignment_sha256(dossier_assignment)
+        != _source_evidence_assignment_sha256(expected_assignment)
+    ):
+        raise ValueError("stage3_prefix_import_assignment_mismatch")
+    if dossier.get("repo_revision") != resolved_repo_ref:
+        raise ValueError("stage3_prefix_import_revision_mismatch")
+    if verification.get("status") != "verified":
+        raise ValueError("stage3_prefix_import_evidence_not_verified")
+
+    candidate_items = [*completed, dossier]
+    progress_checkpoint = _completed_prefix_checkpoint(
+        selected_problems=selected_payloads,
+        completed_dossiers=candidate_items,
+        resolved_repo_ref=resolved_repo_ref,
+        compatibility_contract=compatibility,
+    )
+    candidate = build_stage_document(
+        "repro_research",
+        candidate_items,
+        input_meta={
+            "selected_problem_count": len(selected_payloads),
+            "fresh_research_dossier_count": len(candidate_items),
+            "retained_research_reused_count": 0,
+            "research_dossier_count": len(candidate_items),
+            "stage_status": "checkpointed_progress",
+            "dry_run": False,
+            "agent": agent,
+            "model": model,
+            "repo_input": repo_input,
+            "target_slug": target_slug,
+            "research_compatibility": compatibility,
+            "progress_checkpoint": progress_checkpoint,
+            "supervised_prefix_import_count": 1,
+        },
+        artifacts=dict(artifacts),
+    )
+    authenticated = _resume_completed_prefix_from_stage_document(
+        candidate,
+        selected_problems=selected_payloads,
+        resolved_repo_ref=resolved_repo_ref,
+        expected_compatibility_contract=compatibility,
+    )
+    if len(authenticated) != len(candidate_items):
+        raise ValueError("stage3_prefix_import_native_validation_incomplete")
+
+    # Rebuild all hashes from the native normalized dossiers, then validate the
+    # exact document that the persistence layer will receive.
+    final_checkpoint = _completed_prefix_checkpoint(
+        selected_problems=selected_payloads,
+        completed_dossiers=authenticated,
+        resolved_repo_ref=resolved_repo_ref,
+        compatibility_contract=compatibility,
+    )
+    candidate["items"] = authenticated
+    candidate["item_count"] = len(authenticated)
+    candidate_meta = dict(candidate["input_meta"])
+    candidate_meta["progress_checkpoint"] = final_checkpoint
+    candidate["input_meta"] = candidate_meta
+    final_authenticated = _resume_completed_prefix_from_stage_document(
+        candidate,
+        selected_problems=selected_payloads,
+        resolved_repo_ref=resolved_repo_ref,
+        expected_compatibility_contract=compatibility,
+    )
+    if final_authenticated != authenticated:
+        raise ValueError("stage3_prefix_import_native_validation_unstable")
+    return candidate
+
+
+def _run_repro_research_stage(
+    *,
+    repo_root: Path,
+    repo_input: str | None,
+    repo_ref: str | None,
+    target_slug: str | None,
+    selected_priority_decisions: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+    atoms: list[dict[str, Any]],
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    dry_run: bool,
+    replay_timeout_seconds: float,
+    replay_executor: ReplayExecutor,
+    replay_executor_metadata: dict[str, Any],
+    resume_stage_document: Mapping[str, Any] | None = None,
+    reused_research_dossiers: Sequence[dict[str, Any]] = (),
+    resume_upstream_contract: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run stage 3 reproduce-plus-research and write the stage artifacts."""
+    import json as _json
+
+    records_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    selected_payloads = _build_selected_research_payloads(
+        repo_root=repo_root,
+        selected_priority_decisions=selected_priority_decisions,
+        problem_records=problem_records,
+        atoms=atoms,
+    )
 
     reused = [dict(item) for item in reused_research_dossiers]
     core_resume_stage_document = resume_stage_document

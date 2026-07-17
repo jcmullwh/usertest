@@ -8,6 +8,7 @@ import pytest
 
 from backlog_repo.outcomes import extract_outcome_markdown, upsert_outcome_markdown
 from backlog_repo.plan_index import (
+    _extract_atom_ids_from_ticket_markdown,
     archive_integrity_unknown_plan_ticket_file,
     archive_plan_ticket_file,
     dedupe_actioned_plan_ticket_files,
@@ -818,6 +819,87 @@ def test_plan_sync_projects_full_case_outcome_record(tmp_path: Path) -> None:
     assert projection["required"] is True
     assert projection["outcome_record"]["state"] == "tests_verified"
     assert atom_actions[atom_id]["last_outcome_record"]["outcome_scope"] == "case"
+
+
+def test_evidence_atom_section_accepts_namespaced_run_ids_only() -> None:
+    namespaced = (
+        "usertest_implement/usertest/20260704T161642Z/codex/0:"
+        "maintenance_image_cleanup:1"
+    )
+    unrelated = "usertest/20260709T000000Z/codex/0:suggested_change:2"
+    markdown = (
+        "# Plan\n\n"
+        f"- Unrelated diagnostic: `{unrelated}`\n\n"
+        "## Evidence atom ids\n\n"
+        f"- `{namespaced}`\n\n"
+        "## Verification\n\n"
+        f"Ignore `{unrelated}` here too.\n"
+    )
+
+    assert _extract_atom_ids_from_ticket_markdown(markdown) == [namespaced]
+
+
+def test_historical_evidence_atom_labels_preserve_provenance_only() -> None:
+    metadata_atom = "project_scaffold/20260210T065815Z/codex/0:error_json:1"
+    source_ticket_atom = "usertest/20260219T003604Z/codex/0:confusion_point:1"
+    generated_stub_atom = "__aggregate__/usertest/all:aggregate_metrics:2"
+    unrelated = "usertest/20260709T000000Z/codex/0:suggested_change:2"
+    markdown = (
+        "# Historical plan\n\n"
+        "- Evidence atom ids:\n"
+        f"- `{metadata_atom}`\n\n"
+        "Evidence atom ids from source ticket:\n\n"
+        f"- `{source_ticket_atom}`\n\n"
+        "Atom ids:\n"
+        f"- `{generated_stub_atom}`\n\n"
+        "## Verification\n\n"
+        f"A diagnostic mentioned `{unrelated}`, but it is not provenance.\n"
+    )
+
+    assert _extract_atom_ids_from_ticket_markdown(markdown) == sorted(
+        [metadata_atom, source_ticket_atom, generated_stub_atom]
+    )
+
+
+def test_historical_evidence_label_stops_at_non_atom_content() -> None:
+    evidence_atom = "usertest/20260219T003604Z/codex/0:error_json:1"
+    unrelated = "usertest/20260709T000000Z/codex/0:suggested_change:2"
+    markdown = (
+        "Evidence atom ids:\n"
+        f"- `{evidence_atom}`\n"
+        "- explanatory prose ends the provenance list\n"
+        f"- `{unrelated}`\n"
+    )
+
+    assert _extract_atom_ids_from_ticket_markdown(markdown) == [evidence_atom]
+
+
+def test_plan_sync_projects_namespaced_atom_id(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "abcdef0123456789"
+    atom_id = (
+        "usertest_implement/usertest/20260704T161642Z/codex/0:"
+        "maintenance_image_cleanup:1"
+    )
+    path = owner_root / ".agents" / "plans" / "5 - complete" / (
+        f"20260709_{fingerprint}_namespaced.md"
+    )
+    _write_plan(path, fingerprint, "Namespaced")
+    path.write_text(
+        path.read_text(encoding="utf-8") + f"\n## Evidence atom ids\n\n- `{atom_id}`\n",
+        encoding="utf-8",
+    )
+    atom_actions: dict[str, dict[str, object]] = {}
+
+    summary = sync_atom_actions_from_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=[owner_root],
+        generated_at="2026-07-10T00:00:00Z",
+    )
+
+    assert summary["tickets_without_evidence"] == 0
+    assert summary["atom_ids_seen"] == 1
+    assert atom_actions[atom_id]["case_id"] == "case:archive-test"
 
 
 def test_plan_copy_archive_does_not_project_case_outcome(tmp_path: Path) -> None:

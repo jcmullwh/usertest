@@ -15,8 +15,6 @@ import json
 from pathlib import Path
 from types import ModuleType
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Module loader
@@ -219,6 +217,51 @@ def test_lint_problem_miner_no_solution_fields_rejects_multiple_forbidden(tmp_pa
     errors = mod.lint_problem_miner_prompts_no_solution_fields(repo_root=tmp_path)
     assert any("family_id" in e for e in errors)
     assert any("option_id" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# lint_problem_miner_origin_index_read_order
+# ---------------------------------------------------------------------------
+
+
+def test_lint_problem_miner_origin_index_read_order_passes(tmp_path: Path) -> None:
+    mod = _load_module()
+    _write_text(
+        tmp_path / "configs" / "backlog_prompts" / "problem_miner_default.md",
+        (
+            "Read origin_attachment_evidence.manifest_file, then "
+            "run_context.index_file, then assigned_evidence.index_file.\n"
+        ),
+    )
+    assert mod.lint_problem_miner_origin_index_read_order(repo_root=tmp_path) == []
+
+
+def test_lint_problem_miner_origin_index_read_order_reports_missing_field(
+    tmp_path: Path,
+) -> None:
+    mod = _load_module()
+    _write_text(
+        tmp_path / "configs" / "backlog_prompts" / "problem_miner_default.md",
+        "Read origin_attachment_evidence.manifest_file and assigned_evidence.index_file.\n",
+    )
+    errors = mod.lint_problem_miner_origin_index_read_order(repo_root=tmp_path)
+    assert any("missing_origin_index_fields" in error for error in errors)
+    assert any("run_context.index_file" in error for error in errors)
+
+
+def test_lint_problem_miner_origin_index_read_order_reports_wrong_order(
+    tmp_path: Path,
+) -> None:
+    mod = _load_module()
+    _write_text(
+        tmp_path / "configs" / "backlog_prompts" / "problem_miner_default.md",
+        (
+            "Read origin_attachment_evidence.manifest_file, then "
+            "assigned_evidence.index_file, then run_context.index_file.\n"
+        ),
+    )
+    errors = mod.lint_problem_miner_origin_index_read_order(repo_root=tmp_path)
+    assert any("origin_index_order_invalid" in error for error in errors)
 
 
 # ---------------------------------------------------------------------------

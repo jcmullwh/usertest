@@ -33,6 +33,7 @@ from run_artifacts.lifecycle import (
 )
 from run_artifacts.lifecycle import (
     JsonArtifactReadResult,
+    artifact_read_details,
     classify_run_lifecycle,
 )
 from run_artifacts.path_normalization import normalize_agent_path
@@ -46,6 +47,46 @@ _EMBED_DEFINITION_KEYS = {
     "prompt_template_md",
     "report_schema_json",
 }
+MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH = "sandbox/maintenance_image_cleanup.json"
+HISTORY_NONE_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = (
+    "target_ref.json",
+    "evidence_assignment.json",
+    "effective_run_spec.json",
+    "report.json",
+    "metrics.json",
+    "preflight.json",
+    "error.json",
+    "report_validation_errors.json",
+    "run_meta.json",
+    "agent_attempts.json",
+    "ticket_ref.json",
+    "timing.json",
+    MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
+)
+HISTORY_DEFINITION_EMBED_RELATIVE_PATHS: tuple[str, ...] = (
+    "persona.source.md",
+    "persona.resolved.md",
+    "mission.source.md",
+    "mission.resolved.md",
+    "prompt.template.md",
+    "report.schema.json",
+)
+HISTORY_PROMPT_EMBED_RELATIVE_PATHS: tuple[str, ...] = (
+    "prompt.txt",
+)
+HISTORY_ALL_EMBED_RELATIVE_PATHS: tuple[str, ...] = (
+    "users.md",
+)
+HISTORY_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        (
+            *HISTORY_NONE_RUN_ARTIFACT_RELATIVE_PATHS,
+            *HISTORY_DEFINITION_EMBED_RELATIVE_PATHS,
+            *HISTORY_PROMPT_EMBED_RELATIVE_PATHS,
+            *HISTORY_ALL_EMBED_RELATIVE_PATHS,
+        )
+    )
+)
 
 
 def _canonical_json_sha256(value: Any) -> str:
@@ -298,6 +339,33 @@ def _read_json(path: Path) -> Any | None:
     return _read_json_artifact(path).value
 
 
+def _read_maintenance_image_cleanup_sidecar(
+    run_dir: Path,
+) -> tuple[Any | None, dict[str, Any], dict[str, Any]]:
+    """Read the runner-owned cleanup observation with explicit byte/read provenance."""
+
+    path = run_dir / Path(MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH)
+    read = _read_json_artifact(path)
+    read_details = artifact_read_details(read)
+    read_details["path"] = MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH
+
+    artifact_ref: dict[str, Any] = {
+        "path": MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
+        "exists": read.exists,
+        "size_bytes": None,
+        "sha256": None,
+    }
+    if read.exists:
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            pass
+        else:
+            artifact_ref["size_bytes"] = len(raw)
+            artifact_ref["sha256"] = sha256(raw).hexdigest()
+    return read.value, read_details, artifact_ref
+
+
 def _derive_run_status(
     *,
     report_read: JsonArtifactReadResult,
@@ -513,6 +581,11 @@ def iter_report_history(
         agent_attempts = _read_json(run_dir / "agent_attempts.json")
         ticket_ref = _read_json(run_dir / "ticket_ref.json")
         timing = _read_json(run_dir / "timing.json")
+        (
+            maintenance_image_cleanup,
+            maintenance_image_cleanup_read,
+            maintenance_image_cleanup_artifact_ref,
+        ) = _read_maintenance_image_cleanup_sidecar(run_dir)
 
         agent_exit_code: int | None = None
         if isinstance(error, dict):
@@ -605,6 +678,11 @@ def iter_report_history(
             "agent_attempts": agent_attempts,
             "ticket_ref": ticket_ref if isinstance(ticket_ref, dict) else None,
             "timing": timing if isinstance(timing, dict) else None,
+            "maintenance_image_cleanup": maintenance_image_cleanup,
+            "maintenance_image_cleanup_read": maintenance_image_cleanup_read,
+            "maintenance_image_cleanup_artifact_ref": (
+                maintenance_image_cleanup_artifact_ref
+            ),
             "terminal_artifact_reads": terminal_artifact_reads,
             "embedded": embedded,
             "embedded_capture_manifest": embedded_capture_manifest,
@@ -688,6 +766,11 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
     run_meta_read = _read_json_artifact(run_dir / "run_meta.json")
     run_meta = run_meta_read.value
     agent_attempts = _read_json(run_dir / "agent_attempts.json")
+    (
+        maintenance_image_cleanup,
+        maintenance_image_cleanup_read,
+        maintenance_image_cleanup_artifact_ref,
+    ) = _read_maintenance_image_cleanup_sidecar(run_dir)
 
     agent_exit_code: int | None = None
     if isinstance(error, dict):
@@ -722,6 +805,9 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
         "report_validation_errors": report_validation_errors,
         "run_meta": run_meta,
         "agent_attempts": agent_attempts,
+        "maintenance_image_cleanup": maintenance_image_cleanup,
+        "maintenance_image_cleanup_read": maintenance_image_cleanup_read,
+        "maintenance_image_cleanup_artifact_ref": maintenance_image_cleanup_artifact_ref,
         "terminal_artifact_reads": terminal_artifact_reads,
         "embedded": {},
         "embedded_capture_manifest": {},

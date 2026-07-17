@@ -464,6 +464,110 @@ def test_codex_login_status_accepts_exact_chatgpt_status_on_stderr() -> None:
     assert result.to_redacted_dict()["status_kind"] == "chatgpt"
 
 
+def test_codex_login_status_accepts_chatgpt_after_known_desktop_launcher_warnings() -> None:
+    result = CodexLoginStatusResult(
+        argv=["codex", "login", "status"],
+        exit_code=0,
+        stdout="",
+        stderr=(
+            "WARNING: failed to clean up stale arg0 temp dirs: Access is denied. "
+            "(os error 5)\n"
+            "WARNING: proceeding, even though we could not create PATH aliases: "
+            "Access is denied. (os error 5) at path "
+            '"C:\\\\Users\\\\user\\\\.codex\\\\tmp\\\\arg0\\\\codex-arg0abc"\n'
+            "Logged in using ChatGPT\n"
+        ),
+        codex_home=r"C:\Users\user\.codex",
+        auth_env_vars_blank={name: True for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS},
+    )
+
+    assert result.ok is True
+    redacted = result.to_redacted_dict()
+    assert redacted["status_kind"] == "chatgpt"
+    assert redacted["chatgpt_status_exact"] is True
+    assert redacted["ignored_launcher_diagnostic_count"] == 2
+    assert redacted["ignored_launcher_diagnostic_kinds"] == [
+        "path_alias_creation_access_denied",
+        "stale_arg0_cleanup_access_denied",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("extra_line", "expected_kind"),
+    [
+        ("WARNING: authentication cache changed unexpectedly", "unexpected"),
+        ("Logged in using an API key", "api_key"),
+    ],
+)
+def test_codex_login_status_does_not_ignore_unknown_or_contradictory_output(
+    extra_line: str,
+    expected_kind: str,
+) -> None:
+    result = CodexLoginStatusResult(
+        argv=["codex", "login", "status"],
+        exit_code=0,
+        stdout="",
+        stderr=(
+            "WARNING: failed to clean up stale arg0 temp dirs: Access is denied. "
+            "(os error 5)\n"
+            f"{extra_line}\n"
+            "Logged in using ChatGPT\n"
+        ),
+        codex_home="C:/host/.codex",
+        auth_env_vars_blank={name: True for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS},
+    )
+
+    assert result.ok is False
+    assert result.to_redacted_dict()["status_kind"] == expected_kind
+
+
+@pytest.mark.parametrize(
+    "tampered_warning",
+    [
+        (
+            "WARNING: failed to clean up stale arg0 temp dirs: Access is denied. "
+            "(os error 5) Logged in using an API key"
+        ),
+        (
+            "WARNING: proceeding, even though we could not create PATH aliases: "
+            "Access is denied. (os error 5) at path "
+            '"C:\\\\outside\\\\codex-arg0abc"'
+        ),
+    ],
+)
+def test_codex_login_status_rejects_tampered_known_launcher_warning(
+    tampered_warning: str,
+) -> None:
+    result = CodexLoginStatusResult(
+        argv=["codex", "login", "status"],
+        exit_code=0,
+        stdout="",
+        stderr=f"{tampered_warning}\nLogged in using ChatGPT\n",
+        codex_home=r"C:\Users\user\.codex",
+        auth_env_vars_blank={name: True for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS},
+    )
+
+    assert result.ok is False
+    assert result.to_redacted_dict()["status_kind"] == "unexpected"
+
+
+def test_codex_login_status_does_not_ignore_launcher_warning_on_stdout() -> None:
+    result = CodexLoginStatusResult(
+        argv=["codex", "login", "status"],
+        exit_code=0,
+        stdout=(
+            "WARNING: failed to clean up stale arg0 temp dirs: Access is denied. "
+            "(os error 5)\n"
+        ),
+        stderr="Logged in using ChatGPT\n",
+        codex_home=r"C:\Users\user\.codex",
+        auth_env_vars_blank={name: True for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS},
+    )
+
+    assert result.ok is False
+    assert result.to_redacted_dict()["status_kind"] == "unexpected"
+
+
 def test_subscription_config_preserves_safe_knobs_and_forces_canonical_route_last() -> None:
     safe = [
         "model_reasoning_effort=high",

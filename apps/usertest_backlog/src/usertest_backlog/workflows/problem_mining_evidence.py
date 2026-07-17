@@ -144,6 +144,72 @@ def _receipt_hash(receipt: Mapping[str, Any]) -> str:
     )
 
 
+_CORRECTED_ATTEMPT_SELECTION_KIND = "problem_mining_external_correction_selection"
+
+
+def bind_externally_corrected_attempt_history(
+    *,
+    receipt: Mapping[str, Any],
+    attempt_history: Sequence[Mapping[str, Any]],
+    feedback_sha256: str,
+    feedback_kind: str,
+) -> dict[str, Any]:
+    """Select the accepted frontier of a verified same-author correction history.
+
+    An independent quality correction legitimately leaves both the previously
+    accepted response and its corrected replacement as verified artifacts.  That
+    is different from ordinary response-contract retry history, where exactly one
+    attempt is verified.  Persist an explicit, hash-bound selection so downstream
+    revalidation can distinguish the two cases without treating every
+    multiple-verified history as acceptable.
+    """
+
+    history = [dict(item) for item in attempt_history]
+    verified = [
+        item
+        for item in history
+        if item.get("status") == "verified" and _text(item.get("attempt_tag")) is not None
+    ]
+    if (
+        len(verified) < 2
+        or not history
+        or history[-1].get("status") != "verified"
+        or any(item.get("schema_version") != 2 for item in history)
+    ):
+        raise ValueError("problem_mining_external_correction_history_invalid")
+    accepted_tag = _text(history[-1].get("attempt_tag"))
+    accepted_number = history[-1].get("attempt_number")
+    verified_tags = [_text(item.get("attempt_tag")) for item in verified]
+    if (
+        accepted_tag is None
+        or isinstance(accepted_number, bool)
+        or not isinstance(accepted_number, int)
+        or len(verified_tags) != len(set(verified_tags))
+        or not _valid_sha256(feedback_sha256)
+        or _text(feedback_kind) is None
+    ):
+        raise ValueError("problem_mining_external_correction_selection_invalid")
+    selection: dict[str, Any] = {
+        "schema_version": 1,
+        "receipt_kind": _CORRECTED_ATTEMPT_SELECTION_KIND,
+        "selection_reason": "external_independent_feedback",
+        "feedback_sha256": feedback_sha256,
+        "feedback_kind": feedback_kind,
+        "superseded_verified_attempt_tags": verified_tags[:-1],
+        "accepted_attempt_tag": accepted_tag,
+        "accepted_attempt_number": accepted_number,
+        "accepted_attempt_sha256": _canonical_hash(history[-1]),
+        "attempt_history_sha256": _canonical_hash(history),
+    }
+    selection["receipt_sha256"] = _receipt_hash(selection)
+    updated = dict(receipt)
+    updated["attempt_history"] = history
+    updated["successful_attempt_tag"] = accepted_tag
+    updated["successful_attempt_selection"] = selection
+    updated["correction_status"] = "externally_corrected"
+    return updated
+
+
 def immutable_atom_evidence_projection(atom: Mapping[str, Any]) -> dict[str, Any]:
     """Return immutable evidence content, excluding stage-1 decisions."""
 
@@ -1039,6 +1105,12 @@ def apply_problem_mining_decision_partition(
         rationale = _text(decision.get("rationale"))
         if disposition not in _NON_SUPPORT_DISPOSITIONS or rationale is None:
             raise ValueError(f"problem_mining_uncited_atom_decision_invalid:{atom_id}")
+        # This partition is authoritative for the current Stage 1 assignment.  A
+        # same-author correction may retract a previously cited atom; retaining its
+        # provisional case membership would contradict the corrected non-support
+        # disposition and make the final evidence receipt impossible to satisfy.
+        atom["case_id"] = None
+        atom["supporting_case_ids"] = []
         atom = apply_atom_disposition_decision(
             {
                 **atom,
@@ -1061,6 +1133,29 @@ def apply_problem_mining_decision_partition(
     if seen != set(eligible_ids):
         raise ValueError("problem_mining_final_decision_atoms_missing")
     return updated
+
+
+def _finalization_attempt_provenance_errors(
+    miners: Sequence[Any],
+) -> list[str]:
+    """Return attempt-frontier errors that must keep a live draft non-exportable."""
+
+    errors: list[str] = []
+    for index, raw_miner in enumerate(miners, start=1):
+        if not isinstance(raw_miner, Mapping):
+            errors.append(f"problem_mining_miner_receipt_invalid:{index}")
+            continue
+        tag = _text(raw_miner.get("tag")) or f"miner_{index:03d}"
+        errors.extend(_attempt_history_errors(raw_miner, tag=tag))
+        for component_name in ("primary_pass", "non_support_review"):
+            component_raw = raw_miner.get(component_name)
+            if not isinstance(component_raw, Mapping):
+                continue
+            component_tag = _text(component_raw.get("tag")) or tag
+            errors.extend(
+                _attempt_history_errors(component_raw, tag=component_tag)
+            )
+    return list(dict.fromkeys(errors))
 
 
 def finalize_problem_mining_evidence_receipt(
@@ -1113,7 +1208,12 @@ def finalize_problem_mining_evidence_receipt(
 
     mode = _text(draft.get("mode")) or "invalid"
     miners = list(draft.get("miners", []))
-    live_jobs_verified = all(
+    attempt_provenance_errors = (
+        _finalization_attempt_provenance_errors(miners)
+        if mode == "live"
+        else []
+    )
+    live_jobs_verified = not attempt_provenance_errors and all(
         isinstance(miner, Mapping) and miner.get("status") == "verified" for miner in miners
     )
     cross_raw = draft.get("cross_job_synthesis")
@@ -1151,6 +1251,10 @@ def finalize_problem_mining_evidence_receipt(
         "cross_job_synthesis": cross_job_synthesis,
         "decision_partition": sorted(decisions, key=lambda item: item["atom_id"]),
     }
+    if attempt_provenance_errors:
+        # Preserve the useful corrected candidate and its exact failure reason,
+        # while refusing to mislabel it as live-verified/exportable.
+        receipt["attempt_provenance_errors"] = attempt_provenance_errors
     receipt["receipt_sha256"] = _receipt_hash(receipt)
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     receipt_path.write_text(
@@ -1343,6 +1447,70 @@ def _workspace_atom_partition_errors(
     return []
 
 
+def _corrected_attempt_selection_errors(
+    miner: Mapping[str, Any],
+    *,
+    raw_history: Sequence[Mapping[str, Any]],
+    verified_tags: Sequence[str],
+    tag: str,
+) -> list[str]:
+    selection_raw = miner.get("successful_attempt_selection")
+    if not isinstance(selection_raw, Mapping):
+        return [f"problem_mining_corrected_attempt_selection_missing:{tag}"]
+    selection = dict(selection_raw)
+    expected_fields = {
+        "schema_version",
+        "receipt_kind",
+        "selection_reason",
+        "feedback_sha256",
+        "feedback_kind",
+        "superseded_verified_attempt_tags",
+        "accepted_attempt_tag",
+        "accepted_attempt_number",
+        "accepted_attempt_sha256",
+        "attempt_history_sha256",
+        "receipt_sha256",
+    }
+    errors: list[str] = []
+    if (
+        set(selection) != expected_fields
+        or selection.get("schema_version") != 1
+        or selection.get("receipt_kind") != _CORRECTED_ATTEMPT_SELECTION_KIND
+        or selection.get("selection_reason") != "external_independent_feedback"
+        or not _valid_sha256(selection.get("feedback_sha256"))
+        or _text(selection.get("feedback_kind")) is None
+        or selection.get("receipt_sha256") != _receipt_hash(selection)
+    ):
+        errors.append(f"problem_mining_corrected_attempt_selection_invalid:{tag}")
+    if any(item.get("schema_version") != 2 for item in raw_history):
+        errors.append(f"problem_mining_corrected_attempt_provenance_invalid:{tag}")
+    latest = raw_history[-1] if raw_history else {}
+    latest_tag = _text(latest.get("attempt_tag"))
+    latest_number = latest.get("attempt_number")
+    accepted_tag = _text(selection.get("accepted_attempt_tag"))
+    if (
+        latest.get("status") != "verified"
+        or accepted_tag != latest_tag
+        or selection.get("accepted_attempt_number") != latest_number
+        or miner.get("successful_attempt_tag") != latest_tag
+    ):
+        errors.append(f"problem_mining_corrected_attempt_selection_non_latest:{tag}")
+    if (
+        len(verified_tags) != len(set(verified_tags))
+        or _string_list(selection.get("superseded_verified_attempt_tags"))
+        != list(verified_tags[:-1])
+        or accepted_tag != verified_tags[-1]
+    ):
+        errors.append(f"problem_mining_corrected_attempt_selection_frontier_invalid:{tag}")
+    if (
+        selection.get("accepted_attempt_sha256") != _canonical_hash(latest)
+        or selection.get("attempt_history_sha256")
+        != _canonical_hash(list(raw_history))
+    ):
+        errors.append(f"problem_mining_corrected_attempt_selection_history_changed:{tag}")
+    return errors
+
+
 def _attempt_history_errors(miner: Mapping[str, Any], *, tag: str) -> list[str]:
     raw_history = miner.get("attempt_history")
     if raw_history is None:
@@ -1452,8 +1620,25 @@ def _attempt_history_errors(miner: Mapping[str, Any], *, tag: str) -> list[str]:
     if observed_numbers != list(range(1, len(raw_history) + 1)):
         errors.append(f"problem_mining_attempt_numbers_noncontiguous:{tag}")
     successful_tag = _text(miner.get("successful_attempt_tag"))
-    if miner.get("status") == "verified" and verified_tags != [successful_tag]:
-        errors.append(f"problem_mining_successful_attempt_invalid:{tag}")
+    if miner.get("status") == "verified":
+        if len(verified_tags) <= 1:
+            if verified_tags != [successful_tag]:
+                errors.append(f"problem_mining_successful_attempt_invalid:{tag}")
+            if miner.get("successful_attempt_selection") is not None:
+                errors.append(
+                    f"problem_mining_corrected_attempt_selection_unexpected:{tag}"
+                )
+        else:
+            errors.extend(
+                _corrected_attempt_selection_errors(
+                    miner,
+                    raw_history=[
+                        item for item in raw_history if isinstance(item, Mapping)
+                    ],
+                    verified_tags=verified_tags,
+                    tag=tag,
+                )
+            )
     return errors
 
 
@@ -2407,6 +2592,7 @@ __all__ = [
     "ProblemMiningEvidenceReceipt",
     "ProblemMiningResponseContractError",
     "apply_problem_mining_decision_partition",
+    "bind_externally_corrected_attempt_history",
     "build_dry_run_miner_receipt",
     "build_failed_miner_receipt",
     "build_live_miner_receipt",

@@ -3586,6 +3586,167 @@ def test_current_research_attempt_history_allows_adaptive_same_session_correctio
         parse_research_dossier_list(json.dumps([dossier]))
 
 
+def _rescore_attempt_chain() -> tuple[list[dict[str, object]], dict[str, object]]:
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+
+    def artifacts(attempt_number: int) -> list[dict[str, object]]:
+        return [
+            {
+                "kind": kind,
+                "path": f"C:/retained/rescore-{attempt_number}/{filename}",
+                "exists": False,
+                "sha256": None,
+                "size_bytes": None,
+            }
+            for kind, filename in (
+                ("report", "report.json"),
+                ("workspace_ref", "workspace_ref.json"),
+                ("target_ref", "target_ref.json"),
+                ("normalized_events", "normalized_events.jsonl"),
+                ("codex_subscription_auth", "codex_execpolicy_overlay.json"),
+            )
+        ]
+
+    source_dossier = {"phase": "source"}
+    source: dict[str, object] = {
+        "attempt_number": 1,
+        "attempt_kind": "full_research",
+        "outcome": "output_contract_invalid",
+        "run_dir": "C:/retained/rescore-1",
+        "report_path": "C:/retained/rescore-1/report.json",
+        "validation_errors": ["obsolete:evaluator-finding"],
+        "validation_errors_before": [],
+        "validation_errors_after": ["obsolete:evaluator-finding"],
+        "attempted_dossier": source_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(source_dossier),
+        "source_attempt_sha256": None,
+        "authorized_paths": [],
+        "baseline_dossier_sha256": None,
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": None,
+        "attempt_wall_seconds": 10.0,
+        "repair_progress": None,
+        "attempt_artifacts": artifacts(1),
+    }
+    source["attempt_sha256"] = contracts.research_attempt_sha256(source)
+    candidate = {"phase": "corrected"}
+    continuation: dict[str, object] = {
+        "attempt_number": 2,
+        "attempt_kind": "evidence_verification_research_continuation",
+        "outcome": "repair_contract_valid",
+        "run_dir": "C:/retained/rescore-2",
+        "report_path": "C:/retained/rescore-2/report.json",
+        "validation_errors": [],
+        "validation_errors_before": ["replacement:finding"],
+        "validation_errors_after": [],
+        "attempted_dossier": candidate,
+        "attempted_dossier_sha256": _fixture_json_sha256(candidate),
+        "source_attempt_sha256": source["attempt_sha256"],
+        "authorized_paths": ["extensions.backlog_repro_research"],
+        "baseline_dossier_sha256": source["attempted_dossier_sha256"],
+        "baseline_projection_sha256": "a" * 64,
+        "repair_contract_sha256": "b" * 64,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": session_id,
+        "attempt_wall_seconds": 20.0,
+        "repair_progress": {
+            "decision": "accepted",
+            "reason": "rescored_evaluator_findings_corrected",
+        },
+        "attempt_artifacts": artifacts(2),
+    }
+    authored_sha256 = contracts.research_attempt_sha256(continuation)
+    continuation["attempt_sha256"] = authored_sha256
+    rescore: dict[str, object] = {
+        "schema_version": 1,
+        "contract_kind": "research_validation_error_rescore",
+        "source_attempt_sha256": source["attempt_sha256"],
+        "source_attempted_dossier_sha256": source["attempted_dossier_sha256"],
+        "source_validation_errors": source["validation_errors_after"],
+        "replacement_validation_errors": continuation["validation_errors_before"],
+        "reason": "authenticated evaluator defect correction",
+        "evaluator_defect_ids": ["BDS-test"],
+        "rescore_receipt_path": "C:/retained/rescore-receipt.json",
+        "rescore_receipt_sha256": "c" * 64,
+        "authored_attempt_sha256": authored_sha256,
+    }
+    rescore["rescore_sha256"] = _fixture_json_sha256(rescore)
+    continuation["validation_error_rescore"] = rescore
+    continuation["attempt_sha256"] = contracts.research_attempt_sha256(continuation)
+    return [source, continuation], rescore
+
+
+def test_research_attempt_rescore_authenticates_replaced_error_frontier() -> None:
+    attempts, _ = _rescore_attempt_chain()
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert parsed[0]["research_attempts"][1]["validation_errors_before"] == [
+        "replacement:finding"
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source_attempt",
+        "source_dossier",
+        "source_errors",
+        "replacement_errors",
+        "authored_attempt",
+        "receipt_hash",
+        "self_hash",
+    ],
+)
+def test_research_attempt_rescore_rejects_any_changed_binding(mutation: str) -> None:
+    attempts, rescore = _rescore_attempt_chain()
+    if mutation == "source_attempt":
+        rescore["source_attempt_sha256"] = "d" * 64
+    elif mutation == "source_dossier":
+        rescore["source_attempted_dossier_sha256"] = "d" * 64
+    elif mutation == "source_errors":
+        rescore["source_validation_errors"] = ["different"]
+    elif mutation == "replacement_errors":
+        rescore["replacement_validation_errors"] = ["different"]
+    elif mutation == "authored_attempt":
+        rescore["authored_attempt_sha256"] = "d" * 64
+    elif mutation == "receipt_hash":
+        rescore["rescore_receipt_sha256"] = "invalid"
+    if mutation != "self_hash":
+        rescore["rescore_sha256"] = _fixture_json_sha256(
+            {key: value for key, value in rescore.items() if key != "rescore_sha256"}
+        )
+    else:
+        rescore["rescore_sha256"] = "d" * 64
+    attempts[1]["attempt_sha256"] = contracts.research_attempt_sha256(attempts[1])
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError, match="research_attempt_rescore_invalid"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def test_research_attempt_prior_error_mismatch_still_fails_without_rescore() -> None:
+    attempts, rescore = _rescore_attempt_chain()
+    attempts[1].pop("validation_error_rescore")
+    attempts[1]["attempt_sha256"] = rescore["authored_attempt_sha256"]
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError, match="research_attempt_prior_errors_mismatch"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
 @pytest.mark.parametrize(
     ("feedback_before", "feedback_after"),
     [

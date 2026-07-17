@@ -52,9 +52,18 @@ PLAN_TICKET_FILENAME_RE = re.compile(
     r"(?:(?P<legacy_ticket_id>BLG-[0-9]{3}|TKT-[0-9a-f]{12})_)?"
     r"(?P<fingerprint>[0-9a-f]{16})_(?P<slug>.+\.md)$"
 )
-ATOM_ID_RE = re.compile(
-    r"^[A-Za-z0-9_.-]+/[0-9]{8}T[0-9]{6}Z/[A-Za-z0-9_.-]+/[0-9]+:[A-Za-z0-9_.-]+:[0-9]+$"
+_ATOM_ID_PATH_COMPONENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
+_ATOM_ID_SOURCE_RE = re.compile(r"[A-Za-z0-9_.-]+")
+_EVIDENCE_ATOM_IDS_HEADING_RE = re.compile(
+    r"^#{1,6}\s+Evidence\s+atom\s+ids\s*$",
+    flags=re.IGNORECASE | re.MULTILINE,
 )
+_EVIDENCE_ATOM_IDS_LABEL_RE = re.compile(
+    r"^(?:-\s*)?(?:Evidence\s+atom\s+ids(?:\s+from\s+source\s+ticket)?|Atom\s+ids)"
+    r"\s*:\s*$",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s+", flags=re.MULTILINE)
 DEQUEUED_PLAN_DIRNAMES: tuple[str, ...] = ("_dequeued",)
 REMOVED_PLAN_DIRNAMES: tuple[str, ...] = (*DISCARDED_PLAN_BUCKETS, *DEQUEUED_PLAN_DIRNAMES)
 
@@ -575,8 +584,60 @@ def archive_plan_ticket_file(
     return destination
 
 
+def _valid_plan_atom_id(value: str) -> bool:
+    """Return whether ``value`` has the structural atom-ID contract.
+
+    A run identifier is a slash-delimited path and may contain arbitrary namespace
+    depth.  Splitting from the right preserves that namespace while still binding the
+    source kind and one-based atom index.
+    """
+
+    parts = value.rsplit(":", 2)
+    if len(parts) != 3:
+        return False
+    run_id, source, raw_index = parts
+    run_parts = run_id.split("/")
+    return bool(
+        len(run_parts) >= 2
+        and all(_ATOM_ID_PATH_COMPONENT_RE.fullmatch(part) for part in run_parts)
+        and _ATOM_ID_SOURCE_RE.fullmatch(source)
+        and raw_index.isdigit()
+        and int(raw_index) > 0
+    )
+
+
+def _evidence_atom_id_section_bodies(markdown: str) -> list[str]:
+    """Return bodies of current and recognized historical provenance blocks."""
+
+    bodies: list[str] = []
+    for heading in _EVIDENCE_ATOM_IDS_HEADING_RE.finditer(markdown):
+        body_start = heading.end()
+        next_heading = _MARKDOWN_HEADING_RE.search(markdown, body_start)
+        body_end = next_heading.start() if next_heading is not None else len(markdown)
+        bodies.append(markdown[body_start:body_end])
+    for label in _EVIDENCE_ATOM_IDS_LABEL_RE.finditer(markdown):
+        body_start = label.end()
+        body_end = body_start
+        saw_atom_line = False
+        for line in markdown[body_start:].splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped:
+                if saw_atom_line:
+                    break
+                body_end += len(line)
+                continue
+            match = re.fullmatch(r"-\s*`([^`]+)`\s*", stripped)
+            if match is None or not _valid_plan_atom_id(match.group(1).strip()):
+                break
+            saw_atom_line = True
+            body_end += len(line)
+        if saw_atom_line:
+            bodies.append(markdown[body_start:body_end])
+    return bodies
+
+
 def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
-    """Extract atom identifiers from backtick-wrapped markdown tokens.
+    """Extract atom identifiers from the ticket's evidence section.
 
     Parameters
     ----------
@@ -586,15 +647,15 @@ def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
     Returns
     -------
     list[str]
-        Sorted unique atom IDs matching the repository atom-ID pattern.
+        Sorted unique atom IDs matching the repository atom-ID structure.
     """
 
-    candidates = re.findall(r"`([^`]+)`", markdown)
     atom_ids: set[str] = set()
-    for candidate in candidates:
-        cleaned = candidate.strip()
-        if ATOM_ID_RE.match(cleaned):
-            atom_ids.add(cleaned)
+    for body in _evidence_atom_id_section_bodies(markdown):
+        for candidate in re.findall(r"`([^`]+)`", body):
+            cleaned = candidate.strip()
+            if _valid_plan_atom_id(cleaned):
+                atom_ids.add(cleaned)
     return sorted(atom_ids)
 
 

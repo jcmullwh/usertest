@@ -13,9 +13,11 @@ from agent_adapters import (
 )
 from backlog_core import build_operational_failure_candidates, extract_backlog_atoms
 from backlog_core.case_lineage import (
+    apply_atom_disposition_decision,
     apply_atom_dispositions,
     atom_disposition_receipt_errors,
     eligible_problem_mining_atoms,
+    normalize_atom_lineage,
 )
 from backlog_miner.ensemble import (
     _CODEX_CHATGPT_CONFIG_OVERRIDES,
@@ -27,9 +29,12 @@ from backlog_miner.pipeline import StagePromptRun, _write_model_invocation_manif
 from backlog_repo import write_case_relation_receipt
 
 from usertest_backlog.workflows.problem_mining import (
+    _apply_stage1_case_evidence_retractions,
     _atoms_for_problem_mining_prompt,
+    _coverage_depth_review_prompt,
     _cross_job_leaf_routing_nodes,
     _failed_relation_review_batch_count,
+    _order_problem_mining_atoms_for_local_context,
     _partition_problem_mining_chunks,
     _preserve_primary_after_coverage_review_failure,
     _problem_mining_attempt_manifest_sha256,
@@ -45,6 +50,8 @@ from usertest_backlog.workflows.problem_mining import (
     _run_problem_mining_job_with_response_retry,
     _run_problem_mining_stage,
     _run_relation_review_batches,
+    _verified_problem_mining_controller_manifest,
+    _verified_problem_mining_prior_events_path,
     _verified_relation_edges_from_case_registry,
     _write_chunked_problem_mining_atoms_workspace,
 )
@@ -53,7 +60,9 @@ from usertest_backlog.workflows.problem_mining_evidence import (
     _attempt_history_errors,
     _cross_job_synthesis_errors,
     _miner_receipt_errors,
+    _receipt_hash,
     apply_problem_mining_decision_partition,
+    bind_externally_corrected_attempt_history,
     build_dry_run_miner_receipt,
     build_failed_miner_receipt,
     build_live_miner_receipt,
@@ -100,6 +109,176 @@ def _problem(atom_id: str = "atom:one") -> dict[str, object]:
         "evidence_summary": "The full atom records the failed command.",
         "problem_status": "identified",
     }
+
+
+def _controller_manifest_continuation_fixture(
+    tmp_path: Path,
+) -> tuple[Path, dict[str, object], dict[str, object], dict[str, object]]:
+    workspace = tmp_path / "workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=_atoms_for_problem_mining_prompt([_atom()]),
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:one"],
+        source_root=tmp_path,
+    )
+    agent_manifest_path = workspace / "atoms.json"
+    agent_raw = agent_manifest_path.read_bytes()
+    retained_attempt: dict[str, object] = {
+        "status": "verified",
+        "workspace_dir": str(workspace),
+        "workspace_manifest_sha256": _problem_mining_attempt_manifest_sha256(
+            manifest
+        ),
+        "artifacts": {
+            "workspace_manifest": {
+                "path": str(agent_manifest_path),
+                "sha256": sha256(agent_raw).hexdigest(),
+                "bytes": len(agent_raw),
+            }
+        },
+    }
+    attestations = []
+    for relative in ("atoms.json", "atoms_index.md", "atoms_text/atoms_001.md"):
+        path = workspace / relative
+        raw = path.read_bytes()
+        attestations.append(
+            {
+                "file": relative,
+                "file_sha256": sha256(raw).hexdigest(),
+                "file_size_bytes": len(raw),
+            }
+        )
+    retained_component: dict[str, object] = {
+        "required_workspace_read_attestations": attestations
+    }
+    return workspace, manifest, retained_attempt, retained_component
+
+
+def test_controller_manifest_reconstructs_full_receipt_from_agent_projection(
+    tmp_path: Path,
+) -> None:
+    workspace, expected, attempt, component = (
+        _controller_manifest_continuation_fixture(tmp_path)
+    )
+
+    observed = _verified_problem_mining_controller_manifest(
+        workspace_dir=workspace,
+        retained_attempt=attempt,
+        retained_component_receipt=component,
+    )
+
+    assert observed == expected
+    assert _problem_mining_attempt_manifest_sha256(observed) == attempt[
+        "workspace_manifest_sha256"
+    ]
+
+
+def test_exact_session_continuation_reuses_hash_bound_prior_read_events(
+    tmp_path: Path,
+) -> None:
+    workspace, manifest, attempt, component = (
+        _controller_manifest_continuation_fixture(tmp_path)
+    )
+    events = tmp_path / "attempt" / "cumulative.normalized.jsonl"
+    events.parent.mkdir()
+    events.write_text('{"type":"read_file"}\n', encoding="utf-8")
+    events_raw = events.read_bytes()
+    events_sha = sha256(events_raw).hexdigest()
+    attempt["artifacts"]["cumulative_normalized_events"] = {
+        "path": str(events),
+        "sha256": events_sha,
+        "bytes": len(events_raw),
+    }
+    component.update(
+        {
+            "workspace_dir": str(workspace),
+            "workspace_manifest_sha256": _problem_mining_attempt_manifest_sha256(
+                manifest
+            ),
+            "normalized_events_path": str(events),
+            "normalized_events_sha256": events_sha,
+        }
+    )
+
+    observed = _verified_problem_mining_prior_events_path(
+        retained_attempt=attempt,
+        retained_component_receipt=component,
+        workspace_dir=workspace,
+        workspace_manifest_sha256=_problem_mining_attempt_manifest_sha256(manifest),
+    )
+
+    assert observed == events.resolve()
+
+
+def test_exact_session_continuation_rejects_changed_prior_read_events(
+    tmp_path: Path,
+) -> None:
+    workspace, manifest, attempt, component = (
+        _controller_manifest_continuation_fixture(tmp_path)
+    )
+    events = tmp_path / "attempt" / "cumulative.normalized.jsonl"
+    events.parent.mkdir()
+    events.write_text('{"type":"read_file"}\n', encoding="utf-8")
+    events_raw = events.read_bytes()
+    events_sha = sha256(events_raw).hexdigest()
+    attempt["artifacts"]["cumulative_normalized_events"] = {
+        "path": str(events),
+        "sha256": events_sha,
+        "bytes": len(events_raw),
+    }
+    component.update(
+        {
+            "workspace_dir": str(workspace),
+            "workspace_manifest_sha256": _problem_mining_attempt_manifest_sha256(
+                manifest
+            ),
+            "normalized_events_path": str(events),
+            "normalized_events_sha256": events_sha,
+        }
+    )
+    events.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="stage1_prior_read_evidence_artifact_changed"):
+        _verified_problem_mining_prior_events_path(
+            retained_attempt=attempt,
+            retained_component_receipt=component,
+            workspace_dir=workspace,
+            workspace_manifest_sha256=_problem_mining_attempt_manifest_sha256(
+                manifest
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("relative", "error"),
+    [
+        ("atoms.json", "stage1_workspace_manifest_file_sha256_changed"),
+        (
+            "origin_evidence/manifest.json",
+            "stage1_workspace_origin_manifest_file_sha256_changed",
+        ),
+        ("atoms_text/atoms_001.md", "stage1_workspace_markdown_chunk_sha256_changed"),
+        ("atoms_index.md", "stage1_workspace_attested_file_sha256_changed"),
+    ],
+)
+def test_controller_manifest_reconstruction_rejects_workspace_tampering(
+    tmp_path: Path,
+    relative: str,
+    error: str,
+) -> None:
+    workspace, _, attempt, component = _controller_manifest_continuation_fixture(
+        tmp_path
+    )
+    path = workspace / relative
+    path.write_bytes(path.read_bytes() + b"tampered")
+
+    with pytest.raises(ValueError, match=error):
+        _verified_problem_mining_controller_manifest(
+            workspace_dir=workspace,
+            retained_attempt=attempt,
+            retained_component_receipt=component,
+        )
 
 
 def _valid_problem_mining_response(atom_id: str = "atom:one") -> str:
@@ -202,6 +381,8 @@ def _write_fake_codex_attempt_artifacts(
     kwargs: dict[str, object],
     response: str,
     read_chunks: bool = True,
+    read_workspace_evidence: bool = True,
+    read_origin_attachments: bool = True,
     session_available: bool = True,
 ) -> str | StagePromptRun:
     out_dir = Path(str(kwargs["out_dir"]))
@@ -219,11 +400,15 @@ def _write_fake_codex_attempt_artifacts(
         newline="\n",
     )
     manifest = json.loads((workspace / "atoms.json").read_text(encoding="utf-8"))
-    relative_paths = ["atoms.json", str(manifest["index_file"])]
-    if read_chunks:
+    relative_paths = (
+        ["atoms.json", str(manifest["index_file"])]
+        if read_workspace_evidence
+        else []
+    )
+    if read_workspace_evidence and read_chunks:
         relative_paths.extend(str(chunk["text_file"]) for chunk in manifest["chunks"])
     origin_summary = manifest.get("origin_attachment_evidence")
-    if isinstance(origin_summary, dict):
+    if read_origin_attachments and isinstance(origin_summary, dict):
         origin_manifest_file = origin_summary.get("manifest_file")
         if isinstance(origin_manifest_file, str):
             origin_manifest = json.loads(
@@ -721,6 +906,68 @@ def test_primary_mining_retries_fresh_until_codex_author_session_exists(
     ]
     assert result["attempt_history"][0]["agent_session_id"] is None
     assert result["attempt_history"][1]["agent_session_id"] is not None
+
+
+def test_stage_meta_does_not_count_pre_author_acquisition_as_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template = tmp_path / "problem_miner_default.md"
+    template.write_text(
+        "{{STAGE_GUIDANCE}}\nEvidence: {{ATOMS_JSON}}\n",
+        encoding="utf-8",
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> str | StagePromptRun:
+        calls.append(dict(kwargs))
+        tag = str(kwargs["tag"])
+        pre_author_attempt = tag == "problem_mining_001"
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=(
+                "" if pre_author_attempt else _valid_problem_mining_response()
+            ),
+            session_available=not pre_author_attempt,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+
+    stage_doc = _run_problem_mining_stage(
+        repo_root=tmp_path,
+        atoms=[_atom()],
+        pipeline_manifest=type(
+            "Manifest",
+            (),
+            {"problem_miner_templates": (template,)},
+        )(),
+        artifacts_dir=tmp_path / "artifacts",
+        out_json=tmp_path / "problem_records.json",
+        out_md=tmp_path / "problem_records.md",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        dry_run=False,
+        stage_guidance_text="Mine observed problems without proposing fixes.",
+        case_registry={"cases": {}, "aliases": {}},
+    )
+
+    assert [str(call["tag"]) for call in calls] == [
+        "problem_mining_001",
+        "problem_mining_001_session_acquisition_001",
+        "problem_mining_001_coverage_depth_review",
+    ]
+    miner_result = stage_doc["input_meta"]["miner_results"][0]
+    assert miner_result["session_acquisition_retry_count"] == 1
+    assert miner_result["format_retry_count"] == 0
+    assert miner_result["same_session_correction_count"] == 0
+    assert miner_result["correction_metrics"]["correction_turn_count"] == 0
+    assert miner_result["coverage_depth_review_session_acquisition_retry_count"] == 0
+    assert miner_result["coverage_depth_review_format_retry_count"] == 0
+    assert miner_result["coverage_depth_review_same_session_correction_count"] == 0
 
 
 def test_primary_mining_transient_exact_session_exception_retries_same_author(
@@ -1506,6 +1753,189 @@ def test_empty_response_attempt_artifact_tamper_or_removal_fails_revalidation(
     )
 
 
+def _externally_corrected_verified_miner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], dict[str, object]]:
+    import usertest_backlog.workflows.problem_mining as problem_mining
+
+    atom = _atom()
+    prompt_atoms = _atoms_for_problem_mining_prompt([atom])
+    workspace = tmp_path / "external-correction-workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=prompt_atoms,
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:one"],
+        source_root=tmp_path,
+    )
+    response = json.dumps(
+        {
+            "problem_records": [],
+            "atom_decisions": [
+                {
+                    "atom_id": "atom:one",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": (
+                        "The retained evidence does not establish an actionable "
+                        "failure mechanism."
+                    ),
+                    "revisit_when": None,
+                }
+            ],
+        }
+    )
+
+    def fake_run(**kwargs: object) -> str | StagePromptRun:
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=response,
+        )
+
+    monkeypatch.setattr(problem_mining, "run_stage_prompt_json", fake_run)
+    common = {
+        "repo_root": tmp_path,
+        "stage_artifacts_dir": tmp_path / "external-correction-artifacts",
+        "base_tag": "problem_mining_001",
+        "prompt_atoms": prompt_atoms,
+        "assigned_atom_ids": ["atom:one"],
+        "max_records_per_miner": 20,
+        "eligible_atom_ids": ["atom:one"],
+        "template_name": "problem_miner_default.md",
+        "record_contract_error_prefix": "problem_mining_contract_invalid",
+        "agent": "codex",
+        "model": None,
+        "cfg": object(),
+        "initial_workspace_dir": workspace,
+        "initial_manifest": manifest,
+    }
+    initial = problem_mining._run_problem_mining_attempt(
+        **common,
+        attempt_tag="problem_mining_001",
+        attempt_number=1,
+        prompt="Read the evidence and return the strict response.",
+    )
+    assert initial["failure"] is None
+    corrected = problem_mining._run_problem_mining_attempt(
+        **common,
+        attempt_tag="qualification_stage1_correction_001",
+        attempt_number=2,
+        prompt="Apply the independent feedback and return the complete response.",
+        resume_session_id=initial["agent_session_id"],
+    )
+    assert corrected["failure"] is None
+    history = [initial["attempt_record"], corrected["attempt_record"]]
+    receipt = bind_externally_corrected_attempt_history(
+        receipt=corrected["receipt"],
+        attempt_history=history,
+        feedback_sha256="a" * 64,
+        feedback_kind="accepted_output_quality",
+    )
+    return receipt, atom
+
+
+@pytest.mark.parametrize("mutation", ["missing", "tampered", "non_latest"])
+def test_external_correction_selection_rejects_unbound_or_stale_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    receipt, _atom_record = _externally_corrected_verified_miner(
+        tmp_path,
+        monkeypatch,
+    )
+    assert _attempt_history_errors(receipt, tag="problem_mining_001") == []
+    mutated = deepcopy(receipt)
+    if mutation == "missing":
+        mutated.pop("successful_attempt_selection")
+        expected = "problem_mining_corrected_attempt_selection_missing:problem_mining_001"
+    elif mutation == "tampered":
+        mutated["successful_attempt_selection"]["feedback_sha256"] = "b" * 64
+        expected = "problem_mining_corrected_attempt_selection_invalid:problem_mining_001"
+    else:
+        selection = mutated["successful_attempt_selection"]
+        selection["accepted_attempt_tag"] = "problem_mining_001"
+        selection["accepted_attempt_number"] = 1
+        selection["accepted_attempt_sha256"] = "c" * 64
+        selection["receipt_sha256"] = _receipt_hash(selection)
+        expected = (
+            "problem_mining_corrected_attempt_selection_non_latest:problem_mining_001"
+        )
+    assert expected in _attempt_history_errors(mutated, tag="problem_mining_001")
+
+
+def test_external_correction_finalizes_and_independently_reverifies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, atom = _externally_corrected_verified_miner(tmp_path, monkeypatch)
+    draft = build_problem_mining_evidence_draft(
+        atoms=[atom],
+        eligible_atoms=[atom],
+        mode="live",
+    )
+    draft["miners"] = [receipt]
+    updated_atoms = apply_problem_mining_decision_partition(
+        atoms=[atom],
+        canonical_records=[],
+        draft=draft,
+    )
+    receipt_path = tmp_path / "corrected.problem_mining.evidence.json"
+    finalized = finalize_problem_mining_evidence_receipt(
+        draft=draft,
+        atoms=updated_atoms,
+        receipt_path=receipt_path,
+    )
+    stage1 = {
+        "artifacts": {"problem_mining_evidence_receipt": str(receipt_path)},
+        "input_meta": {
+            "problem_mining_evidence_receipt": problem_mining_evidence_receipt_ref(
+                receipt=finalized,
+                receipt_path=receipt_path,
+            )
+        },
+    }
+
+    assert finalized["status"] == "verified"
+    assert finalized["eligible_for_shadow_export"] is True
+    assert verify_problem_mining_evidence_receipt(
+        stage1=stage1,
+        atoms=updated_atoms,
+        require_live=True,
+    ) == []
+
+
+def test_finalization_preserves_but_downgrades_unselected_corrected_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, atom = _externally_corrected_verified_miner(tmp_path, monkeypatch)
+    receipt.pop("successful_attempt_selection")
+    draft = build_problem_mining_evidence_draft(
+        atoms=[atom],
+        eligible_atoms=[atom],
+        mode="live",
+    )
+    draft["miners"] = [receipt]
+    updated_atoms = apply_problem_mining_decision_partition(
+        atoms=[atom],
+        canonical_records=[],
+        draft=draft,
+    )
+    finalized = finalize_problem_mining_evidence_receipt(
+        draft=draft,
+        atoms=updated_atoms,
+        receipt_path=tmp_path / "unselected.problem_mining.evidence.json",
+    )
+
+    assert finalized["status"] == "partial_failed_jobs"
+    assert finalized["eligible_for_shadow_export"] is False
+    assert finalized["attempt_provenance_errors"] == [
+        "problem_mining_corrected_attempt_selection_missing:problem_mining_001"
+    ]
+
+
 def _verified_stage1(tmp_path: Path) -> tuple[dict[str, object], list[dict[str, object]]]:
     atom = _atom()
     draft = build_problem_mining_evidence_draft(atoms=[atom], eligible_atoms=[atom], mode="live")
@@ -1842,6 +2272,282 @@ def test_runner_rule_can_prove_proposal_evidence_is_expected_noise(tmp_path: Pat
     assert final_atom["disposition_proof"]["rule_id"] == "proposal_evidence_class_v1"
     assert atom_disposition_receipt_errors(final_atom, require_decided=True) == []
     assert eligible_problem_mining_atoms([final_atom]) == []
+
+
+def test_corrected_non_support_decision_clears_provisional_case_membership(
+    tmp_path: Path,
+) -> None:
+    atom = {
+        **_atom(),
+        "case_id": "case:provisional",
+        "supporting_case_ids": ["case:provisional"],
+        "disposition": "supports_case",
+    }
+    draft = {
+        "mode": "live",
+        "eligible_atom_ids": ["atom:one"],
+        "miners": [
+            {
+                "tag": "problem_mining_001",
+                "status": "verified",
+                "atom_decisions": [
+                    {
+                        "atom_id": "atom:one",
+                        "disposition": "unresolved",
+                        "problem_ids": [],
+                        "rationale": "The evidence does not establish a problem.",
+                        "revisit_when": None,
+                    }
+                ],
+            }
+        ],
+    }
+
+    partitioned = apply_problem_mining_decision_partition(
+        atoms=[atom], canonical_records=[], draft=draft
+    )
+    final_atom = apply_atom_dispositions(partitioned, [])[0]
+    receipt = finalize_problem_mining_evidence_receipt(
+        draft=draft,
+        atoms=[final_atom],
+        receipt_path=tmp_path / "corrected_non_support.evidence.json",
+    )
+
+    assert final_atom["case_id"] is None
+    assert final_atom["supporting_case_ids"] == []
+    assert final_atom["disposition"] == "unresolved"
+    assert receipt["decision_partition"][0]["case_ids"] == []
+
+
+def _case_retraction_correction_meta(atom_ids: list[str]) -> dict[str, object]:
+    return {
+        "feedback_sha256": "a" * 64,
+        "target_atom_ids": atom_ids,
+        "replaced_assignment_atom_ids": atom_ids,
+        "attempt_record": {
+            "workspace_manifest_sha256": "b" * 64,
+            "artifacts": {"response": {"sha256": "c" * 64}},
+        },
+    }
+
+
+def _case_retraction_source_receipt_ref() -> dict[str, object]:
+    return {
+        "file_sha256": "d" * 64,
+        "receipt_sha256": "e" * 64,
+    }
+
+
+def _case_retraction_atom(
+    atom_id: str,
+    *,
+    case_id: str | None,
+    supports_case: bool,
+) -> dict[str, object]:
+    atom = _atom(atom_id)
+    atom["case_id"] = case_id
+    atom["supporting_case_ids"] = [case_id] if case_id is not None else []
+    if supports_case:
+        atom["disposition"] = "supports_case"
+        return atom
+    return apply_atom_disposition_decision(
+        atom,
+        disposition="unresolved",
+        source="problem_mining_evidence_partition",
+        rationale="The corrected evidence review does not establish a problem.",
+    )
+
+
+def _case_retraction_registry() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "cases": {
+            "case:one": {
+                "case_id": "case:one",
+                "canonical_problem_id": "problem:one",
+                "problem_ids": ["problem:one"],
+                "state": "active",
+                "case_revision": 2,
+                "evidence_atom_ids": ["atom:one"],
+                "source_evidence_atom_ids": ["atom:one"],
+                "derived_evidence_atom_ids": [],
+                "occurrence_evidence_atom_ids": ["atom:one"],
+                "source_evidence_atom_sha256_by_id": {"atom:one": "f" * 64},
+                "source_evidence_snapshot_complete": True,
+                "source_evidence_snapshot_missing_atom_ids": [],
+                "source_evidence_snapshot_sha256": "1" * 64,
+            },
+            "case:other": {
+                "case_id": "case:other",
+                "canonical_problem_id": "problem:other",
+                "problem_ids": ["problem:other"],
+                "state": "active",
+                "case_revision": 1,
+                "evidence_atom_ids": ["atom:other"],
+                "source_evidence_atom_ids": ["atom:other"],
+                "derived_evidence_atom_ids": [],
+                "occurrence_evidence_atom_ids": [],
+                "source_evidence_atom_sha256_by_id": {"atom:other": "2" * 64},
+                "source_evidence_snapshot_complete": True,
+                "source_evidence_snapshot_missing_atom_ids": [],
+                "source_evidence_snapshot_sha256": "3" * 64,
+            },
+        },
+        "problem_id_to_case_id": {
+            "problem:one": "case:one",
+            "problem:other": "case:other",
+        },
+        "atom_id_to_case_id": {
+            "atom:one": "case:one",
+            "atom:other": "case:other",
+        },
+        "atom_id_to_case_ids": {
+            "atom:one": ["case:one"],
+            "atom:other": ["case:other"],
+        },
+        "ticket_fingerprint_to_case_id": {
+            "ticket:one": "case:one",
+            "ticket:other": "case:other",
+        },
+        "operational_signature_to_case_id": {
+            "4" * 64: "case:one",
+            "5" * 64: "case:other",
+        },
+    }
+
+
+def test_full_case_evidence_retraction_is_durable_idempotent_and_scoped() -> None:
+    registry = _case_retraction_registry()
+    prior_atom = _case_retraction_atom(
+        "atom:one", case_id="case:one", supports_case=True
+    )
+    corrected_atom = _case_retraction_atom(
+        "atom:one", case_id=None, supports_case=False
+    )
+
+    retracted, receipts = _apply_stage1_case_evidence_retractions(
+        registry=registry,
+        prior_atoms=[prior_atom],
+        updated_atoms=[corrected_atom],
+        correction_meta=_case_retraction_correction_meta(["atom:one"]),
+        source_evidence_receipt_ref=_case_retraction_source_receipt_ref(),
+    )
+
+    case = retracted["cases"]["case:one"]
+    assert case["state"] == "superseded"
+    assert case["superseded_reason"] == "qualification_evidence_retracted"
+    assert case["case_revision"] == 3
+    assert case["evidence_atom_ids"] == []
+    assert case["source_evidence_atom_ids"] == []
+    assert case["occurrence_evidence_atom_ids"] == []
+    assert case["source_evidence_atom_sha256_by_id"] == {}
+    assert len(receipts) == 1
+    assert receipts[0]["retracted_atom_ids"] == ["atom:one"]
+    assert len(receipts[0]["content_sha256"]) == 64
+    for map_name in (
+        "problem_id_to_case_id",
+        "atom_id_to_case_id",
+        "ticket_fingerprint_to_case_id",
+        "operational_signature_to_case_id",
+    ):
+        assert "case:one" not in retracted[map_name].values()
+    assert all(
+        "case:one" not in memberships
+        for memberships in retracted["atom_id_to_case_ids"].values()
+    )
+    assert retracted["cases"]["case:other"] == registry["cases"]["case:other"]
+    assert retracted["problem_id_to_case_id"]["problem:other"] == "case:other"
+
+    next_cycle = normalize_atom_lineage(
+        [_atom("atom:one")],
+        case_registry=retracted,
+    )[0]
+    assert next_cycle["case_id"] is None
+    assert next_cycle["supporting_case_ids"] == []
+    assert next_cycle["disposition"] == "unresolved"
+
+    repeated, repeated_receipts = _apply_stage1_case_evidence_retractions(
+        registry=retracted,
+        prior_atoms=[prior_atom],
+        updated_atoms=[corrected_atom],
+        correction_meta=_case_retraction_correction_meta(["atom:one"]),
+        source_evidence_receipt_ref=_case_retraction_source_receipt_ref(),
+    )
+    assert repeated == retracted
+    assert repeated_receipts == receipts
+
+
+def test_partial_case_evidence_retraction_keeps_remaining_case_active() -> None:
+    registry = _case_retraction_registry()
+    case = registry["cases"]["case:one"]
+    case["evidence_atom_ids"] = ["atom:one", "atom:two"]
+    case["source_evidence_atom_ids"] = ["atom:one", "atom:two"]
+    case["source_evidence_atom_sha256_by_id"] = {
+        "atom:one": "f" * 64,
+        "atom:two": "6" * 64,
+    }
+    registry["atom_id_to_case_id"]["atom:two"] = "case:one"
+    registry["atom_id_to_case_ids"]["atom:two"] = ["case:one"]
+    prior_atoms = [
+        _case_retraction_atom("atom:one", case_id="case:one", supports_case=True),
+        _case_retraction_atom("atom:two", case_id="case:one", supports_case=True),
+    ]
+    updated_atoms = [
+        _case_retraction_atom("atom:one", case_id=None, supports_case=False),
+        prior_atoms[1],
+    ]
+
+    retracted, receipts = _apply_stage1_case_evidence_retractions(
+        registry=registry,
+        prior_atoms=prior_atoms,
+        updated_atoms=updated_atoms,
+        correction_meta=_case_retraction_correction_meta(["atom:one"]),
+        source_evidence_receipt_ref=_case_retraction_source_receipt_ref(),
+    )
+
+    case = retracted["cases"]["case:one"]
+    assert case["state"] == "active"
+    assert "superseded_reason" not in case
+    assert case["case_revision"] == 3
+    assert case["evidence_atom_ids"] == ["atom:two"]
+    assert case["source_evidence_atom_ids"] == ["atom:two"]
+    assert case["source_evidence_atom_sha256_by_id"] == {"atom:two": "6" * 64}
+    assert retracted["problem_id_to_case_id"]["problem:one"] == "case:one"
+    assert "atom:one" not in retracted["atom_id_to_case_id"]
+    assert retracted["atom_id_to_case_id"]["atom:two"] == "case:one"
+    assert receipts[0]["remaining_source_evidence_atom_ids"] == ["atom:two"]
+
+
+def test_case_evidence_retraction_rejects_tampered_embedded_receipt() -> None:
+    registry = _case_retraction_registry()
+    prior_atom = _case_retraction_atom(
+        "atom:one", case_id="case:one", supports_case=True
+    )
+    corrected_atom = _case_retraction_atom(
+        "atom:one", case_id=None, supports_case=False
+    )
+    retracted, _ = _apply_stage1_case_evidence_retractions(
+        registry=registry,
+        prior_atoms=[prior_atom],
+        updated_atoms=[corrected_atom],
+        correction_meta=_case_retraction_correction_meta(["atom:one"]),
+        source_evidence_receipt_ref=_case_retraction_source_receipt_ref(),
+    )
+    retracted["cases"]["case:one"]["evidence_retraction_receipts"][0][
+        "content_sha256"
+    ] = "0" * 64
+
+    with pytest.raises(
+        ValueError,
+        match="problem_mining_case_evidence_retraction_receipt_hash_mismatch:case:one",
+    ):
+        _apply_stage1_case_evidence_retractions(
+            registry=retracted,
+            prior_atoms=[prior_atom],
+            updated_atoms=[corrected_atom],
+            correction_meta=_case_retraction_correction_meta(["atom:one"]),
+            source_evidence_receipt_ref=_case_retraction_source_receipt_ref(),
+        )
 
 
 @pytest.mark.parametrize("tampered_field", ["whole_file_observed", "file_sha256"])
@@ -3144,6 +3850,51 @@ def test_many_operational_occurrences_use_bounded_explicit_stage1_projection() -
     assert _partition_problem_mining_chunks([projection], chunk_max_bytes=55_000) == [[projection]]
 
 
+def test_comparable_structured_observations_are_grouped_chronologically() -> None:
+    def observation(atom_id: str, timestamp: str, queue_depth: int) -> dict[str, object]:
+        atom = _atom(atom_id)
+        atom.update(
+            {
+                "source": "runner_queue_observation",
+                "origin_stage": "runner_queue_monitor",
+                "target_slug": "target-a",
+                "timestamp_utc": timestamp,
+                "queue_depth": queue_depth,
+                "processed_count": 0,
+            }
+        )
+        return atom
+
+    unrelated = _atom("atom:unrelated")
+    unrelated.update(
+        {
+            "source": "different_observation",
+            "origin_stage": "runner_other_monitor",
+            "target_slug": "target-a",
+            "timestamp_utc": "2026-07-02T12:00:00Z",
+        }
+    )
+    prompt_atoms = _atoms_for_problem_mining_prompt(
+        [
+            observation("atom:late", "2026-07-03T12:00:00Z", 49),
+            unrelated,
+            observation("atom:early", "2026-07-01T12:00:00Z", 1),
+            observation("atom:middle", "2026-07-02T12:00:00Z", 36),
+        ]
+    )
+
+    ordered = _order_problem_mining_atoms_for_local_context(prompt_atoms)
+
+    assert [item["atom_id"] for item in ordered] == [
+        "atom:early",
+        "atom:middle",
+        "atom:late",
+        "atom:unrelated",
+    ]
+    assert [item["queue_depth"] for item in ordered[:3]] == [1, 36, 49]
+    assert [item["processed_count"] for item in ordered[:3]] == [0, 0, 0]
+
+
 def test_problem_mining_projection_retains_unique_evidence_context(tmp_path: Path) -> None:
     atom = _atom()
     atom.update(
@@ -3533,7 +4284,7 @@ def test_independent_review_can_recover_primary_missed_problem() -> None:
     assert decisions[0]["disposition"] == "supports_case"
 
 
-def test_independent_review_must_confirm_primary_support_claim_verbatim() -> None:
+def test_independent_review_can_confirm_unchanged_primary_support_claim() -> None:
     primary_problem = _problem()
     records, decisions = _reconcile_problem_mining_reviews(
         primary_records=[primary_problem],
@@ -3562,6 +4313,85 @@ def test_independent_review_must_confirm_primary_support_claim_verbatim() -> Non
     assert decisions[0]["disposition"] == "supports_case"
     assert decisions[0]["problem_ids"] == ["problem:one"]
     assert "independently confirmed" in decisions[0]["rationale"]
+
+
+def test_independent_review_refines_same_problem_without_changing_identity() -> None:
+    primary_problem = _problem()
+    refined_problem = {
+        **primary_problem,
+        "title": "Queue depth grows while processing remains at zero",
+        "problem": (
+            "Three timestamped observations show queue depth increasing from 1 to 36 "
+            "to 49 while processed_count remains zero."
+        ),
+        "user_impact": (
+            "Unverified impact: the observations do not include latency, task failure, "
+            "or another direct user-effect measurement."
+        ),
+        "confidence": 0.84,
+        "evidence_summary": (
+            "Chronological queue_depth=1->36->49; processed_count=0 in all three "
+            "observations."
+        ),
+    }
+
+    records, decisions = _reconcile_problem_mining_reviews(
+        primary_records=[primary_problem],
+        primary_decisions=[
+            {
+                "atom_id": "atom:one",
+                "disposition": "supports_case",
+                "problem_ids": ["problem:one"],
+                "rationale": "The primary pass selected a measurement caveat.",
+                "revisit_when": None,
+            }
+        ],
+        review_records=[refined_problem],
+        review_decisions=[
+            {
+                "atom_id": "atom:one",
+                "disposition": "supports_case",
+                "problem_ids": ["problem:one"],
+                "rationale": (
+                    "The chronological behavior is directly observed; its user impact "
+                    "remains unverified."
+                ),
+                "revisit_when": None,
+            }
+        ],
+    )
+
+    assert records == [refined_problem]
+    assert records[0]["problem_id"] == "problem:one"
+    assert "-review-" not in str(records[0]["problem_id"])
+    assert decisions[0]["disposition"] == "supports_case"
+    assert decisions[0]["problem_ids"] == ["problem:one"]
+
+
+def test_coverage_review_prompt_requests_depth_refinement_without_impact_invention() -> None:
+    prompt = _coverage_depth_review_prompt(
+        primary_records=[_problem()],
+        primary_decisions=[
+            {
+                "atom_id": "atom:one",
+                "disposition": "supports_case",
+                "problem_ids": ["problem:one"],
+                "rationale": "The primary pass selected a possible problem.",
+                "revisit_when": None,
+            }
+        ],
+        template_text="{{STAGE_GUIDANCE}}\n{{ATOMS_JSON}}",
+        stage_guidance_text="Read the evidence before deciding.",
+        atoms_placeholder='{"atoms_file":"atoms.json"}',
+        max_records_per_miner=20,
+    )
+
+    assert "compare repeated structured observations in timestamp order" in prompt
+    assert "distinguish observed behavior from measurement caveats" in prompt
+    assert "do not state plausible user impact as observed fact" in prompt
+    assert "reuse its problem_id and emit a refined complete record" in prompt
+    assert "Reject an unsupported primary" in prompt
+    assert "emit the corresponding primary problem record verbatim" not in prompt
 
 
 def test_unconfirmed_primary_support_claim_becomes_unresolved() -> None:
@@ -3794,6 +4624,108 @@ def test_coverage_review_response_retry_reruns_full_review_and_verifies(
         "problem_mining_001_coverage_depth_review_correction_001"
     )
     assert len(receipt["non_support_review"]["read_attestations"]) == 1
+
+
+def test_coverage_review_composite_preserves_cumulative_read_attestations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template = tmp_path / "problem_miner_default.md"
+    template.write_text(
+        "{{STAGE_GUIDANCE}}\nEvidence: {{ATOMS_JSON}}\n",
+        encoding="utf-8",
+    )
+    response = _valid_problem_mining_response()
+    calls: list[str] = []
+    run_dir = tmp_path / "runs" / "target" / "one"
+    run_dir.mkdir(parents=True)
+    artifact = run_dir / "agent_stderr.txt"
+    artifact.write_text("The assigned command failed.\n", encoding="utf-8")
+    atom = _atom()
+    atom.update(
+        {
+            "run_dir": str(run_dir),
+            "attachments": [
+                {
+                    "kind": "agent_stderr",
+                    "artifact_ref": {
+                        "path": artifact.name,
+                        "sha256": sha256(artifact.read_bytes()).hexdigest(),
+                        "size_bytes": artifact.stat().st_size,
+                    },
+                }
+            ],
+        }
+    )
+
+    def _fake_run_stage_prompt_json(**kwargs: object) -> str | StagePromptRun:
+        tag = str(kwargs["tag"])
+        calls.append(tag)
+        is_correction = "_correction_" in tag
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=response,
+            # Reproduce the retained-run frontier exactly: the initial author turn
+            # read every main workspace file but omitted the origin index; the same-
+            # session correction read only that missing attachment. Each successful
+            # component therefore depends on its cumulative event stream.
+            read_workspace_evidence=not is_correction,
+            read_origin_attachments=is_correction,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        _fake_run_stage_prompt_json,
+    )
+
+    stage_doc = _run_problem_mining_stage(
+        repo_root=tmp_path,
+        atoms=[atom],
+        pipeline_manifest=type(
+            "Manifest",
+            (),
+            {"problem_miner_templates": (template,)},
+        )(),
+        artifacts_dir=tmp_path / "artifacts",
+        out_json=tmp_path / "problem_records.json",
+        out_md=tmp_path / "problem_records.md",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        dry_run=False,
+        stage_guidance_text="Mine observed problems without proposing fixes.",
+        case_registry={"cases": {}, "aliases": {}},
+    )
+
+    assert calls == [
+        "problem_mining_001",
+        "problem_mining_001_correction_001",
+        "problem_mining_001_coverage_depth_review",
+        "problem_mining_001_coverage_depth_review_correction_001",
+    ]
+    miner_result = stage_doc["input_meta"]["miner_results"][0]
+    assert miner_result["status"] == "ok"
+    assert [item["status"] for item in miner_result["attempt_history"]] == [
+        "failed",
+        "verified",
+    ]
+    assert [
+        item["status"]
+        for item in miner_result["coverage_depth_review_attempt_history"]
+    ] == ["failed", "verified"]
+
+    receipt = stage_doc["input_meta"]["problem_mining_evidence_draft"]["miners"][0]
+    assert receipt["status"] == "verified"
+    assert receipt["primary_pass"]["correction_status"] == "corrected"
+    assert receipt["non_support_review"]["correction_status"] == "corrected"
+    assert receipt["normalized_events_path"].endswith(
+        ".cumulative_normalized_events.jsonl"
+    )
+    assert receipt["normalized_events_path"] == receipt["primary_pass"][
+        "normalized_events_path"
+    ]
+    assert receipt["required_workspace_read_attestations"]
+    assert receipt["origin_attachment_read_attestations"]
 
 
 def test_relation_payload_omits_unrelated_global_case_index_entries() -> None:
@@ -4096,6 +5028,140 @@ def test_relation_review_confidence_is_telemetry_not_a_collapse_gate() -> None:
     )
 
     assert errors == []
+
+
+def test_relation_review_requires_cited_evidence_from_every_collapse_side() -> None:
+    errors = _relation_decision_item_errors(
+        {
+            "focus_id": "problem:a",
+            "action": "alias",
+            "alias_target_id": "problem:b",
+            "evidence_atom_ids": ["atom:a"],
+            "rationale": "The two facets appear to describe one failure.",
+            "review_confidence": 0.9,
+        },
+        focus_problem_ids={"problem:a"},
+        known_problem_ids={"problem:a", "problem:b"},
+        known_evidence_atom_ids={"atom:a", "atom:b"},
+        evidence_atom_ids_by_problem_id={
+            "problem:a": {"atom:a"},
+            "problem:b": {"atom:b"},
+        },
+        allowed_actions={"merge", "alias", "split", "same_cause_group", "keep_separate"},
+    )
+
+    assert errors == [
+        "relation_decision_collapse_peer_evidence_missing:problem:a:problem:b"
+    ]
+
+
+def test_relation_review_repairs_incomplete_alias_evidence_in_same_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relation_items = [
+        {
+            "problem_id": "problem:a",
+            "case_id": "case:a",
+            "title": "Failure facet A",
+            "evidence_atom_ids": ["atom:a"],
+        },
+        {
+            "problem_id": "problem:b",
+            "case_id": "case:b",
+            "title": "Failure facet B",
+            "evidence_atom_ids": ["atom:b"],
+        },
+    ]
+    neighborhoods = [
+        {
+            "focus_id": problem_id,
+            "most_related_by_semantic": [
+                {
+                    "index": 1 - index,
+                    "score": 0.9,
+                }
+            ],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+        for index, problem_id in enumerate(("problem:a", "problem:b"))
+    ]
+
+    def alias_response(*, complete_evidence: bool) -> str:
+        evidence = ["atom:a", "atom:b"] if complete_evidence else ["atom:a"]
+        return json.dumps(
+            [
+                {
+                    "focus_id": "problem:a",
+                    "action": "alias",
+                    "alias_target_id": "problem:b",
+                    "evidence_atom_ids": evidence,
+                    "rationale": "Both facets describe one suspected failure.",
+                    "review_confidence": 0.9,
+                },
+                {
+                    "focus_id": "problem:b",
+                    "action": "alias",
+                    "alias_target_id": "problem:a",
+                    "evidence_atom_ids": evidence,
+                    "rationale": "Both facets describe one suspected failure.",
+                    "review_confidence": 0.9,
+                },
+            ]
+        )
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_relation_stage_run(
+            kwargs=dict(kwargs),
+            response=alias_response(complete_evidence=len(calls) > 1),
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    review_dir = tmp_path / "relation_review"
+    review_dir.mkdir()
+
+    decisions, batches = _run_relation_review_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:a", "problem:b"],
+        template="{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}",
+        allowed_actions=["merge", "alias", "split", "same_cause_group", "keep_separate"],
+        stage_guidance_text="Cite exact evidence from every collapse side.",
+        review_dir=review_dir,
+        tag="relation_review",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        max_foci=2,
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["resume_session_id"] is not None
+    assert batches[0]["correction_status"] == "corrected"
+    first_errors = batches[0]["attempt_history"][0]["validation_errors"]
+    assert (
+        "relation_decision_index=0:"
+        "relation_decision_collapse_peer_evidence_missing:problem:a:problem:b"
+        in first_errors
+    )
+    assert (
+        "relation_decision_index=1:"
+        "relation_decision_collapse_focus_evidence_missing:problem:b"
+        in first_errors
+    )
+    assert not any("missing_focus" in error for error in first_errors)
+    assert all(
+        decision["evidence_atom_ids"] == ["atom:a", "atom:b"]
+        for decision in decisions
+    )
 
 
 def test_relation_review_stall_preserves_valid_focus_and_falls_back_only_missing_focus(
@@ -4493,6 +5559,10 @@ def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
     }
     (workspace / "atoms.json").write_text(json.dumps(manifest), encoding="utf-8")
     manifest_sha = problem_mining._problem_mining_attempt_manifest_sha256(manifest)
+    review_events = workspace / "review.cumulative.normalized.jsonl"
+    review_events.write_text('{"type":"read_file"}\n', encoding="utf-8")
+    review_events_raw = review_events.read_bytes()
+    review_events_sha = sha256(review_events_raw).hexdigest()
     primary_workspace = tmp_path / "primary-workspace"
     primary_workspace.mkdir()
     (primary_workspace / "atoms.json").write_text(
@@ -4529,7 +5599,13 @@ def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
                         }
                     ],
                 },
-                "non_support_review": {"status": "verified"},
+                "non_support_review": {
+                    "status": "verified",
+                    "workspace_dir": str(workspace),
+                    "workspace_manifest_sha256": manifest_sha,
+                    "normalized_events_path": str(review_events),
+                    "normalized_events_sha256": review_events_sha,
+                },
                 "review_scope": "all_assigned_atoms_positive_and_non_support",
                 "primary_problem_records": [],
                 "primary_atom_decisions": [
@@ -4557,11 +5633,22 @@ def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
                     "assigned_atom_ids": ["atom:one"],
                     "coverage_depth_review_attempt_history": [
                         {
+                            "schema_version": 2,
+                            "attempt_number": 1,
+                            "attempt_tag": "problem_mining_001_coverage_depth_review",
                             "status": "verified",
                             "agent_session_id": session_id,
+                            "resumed_from_session_id": None,
                             "workspace_dir": str(workspace),
                             "workspace_manifest_sha256": manifest_sha,
-                        }
+                            "artifacts": {
+                                "cumulative_normalized_events": {
+                                    "path": str(review_events),
+                                    "sha256": review_events_sha,
+                                    "bytes": len(review_events_raw),
+                                }
+                            },
+                        },
                     ],
                 }
             ],
@@ -4608,7 +5695,17 @@ def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
                     }
                 ],
             },
-            "attempt_record": {"status": "verified", "artifacts": {}},
+            "attempt_record": {
+                "schema_version": 2,
+                "attempt_number": 2,
+                "attempt_tag": "qualification_stage1_correction_001",
+                "status": "verified",
+                "agent_session_id": session_id,
+                "resumed_from_session_id": session_id,
+                "workspace_dir": str(workspace),
+                "workspace_manifest_sha256": manifest_sha,
+                "artifacts": {},
+            },
         }
 
     monkeypatch.setattr(problem_mining, "_run_problem_mining_attempt", attempt)
@@ -4674,6 +5771,7 @@ def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
     assert calls[0]["resume_session_id"] == session_id
     assert calls[0]["initial_workspace_dir"] == workspace.resolve()
     assert calls[0]["expected_manifest_sha256"] == manifest_sha
+    assert calls[0]["prior_normalized_events_paths"] == (review_events.resolve(),)
     assert "BOUND FEEDBACK" in str(calls[0]["prompt"])
     draft = relation_calls[0]["stage_doc"]["input_meta"][
         "problem_mining_evidence_draft"
@@ -4681,6 +5779,12 @@ def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
     assert (
         draft["miners"][0]["non_support_review"]["attempt_history"][-1]["status"]
         == "verified"
+    )
+    assert (
+        draft["miners"][0]["non_support_review"]["successful_attempt_selection"][
+            "accepted_attempt_tag"
+        ]
+        == "qualification_stage1_correction_001"
     )
     assert draft["miners"][0]["primary_problem_records"] == []
 
@@ -4713,7 +5817,17 @@ def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
                     }
                 ],
             },
-            "attempt_record": {"status": "verified", "artifacts": {}},
+            "attempt_record": {
+                "schema_version": 2,
+                "attempt_number": 2,
+                "attempt_tag": "qualification_stage1_correction_001",
+                "status": "verified",
+                "agent_session_id": session_id,
+                "resumed_from_session_id": session_id,
+                "workspace_dir": str(workspace),
+                "workspace_manifest_sha256": manifest_sha,
+                "artifacts": {},
+            },
         }
 
     monkeypatch.setattr(problem_mining, "_run_problem_mining_attempt", retract_attempt)
@@ -5092,16 +6206,24 @@ def test_primary_miner_correction_requires_retained_independent_rereview(
                     "assigned_atom_ids": ["atom:one"],
                     "attempt_history": [
                         {
+                            "schema_version": 2,
+                            "attempt_number": 1,
+                            "attempt_tag": "problem_mining_001",
                             "status": "verified",
                             "agent_session_id": primary_session,
+                            "resumed_from_session_id": None,
                             "workspace_dir": str(primary_workspace),
                             "workspace_manifest_sha256": manifest_sha,
                         }
                     ],
                     "coverage_depth_review_attempt_history": [
                         {
+                            "schema_version": 2,
+                            "attempt_number": 1,
+                            "attempt_tag": "problem_mining_001_coverage_depth_review",
                             "status": "verified",
                             "agent_session_id": review_session,
+                            "resumed_from_session_id": None,
                             "workspace_dir": str(review_workspace),
                             "workspace_manifest_sha256": manifest_sha,
                         }
@@ -5137,9 +6259,14 @@ def test_primary_miner_correction_requires_retained_independent_rereview(
                 "normalized_events_path": str(primary_events),
             },
             "attempt_record": {
+                "schema_version": 2,
+                "attempt_number": 2,
+                "attempt_tag": "qualification_stage1_correction_001",
                 "status": "verified",
                 "agent_session_id": primary_session,
+                "resumed_from_session_id": primary_session,
                 "workspace_dir": str(primary_workspace),
+                "workspace_manifest_sha256": manifest_sha,
                 "artifacts": {},
             },
         }
@@ -5162,9 +6289,16 @@ def test_primary_miner_correction_requires_retained_independent_rereview(
             },
             "attempt_history": [
                 {
+                    "schema_version": 2,
+                    "attempt_number": 2,
+                    "attempt_tag": (
+                        "problem_mining_001_coverage_depth_review_correction_001"
+                    ),
                     "status": "verified",
                     "agent_session_id": review_session,
+                    "resumed_from_session_id": review_session,
                     "workspace_dir": str(review_workspace),
+                    "workspace_manifest_sha256": manifest_sha,
                     "attempt_elapsed_seconds": 2.0,
                 }
             ],

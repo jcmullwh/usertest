@@ -619,6 +619,12 @@ def test_incomplete_stage3_correction_uses_each_current_same_author_frontier(
         ],
     )
     seen_revisions: list[int] = []
+    objective_best_frontier = {
+        "kind": "research_objective_best_frontier_v1",
+        "source_attempt_sha256": "a" * 64,
+        "frontier_sha256": "b" * 64,
+    }
+    seen_objective_best_frontiers: list[dict[str, Any] | None] = []
 
     monkeypatch.setattr(
         runtime,
@@ -636,6 +642,10 @@ def test_incomplete_stage3_correction_uses_each_current_same_author_frontier(
     def continue_research(**kwargs: Any) -> dict[str, Any]:
         revision = int(kwargs["dossier"]["revision"])
         seen_revisions.append(revision)
+        supplied_frontier = kwargs.get("objective_best_frontier")
+        seen_objective_best_frontiers.append(
+            dict(supplied_frontier) if isinstance(supplied_frontier, dict) else None
+        )
         next_dossier = {
             **kwargs["dossier"],
             "revision": revision + 1,
@@ -647,6 +657,7 @@ def test_incomplete_stage3_correction_uses_each_current_same_author_frontier(
             "validation_errors": [] if revision == 1 else ["schema:still_invalid"],
             "agent_session_id": route["agent_session_id"],
             "workspace_dir": route["workspace_dir"],
+            "objective_best_frontier": objective_best_frontier,
         }
 
     monkeypatch.setattr(
@@ -726,10 +737,64 @@ def test_incomplete_stage3_correction_uses_each_current_same_author_frontier(
     )
 
     assert seen_revisions == [0, 1]
+    assert seen_objective_best_frontiers == [None, objective_best_frontier]
     assert result.consumption["accepted_repair_count"] == 1
     retained = result.stage_documents["repro_research"]["items"][0]
     assert retained["revision"] == 2
     assert retained["retained_attempts"] == [0, 1, 2]
+    replacement_meta = result.stage_documents["repro_research"]["input_meta"][
+        "qualification_repair_history"
+    ][0]["replacement_author_input_meta"]
+    assert replacement_meta["qualification_research_correction"][
+        "objective_best_frontier"
+    ] == objective_best_frontier
+
+
+def test_stage3_objective_best_frontier_reloads_from_repair_history() -> None:
+    older = {
+        "kind": "research_objective_best_frontier_v1",
+        "source_attempt_sha256": "a" * 64,
+        "frontier_sha256": "b" * 64,
+    }
+    current = {
+        "kind": "research_objective_best_frontier_v1",
+        "source_attempt_sha256": "c" * 64,
+        "frontier_sha256": "d" * 64,
+    }
+    document = _doc("repro_research", [])
+    document["input_meta"]["qualification_repair_history"] = [
+        {
+            "affected_problem_ids": ["problem:one"],
+            "replacement_author_input_meta": {
+                "qualification_research_correction": {
+                    "objective_best_frontier": older,
+                }
+            },
+        },
+        {
+            "affected_problem_ids": ["problem:other"],
+            "replacement_author_input_meta": {
+                "qualification_research_correction": {
+                    "objective_best_frontier": {
+                        "kind": "unrelated",
+                    },
+                }
+            },
+        },
+        {
+            "affected_problem_ids": ["problem:one"],
+            "replacement_author_input_meta": {
+                "qualification_research_correction": {
+                    "objective_best_frontier": current,
+                }
+            },
+        },
+    ]
+
+    assert runtime._qualification_research_objective_best_frontier(
+        document,
+        problem_id="problem:one",
+    ) == current
 
 
 def test_runtime_stage1_miss_resumes_reviewer_then_runs_stage2_through_stage6(

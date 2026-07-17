@@ -217,20 +217,20 @@ evidence uses the machine-checkable shapes below, not prose substitutes.
   observes it; an inconclusive challenge has `inconclusive`.
 - A proof adapter contains registered `adapter_id`, existing distinct baseline/challenge IDs,
   `hypothesis_id`, `intervention={kind,target,predicted_polarity,before?,after?}`, and
-  `positive_outcome={predicate,semantic_basis}`. This historically named field is the
-  source-bound causal predicate and does not require a future solution contract. Controlled replay
-  adapters require
-  `observations={baseline:{source,...},challenge:{source,...}}`; use the exact selector source names
-  listed above (JSON also uses `json_pointer`). State adapters use their adapter-specific state
-  input. Put connected inspected production paths under `implementation_touchpoints`; keep the
-  intervention locator separate.
-  To link that pair to a hypothesis, one hypothesis `mechanism_symbols` value must exactly equal its
-  touchpoint `causal_locator` or a touchpoint `symbols` entry. Use `symbols`, not `inspected_symbols`.
-  Touchpoints belong under `proof_adapter`, never in invented hypothesis-level link fields.
-  Semantic basis shapes are `origin_exact_value={atom_id,field_path}`,
-  `repository_fail_first_command={baseline_experiment_id,challenge_experiment_id}`,
-  `authenticated_semantic_citation={atom_id,field_path,semantic_rationale,semantic_relation}`, or
-  `repository_contract_quote={path,exact_quote,contract_type,...contract locator}`.
+  `positive_outcome={predicate,semantic_basis}` does not require a future solution contract.
+  Controlled replay uses `observations={baseline:{source,...},
+  challenge:{source,...}}` with the selector sources above; state adapters use their own state
+  input. Put inspected production paths under `implementation_touchpoints`, not the intervention.
+  To link the pair, a hypothesis `mechanism_symbols` value must equal touchpoint `causal_locator` or
+  `symbols`; use `symbols`, not `inspected_symbols`. Keep touchpoints under `proof_adapter`, never in invented hypothesis-level fields.
+  A semantic basis is a flat object with top-level `kind`, never `{kind_name:{...}}`: use
+  `{kind:"origin_exact_value",atom_id,field_path}`, `{kind:"repository_fail_first_command",
+  baseline_experiment_id,challenge_experiment_id}`, `{kind:"authenticated_semantic_citation",
+  atom_id,field_path,semantic_rationale,semantic_relation}`, or `{kind:"repository_contract_quote",
+  path,exact_quote,contract_type,...locator}`. Respectively these require a predicate-matching source
+  value; the same authorized command changing nonzero to zero with predicate zero; a cited source
+  field plus justified interpretation; or an inspected API/doc/schema contract. Preserve a challenge
+  selector and predicate that already match retained output.
 - A positive predicate is an object with a top-level discriminator: `{"kind":"equals",
   "expected":...}`, `{"kind":"membership","members":[...]}`, `{"kind":"range",
   "minimum"?:...,"maximum"?:...}`, `{"kind":"schema","schema":{...}}`,

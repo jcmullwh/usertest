@@ -79,7 +79,13 @@ def _dossier() -> dict:
     }
 
 
-def _stage_doc(path: Path, stage: str, items: list[dict]) -> dict:
+def _stage_doc(
+    path: Path,
+    stage: str,
+    items: list[dict],
+    *,
+    input_meta: dict | None = None,
+) -> dict:
     artifact_name = {
         "repro_research": "research_json",
         "solution_optioning": "solution_options_json",
@@ -89,13 +95,20 @@ def _stage_doc(path: Path, stage: str, items: list[dict]) -> dict:
     return build_stage_document(
         stage,
         items,
-        input_meta={},
+        input_meta=input_meta or {},
         artifacts={artifact_name: str(path.resolve())},
     )
 
 
-def _persist_stage(registry: dict, path: Path, stage: str, items: list[dict]) -> dict:
-    document = _stage_doc(path, stage, items)
+def _persist_stage(
+    registry: dict,
+    path: Path,
+    stage: str,
+    items: list[dict],
+    *,
+    input_meta: dict | None = None,
+) -> dict:
+    document = _stage_doc(path, stage, items, input_meta=input_meta)
     registry = update_case_registry_stage_lineage(registry, stage_doc=document)
     path.write_text(
         json.dumps(document, ensure_ascii=False, indent=2) + "\n",
@@ -195,6 +208,153 @@ def _retained_chain_record(
         lambda _plan, *, problem, research, selection: (True, []),
     )
     return record, paths, registry
+
+
+def _retained_no_change_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    disposition: str = "already_addressed",
+) -> tuple[dict, dict[str, Path], dict]:
+    problem = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "title": "One causal problem",
+        "evidence_atom_ids": ["atom:one"],
+        "source_evidence_atom_ids": ["atom:one"],
+    }
+    dossier = _dossier()
+    dossier["actionability_assessment"] = {
+        "disposition": disposition,
+        "rationale": "The exact pinned revision already contains the verified behavior.",
+        "evidence_refs": ["experiment:one"],
+    }
+    paths = {
+        "research": tmp_path / "research.json",
+        "options": tmp_path / "options.json",
+    }
+    outcome = {
+        "problem_id": "problem:one",
+        "optioning_status": "not_required",
+        "research_actionability_disposition": disposition,
+        "decision_rationale": "The authenticated Stage 3 proof requires no product change.",
+        "evidence_refs": ["experiment:one"],
+        "research_readiness_blockers": [],
+        "option_count": 0,
+        "rejected_option_count": 0,
+    }
+    registry = build_case_registry([problem], supporting_atoms=[_atom()])
+    registry = _persist_stage(
+        registry,
+        paths["research"],
+        "repro_research",
+        [dossier],
+    )
+    registry = _persist_stage(
+        registry,
+        paths["options"],
+        "solution_optioning",
+        [],
+        input_meta={"optioning_outcomes": [outcome]},
+    )
+    record = problem_case_records_from_registry(registry)[0]
+    monkeypatch.setattr(
+        research_hydration,
+        "assess_research_readiness",
+        lambda _item: (True, []),
+    )
+    monkeypatch.setattr(
+        research_hydration,
+        "verify_persisted_research_evidence",
+        lambda _item: (True, []),
+    )
+    return record, paths, registry
+
+
+@pytest.mark.parametrize("disposition", ["already_addressed", "non_actionable"])
+def test_exact_no_change_disposition_hydrates_and_routes_to_nonterminal_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    disposition: str,
+) -> None:
+    record, _paths, registry = _retained_no_change_record(
+        tmp_path,
+        monkeypatch,
+        disposition=disposition,
+    )
+
+    retained, errors = downstream_hydration.hydrate_retained_no_change_disposition(record)
+    route = prioritization._runner_research_route(record)
+
+    assert errors == []
+    assert retained is not None
+    assert retained["research_actionability_disposition"] == disposition
+    assert retained["live_verification_status"] == "unverified"
+    assert route["research_route"] == "await_evidence"
+    assert route["selected_for_research"] is False
+    assert route["eligible_for_downstream"] is False
+    assert route["reconsider_when"]
+    assert registry["cases"]["case:one"]["state"] == "active"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        ("duplicate_outcome", "retained_no_change_outcome_ambiguous"),
+        ("case_option", "retained_no_change_artifact_has_case_options"),
+        ("changed_evidence_refs", "retained_no_change_outcome_digest_mismatch"),
+    ],
+)
+def test_untrusted_zero_option_disposition_rebuilds_instead_of_parking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    record, paths, _registry = _retained_no_change_record(tmp_path, monkeypatch)
+    document = json.loads(paths["options"].read_text(encoding="utf-8"))
+    if mutation == "duplicate_outcome":
+        document["input_meta"]["optioning_outcomes"].append(
+            dict(document["input_meta"]["optioning_outcomes"][0])
+        )
+    elif mutation == "case_option":
+        document["items"].append(
+            {
+                "case_id": "case:one",
+                "problem_id": "problem:one",
+                "option_id": "option:unexpected",
+            }
+        )
+    else:
+        document["input_meta"]["optioning_outcomes"][0]["evidence_refs"] = ["experiment:other"]
+    paths["options"].write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    retained, errors = downstream_hydration.hydrate_retained_no_change_disposition(record)
+    route = prioritization._runner_research_route(record)
+
+    assert retained is None
+    assert errors == [expected_error]
+    assert route["research_route"] == "continue_downstream"
+    assert route["selected_for_research"] is False
+    assert route["eligible_for_downstream"] is True
+
+
+def test_stale_no_change_input_chain_rebuilds_instead_of_parking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record, _paths, _registry = _retained_no_change_record(tmp_path, monkeypatch)
+    record["prior_stage_context"]["optioning"]["input_chain_sha256"] = "0" * 64
+
+    retained, errors = downstream_hydration.hydrate_retained_no_change_disposition(record)
+    route = prioritization._runner_research_route(record)
+
+    assert retained is None
+    assert errors == ["retained_no_change_input_chain_mismatch"]
+    assert route["research_route"] == "continue_downstream"
 
 
 def test_exact_current_chain_hydrates_and_routes_to_await_outcome(

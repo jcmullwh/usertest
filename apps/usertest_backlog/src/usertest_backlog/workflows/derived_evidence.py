@@ -539,6 +539,37 @@ def _derived_role(record: Mapping[str, Any]) -> tuple[str, str]:
     return "implementation", "implementation"
 
 
+def _is_trusted_runner_operational_observation(atom: Mapping[str, Any]) -> bool:
+    """Return whether an atom has runner-owned, mission-independent lineage.
+
+    Implementation history contains both agent-authored work products and runner-owned
+    operational sidecars.  Only the latter are independent observations: assigning the
+    enclosing implementation or verification mission to them would hide real runner
+    evidence from problem mining.  The explicit authority is minted by the extractor;
+    report prose cannot opt itself into this exception.
+    """
+
+    authorities_raw = atom.get("lineage_authorities")
+    authorities = (
+        {
+            authority
+            for value in authorities_raw
+            for authority in [_clean_string(value)]
+            if authority is not None
+        }
+        if isinstance(authorities_raw, list)
+        else set()
+    )
+    origin_stage = _clean_string(atom.get("origin_stage"))
+    return (
+        _clean_string(atom.get("evidence_role")) == "observation"
+        and _clean_string(atom.get("evidence_class")) == "observed"
+        and origin_stage is not None
+        and origin_stage.startswith("runner_")
+        and "runner_operational_sidecar" in authorities
+    )
+
+
 def _bind_derived_atoms(
     atoms: Sequence[Mapping[str, Any]],
     *,
@@ -568,6 +599,26 @@ def _bind_derived_atoms(
             else []
         )
         parent_case_id = case_ids[0] if status in {"verified", "reconstructed"} else None
+        source_provenance = {
+            "derived_source_root": record.get("derived_source_root"),
+            "derived_source_root_kind": record.get("derived_source_root_kind"),
+            "derived_source_run_rel": record.get("derived_source_run_rel"),
+            "derived_source_record_identity": record.get("derived_source_record_identity"),
+            "derived_source_target_ref_sha256": record.get("derived_source_target_ref_sha256"),
+            "derived_source_ticket_ref_sha256": record.get("derived_source_ticket_ref_sha256"),
+            "derived_source_orphan_recovery_receipt_sha256": record.get(
+                "derived_source_orphan_recovery_receipt_sha256"
+            ),
+        }
+        if _is_trusted_runner_operational_observation(atom):
+            atom.update(
+                {
+                    "origin_run_id": run_rel,
+                    **source_provenance,
+                }
+            )
+            bound.append(atom)
+            continue
         atom.update(
             {
                 "origin_run_id": run_rel,
@@ -586,15 +637,7 @@ def _bind_derived_atoms(
                 "derived_parent_case_ids_considered": case_ids,
                 "derived_parent_plan_revision_id": binding.get("plan_revision_id"),
                 "derived_parent_binding_errors": list(binding.get("errors") or []),
-                "derived_source_root": record.get("derived_source_root"),
-                "derived_source_root_kind": record.get("derived_source_root_kind"),
-                "derived_source_run_rel": record.get("derived_source_run_rel"),
-                "derived_source_record_identity": record.get("derived_source_record_identity"),
-                "derived_source_target_ref_sha256": record.get("derived_source_target_ref_sha256"),
-                "derived_source_ticket_ref_sha256": record.get("derived_source_ticket_ref_sha256"),
-                "derived_source_orphan_recovery_receipt_sha256": record.get(
-                    "derived_source_orphan_recovery_receipt_sha256"
-                ),
+                **source_provenance,
             }
         )
         if parent_case_id is None:
@@ -610,6 +653,9 @@ def _bind_derived_atoms(
     )
     finalized: list[dict[str, Any]] = []
     for atom in normalized:
+        if _is_trusted_runner_operational_observation(atom):
+            finalized.append(atom)
+            continue
         status = _clean_string(atom.get("derived_parent_binding_status")) or "unavailable"
         if atom.get("disposition") == "unresolved":
             atom = apply_atom_disposition_decision(
@@ -639,6 +685,16 @@ def annotate_primary_derived_evidence(
     """Finalize parent binding for research evidence already read from the primary root."""
 
     resolved_source_root = source_root.expanduser().resolve()
+    cases_raw = case_registry.get("cases")
+    canonical_case_ids = (
+        {
+            str(case_id)
+            for case_id, entry in cases_raw.items()
+            if isinstance(case_id, str) and isinstance(entry, Mapping)
+        }
+        if isinstance(cases_raw, Mapping)
+        else set()
+    )
     records_by_run = {
         run_rel: dict(record)
         for record in records
@@ -682,6 +738,8 @@ def annotate_primary_derived_evidence(
         has_lineage_errors = any(atom.get("lineage_validation_errors") for atom in run_atoms)
         if len(case_ids) > 1 or has_lineage_errors:
             status = "conflict"
+        elif len(case_ids) == 1 and case_ids[0] not in canonical_case_ids:
+            status = "parent_missing"
         elif len(case_ids) == 1:
             status = (
                 "verified"
@@ -742,7 +800,10 @@ def annotate_primary_derived_evidence(
                 "derived_parent_case_ids_considered": list(binding.get("case_ids") or []),
             }
         )
-        if _clean_string(atom.get("parent_case_id")) is None:
+        if (
+            status not in {"verified", "reconstructed"}
+            or _clean_string(atom.get("parent_case_id")) is None
+        ):
             atom["lineage_mining_blocker"] = f"derived_parent_binding_{status}"
             atom["case_id"] = None
             atom["supporting_case_ids"] = []
@@ -762,9 +823,35 @@ def annotate_primary_derived_evidence(
         case_registry=case_registry,
         strict_new_output=True,
     )
+    finalized: list[dict[str, Any]] = []
+    for raw_atom in normalized:
+        atom = dict(raw_atom)
+        role = _clean_string(atom.get("evidence_role"))
+        status = _clean_string(atom.get("derived_parent_binding_status")) or "unavailable"
+        if (
+            role in {"research", "implementation", "verification"}
+            and status not in {"verified", "reconstructed"}
+        ):
+            # Normalization preserves runner-authored parent lineage for traceability,
+            # but that lineage is not canonical membership when its parent is absent or
+            # conflicting. Reassert the non-originating decision after normalization so
+            # a missing parent cannot be reintroduced as ``case_id`` by field fallback.
+            atom["lineage_mining_blocker"] = f"derived_parent_binding_{status}"
+            atom["case_id"] = None
+            atom["supporting_case_ids"] = []
+            atom = apply_atom_disposition_decision(
+                atom,
+                disposition="unresolved",
+                source="runner_target_ref",
+                rationale=(
+                    "Primary-run derived evidence has no authoritative canonical parent "
+                    f"binding ({status}); it is retained but cannot originate from prose."
+                ),
+            )
+        finalized.append(atom)
     source_counts = Counter(
         str(atom.get("source") or "unknown")
-        for atom in normalized
+        for atom in finalized
         if _clean_string(atom.get("evidence_role"))
         in {"research", "implementation", "verification"}
     )
@@ -772,7 +859,7 @@ def annotate_primary_derived_evidence(
         str(binding.get("status") or "unavailable") for binding in bindings_by_run.values()
     )
     return PrimaryDerivedEvidence(
-        atoms=normalized,
+        atoms=finalized,
         parent_bindings_by_run=bindings_by_run,
         metadata={
             "source_root": str(resolved_source_root),
@@ -830,7 +917,12 @@ def ingest_derived_evidence_records(
         str(binding.get("status") or "unavailable") for binding in bindings_by_run.values()
     )
     binding_atom_counts = Counter(
-        str(atom.get("derived_parent_binding_status") or "unavailable") for atom in atoms
+        (
+            "not_applicable_runner_observation"
+            if _is_trusted_runner_operational_observation(atom)
+            else str(atom.get("derived_parent_binding_status") or "unavailable")
+        )
+        for atom in atoms
     )
     binding_receipts = [
         {

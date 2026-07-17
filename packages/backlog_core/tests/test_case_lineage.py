@@ -1451,6 +1451,78 @@ def _stage_doc(
     }
 
 
+def test_zero_option_stage_persists_exact_auxiliary_outcome_identity() -> None:
+    registry = build_case_registry(
+        [
+            {
+                "problem_id": "problem:one",
+                "case_id": "case:one",
+                "evidence_atom_ids": ["atom:one"],
+                "source_evidence_atom_ids": ["atom:one"],
+            }
+        ]
+    )
+    research = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_schema_version": 3,
+        "repo_revision": "a" * 40,
+        "research_method": "static_diagnosis",
+        "reproduction_status": "not_reproduced",
+        "research_status": "evidence_sufficient",
+        "root_cause_confidence": 0.9,
+        "material_unknowns": [],
+        "blocking_reasons": [],
+        "actionability_assessment": {
+            "disposition": "already_addressed",
+            "rationale": "The exact pinned revision already contains the verified behavior.",
+            "evidence_refs": ["experiment:one"],
+        },
+    }
+    registry = update_case_registry_stage_lineage(
+        registry,
+        stage_doc=_stage_doc("repro_research", [research], suffix="1"),
+    )
+    outcome = {
+        "problem_id": "problem:one",
+        "optioning_status": "not_required",
+        "research_actionability_disposition": "already_addressed",
+        "decision_rationale": "The authenticated proof requires no product change.",
+        "evidence_refs": ["experiment:one"],
+        "research_readiness_blockers": [],
+        "option_count": 0,
+        "rejected_option_count": 0,
+    }
+    optioning = _stage_doc(
+        "solution_optioning",
+        [],
+        suffix="2",
+        input_meta={"optioning_outcomes": [outcome]},
+    )
+    optioning["artifacts"] = {"solution_options_json": "compiled/case.solution_options.2.json"}
+
+    registry = update_case_registry_stage_lineage(registry, stage_doc=optioning)
+
+    summary = registry["cases"]["case:one"]["current_option_set"]
+    expected_outcome_sha256 = sha256(
+        json.dumps(
+            outcome,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert summary["case_id"] == "case:one"
+    assert summary["problem_id"] == "problem:one"
+    assert summary["optioning_status"] == "not_required"
+    assert summary["option_ids"] == []
+    assert summary["family_ids"] == []
+    assert summary["optioning_outcome_count"] == 1
+    assert summary["optioning_outcome_sha256"] == expected_outcome_sha256
+    assert summary["research_actionability_disposition"] == "already_addressed"
+    assert summary["actionability_evidence_refs"] == ["experiment:one"]
+
+
 def test_stage_lineage_is_cumulative_and_carried_cases_reuse_proof_context() -> None:
     registry = build_case_registry(
         [

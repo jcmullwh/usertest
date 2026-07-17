@@ -43,6 +43,27 @@ them as problem evidence. Only assigned atoms may receive decisions or citations
 - Missing or ambiguous terminal context is uncertainty, not proof of either success or failure.
   Use `unresolved` or `deferred` with a concrete reconsideration trigger.
 
+## Compare repeated structured observations
+
+When two or more assigned atoms describe the same observed surface at different timestamps,
+read them as a series before choosing the problem statement. Order the observations by their
+evidence timestamp and compare like-named structured fields. The evidence summary should state
+both the material changes and the relevant invariants; for example, a growing count alongside
+an unchanged zero-success count can be more informative than either observation in isolation.
+Do not infer a causal mechanism or violated policy that the series does not establish.
+
+A measurement caveat is a boundary on the claim, not automatically the problem. Fields that
+say a value is unknown, proxy-based, unavailable, or incomplete limit what can be concluded.
+Promote the missing measurement itself only when evidence shows that the absence obstructed the
+requested task or user. Otherwise prefer the strongest observed behavior and preserve the
+measurement limitation as uncertainty around its extent or impact.
+
+Do not manufacture user impact to make a concrete observation look actionable. If the behavior
+is directly observed but its user or runtime effect is only plausible, say explicitly in
+`user_impact` that the impact is unverified and name the evidence that would establish it. This
+honest uncertainty does not by itself require suppressing the observation; use `unresolved` only
+when the missing evidence is material to deciding whether a problem exists at all.
+
 ## What to avoid
 
 - Do not propose solutions, fixes, or implementation ideas. Stage 1 only identifies that

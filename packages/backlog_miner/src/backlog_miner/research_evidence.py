@@ -4206,7 +4206,7 @@ def _harness_mechanism_touches(
     if not _within(path, workspace) or not path.is_file() or path.is_symlink():
         return relative, [], None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return relative, [], None
@@ -4656,7 +4656,7 @@ def _verified_declared_mechanism_link(
         ):
             return None
         try:
-            content = caller_path.read_text(encoding="utf-8", errors="strict")
+            content = caller_path.read_text(encoding="utf-8-sig", errors="strict")
             tree = ast.parse(content)
         except (OSError, UnicodeDecodeError, SyntaxError):
             return None
@@ -5292,7 +5292,7 @@ def _pytest_test_selection_receipt(
         )
         return None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
     except (OSError, UnicodeDecodeError):
         errors.append(
             f"causal_control_test_file_unreadable:{hypothesis_id}:{experiment_id}:{test_path}"
@@ -6228,7 +6228,7 @@ def _retained_harness_scalar_argv_difference(
             if baseline_seal is None or baseline_seal != challenge_seal:
                 return None
     try:
-        content = baseline_harness_path.read_text(encoding="utf-8", errors="strict")
+        content = baseline_harness_path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
@@ -7569,7 +7569,7 @@ def _research_harness_dependency_edges(
         if not _within(path, workspace) or not path.is_file() or path.is_symlink():
             continue
         try:
-            content = path.read_text(encoding="utf-8", errors="strict")
+            content = path.read_text(encoding="utf-8-sig", errors="strict")
             tree = ast.parse(content)
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
@@ -10003,7 +10003,7 @@ def _restricted_outcome_assertion_dataflow(
     if not _within(path, workspace) or not path.is_file() or path.is_symlink():
         return None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
@@ -10731,7 +10731,7 @@ def _retained_harness_positive_contract(
     if not _within(path, workspace) or not path.is_file() or path.is_symlink():
         return None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
@@ -14223,6 +14223,16 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
     for attempt_index, attempt in enumerate(attempts):
         if not isinstance(attempt, dict):
             continue
+        rescore_raw = attempt.get("validation_error_rescore")
+        if rescore_raw is not None:
+            rescore = rescore_raw if isinstance(rescore_raw, Mapping) else {}
+            receipt_path_raw = _text(rescore.get("rescore_receipt_path"))
+            receipt_path = Path(receipt_path_raw) if receipt_path_raw is not None else None
+            receipt_sha256 = _text(rescore.get("rescore_receipt_sha256"))
+            if receipt_path is None or not receipt_path.is_file():
+                errors.append(f"research_attempt_rescore_receipt_missing:{attempt_index}")
+            elif receipt_sha256 is None or _sha256_path(receipt_path) != receipt_sha256:
+                errors.append(f"research_attempt_rescore_receipt_changed:{attempt_index}")
         if attempt.get("outcome") == "invocation_failed":
             continue
         run_dir_raw = _text(attempt.get("run_dir"))
