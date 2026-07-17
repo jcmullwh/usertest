@@ -13572,25 +13572,23 @@ def _proof_adapter_receipts(
                     key: value for key, value in binding.items() if key != "declared_binding_sha256"
                 }
                 predicate_contract = binding.get("observation_predicate")
-                baseline_value = (
-                    baseline_observation.get("observed")
-                    if isinstance(baseline_observation, Mapping)
-                    else None
-                )
+                source_value = binding.get("origin_atom_value")
                 predicate_passed, predicate_errors = evaluate_proof_predicate(
                     predicate_contract,
-                    baseline_value,
+                    source_value,
                 )
                 if (
                     binding.get("experiment_id") != baseline_id
                     or binding.get("declared_binding_sha256")
                     != _canonical_json_sha256(declared_projection)
+                    or binding.get("observation_predicate_sha256")
+                    != _canonical_json_sha256(predicate_contract)
                     or not isinstance(baseline_observation, Mapping)
                     or predicate_errors
                     or not predicate_passed
                 ):
                     unit_errors.append(
-                        "proof_adapter_atom_predicate_not_bound_to_baseline:"
+                        "proof_adapter_atom_predicate_binding_invalid:"
                         f"{binding.get('atom_id')}"
                     )
                     continue
@@ -13609,6 +13607,9 @@ def _proof_adapter_receipts(
                             "baseline_experiment_id": baseline_id,
                             "baseline_observation_sha256": baseline_observation.get(
                                 "observation_sha256"
+                            ),
+                            "binding_verification_method": (
+                                "runner_bound_source_predicate_with_baseline_experiment_v1"
                             ),
                             "adapter_id": provisional_proof.get("adapter_id"),
                             "adapter_version": provisional_proof.get("adapter_version"),

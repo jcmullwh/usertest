@@ -8228,11 +8228,14 @@ def test_explicit_symptom_predicate_binds_runner_owned_large_atom_value() -> Non
     )
 
 
-def test_structured_atom_predicate_is_attested_against_adapter_baseline(
+def test_structured_atom_predicate_supports_source_to_mechanism_output_transform(
     tmp_path: Path,
 ) -> None:
-    atom_id = "atom:attempt-count"
-    snapshot = {"observed_attempts": 5, "expected_attempts": 1}
+    atom_id = "atom:stderr"
+    snapshot = {
+        "excerpt_tail": "worker panic at windows-sandbox-rs",
+        "expected_reason": "shell_probe_failed",
+    }
     atom_sha256 = mod._canonical_json_sha256(snapshot)
     assignment = {
         "atom_receipts": [
@@ -8246,10 +8249,11 @@ def test_structured_atom_predicate_is_attested_against_adapter_baseline(
     declaration = {
         "role": "symptom",
         "atom_id": atom_id,
-        "field_path": "$.observed_attempts",
-        "value": 5,
-        "value_sha256": mod._canonical_json_sha256(5),
-        "observation_predicate": {"kind": "equals", "expected": 5},
+        "field_path": "$.excerpt_tail",
+        "observation_predicate": {
+            "kind": "contains",
+            "expected": "windows-sandbox-rs",
+        },
     }
     errors: list[str] = []
     bindings, direct = mod._explicit_atom_binding_receipts(
@@ -8264,10 +8268,10 @@ def test_structured_atom_predicate_is_attested_against_adapter_baseline(
     assert errors == []
     assert direct is True
 
-    def replay(experiment_id: str, attempts: int) -> dict[str, object]:
+    def replay(experiment_id: str, reason_code: str) -> dict[str, object]:
         stdout = tmp_path / f"{experiment_id.replace(':', '-')}.json"
         stderr = tmp_path / f"{experiment_id.replace(':', '-')}.stderr"
-        stdout.write_text(json.dumps({"attempts": attempts}), encoding="utf-8")
+        stdout.write_text(json.dumps({"reason_code": reason_code}), encoding="utf-8")
         stderr.write_text("", encoding="utf-8")
         return {
             "experiment_id": experiment_id,
@@ -8287,26 +8291,26 @@ def test_structured_atom_predicate_is_attested_against_adapter_baseline(
 
     claim = {
         "adapter_id": "structured_replay.v1",
-        "hypothesis_id": "hypothesis:attempts",
+        "hypothesis_id": "hypothesis:sandbox-classifier",
         "baseline_experiment_id": "experiment:baseline",
         "challenge_experiment_id": "experiment:challenge",
         "intervention": {
-            "kind": "attempt_policy",
-            "target": "policy:attempts",
-            "predicted_polarity": "excess_to_expected",
-            "before": 5,
-            "after": 1,
+            "kind": "signature_mode",
+            "target": "runner_core.shell_capability._resolve_shell_capability",
+            "predicted_polarity": "panic_to_generic_failure",
+            "before": "retained",
+            "after": "removed",
         },
         "observations": {
-            "baseline": {"source": "stdout_json", "json_pointer": "/attempts"},
-            "challenge": {"source": "stdout_json", "json_pointer": "/attempts"},
+            "baseline": {"source": "stdout_json", "json_pointer": "/reason_code"},
+            "challenge": {"source": "stdout_json", "json_pointer": "/reason_code"},
         },
         "positive_outcome": {
-            "predicate": {"kind": "equals", "expected": 1},
+            "predicate": {"kind": "equals", "expected": "shell_probe_failed"},
             "semantic_basis": {
                 "kind": "origin_exact_value",
                 "atom_id": atom_id,
-                "field_path": "$.expected_attempts",
+                "field_path": "$.expected_reason",
             },
         },
     }
@@ -8317,16 +8321,20 @@ def test_structured_atom_predicate_is_attested_against_adapter_baseline(
             "proof_adapter": claim,
         },
     }
-    dossier = {"root_cause_hypotheses": [{"hypothesis_id": "hypothesis:attempts"}]}
+    dossier = {
+        "root_cause_hypotheses": [{"hypothesis_id": "hypothesis:sandbox-classifier"}]
+    }
 
     proofs, diagnostics = mod._proof_adapter_receipts(
         dossier,
-        case_id="case:attempts",
-        problem_id="problem:attempts",
+        case_id="case:sandbox-classifier",
+        problem_id="problem:sandbox-classifier",
         experiments=experiments,
         clean_replays={
-            "experiment:baseline": replay("experiment:baseline", 5),
-            "experiment:challenge": replay("experiment:challenge", 1),
+            "experiment:baseline": replay(
+                "experiment:baseline", "codex_windows_sandbox_panic"
+            ),
+            "experiment:challenge": replay("experiment:challenge", "shell_probe_failed"),
         },
         evidence_assignment=assignment,
         atom_bindings=bindings,
@@ -8343,12 +8351,148 @@ def test_structured_atom_predicate_is_attested_against_adapter_baseline(
     assert attested[0]["atom_id"] == atom_id
     assert attested[0]["baseline_experiment_id"] == "experiment:baseline"
     assert attested[0]["runner_attested"] is True
+    assert attested[0]["binding_verification_method"] == (
+        "runner_bound_source_predicate_with_baseline_experiment_v1"
+    )
     assert proof["replay_observation"]["selector"] == {
         "source": "stdout_json",
-        "json_pointer": "/attempts",
+        "json_pointer": "/reason_code",
     }
     assert proof["replay_inputs"]["source_experiment_id"] == "experiment:baseline"
     assert mod.validate_causal_proof_receipt(proof) == []
+
+
+def test_structured_atom_predicate_rejects_binding_from_challenge_experiment(
+    tmp_path: Path,
+) -> None:
+    atom_id = "atom:stderr"
+    snapshot = {"excerpt_tail": "worker panic at windows-sandbox-rs"}
+    assignment = {
+        "atom_receipts": [
+            {
+                "atom_id": atom_id,
+                "atom_sha256": mod._canonical_json_sha256(snapshot),
+                "atom_snapshot": snapshot,
+            }
+        ]
+    }
+    errors: list[str] = []
+    bindings, direct = mod._explicit_atom_binding_receipts(
+        experiment={
+            "origin_evidence_bindings": [
+                {
+                    "role": "symptom",
+                    "atom_id": atom_id,
+                    "field_path": "$.excerpt_tail",
+                    "observation_predicate": {
+                        "kind": "contains",
+                        "expected": "windows-sandbox-rs",
+                    },
+                }
+            ]
+        },
+        experiment_id="experiment:challenge",
+        atom_id=atom_id,
+        atom_receipt=assignment["atom_receipts"][0],
+        assertion={},
+        command="runner verify",
+        errors=errors,
+    )
+    assert errors == []
+    assert direct is True
+
+    def replay(experiment_id: str, reason_code: str) -> dict[str, object]:
+        stdout = tmp_path / f"{experiment_id.replace(':', '-')}.json"
+        stderr = tmp_path / f"{experiment_id.replace(':', '-')}.stderr"
+        stdout.write_text(json.dumps({"reason_code": reason_code}), encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        return {
+            "experiment_id": experiment_id,
+            "executed_argv": ["runner", "verify"],
+            "exit_code": 0,
+            "execution_isolation": {"platform": "windows"},
+            "stdout_path": str(stdout),
+            "stderr_path": str(stderr),
+            "stdout_sha256": sha256(stdout.read_bytes()).hexdigest(),
+            "stderr_sha256": sha256(stderr.read_bytes()).hexdigest(),
+            "replay_inputs": mod._replay_inputs_receipt(
+                source_experiment_id=experiment_id,
+                environment_overrides={},
+                disposable_state_paths=[],
+            ),
+        }
+
+    claim = {
+        "adapter_id": "structured_replay.v1",
+        "hypothesis_id": "hypothesis:sandbox-classifier",
+        "baseline_experiment_id": "experiment:baseline",
+        "challenge_experiment_id": "experiment:challenge",
+        "intervention": {
+            "kind": "signature_mode",
+            "target": "runner_core.shell_capability._resolve_shell_capability",
+            "predicted_polarity": "panic_to_generic_failure",
+            "before": "retained",
+            "after": "removed",
+        },
+        "observations": {
+            "baseline": {"source": "stdout_json", "json_pointer": "/reason_code"},
+            "challenge": {"source": "stdout_json", "json_pointer": "/reason_code"},
+        },
+        "positive_outcome": {
+            "predicate": {"kind": "equals", "expected": "shell_probe_failed"},
+            "semantic_basis": {
+                "kind": "authenticated_semantic_citation",
+                "atom_id": atom_id,
+                "field_path": "$.excerpt_tail",
+                "semantic_relation": "causal_contrast",
+                "semantic_rationale": (
+                    "The retained source identifies the historical classifier input."
+                ),
+            },
+        },
+    }
+    experiments = {
+        "experiment:baseline": {"experiment_id": "experiment:baseline"},
+        "experiment:challenge": {
+            "experiment_id": "experiment:challenge",
+            "proof_adapter": claim,
+        },
+    }
+
+    proofs, diagnostics = mod._proof_adapter_receipts(
+        {
+            "root_cause_hypotheses": [
+                {"hypothesis_id": "hypothesis:sandbox-classifier"}
+            ]
+        },
+        case_id="case:sandbox-classifier",
+        problem_id="problem:sandbox-classifier",
+        experiments=experiments,
+        clean_replays={
+            "experiment:baseline": replay(
+                "experiment:baseline", "codex_windows_sandbox_panic"
+            ),
+            "experiment:challenge": replay("experiment:challenge", "shell_probe_failed"),
+        },
+        evidence_assignment=assignment,
+        atom_bindings=bindings,
+        planning_workspace=None,
+        symbol_receipts=[],
+        artifact_receipts=[],
+    )
+
+    assert proofs == []
+    assert diagnostics == [
+        {
+            "experiment_id": "experiment:challenge",
+            "adapter_id": "structured_replay.v1",
+            "claim_sha256": mod._canonical_json_sha256(claim),
+            "diagnostics": [
+                f"proof_adapter_atom_predicate_binding_invalid:{atom_id}",
+                "proof_adapter_source_root_unbound",
+            ],
+        }
+    ]
 
 
 def test_declared_mechanism_link_requires_runner_observed_python_call_chain(

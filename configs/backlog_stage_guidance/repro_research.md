@@ -39,7 +39,7 @@ An inconclusive command stopped by an external timeout/kill (exit 124/137) is a 
 If timeout is the assigned symptom, use a self-contained faithful replay whose `supports`/`refutes` outcome is the observed behavior, not the runner cutoff.
 
 `origin_evidence_bindings` may bind a structured symptom field with `observation_predicate` using any registered deterministic predicate. For `role="symptom"`, provide the exact `$.field` path and predicate; omit `value` when the runner should derive and hash a large immutable source value rather than copying it into model output. The runner evaluates the predicate against the immutable atom value,
-then the adapter baseline, and retains both in one content-addressed source-root receipt. Do not stringify numbers, booleans, JSON objects, state, or events merely to fit a text assertion.
+binds it to the adapter's baseline experiment, and retains both the source predicate and baseline observation in one content-addressed source-root receipt. The mechanism output may be a transformation of the source value; do not force the source predicate to describe the output. Do not stringify numbers, booleans, JSON objects, state, or events merely to fit a text assertion.
 
 For the primary hypothesis, attempt to falsify it. State the disproof condition before interpreting
 the result. A survived challenge must retain the baseline, intervention/challenge, observations,

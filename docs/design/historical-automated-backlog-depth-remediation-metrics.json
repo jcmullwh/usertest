@@ -4,20 +4,20 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-17T09:55:25.440684Z",
+    "as_of": "2026-07-17T10:43:51.799193Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
         "value": "Stage 3 causal verification active",
-        "detail": "The exact Windows case retains all 25 signed atoms and one signed-in Terra author. The author resolved the prior 41-finding dossier frontier and then corrected its single output-contract mismatch. The deeper evidence verifier now reports 36 raw strings that reduce to two substantive clusters: incomplete per-atom evidence binding, and an unauthenticated causal-harness/mechanism path.",
+        "detail": "The exact Windows case retains all 25 signed atoms and one signed-in Terra author. Attempt 11 attached all 23 context rows and restored an evidence-sufficient/already-addressed candidate. Eight dependent findings exposed one verifier defect for transformed source evidence and one authored positive-control predicate error. The verifier correction is fully tested; exact model-free replay is next.",
         "tone": "good"
       },
       {
         "label": "Current lifecycle outcome",
         "value": "Active; no work exported",
-        "detail": "Stage 1/2 remain accepted. The Windows historical failure is real and the researcher has produced a meaningful retained-atom classifier contrast, but the current evidence-sufficient/already-addressed conclusion is not accepted yet. The harness semantically uses 19 of 25 atoms while claiming all 25, and its mechanism intervention is not yet authenticated. Nothing has advanced to Stage 4, export, tickets, implementation, or Docker.",
+        "detail": "Stage 1/2 remain accepted. The Windows historical failure is real; the complete context assessment and all 25 bindings are now present. Readiness is still false because the proof adapter conflated source and output predicates, while the authored positive predicate names the baseline panic rather than the challenge's generic failure result. Nothing has advanced to Stage 4, export, tickets, implementation, or Docker.",
         "tone": "warn"
       },
       {
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Correct two Stage 3 evidence clusters",
-        "detail": "Return the atom-binding and causal-harness findings to the same author for one evidence-capable turn. Require honest per-atom roles and a directly authenticated production-mechanism contrast. Do not restart Stage 1/2, start another case, or force optioning if the verified disposition is already addressed.",
+        "value": "Replay transformed-source proof",
+        "detail": "Commit the fully tested general verifier correction, replay the exact retained attempt without a model call, then return only the remaining authored adapter diagnostic to the same researcher. Do not restart Stage 1/2 or rerun completed context work.",
         "tone": "warn"
       }
     ],
@@ -2652,29 +2652,29 @@
         "lifecycle_id": "pipeline-cycle:338a373f:20260717",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 31,
-          "continuation_launches": 8,
+          "author_invocations": 35,
+          "continuation_launches": 12,
           "stage_reruns": 2,
           "full_restarts": 0,
-          "summary": "Thirty-one author calls have started. The Windows Stage 3 case still uses one gpt-5.6-terra session: six old-controller calls followed by three evidence-capable corrections and one focused assertion correction. The latest two turns took 285.361 seconds and 208.780 seconds. Eight externally launched continuations and two stage-local reruns are counted. No full-cycle restart occurred."
+          "summary": "Thirty-five author calls have started. The Windows Stage 3 case still uses one gpt-5.6-terra author session. Attempt 11 took 419.871 seconds, attached all 23 context bindings, and advanced to eight dependent mechanism/falsification findings. Twelve externally launched continuations, two stage-local reruns, and zero full-cycle restarts are counted. No author call is active while the verifier correction is committed and replayed model-free."
         },
         "label": "Clean exact-revision backlog qualification cycle",
         "scope": "Reconciled non-IDEA evidence custody, output-blind currentness, canonical lifecycle materialization, accepted Stage 1/2, and one bounded canonical Windows Stage 3 reassessment; Stage 4+, exports, tickets, implementation, and Docker disabled",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-          "elapsed_seconds": 24305.440684,
+          "elapsed_seconds": 27211.799193,
           "coverage": "active",
-          "display": "6 h 45 m 5.44 s as of 09:55:25Z",
+          "display": "7 h 33 m 31.80 s as of 10:43:51Z",
           "note": "Wall time begins at creation of the retained qualification-cycle root. Supporting records preserve preparation, reconciliation, manifests, preflights, component executions, tests, and correction intervals separately."
         },
         "furthest_stage": "Single-case Stage 3 causal evidence verification after accepted Stage 1/2",
-        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and the same signed-in Terra session remains continuous. A 285.361-second turn replaced the prior shallow experiments with an assigned-atom production-classification harness and reduced 41 prior verifier findings to one output-contract mismatch. The helper then mistakenly selected the older objective-best object; AN-15 recovered the exact forward candidate without a model call. A 208.780-second same-author turn corrected the assertion polarity and reached the deeper evidence verifier. Its 36 raw strings collapse into two root clusters: 28 atom-binding/coverage findings because the baseline claims all 25 atoms while explicitly binding only two incorrectly and semantically processing only 19; and eight mechanism/falsification findings because the exact production symbol definition was not fully read and the direct-script intervention is not yet authenticated as a controlled mechanism path. The result remains non-ready. Stage 4+, export, ticketing, implementation, and Docker remain disabled.",
-        "outcome": "Active; Stage 3 advanced to two focused evidence-correction clusters",
+        "current_state": "The exact 2,854-atom input and 24-case graph remain accepted. The Windows assignment contains all 25 provisional-group atoms and the signed-in Terra researcher remains the sole author. Attempt 10 executed the complete assessment; attempt 11 took 419.871 seconds and attached every one of its 23 non-stderr rows, eliminating that entire projection cluster and restoring evidence_sufficient/partial/already_addressed with only a nonmaterial future-runtime boundary. The deeper verifier then returned eight strings. Root diagnostics show two causes, not eight independent failures. BDS-112 incorrectly required the source atom's contains-windows-sandbox-rs predicate to pass on the transformed classifier reason-code output. Separately, the author set the causal-contrast positive predicate to equals codex_windows_sandbox_panic even though that is the baseline and the challenge observed shell_probe_failed. The general BDS-112 correction now validates the predicate against the immutable source, binds it to the baseline experiment and distinct baseline observation hash, preserves legacy identity receipts, and rejects challenge-only bindings. All 363 affected tests completed in 185.6 seconds: 362 passed and one expected skip. The exact attempt remains non-ready pending committed model-free replay and one likely same-author predicate correction. Stage 4+, export, ticketing, implementation, and Docker remain disabled.",
+        "outcome": "Active; complete 25-atom candidate retained, verifier fix green, exact replay pending",
         "errors": {
-          "count": 21,
+          "count": 25,
           "count_kind": "deduplicated_clusters",
-          "summary": "Ten product defects are counted: BDS-100 through BDS-109. Eleven supervisor/observability errors are counted: AN-05 through AN-15. AN-15 is the throw-away helper selecting the objective-best dossier instead of the advancing forward frontier; the system adapter retained both correctly. The current 36 verifier strings are two model-quality/evidence clusters, not 36 new product defects.",
+          "summary": "Thirteen product defects are counted: BDS-100 through BDS-112. Twelve supervisor/observability errors are counted: AN-05 through AN-16. BDS-112 is the transformed-source predicate asymmetry exposed only after attempt 11 completed all assigned bindings. The current eight verifier strings are grouped into that verifier defect, one authored positive-predicate error, and their dependent causal/falsification cascade; they are not eight product defects.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2686,6 +2686,9 @@
             "BDS-107",
             "BDS-108",
             "BDS-109",
+            "BDS-110",
+            "BDS-111",
+            "BDS-112",
             "AN-05",
             "AN-06",
             "AN-07",
@@ -2696,18 +2699,19 @@
             "AN-12",
             "AN-13",
             "AN-14",
-            "AN-15"
+            "AN-15",
+            "AN-16"
           ]
         },
         "automatic_self_corrections": {
-          "count": 5,
+          "count": 9,
           "count_kind": "deduplicated_clusters",
-          "summary": "Five nondeterministic quality clusters improved automatically: the relation split, the later peer-evidence correction, the Windows three-to-zero output correction, the expanded-evidence reassessment, and the latest causal-evidence sequence. In that latest sequence the same author replaced the earlier unbound experiments, ran a production classifier contrast over the assigned evidence, reduced 41 prior findings to one output mismatch, then corrected that mismatch and reached the deeper verifier. The newly exposed 36 strings are reported separately as two unresolved clusters rather than erasing the demonstrated progress."
+          "summary": "Nine nondeterministic quality clusters improved automatically. The prior eight remain; attempt 11 attached all 23 exact context bindings and restored the complete evidence-sufficient/already-addressed claim set. The newly exposed deeper adapter findings remain unresolved, so this progress is retained without calling the overall dossier verified."
         },
         "supervisor_interventions": {
-          "count": 22,
+          "count": 29,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior nineteen interventions remain. Three were added: launching the four-cluster causal-evidence feedback, recovering and correcting the AN-15 forward-frontier helper mistake, and launching the single falsification-assertion correction. Auditing the new 36 strings into two clusters is not counted as another intervention until that feedback is launched.",
+          "summary": "Twenty-nine deduplicated interventions are counted. The prior 28 remain; one was added for implementing and fully testing BDS-112 after attempt 11 exposed the source-to-output transformation defect. The pending exact model-free replay is not counted until launched. Audits without an action are not counted as interventions.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2730,12 +2734,19 @@
             "AN-14",
             "stage3_causal_cluster_feedback_launch",
             "AN-15",
-            "stage3_falsification_assertion_feedback_launch"
+            "stage3_falsification_assertion_feedback_launch",
+            "stage3_deep_evidence_feedback_launch",
+            "BDS-111",
+            "AN-16",
+            "stage3_available_evidence_feedback_launch",
+            "stage3_complete_context_feedback_launch",
+            "stage3_context_binding_feedback_launch",
+            "BDS-112"
           ]
         },
-        "next_action": "Send the two audited atom-binding and mechanism-authentication clusters to the same Windows author for one evidence-capable turn. Reverify the exact result and accept only a causally bound conclusion or an honest downgrade; do not start Stage 4 unless the verified disposition actually requires change.",
+        "next_action": "Commit BDS-112, replay attempt 11 exactly with zero model calls, inspect the remaining root diagnostic, and return only the genuine authored correction to the same session. Materialize already_addressed without Stage 4 if the resulting proof verifies.",
         "tone": "warn",
-        "data_quality": "Earlier receipts remain retained. Causal-cluster correction SHA D2B37B64...: 285.361 seconds, same signed-in Terra session, 41 prior findings reduced to one output mismatch, source unchanged. AN-15 recovery matched the forward model projection to attempt 6 and made zero model calls. Falsification assertion correction SHA C742BFF3...: 208.780 seconds, same session, subscription provenance passed, source unchanged, one output mismatch resolved, 36 deeper verifier strings. Exact current denominator: 36 strings grouped into 28 atom-binding/coverage and eight mechanism/falsification findings; this is two correction clusters, not 36 cases or product defects.",
+        "data_quality": "Attempt-11 receipt SHA 5C561E45... and continuation-result SHA AB78ACCE... show 419.871 seconds, exact signed-in Terra session continuity, blank API billing variables, unchanged source dossier, one author turn, 23 input findings removed, and eight deeper findings. The persisted candidate is evidence_sufficient/partial/already_addressed with 25 addressed atoms and 25 explicit bindings. Root adapter diagnostics independently record positive_predicate_not_satisfied:equals plus the transformed-source rejection. The BDS-112 affected test gate collected 363 tests; 362 passed and one expected skip in 185.6 seconds.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "qualification_prepare_c1b44df8_20260717",
@@ -2764,6 +2775,12 @@
           "stage3_windows_descriptive_scenario_replay_73a6e2e1_20260717",
           "stage3_windows_evidence_cluster_correction_73a6e2e1_20260717",
           "stage3_windows_falsification_correction_73a6e2e1_20260717",
+          "stage3_windows_deep_evidence_correction_73a6e2e1_20260717",
+          "stage3_windows_available_evidence_completion_09cad0d4_20260717",
+          "stage3_windows_complete_assigned_context_feedback_09cad0d4_20260717",
+          "stage3_windows_complete_assigned_context_result_09cad0d4_20260717",
+          "stage3_windows_context_binding_feedback_09cad0d4_20260717",
+          "stage3_windows_context_binding_result_09cad0d4_20260717",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -8102,6 +8119,105 @@
       "api_billing_variables_blank": true,
       "source_dossier_unchanged": true,
       "limitations": "The one output mismatch was corrected. The newly visible 36 strings are deeper evidence findings grouped into incomplete atom binding/coverage and unauthenticated causal-harness/mechanism proof; they do not negate the correction and are not 36 independent defects."
+    },
+    {
+      "id": "stage3_windows_deep_evidence_correction_73a6e2e1_20260717",
+      "path": "U:/usertest_backlog_qualification/73a6e2e1_20260717T093000Z/component_frontiers/stage3_windows_deep_evidence_correction_20260717T100700Z/continuation_result.json",
+      "kind": "same_author_deep_evidence_correction_with_separate_forward_frontier",
+      "file_sha256": "8CFFC867E10048F2915D64421DEE8D411F424F7A8C46BE018701E40303D81E5B",
+      "duration_seconds": 189.992705,
+      "pipeline_git_head": "73a6e2e1a52ce03509616c41b653d38fc09de2eb",
+      "model": "gpt-5.6-terra",
+      "author_session_continuity": true,
+      "objective_best_finding_count": 36,
+      "forward_finding_count": 2,
+      "new_model_invocations": 1,
+      "subscription_status": "Logged in using ChatGPT",
+      "source_dossier_unchanged": true,
+      "limitations": "The retained objective-best frontier still has 36 findings, while the safe advancing forward candidate has two exact stderr-value binding errors. The latter is the correction-progress denominator; neither is a ready result."
+    },
+    {
+      "id": "stage3_windows_available_evidence_completion_09cad0d4_20260717",
+      "path": "U:/usertest_backlog_qualification/09cad0d4_20260717T102000Z/component_frontiers/stage3_windows_available_evidence_completion_20260717T102000Z/one_turn_continuation_receipt.json",
+      "kind": "same_author_large_binding_correction_with_incomplete_available_work",
+      "file_sha256": "8E00D231B9A79582CC013964C814F6F337AAA974647CBD54C5B9F82064C7810A",
+      "duration_seconds": 152.574289,
+      "pipeline_git_head": "09cad0d45783fb8c3434aa3d8d7fe35b08512a8b",
+      "model": "gpt-5.6-terra",
+      "attempt_record_author_session_continuity": true,
+      "input_finding_count": 2,
+      "output_contract_and_evidence_finding_count": 0,
+      "persisted_research_status": "insufficient_evidence",
+      "persisted_reproduction_status": "partial",
+      "new_model_invocations": 1,
+      "subscription_status": "Logged in using ChatGPT",
+      "source_dossier_unchanged": true,
+      "limitations": "Both source-binding findings were corrected, but the author repeated an unperformed context-assessment task as a material unknown even though all required inputs and authorization were available. Zero validator errors therefore does not equal a completed case disposition. The helper receipt's top-level observed-session field is null; the retained attempt record carries the expected and observed original session."
+    },
+    {
+      "id": "stage3_windows_complete_assigned_context_feedback_09cad0d4_20260717",
+      "path": ".tmp/component_validation/windows_stage3_complete_assigned_context_feedback_20260717T103000Z.json",
+      "kind": "active_same_author_available_work_completion_contract",
+      "file_sha256": "2013C303A89DBED8455A7491961BB8E573F7115E25DAAC42CB0F00B554D42A0F",
+      "pipeline_git_head": "09cad0d45783fb8c3434aa3d8d7fe35b08512a8b",
+      "model": "gpt-5.6-terra",
+      "assigned_atom_count": 25,
+      "currently_experiment_addressed_atom_count": 2,
+      "new_model_invocations_started": 1,
+      "stage1_stage2_or_downstream_invoked": false,
+      "limitations": "This is the content-bound feedback contract for the currently active turn, not an outcome receipt. Duration, findings, and disposition remain pending."
+    },
+    {
+      "id": "stage3_windows_complete_assigned_context_result_09cad0d4_20260717",
+      "path": "U:/usertest_backlog_qualification/09cad0d4_20260717T103000Z/component_frontiers/stage3_windows_complete_assigned_context_20260717T103000Z/continuation_result.json",
+      "kind": "same_author_complete_context_assessment_with_missing_binding_projection",
+      "file_sha256": "7B849CDD841080F4DD065EDFEB429430FA44FB00F3C3BCEF0E0646A132086045",
+      "duration_seconds": 217.148256,
+      "pipeline_git_head": "09cad0d45783fb8c3434aa3d8d7fe35b08512a8b",
+      "model": "gpt-5.6-terra",
+      "author_session_continuity": true,
+      "input_finding_count": 1,
+      "forward_finding_count": 23,
+      "forward_finding_cluster_count": 1,
+      "assessment_output_atom_count": 25,
+      "assessment_output_command_failure_count": 17,
+      "new_model_invocations": 1,
+      "subscription_status": "Logged in using ChatGPT",
+      "source_dossier_unchanged": true,
+      "limitations": "The prior available-work gap is substantively closed: the assessment ran and retained exact rows. The dossier omitted all 23 non-stderr origin_evidence_bindings, so the candidate remains non-ready behind one projection cluster."
+    },
+    {
+      "id": "stage3_windows_context_binding_feedback_09cad0d4_20260717",
+      "path": ".tmp/component_validation/windows_stage3_context_binding_feedback_20260717T102700Z.json",
+      "kind": "active_same_author_context_binding_correction_contract",
+      "file_sha256": "EF51D58FE0052044B3DF321689B2D4232E52AA2AE6DABC6DD7EC82F8F5807B95",
+      "pipeline_git_head": "09cad0d45783fb8c3434aa3d8d7fe35b08512a8b",
+      "model": "gpt-5.6-terra",
+      "raw_finding_count": 23,
+      "finding_cluster_count": 1,
+      "new_model_invocations_started": 1,
+      "stage1_stage2_or_downstream_invoked": false,
+      "limitations": "This is the active feedback contract, not an outcome receipt. It preserves the already-executed assessment and requests only projection of its 23 non-stderr rows into dossier bindings."
+    },
+    {
+      "id": "stage3_windows_context_binding_result_09cad0d4_20260717",
+      "path": "U:/usertest_backlog_qualification/09cad0d4_20260717T102700Z/component_frontiers/stage3_windows_context_binding_20260717T102700Z/continuation_result.json",
+      "kind": "same_author_complete_binding_candidate_with_deeper_adapter_findings",
+      "file_sha256": "AB78ACCECD879AFFC73E951D8806FF01EC780D284A9FD4B499BAE48F75FF7A3D",
+      "duration_seconds": 419.870538,
+      "pipeline_git_head": "09cad0d45783fb8c3434aa3d8d7fe35b08512a8b",
+      "model": "gpt-5.6-terra",
+      "author_session_continuity": true,
+      "input_finding_count": 23,
+      "forward_finding_count": 8,
+      "context_binding_finding_count": 0,
+      "persisted_research_status": "evidence_sufficient",
+      "persisted_reproduction_status": "partial",
+      "persisted_actionability_disposition": "already_addressed",
+      "new_model_invocations": 1,
+      "subscription_status": "Logged in using ChatGPT",
+      "source_dossier_unchanged": true,
+      "limitations": "All 23 context bindings were attached. The eight deeper strings include dependent mechanism/falsification errors rooted in a transformed-source verifier defect and an authored positive predicate that names the baseline rather than the challenge outcome. The candidate is not yet verified."
     },
     {
       "id": "executive_summary",
