@@ -1006,12 +1006,12 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-132 - Universal planning-grade mechanism gate distorted complete negative research
 
-- Status: `local_correction_verified_live_replay_pending`
+- Status: `closed_fresh_production_stage3_and_stage4_green`
 - Priority: objective-critical, good-throughput blocking
 - Objective impact: every `evidence_sufficient` dossier was required to carry an implementation-ready causal mechanism and survived falsification even when actionability was `already_addressed` or `non_actionable`. The Windows author correctly identified a real external sandbox panic, the old runner's missing controlled route, commit `7651f965`'s mitigation, and the remaining vendor/live boundary. The verifier rejected that boundary-level conclusion and repeated feedback progressively converted a diagnostic classifier into the supposed cause. This produced zero terminal throughput and directly undermined root-cause depth.
 - Correction: common sufficiency still requires authenticated symptoms, complete assigned-evidence accounting, current actionability evidence, repository inspection, and no unknown capable of changing the disposition. Only `requires_change` now requires the planning-grade mechanism projection, connected change surface, and causal falsification/closure. Complete negatives may retain inaccessible internals as bounded unknowns and may omit an unverified optional mechanism/falsification claim. Mission and repair prompts state the same distinction and explicitly prohibit relabeling a diagnostic as the cause.
 - Verification: the complete affected Stage 3 evidence, stage-contract, and prompt suites passed 411 tests with one expected skip in 87 seconds. New tests prove both terminal dispositions quarantine planning-only mechanism diagnostics and that an authenticated complete negative is ready with no mechanism projection/falsification receipt; the existing actionable negative test still rejects missing causal falsification and exact code path.
-- Closure proof: the exact retained Windows author removes the invalid classifier falsification without losing its evidence, deterministic replay verifies the terminal disposition, production Stage 3 persists it, and Stage 4 records `not_required` with no ticket. A subsequent unrelated `requires_change` case must still be blocked when causal depth is absent.
+- Closure proof: fresh production Stage 3 at pipeline revision `2d430151` used signed-in `gpt-5.6-terra`, retained one author session across five model calls, removed the unsupported optional falsification, and persisted `evidence_sufficient` / `already_addressed` with zero final evidence errors. Its explicit boundaries state that no fresh nested Codex workload ran and that a real Windows probe remains required after relevant runtime or policy changes. Production Stage 4 then recorded `not_required`, zero options, zero model calls, and no Stage 5/6, export, ticket, implementation, or Docker action. The Stage 3 and Stage 4 receipts are `U:\s3c2_fresh_2d430151_run_20260718T031627\stage3_single_case_receipt.json` and `U:\s3c2_stage4_2d430151_run_20260718T033753\stage4_no_change_receipt.json`. Existing actionable-case tests still require causal depth; a future live unrelated `requires_change` case remains the generalization check.
 
 ### BDS-133 - Complete-report correction discarded unchanged origin bindings
 
@@ -1020,7 +1020,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Objective impact: the author made the correct terminal correction but omitted two unchanged `origin_evidence_bindings` arrays while re-emitting the complete dossier. The old controller treated 26 missing binding objects as new research errors even though experiment IDs, atom scope, command, result, exit code, assertion, and control relationship were unchanged.
 - Correction: a targeted correction may carry forward an omitted strict subset of baseline bindings only when all observation and atom-scope fields are unchanged and feedback did not explicitly authorize changing bindings. The exact raw authored dossier, baseline/resolved hashes, restored paths, and binding hashes remain in a content-bound attempt resolution; persisted validation reconstructs the projection and rejects tampering.
 - Exact proof: the retained author report at `U:\s3c2_resume_27b6c01e_r8\repair_result.json` omitted 25 assigned-context bindings and one baseline binding. Model-free replay at `U:\s3c2_controller_resolution_worktree_r3` restored exactly those 26 bindings and passed the real evidence verifier with zero findings in 66.3 seconds. It made zero model, Stage 1/2, downstream, or Docker calls and left the source run unchanged.
-- Closure proof: a fresh production Stage 3 records the raw/effective resolution in its attempt ledger and reaches the same zero-finding terminal dossier without supervisor-authored evidence.
+- Live qualification boundary: the fresh `2d430151` production Stage 3 reached a zero-error terminal dossier without supervisor-authored evidence, but it did not exercise this preservation branch. Its author replaced the overbroad experiments with a smaller all-atoms assessment and retained classifier harness rather than omitting unchanged binding arrays. Therefore the preservation path remains established by the exact model-free replay, persisted-contract tamper tests, and full affected suites; a future natural live use is observation evidence, not a prerequisite for the completed terminal case.
 
 ### BDS-134 - Colon-delimited IDs prevented path-specific repair authorization
 
@@ -1032,12 +1032,12 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-135 - Continuation attempt numbering used history length instead of retained maximum
 
-- Status: `local_correction_verified_fresh_run_pending`
+- Status: `closed_fresh_production_ledger_green`
 - Priority: attempt-ledger integrity and resumability
 - Objective impact: a recovered partial prefix whose first retained record was numbered 15 received new attempts numbered 2 onward. The resulting `15,2,...,20` ledger could not satisfy sequential provenance or be persisted even after the research itself verified cleanly.
 - Correction: every continuation now allocates `max(valid retained attempt_number) + 1`, not `len(history) + 1`. Invalid/non-numeric values do not influence allocation.
 - Historical disposition: the supervised Windows ledger and every underlying run remain retained on `U:` and are marked `integrity_unknown`; they will not be normalized, deleted, or represented as a production completion. A fresh single-case Stage 3 will establish a valid ledger under the corrected controller.
-- Closure proof: focused and full affected tests pass, and the fresh Stage 3 attempt history is sequential, source-linked, subscription-authenticated, verifier-clean, and persistable.
+- Closure proof: focused and full affected tests pass. The fresh production Stage 3 at `U:\s3c2_fresh_2d430151_run_20260718T031627` persisted six sequential records numbered 1-6: one full research call, two output-contract correction calls, one verifier-feedback record, and two evidence-correction calls. Every model record carries the same requested and observed author session `019f7416-4b6f-7320-a6f0-9b0dc418eed6`; final evidence verification is green and the Stage 3 document is persistable.
 
 ### AN-22 - Retained-frontier launcher preflight omitted required invocation context
 
@@ -1053,17 +1053,24 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### AN-24 - Supervisor followed a wrong universal gate through 33 same-session outputs
 
-- Status: `root_cause_corrected_live_closure_pending`
+- Status: `closed_root_cause_corrected_fresh_terminal_case_green`
 - Supervisor impact: the retained Terra session produced 33 research reports from 02:07 through 06:00 on 2026-07-18. At 04:33 it had already authored the substantively correct boundary-level conclusion: external Windows sandbox panic, pre-`7651f965` controlled-route omission, current mitigation, and unknown vendor trigger. Instead of challenging the universal planning-grade gate, supervision continued feeding verifier findings. Later reports narrowed the hypothesis to `_codex_shell_probe_failure_reason`, a classifier the author explicitly said was neither cause nor mitigation. This was excessive intervention and zero useful terminal throughput.
 - Driver: the verifier, readiness gate, mission, and correction feedback all encoded `evidence_sufficient` as synonymous with implementation planning, and supervision over-weighted decreasing mechanical error counts instead of the stated actionability/output purpose.
 - Containment: further model correction stopped after the 35 -> 8 -> 1 mechanical progression exposed the eight deeper planning-only findings. BDS-132 changes the contract rather than asking the author to make a false causal claim. The next call is limited to removing the now-optional invalid classifier mechanism/falsification while preserving all retained research and terminal evidence.
-- Closure proof: the same author reaches the correct terminal disposition under the corrected gate, and future dashboard reporting separates substantive frontier quality from mechanical error count.
+- Closure proof: the old author reached the correct zero-finding semantic frontier, but its retained ledger was structurally corrupt and remains `integrity_unknown`; it was not normalized or promoted. A fresh signed-in Terra author under the corrected controller completed the same case in five model calls and one verifier-feedback record, reducing contract findings 3 -> 1 -> 0 and evidence findings 40 -> 1 -> 0. Stage 3 persisted the terminal disposition and Stage 4 stopped with no option or ticket. Dashboard reporting counts those as two automatic correction clusters, not 44 independent product errors or six independent model outcomes.
 
 ### AN-25 - Durable replay attempted to promote a structurally corrupt supervised ledger
 
 - Status: `contained_without_new_model_work`
 - Supervisor impact: after the exact author report verified with zero findings, two model-free materialization checks attempted to persist the old supervised ledger. The first rejected a baseline-hash mismatch; the second rejected invalid historical session provenance and exposed the `15,2,...,20` numbering defect. No model, Docker, upstream, downstream, ticket, or implementation action occurred, and no retained artifact was changed or removed.
 - Containment: the corrupt run is preserved as `integrity_unknown`. Further normalization work stopped; the next qualification is one fresh single-case Stage 3 under the corrected controller.
+
+### AN-26 - Fresh Stage 3 launcher initially assembled an ineffective sealed-source path
+
+- Status: `closed_preflight_correction_no_model_work`
+- Classification: one supervisor launcher/import cluster, not a model, research, or pipeline-stage failure
+- Exact evidence: the first fresh Stage 3 command used a nested PowerShell array while constructing `PYTHONPATH`. Python consequently imported `backlog_core` from `I:\code\usertest` instead of the sealed `U:\usertest_backlog_qualification\execution_roots\2d430151` source and stopped at module import with `cannot import name 'write_case_registry'`. The failure occurred before argument parsing, output-root creation, subscription activation, model invocation, or stage execution.
+- Containment and result: the launcher flattened every sealed app/package `src` directory into one path-separated value and verified the imported `backlog_core` and `backlog_miner` origins before rerunning. The next model-free preflight completed in 4.6 seconds, hash-bound the one case and all upstream artifacts, and the subsequent production Stage 3 completed normally. No failed artifact was deleted and no product code changed for the launcher mistake.
 
 ### AN-11 - Same-author correction launcher omitted required static path arguments
 

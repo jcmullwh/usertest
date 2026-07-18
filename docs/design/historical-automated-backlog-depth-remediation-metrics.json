@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-18T01:49:12Z",
+    "as_of": "2026-07-18T07:38:02.508344Z",
     "current_run_id": "qualification-cycle-338a373f-20260717",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Stage 1 and Stage 2 complete; first Stage 3 case correctly terminated",
-        "detail": "The corrected Stage 1 frontier persists 24 canonical work units, and Stage 2 has 24/24 valid decisions. The first P0 case completed Stage 3 with zero verifier findings as evidence_sufficient / already_addressed at the pinned target revision. It correctly stopped before optioning, planning, or ticket creation.",
+        "value": "Stage 4 complete for the second real P0 case",
+        "detail": "Two current cases now have evidence-sufficient terminal dispositions without false tickets. BDS-130 duplicate scheduling is the next narrow mechanical blocker before a third distinct case.",
         "tone": "warn"
       },
       {
         "label": "Current bounded throughput",
-        "value": "Stage 1: 24 work units; Stage 2: 24/24 decisions; Stage 3: 1/1 correct dispositions; delivered improvements: 0",
-        "detail": "The first current case is useful non-actionable throughput, not a delivered fix: repository inspection and three clean experiment replays established that the pinned revision already addresses the reported configuration behavior. The same author was corrected in place, with no author, Stage 1, or Stage 2 restart.",
+        "value": "Stage 3: 2/2 correct; explicit Stage 4 terminal handoff: 1/1; delivered: 0",
+        "detail": "The Windows case self-corrected 3 -> 1 -> 0 and 40 -> 1 -> 0 in one author session. Both cases are useful terminal throughput, not delivered fixes.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No standard export-disabled full shadow cycle has completed. The current cycle now has one correct Stage 3 terminal disposition, but 23 prioritized work units remain and no actionable case in this cycle has yet completed optioning, planning, adjudication, or ticket assembly. It therefore still contributes zero qualification passes.",
+        "detail": "No standard export-disabled full shadow cycle has completed. No current actionable case has yet completed optioning, planning, implementation, and outcome proof.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Research the second prioritized case from the retained frontier",
-        "detail": "Start problem:windows-sandbox-command-execution-fails / case:fe517dafc2a12d5779ab from the authenticated Stage 2 artifact. Use signed-in gpt-5.6-terra and the complete 25-atom provisional-group evidence packet. Rerun no upstream stage and advance only to the evidence-supported disposition.",
+        "value": "Deduplicate Stage 2 scheduling, then research the next distinct case",
+        "detail": "Fix and replay only BDS-130. Preserve both provisional-member evidence facets, avoid rerunning completed stages, and then continue the retained backlog.",
         "tone": "warn"
       }
     ],
@@ -2652,29 +2652,29 @@
         "lifecycle_id": "pipeline-cycle:338a373f:20260717",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-        "author_invocations": 109,
-        "continuation_launches": 44,
-          "stage_reruns": 20,
+          "author_invocations": 147,
+          "continuation_launches": 80,
+          "stage_reruns": 23,
           "full_restarts": 0,
-        "summary": "The 89 prior author call attempts are joined by one original Stage 3 author call and nineteen same-session continuations for the first P0 case. The author was not restarted. The current cycle now totals 109 author invocations, 44 continuation launches, twenty stage reruns, and zero full restarts. Model-free diagnostics, verifier rescores, persistence replays, and test runs are not counted as author calls."
+          "summary": "Since the prior checkpoint, the structurally unusable Windows research chain retained 33 Terra reports (one original call and 32 continuations) before its universal-gate defect was corrected. The fresh qualification then used five Terra calls (one original and four same-session corrections), one model-free verifier-feedback record, and no author restart. The cycle now totals 147 author invocations, 80 continuation launches, 23 stage executions/re-executions, and zero full pipeline restarts."
         },
         "label": "Clean exact-revision backlog qualification cycle",
-      "scope": "Reconciled non-IDEA evidence custody, persisted the clean shadow through Stage 2, and correctly dispositioned the first real P0 case under signed-in Terra; no removal, ticket export, implementation, or Docker object mutation was authorized",
+        "scope": "Reconciled non-IDEA evidence custody, completed two real P0 Stage 3 dispositions, and carried the Windows-sandbox case through the production Stage 4 no-change transition under signed-in Terra; no removal, ticket export, implementation, or Docker object mutation was authorized",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
           "end_at": null,
-        "elapsed_seconds": 81532.0,
+          "elapsed_seconds": 102462.508344,
           "coverage": "active",
-        "display": "22 h 38 m 52 s as of 01:49:12Z",
-        "note": "Wall time begins at creation of the retained qualification-cycle root. Clean preparation took 1,062.887 seconds; the standard shadow took 2,792.218 seconds through Stage 1; exact Stage 1 persistence replayed without a model; Stage 2 took 92.334 seconds. The first Stage 3 case used one original author turn and nineteen same-session corrections. Model-free diagnostics, exact experiment replays, persistence recovery, full tests, and supervision gaps are included in wall time but are not separate lifecycle rows or author calls."
+          "display": "28 h 27 m 43 s as of 07:38:03Z",
+          "note": "Complete lifecycle wall time from retained-cycle creation. The fresh Windows Stage 3 receipt records 1,167.49048 seconds and Stage 4 records 8.338704 seconds. The wall clock also includes retained diagnostics, exact replays, tests, code correction, and supervision gaps; those are not misreported as model time."
         },
-      "furthest_stage": "Stage 3 complete for first P0 case; second case next",
-      "current_state": "The clean a2de4947 preparation sealed 2,854 atoms and a 24-case registry. Production replay persisted 24 Stage 1 work units, and Stage 2 completed 24/24 decisions in 92.334 seconds with one signed-in Terra call. The first Stage 3 case, problem:codex-model-messages-config-invalid, retained one Terra author/session through nineteen corrections. Repository inspection and three authenticated experiments establish the mechanism at pinned target revision e0527e23c50c801488bf2b43892baca36de7a2a4. The terminal dossier has zero output or evidence findings and honestly records evidence_sufficient, partial reproduction, and already_addressed. It stops before Stage 4 and emits no false ticket. BDS-126 through BDS-128 corrected repair guidance, proof-adapter attestation, and terminal evidence persistence; their complete owning suites pass. The second prioritized case is next. No export, implementation, removal, or Docker object mutation occurred.",
-      "outcome": "One of one researched current cases correctly dispositioned; zero delivered improvements",
+        "furthest_stage": "Stage 4 complete for second P0 case; duplicate scheduling correction next",
+        "current_state": "Two real current cases have completed Stage 3 with evidence-sufficient, already-addressed dispositions and no false ticket. The Windows-sandbox case used one signed-in Terra session across five model calls; its contract frontier improved 3 -> 1 -> 0 and its evidence frontier 40 -> 1 -> 0 without human dossier edits or stage restart. Stage 4 then emitted not_required with zero options and zero model calls. The old supervised Windows ledger remains integrity_unknown. BDS-130 remains open because the unbounded Stage 2 source scheduled both members of this canonical same-cause case.",
+        "outcome": "Two of two researched current cases correctly dispositioned; zero delivered improvements",
         "errors": {
-          "count": 48,
+          "count": 61,
           "count_kind": "deduplicated_clusters",
-          "summary": "Twenty-nine product defects are counted: BDS-100 through BDS-128. Seventeen supervisor/observability errors are counted: AN-05 through AN-21. One automatic session-acquisition failure cluster recovered inside Stage 1. One deduplicated current-author proof cluster covers the first case's authored source, mechanism, and falsification findings; its cascading verifier messages are not counted separately, and the cluster is now corrected.",
+          "summary": "Sixty-one deduplicated clusters are retained. The new set adds seven product boundaries (BDS-129 through BDS-135), five supervisor/tooling clusters (AN-22 through AN-26), and one nondeterministic Windows Stage 3 author cluster. The author cluster contains the measured 3/1/0 and 40/1/0 frontiers; it is not counted as 45 independent defects.",
           "cluster_ids": [
             "BDS-100",
             "BDS-101",
@@ -2723,18 +2723,31 @@
             "AN-20",
             "AN-21",
             "AUTO-SESSION-01",
-            "AUTHOR-STAGE3-CODEX-CONFIG-01"
+            "AUTHOR-STAGE3-CODEX-CONFIG-01",
+            "BDS-129",
+            "BDS-130",
+            "BDS-131",
+            "BDS-132",
+            "BDS-133",
+            "BDS-134",
+            "BDS-135",
+            "AN-22",
+            "AN-23",
+            "AN-24",
+            "AN-25",
+            "AN-26",
+            "AUTHOR-STAGE3-WINDOWS-SANDBOX-01"
           ]
         },
         "automatic_self_corrections": {
-          "count": 17,
+          "count": 19,
           "count_kind": "deduplicated_clusters",
-          "summary": "Seventeen nondeterministic quality clusters improved automatically. After the previously counted harness and seven-to-one improvements, the retained Stage 3 author reduced the corrected ten-finding evidence frontier to one, then corrected the final falsification-result mismatch from one to zero. Different intermediate error identities did not erase that measured progress. Deterministic evaluator and persistence repairs remain supervisor interventions rather than model success."
+          "summary": "Nineteen nondeterministic quality clusters have improved automatically. The fresh Windows author adds two: output-contract falsification binding improved 3 -> 1 -> 0, and evidence packaging improved 40 -> 1 -> 0. Four correction calls remained in the same author session; a different remaining error identity still counts as progress."
         },
         "supervisor_interventions": {
-          "count": 66,
+          "count": 78,
           "count_kind": "deduplicated_clusters",
-          "summary": "Sixty-six deduplicated interventions are counted. Since the prior checkpoint, seven focused feedback launches kept the exact Terra author/session and preserved the strongest frontier; BDS-126 through BDS-128 corrected three observed product boundaries; and AN-19 through AN-21 record three supervisor/helper mistakes. Model-free diagnostics, tests, observation, and dashboard maintenance are supporting evidence rather than extra interventions.",
+          "summary": "Seventy-eight deduplicated interventions are retained. The new twelve are six product corrections, five supervisor/helper corrections, and the explicit Stage 4 terminal handoff. The fresh Stage 3 author needed zero human content corrections; its four feedback turns were automatic and are not supervisor interventions.",
           "cluster_ids": [
             "AN-05",
             "BDS-100",
@@ -2782,31 +2795,43 @@
             "BDS-118",
             "BDS-119",
             "BDS-120",
-              "stage3_readiness_adjudication_feedback_launch",
-              "BDS-121",
-              "BDS-122",
-              "BDS-123"
-              ,"AN-18"
-              ,"BDS-124"
-              ,"BDS-125"
-              ,"stage3_shared_mechanism_feedback_launch"
-              ,"stage3_inspected_code_linkage_feedback_launch"
-              ,"stage3_exact_linkage_guidance_feedback_launch"
-              ,"stage3_semantic_basis_feedback_launch"
-              ,"stage3_exact_source_basis_feedback_launch"
-              ,"stage3_falsification_survival_feedback_launch"
-              ,"stage3_falsification_result_feedback_launch"
-              ,"BDS-126"
-              ,"BDS-127"
-              ,"BDS-128"
-              ,"AN-19"
-              ,"AN-20"
-              ,"AN-21"
-            ]
+            "stage3_readiness_adjudication_feedback_launch",
+            "BDS-121",
+            "BDS-122",
+            "BDS-123",
+            "AN-18",
+            "BDS-124",
+            "BDS-125",
+            "stage3_shared_mechanism_feedback_launch",
+            "stage3_inspected_code_linkage_feedback_launch",
+            "stage3_exact_linkage_guidance_feedback_launch",
+            "stage3_semantic_basis_feedback_launch",
+            "stage3_exact_source_basis_feedback_launch",
+            "stage3_falsification_survival_feedback_launch",
+            "stage3_falsification_result_feedback_launch",
+            "BDS-126",
+            "BDS-127",
+            "BDS-128",
+            "AN-19",
+            "AN-20",
+            "AN-21",
+            "BDS-129",
+            "BDS-131",
+            "BDS-132",
+            "BDS-133",
+            "BDS-134",
+            "BDS-135",
+            "AN-22",
+            "AN-23",
+            "AN-24",
+            "AN-25",
+            "AN-26",
+            "stage4_windows_sandbox_no_change"
+          ]
         },
-        "next_action": "Start Stage 3 for problem:windows-sandbox-command-execution-fails / case:fe517dafc2a12d5779ab from the exact retained Stage 2 frontier. Verify that its complete 25-atom provisional-group packet is present, use signed-in gpt-5.6-terra, preserve partial progress through same-author feedback, and stop only at the evidence-supported terminal or repairable frontier. Do not rerun Stage 1 or Stage 2.",
+        "next_action": "Correct BDS-130 narrowly in Stage 2 so one canonical same-cause case schedules one research unit while retaining both evidence facets. Replay only Stage 2 scheduling, then start the next distinct prioritized case; do not rerun Stage 1 or the completed Windows Stage 3/4 case.",
         "tone": "warn",
-        "data_quality": "Clean preparation receipt 494E7361... records 1,062.887 seconds and 2,854 atoms. Standard-shadow receipt 8BC4CD98... records 2,792.218 seconds, exact a2de4947 execution, gpt-5.6-terra, Logged in using ChatGPT, and blank API-billing variables. Stage 2 records 92.334 seconds, one Terra call, and 24/24 decisions. The first case's short-root replay at U:\\b128_r2 used eighteen compatible evidence attempts, ran all three experiments in 352.376 seconds, and returned zero findings with zero model or Docker calls. Terminal receipt U:\\b128_terminal_r2\\receipt.json binds terminal attempt SHA-256 3de2fecc... and receipt SHA-256 5a8c0c39..., signed-in ChatGPT provenance, blank API-billing variables, unchanged source, and no upstream/downstream/Docker work. The complete stage-contract, evidence, and runner suites collected 562 tests and passed 561 with one expected skip; Ruff and diff checks pass. Zero full qualification cycles, actionable plans, exports, implementations, removals, or Docker object mutations occurred.",
+        "data_quality": "Fresh Stage 3 receipt DC09FC11... records exact 1,167.49048-second wall time, five Terra calls plus one verifier-feedback ledger record, one session, sequential attempts 1-6, verified evidence, unchanged inputs, and signed-in subscription-only execution. Research document 5BF25B5A... retains the 3/1/0 and 40/1/0 correction frontiers and partial/live boundaries. Stage 4 receipt 6396838B... records 8.338704 seconds, not_required, zero options/model/downstream/export/implementation/Docker actions, and unchanged case identity. This is two terminal research dispositions, not actionable-plan, implementation, live-resolution, or full-cycle qualification.",
         "source_ids": [
           "qualification_prepare_338a373f_20260717",
           "stage12_multisource_8_live_8a047703_20260717",
@@ -2820,7 +2845,11 @@
           "qualification_prepare_a2de4947_20260717",
           "standard_shadow_stage1_a2de4947_20260717",
           "stage1_relation_bds124_exact_replay_20260717",
-          "backlog_depth_supervision_issue_ledger"
+          "backlog_depth_supervision_issue_ledger",
+          "stage3_windows_sandbox_fresh_2d430151_receipt_20260718",
+          "stage3_windows_sandbox_fresh_2d430151_dossier_20260718",
+          "stage4_windows_sandbox_no_change_2d430151_receipt_20260718",
+          "stage4_windows_sandbox_no_change_2d430151_options_20260718"
         ]
       }
     ]
@@ -5099,9 +5128,45 @@
       "id": "backlog_depth_supervision_issue_ledger",
       "path": "docs/design/backlog-depth-supervision-issue-ledger.md",
       "kind": "supervision_issue_and_test_evidence_ledger",
-      "file_sha256_at_dashboard_snapshot": "EC3CC6EF0579C7713611FAF8D8AD83472EC5D2734EEFFAA6FA31149F15F2B578",
-      "as_of": "2026-07-17T19:12:00Z",
-      "limitations": "Records supervisor-discovered defects and correction evidence through BDS-121, including the exact same-author readiness correction, authenticated prior-attempt promotion, and Docker-shell Stage 4 no-change disposition. It is a supervision record, not a substitute for exact run, outcome-role, ticket, verifier, or replay artifacts."
+      "file_sha256_at_dashboard_snapshot": "FCBB52493CC62C88D9C435AAC73BAE545A2779718C9A053580C092970399AD16",
+      "as_of": "2026-07-18T07:38:03Z",
+      "limitations": "Records supervisor-discovered defects and correction evidence through BDS-135 and AN-26, including the fresh Windows-sandbox Stage 3 and Stage 4 terminal qualification. It is a supervision record, not a substitute for exact run, outcome-role, ticket, verifier, or replay artifacts."
+    },
+    {
+      "id": "stage3_windows_sandbox_fresh_2d430151_receipt_20260718",
+      "path": "U:\\s3c2_fresh_2d430151_run_20260718T031627\\stage3_single_case_receipt.json",
+      "kind": "fresh_production_single_case_stage3_terminal_receipt",
+      "file_sha256": "DC09FC11C4E7112CB86AF571E73797FD5DEF492D5AFB48184A639E0414E4372C",
+      "byte_length": 6314,
+      "measured_at": "2026-07-18T07:35:55.491925Z",
+      "limitations": "Proves one fresh Windows-sandbox case completed Stage 3 in 1,167.49048 seconds through signed-in gpt-5.6-terra with one author session, sequential retained-attempt provenance, evidence_sufficient/already_addressed disposition, unchanged source artifacts, and no upstream, downstream, export, implementation, removal, or Docker action. It is one terminal case and does not establish actionable-plan or implementation throughput."
+    },
+    {
+      "id": "stage3_windows_sandbox_fresh_2d430151_dossier_20260718",
+      "path": "U:\\s3c2_fresh_2d430151_run_20260718T031627\\usertest.research.json",
+      "kind": "fresh_production_stage3_verified_research_document",
+      "file_sha256": "5BF25B5A373CC9B0EF1598887CC96B60F19499350CE6054ED6D8D8EB2F79CA45",
+      "byte_length": 1248041,
+      "measured_at": "2026-07-18T07:35:55.491925Z",
+      "limitations": "Contains one terminal dossier and six retained ledger records: five Terra model calls plus one verifier-feedback record. Contract findings progressed 3 to 1 to 0 and evidence findings 40 to 1 to 0. Reproduction remains partial and no fresh nested Windows Codex workload ran."
+    },
+    {
+      "id": "stage4_windows_sandbox_no_change_2d430151_receipt_20260718",
+      "path": "U:\\s3c2_stage4_2d430151_run_20260718T033753\\stage4_no_change_receipt.json",
+      "kind": "production_stage4_already_addressed_no_change_disposition",
+      "file_sha256": "6396838B2181C8E1D8C8F0913A8BE51E3399125D218809163ECD93F96338AA00",
+      "byte_length": 4848,
+      "measured_at": "2026-07-18T07:38:02.508344Z",
+      "limitations": "Proves Stage 4 emitted not_required with zero options, zero model calls, no Stage 5/6, export, ticket, implementation, removal, or Docker action, and unchanged case identity. It is not live Windows-vendor root-cause or runtime-resolution proof."
+    },
+    {
+      "id": "stage4_windows_sandbox_no_change_2d430151_options_20260718",
+      "path": "U:\\s3c2_stage4_2d430151_run_20260718T033753\\usertest.solution_options.json",
+      "kind": "production_stage4_zero_option_document",
+      "file_sha256": "4CA1EC1A252F58E5EB0D366A37D62A4710067FB4880E036C3545B8912D8DCFFD",
+      "byte_length": 3181,
+      "measured_at": "2026-07-18T07:38:02.508344Z",
+      "limitations": "Contains one not_required outcome and zero solution options. This is correct terminal throughput for an already-addressed case, not evidence of a delivered improvement."
     },
     {
       "id": "stage3_docker_shell_terminal_materialization_20260717",
