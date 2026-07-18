@@ -1651,17 +1651,27 @@ def _research_retry_remediation_hints(
         elif code == "research_dossier_hypothesis_support_not_linked_to_inspected_code":
             target_fields = [
                 "root_cause_hypotheses[].mechanism_symbols",
+                "experiments[].artifact_refs",
+                "artifact_refs[]",
+                "inspected_files",
                 "experiments[].proof_adapter.implementation_touchpoints",
             ]
             required_change = (
-                "For a hypothesis supported through a proof-adapter pair, at least one hypothesis "
-                "mechanism_symbols value must exactly equal the connected touchpoint's "
-                "causal_locator or one of its symbols entries. The touchpoint field is named "
-                "symbols, never inspected_symbols; it also requires the inspected repository "
+                "Link the supporting experiment itself to inspected production code through one "
+                "of two exact routes. The simplest route is to include in that experiment's "
+                "artifact_refs an existing declared production artifact whose path is also listed "
+                "in inspected_files; merely naming the artifact in the hypothesis's "
+                "supporting_evidence does not link the experiment. The proof-adapter route "
+                "requires "
+                "at least one hypothesis mechanism_symbols value to exactly equal the connected "
+                "touchpoint's causal_locator or one of its symbols entries. The touchpoint field "
+                "is "
+                "named symbols, never inspected_symbols; it also requires the inspected repository "
                 "path and relationship, and its causal_locator must equal intervention.target. "
-                "Keep implementation_touchpoints under proof_adapter and do not invent "
-                "hypothesis-level evidence_code_links. The other valid route is an existing "
-                "supporting artifact whose path is itself an inspected repository file."
+                "Keep "
+                "implementation_touchpoints under proof_adapter, reuse only evidence already "
+                "declared and actually inspected, and do not invent hypothesis-level "
+                "evidence_code_links."
             )
         elif code.startswith("research_dossier_proof_adapter_predicate_"):
             target_fields = ["experiments[].proof_adapter.positive_outcome.predicate"]

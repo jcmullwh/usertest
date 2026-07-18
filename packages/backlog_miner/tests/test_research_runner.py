@@ -660,8 +660,15 @@ def test_repair_hints_give_exact_shapes_for_common_nondeterministic_errors() -> 
     assert "do not invent artifact references" in hints[6]["required_change"]
     assert hints[7]["target_fields"] == [
         "root_cause_hypotheses[].mechanism_symbols",
+        "experiments[].artifact_refs",
+        "artifact_refs[]",
+        "inspected_files",
         "experiments[].proof_adapter.implementation_touchpoints",
     ]
+    assert "supporting experiment itself" in hints[7]["required_change"]
+    assert "experiment's artifact_refs" in hints[7]["required_change"]
+    assert "path is also listed in inspected_files" in hints[7]["required_change"]
+    assert "supporting_evidence does not link the experiment" in hints[7]["required_change"]
     assert "causal_locator or one of its symbols entries" in hints[7]["required_change"]
     assert "symbols, never inspected_symbols" in hints[7]["required_change"]
     assert "causal_locator must equal intervention.target" in hints[7]["required_change"]
