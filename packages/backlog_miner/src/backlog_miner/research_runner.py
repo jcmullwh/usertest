@@ -2998,6 +2998,39 @@ def _direct_atom_coverage_sources(
     return sources
 
 
+def _verifier_rejected_unknown_atom_coverage_roles(
+    lost_roles: Sequence[str],
+    validation_errors: Sequence[str],
+) -> set[str]:
+    """Return lost direct-coverage roles whose atom identity was rejected as unknown.
+
+    Correction frontiers may retain a mechanically invalid dossier because it made useful
+    progress on other findings.  An unknown ``addresses_atom_ids`` value from that dossier is
+    not established causal coverage, however, and must not become protected merely because it
+    appeared in a supporting experiment.  Bind this exception to the exact deterministic
+    output-contract finding and exact atom identity so an unrelated error cannot excuse removal
+    of valid assigned evidence.
+    """
+
+    prefix = "research_dossier_experiment_addresses_unknown_atoms:"
+    rejected: set[str] = set()
+    role_prefix = "origin_atom["
+    role_suffix = "].direct_experimental_coverage"
+    for role in lost_roles:
+        if not role.startswith(role_prefix) or not role.endswith(role_suffix):
+            continue
+        atom_id = role[len(role_prefix) : -len(role_suffix)]
+        identity_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_.:/-]){re.escape(atom_id)}(?![A-Za-z0-9_.:/-])"
+        )
+        if any(
+            str(error).startswith(prefix) and identity_pattern.search(str(error)) is not None
+            for error in validation_errors
+        ):
+            rejected.add(role)
+    return rejected
+
+
 def _verifier_rejected_direct_support_experiments(
     before_dossier: Mapping[str, Any],
     after_dossier: Mapping[str, Any],
@@ -3426,13 +3459,22 @@ def _unsupported_substantive_coverage_loss(
         ).items()
         if role in lost
     }
-    if not verifier_direct_revisions and not verifier_falsification_revisions:
+    verifier_unknown_atom_revisions = _verifier_rejected_unknown_atom_coverage_roles(
+        lost,
+        validation_errors,
+    )
+    if (
+        not verifier_direct_revisions
+        and not verifier_falsification_revisions
+        and not verifier_unknown_atom_revisions
+    ):
         return lost, []
     remaining = [
         role
         for role in lost
         if role not in verifier_direct_revisions
         and role not in verifier_falsification_revisions
+        and role not in verifier_unknown_atom_revisions
     ]
     basis = [
         f"validator_rejected_direct_support[{experiment_id}]"
@@ -3452,6 +3494,14 @@ def _unsupported_substantive_coverage_loss(
             f"validator_rejected_falsification[{hypothesis_id}][{attempt_id}]"
             for attempt_id in sorted(attempt_ids)
         )
+    basis.extend(
+        "validator_rejected_unknown_origin_atom["
+        + role.removeprefix("origin_atom[").removesuffix(
+            "].direct_experimental_coverage"
+        )
+        + "]"
+        for role in sorted(verifier_unknown_atom_revisions)
+    )
     return remaining, basis
 
 

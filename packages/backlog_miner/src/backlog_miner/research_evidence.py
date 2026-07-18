@@ -6707,6 +6707,45 @@ def _falsification_intervention_receipts(
     return receipts
 
 
+def _falsification_interventions_without_adapter_proof(
+    interventions: Sequence[dict[str, Any]],
+    *,
+    proof_adapter_receipts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop legacy intervention receipts superseded by an accepted adapter proof.
+
+    The stage contract treats a verified proof adapter for the same hypothesis and
+    experiment pair as the falsification intervention.  Retaining the independently
+    derived argv/AST receipt as well makes an otherwise verified dossier internally
+    contradictory: the pair is removed from the expected legacy set, but the extra
+    receipt remains.  Keep legacy receipts for every uncovered pair.
+    """
+
+    covered_pairs = {
+        (
+            str(proof.get("hypothesis_id")),
+            str(intervention.get("baseline_experiment_id")),
+            str(intervention.get("challenge_experiment_id")),
+        )
+        for proof in proof_adapter_receipts
+        if isinstance(proof, Mapping)
+        and _text(proof.get("hypothesis_id")) is not None
+        and isinstance((intervention := proof.get("intervention")), Mapping)
+        and _text(intervention.get("baseline_experiment_id")) is not None
+        and _text(intervention.get("challenge_experiment_id")) is not None
+    }
+    return [
+        receipt
+        for receipt in interventions
+        if (
+            str(receipt.get("hypothesis_id")),
+            str(receipt.get("baseline_experiment_id")),
+            str(receipt.get("challenge_experiment_id")),
+        )
+        not in covered_pairs
+    ]
+
+
 def _causal_control_receipts(
     dossier: dict[str, Any],
     *,
@@ -14289,6 +14328,10 @@ def verify_research_evidence(
             symbol_receipts=symbol_receipts,
             errors=optional_falsification_intervention_errors,
         )
+        falsification_interventions = _falsification_interventions_without_adapter_proof(
+            falsification_interventions,
+            proof_adapter_receipts=proof_adapter_receipts,
+        )
         if optional_falsification_intervention_errors and not proof_adapter_receipts:
             errors.extend(optional_falsification_intervention_errors)
     preliminary_mechanism_errors: list[str] = []
@@ -15363,8 +15406,6 @@ def verify_persisted_research_evidence(
             symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
             errors=intervention_errors,
         )
-        if receipt.get("falsification_interventions") != recomputed_falsification_interventions:
-            errors.append("research_falsification_interventions_changed")
         declared_experiments_raw = dossier.get("experiments")
         declared_experiments = {
             str(experiment.get("experiment_id")): experiment
@@ -15394,6 +15435,14 @@ def verify_persisted_research_evidence(
             errors.append("research_proof_adapter_receipts_changed")
         if receipt.get("proof_adapter_diagnostics", []) != recomputed_adapter_diagnostics:
             errors.append("research_proof_adapter_diagnostics_changed")
+        recomputed_falsification_interventions = (
+            _falsification_interventions_without_adapter_proof(
+                recomputed_falsification_interventions,
+                proof_adapter_receipts=recomputed_adapter_receipts,
+            )
+        )
+        if receipt.get("falsification_interventions") != recomputed_falsification_interventions:
+            errors.append("research_falsification_interventions_changed")
         if intervention_errors and not recomputed_adapter_receipts:
             errors.extend(intervention_errors)
         preliminary_mechanism_errors: list[str] = []

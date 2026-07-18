@@ -7293,6 +7293,37 @@ def test_attested_research_pytest_shared_helper_delta_is_verified(tmp_path: Path
     ]
 
 
+def test_adapter_proof_supersedes_only_matching_falsification_intervention() -> None:
+    covered = {
+        "hypothesis_id": "hypothesis:primary",
+        "baseline_experiment_id": "experiment:baseline",
+        "challenge_experiment_id": "experiment:challenge",
+        "intervention_receipt_id": "falsification_intervention:covered",
+    }
+    uncovered = {
+        "hypothesis_id": "hypothesis:primary",
+        "baseline_experiment_id": "experiment:baseline",
+        "challenge_experiment_id": "experiment:other-challenge",
+        "intervention_receipt_id": "falsification_intervention:uncovered",
+    }
+    proof = {
+        "hypothesis_id": "hypothesis:primary",
+        "intervention": {
+            "baseline_experiment_id": "experiment:baseline",
+            "challenge_experiment_id": "experiment:challenge",
+        },
+    }
+
+    assert mod._falsification_interventions_without_adapter_proof(
+        [covered, uncovered],
+        proof_adapter_receipts=[proof],
+    ) == [uncovered]
+    assert mod._falsification_interventions_without_adapter_proof(
+        [covered, uncovered],
+        proof_adapter_receipts=[{"hypothesis_id": "hypothesis:primary"}],
+    ) == [covered, uncovered]
+
+
 def test_attested_research_pytest_shared_helper_accepts_utf8_bom(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     dossier, replays = _attested_research_pytest_control(workspace)

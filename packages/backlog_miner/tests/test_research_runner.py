@@ -3319,6 +3319,65 @@ def test_unrelated_binding_error_cannot_excuse_direct_support_loss() -> None:
     assert basis == []
 
 
+def test_unknown_atom_finding_allows_only_that_invalid_coverage_role_to_be_removed() -> None:
+    valid_atom = "operational_failure:signature:occurrence"
+    unknown_atom = "operational_failure:signature:malformed-occurrence"
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:causal-control",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": [valid_atom, unknown_atom],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = [valid_atom]
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[
+            "research_dossier_experiment_addresses_unknown_atoms: "
+            "problem:case index=0 ids=['operational_failure:signature:malformed-occurrence']"
+        ],
+    )
+
+    assert unsupported_loss == []
+    assert basis == [
+        "validator_rejected_unknown_origin_atom["
+        "operational_failure:signature:malformed-occurrence]"
+    ]
+
+
+def test_unknown_atom_finding_cannot_excuse_removal_of_other_atom_coverage() -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:causal-control",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": ["run:valid", "run:other"],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = []
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[
+            "research_dossier_experiment_addresses_unknown_atoms: "
+            "problem:case index=0 ids=['run:other']"
+        ],
+    )
+
+    assert unsupported_loss == ["origin_atom[run:valid].direct_experimental_coverage"]
+    assert basis == ["validator_rejected_unknown_origin_atom[run:other]"]
+
+
 def test_verifier_rejected_falsification_can_be_removed_without_false_regression() -> None:
     hypothesis_id = "hypothesis:historical-worker-panic"
     attempt_id = "falsification:current-control"
