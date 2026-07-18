@@ -1541,9 +1541,35 @@ def _validate_proof_adapter_claim(value: Any, *, pid: str, index: int) -> list[s
                 f"{pid}: index={index}"
             )
         semantic_basis = positive.get("semantic_basis")
-        if not isinstance(semantic_basis, dict) or not _is_nonempty_string(
-            semantic_basis.get("kind")
-        ):
+        semantic_kind = (
+            semantic_basis.get("kind") if isinstance(semantic_basis, dict) else None
+        )
+        semantic_basis_valid = False
+        if semantic_kind == "origin_exact_value":
+            semantic_basis_valid = _is_nonempty_string(
+                semantic_basis.get("atom_id")
+            ) and _is_nonempty_string(semantic_basis.get("field_path"))
+        elif semantic_kind == "repository_fail_first_command":
+            semantic_basis_valid = True
+        elif semantic_kind == "repository_contract_quote":
+            semantic_path = semantic_basis.get("path")
+            semantic_basis_valid = (
+                semantic_basis.get("contract_type")
+                in {"api_contract", "documentation", "schema"}
+                and _is_nonempty_string(semantic_path)
+                and not str(semantic_path).startswith(("/", "\\"))
+                and ".." not in str(semantic_path).replace("\\", "/").split("/")
+                and _is_nonempty_string(semantic_basis.get("exact_quote"))
+            )
+        elif semantic_kind == "authenticated_semantic_citation":
+            semantic_basis_valid = (
+                _is_nonempty_string(semantic_basis.get("atom_id"))
+                and _is_nonempty_string(semantic_basis.get("field_path"))
+                and _is_nonempty_string(semantic_basis.get("semantic_relation"))
+                and isinstance(semantic_basis.get("semantic_rationale"), str)
+                and len(str(semantic_basis.get("semantic_rationale")).strip()) >= 20
+            )
+        if not semantic_basis_valid:
             errors.append(
                 f"research_dossier_proof_adapter_semantic_basis_invalid: {pid}: index={index}"
             )

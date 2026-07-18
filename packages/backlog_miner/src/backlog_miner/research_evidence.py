@@ -13876,6 +13876,46 @@ def _proof_adapter_receipts(
     return [by_id[key] for key in sorted(by_id)], diagnostics
 
 
+def _proof_adapter_failure_diagnostics(
+    *,
+    diagnostics: Sequence[Mapping[str, Any]],
+    fatal_mechanism_errors: Sequence[str],
+) -> list[str]:
+    """Expose adapter rejection reasons only when mechanism verification already failed.
+
+    Proof adapters are optional evidence paths, so an adapter diagnostic must not make an
+    otherwise verified dossier fail. When the declared mechanism is already unverifiable,
+    however, hiding the adapter's exact rejection behind generic causal-root errors prevents
+    the same author from repairing the proof it supplied.
+    """
+
+    if not fatal_mechanism_errors:
+        return []
+    errors: list[str] = []
+    for item in diagnostics:
+        experiment_id = _text(item.get("experiment_id"))
+        adapter_id = _text(item.get("adapter_id"))
+        diagnostic_values = item.get("diagnostics")
+        unit = [
+            str(value).strip()
+            for value in (
+                diagnostic_values if isinstance(diagnostic_values, list) else []
+            )
+            if isinstance(value, str) and value.strip()
+        ]
+        if experiment_id is None or adapter_id is None or not unit:
+            continue
+        errors.append(
+            "proof_adapter_unverified:"
+            + experiment_id
+            + ":"
+            + adapter_id
+            + ":"
+            + ",".join(dict.fromkeys(unit))
+        )
+    return errors
+
+
 def _clear_failed_receipt_success_projections(receipt: dict[str, Any]) -> None:
     """Keep a failed proof useful without retaining success-only projections."""
 
@@ -14144,6 +14184,12 @@ def verify_research_evidence(
         dossier, mechanism_errors
     )
     errors.extend(fatal_mechanism_errors)
+    errors.extend(
+        _proof_adapter_failure_diagnostics(
+            diagnostics=proof_adapter_diagnostics,
+            fatal_mechanism_errors=fatal_mechanism_errors,
+        )
+    )
     (
         verified_mechanism,
         verified_mechanism_sha256,

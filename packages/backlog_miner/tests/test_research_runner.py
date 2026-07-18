@@ -693,6 +693,25 @@ def test_repair_hint_explains_flat_tagged_proof_adapter_semantic_basis() -> None
     assert "do not invent evidence" in required_change
 
 
+def test_repair_hint_exposes_deep_proof_adapter_rejection() -> None:
+    error = (
+        "proof_adapter_unverified:experiment:runtime-control:structured_replay.v1:"
+        "repository_contract_quote_positive_basis_unattested"
+    )
+
+    hint = mod._research_retry_remediation_hints([error])[0]
+
+    assert hint["target_fields"] == [
+        "experiments[].proof_adapter.positive_outcome.semantic_basis",
+        "experiments[].proof_adapter.positive_outcome.predicate",
+        "experiments[].proof_adapter.observations",
+        "experiments[].proof_adapter.implementation_touchpoints",
+    ]
+    assert "trailing diagnostic" in hint["required_change"]
+    assert "api_contract, documentation, or schema" in hint["required_change"]
+    assert "authenticated_semantic_citation" in hint["required_change"]
+
+
 def test_repair_hint_explains_shared_harness_dependency_touchpoint_shape() -> None:
     hint = mod._research_retry_remediation_hints(
         [

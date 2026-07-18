@@ -1681,6 +1681,24 @@ def _research_retry_remediation_hints(
                 '{"equals":{...}} and do not reuse the experiment observable-assertion '
                 "shape {source,operator,expected}. Preserve the observed value and semantic basis."
             )
+        elif code == "proof_adapter_unverified":
+            target_fields = [
+                "experiments[].proof_adapter.positive_outcome.semantic_basis",
+                "experiments[].proof_adapter.positive_outcome.predicate",
+                "experiments[].proof_adapter.observations",
+                "experiments[].proof_adapter.implementation_touchpoints",
+            ]
+            required_change = (
+                "The trailing diagnostic names why the declared proof adapter could not be "
+                "attested. Correct that existing adapter using retained evidence rather than "
+                "adding a parallel proof. A repository_contract_quote supports only "
+                "contract_type api_contract, documentation, or schema and must satisfy the "
+                "corresponding inspected-file locator. When the positive predicate is a justified "
+                "interpretation of an authenticated source field rather than its exact value, use "
+                "authenticated_semantic_citation with the real atom_id, field_path, "
+                "semantic_relation, and a substantive semantic_rationale. Preserve the observed "
+                "selectors and implementation touchpoint unless the evidence disproves them."
+            )
         elif code == "research_dossier_proof_adapter_semantic_basis_invalid":
             target_fields = [
                 "experiments[].proof_adapter.positive_outcome.semantic_basis"

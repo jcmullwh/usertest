@@ -3526,6 +3526,52 @@ def test_partial_research_links_adapter_support_through_inspected_touchpoint_sym
     )
 
 
+def test_proof_adapter_rejects_semantic_basis_the_consumer_cannot_attest() -> None:
+    dossier = _valid_dossier(research_status="insufficient_evidence")
+    support = dossier["experiments"][0]
+    challenge = dossier["experiments"][2]
+    challenge["proof_adapter"] = {
+        "adapter_id": "structured_replay.v1",
+        "baseline_experiment_id": support["experiment_id"],
+        "challenge_experiment_id": challenge["experiment_id"],
+        "hypothesis_id": "h1",
+        "intervention": {
+            "kind": "parser_guard_delta",
+            "target": "parser.parse_record",
+            "predicted_polarity": "bad_to_good",
+        },
+        "observations": {
+            "baseline": {"source": "exit_code"},
+            "challenge": {"source": "exit_code"},
+        },
+        "positive_outcome": {
+            "predicate": {"kind": "equals", "expected": 0},
+            "semantic_basis": {
+                "kind": "repository_contract_quote",
+                "path": "src/parser.py",
+                "exact_quote": "return parsed",
+                "contract_type": "regression_test",
+            },
+        },
+    }
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert any("proof_adapter_semantic_basis_invalid" in error for error in errors)
+
+    challenge["proof_adapter"]["positive_outcome"]["semantic_basis"][
+        "contract_type"
+    ] = "api_contract"
+    corrected = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+    assert not any("proof_adapter_semantic_basis_invalid" in error for error in corrected)
+
+
 def test_historical_static_trace_shape_reports_exact_retryable_contract_errors() -> None:
     dossier = _valid_dossier(
         research_method="static_trace",

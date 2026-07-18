@@ -8006,6 +8006,28 @@ def test_proof_adapter_quote_cross_binding_requires_exact_same_contract() -> Non
     assert wrong_expected == semantic
 
 
+def test_failed_mechanism_surfaces_adapter_rejection_without_making_it_fatal() -> None:
+    diagnostics = [
+        {
+            "experiment_id": "experiment:challenge",
+            "adapter_id": "structured_replay.v1",
+            "diagnostics": ["repository_contract_quote_positive_basis_unattested"],
+        }
+    ]
+
+    assert mod._proof_adapter_failure_diagnostics(
+        diagnostics=diagnostics,
+        fatal_mechanism_errors=[],
+    ) == []
+    assert mod._proof_adapter_failure_diagnostics(
+        diagnostics=diagnostics,
+        fatal_mechanism_errors=["primary_hypothesis_mechanism_evidence_missing:h1"],
+    ) == [
+        "proof_adapter_unverified:experiment:challenge:structured_replay.v1:"
+        "repository_contract_quote_positive_basis_unattested"
+    ]
+
+
 def test_atom_binding_uses_structured_snapshot_output_without_ancillary_artifact() -> None:
     assignment = {
         "status": "complete",
