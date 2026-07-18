@@ -48,6 +48,7 @@ from usertest_backlog.workflows.problem_mining import (
     _relation_case_preview,
     _relation_decision_item_errors,
     _relation_review_payload,
+    _restore_historical_provisional_relation_context,
     _retained_relation_correction_candidate,
     _run_cross_job_problem_synthesis,
     _run_independently_reviewed_problem_pass,
@@ -77,6 +78,76 @@ from usertest_backlog.workflows.problem_mining_evidence import (
     problem_mining_evidence_receipt_ref,
     verify_problem_mining_evidence_receipt,
 )
+
+
+def test_historical_provisional_group_restores_complete_research_unit_membership() -> None:
+    relation_item = {
+        "problem_id": "problem:canonical",
+        "case_id": "case:canonical",
+        "case_member_problem_ids": ["problem:canonical"],
+    }
+    group = {
+        "schema_version": 1,
+        "status": "research_hypothesis",
+        "group_id": "provisional:shared-windows-failure",
+        "member_case_ids": ["case:member", "case:canonical"],
+        "member_problem_ids": ["problem:member", "problem:canonical"],
+        "member_facets": [
+            {
+                "case_id": "case:member",
+                "problem_id": "problem:member",
+                "evidence_atom_ids": ["atom:member"],
+                "source_evidence_atom_ids": ["atom:member"],
+            },
+            {
+                "case_id": "case:canonical",
+                "problem_id": "problem:canonical",
+                "evidence_atom_ids": ["atom:canonical"],
+                "source_evidence_atom_ids": ["atom:canonical"],
+            },
+        ],
+    }
+
+    _restore_historical_provisional_relation_context(
+        relation_item,
+        {
+            "case_identity_status": "provisional_same_cause",
+            "case_identity_candidate_ids": ["case:member", "case:canonical"],
+            "provisional_same_cause_group": group,
+        },
+    )
+
+    assert relation_item["case_member_problem_ids"] == [
+        "problem:member",
+        "problem:canonical",
+    ]
+    assert relation_item["provisional_same_cause_group"] == group
+
+
+def test_invalid_historical_provisional_group_cannot_widen_problem_membership() -> None:
+    relation_item = {
+        "problem_id": "problem:canonical",
+        "case_id": "case:canonical",
+        "case_member_problem_ids": ["problem:canonical"],
+    }
+
+    _restore_historical_provisional_relation_context(
+        relation_item,
+        {
+            "case_identity_status": "provisional_same_cause",
+            "case_identity_candidate_ids": ["case:member", "case:canonical"],
+            "provisional_same_cause_group": {
+                "schema_version": 1,
+                "status": "research_hypothesis",
+                "group_id": "provisional:invalid",
+                "member_case_ids": ["case:member", "case:canonical"],
+                "member_problem_ids": ["problem:injected", "problem:canonical"],
+                "member_facets": [],
+            },
+        },
+    )
+
+    assert relation_item["case_member_problem_ids"] == ["problem:canonical"]
 
 
 def _atom(atom_id: str = "atom:one", *, role: str = "observation") -> dict[str, object]:

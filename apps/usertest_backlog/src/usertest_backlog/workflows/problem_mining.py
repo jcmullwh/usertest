@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from backlog_core.case_lineage import (
     atom_disposition_receipt_errors,
+    provisional_same_cause_group_errors,
     source_evidence_snapshot_sha256,
     verified_causal_identities_from_case_registry,
     verified_mechanism_identities_from_case_registry,
@@ -42,6 +43,52 @@ from usertest_backlog.workflows.problem_mining_evidence import (
     parse_problem_mining_response_envelope,
     problem_mining_evidence_receipt_ref,
 )
+
+
+def _restore_historical_provisional_relation_context(
+    relation_item: dict[str, Any],
+    historical_context: Mapping[str, Any] | None,
+) -> None:
+    """Restore one authenticated provisional research unit onto a relation item.
+
+    Registry entries deliberately retain each provisional member as a separate durable
+    case, so an individual entry can name only its own problem ID.  The attached
+    provisional-group receipt is the runner-owned research-unit boundary and names all
+    member problems.  When that receipt is valid, the Stage-1 work unit must expose the
+    same problem membership or Stage 3 will correctly reject the contradictory packet.
+    Invalid historical groups remain visible but are not trusted to widen membership.
+    """
+
+    if not isinstance(historical_context, Mapping):
+        return
+    historical_provisional = historical_context.get("provisional_same_cause_group")
+    if not isinstance(historical_provisional, Mapping):
+        return
+
+    provisional_group = deepcopy(dict(historical_provisional))
+    relation_item["provisional_same_cause_group"] = provisional_group
+    relation_item["case_identity_status"] = historical_context.get(
+        "case_identity_status"
+    )
+    relation_item["case_identity_candidate_ids"] = _coerce_string_list(
+        historical_context.get("case_identity_candidate_ids")
+    )
+    integrity_errors = _coerce_string_list(
+        historical_context.get("provisional_same_cause_integrity_errors")
+    )
+    if integrity_errors:
+        relation_item["provisional_same_cause_integrity_errors"] = integrity_errors
+
+    case_id = _coerce_string(relation_item.get("case_id"))
+    group_errors = provisional_same_cause_group_errors(
+        provisional_group,
+        owning_case_id=case_id,
+    )
+    member_problem_ids = _coerce_string_list(
+        provisional_group.get("member_problem_ids")
+    )
+    if not group_errors and member_problem_ids:
+        relation_item["case_member_problem_ids"] = member_problem_ids
 
 
 def _render_problem_records_markdown(
@@ -6330,26 +6377,10 @@ def _run_problem_case_relation_review(
                 "runner_verified_causal_signature_v1"
             )
         historical_context = historical_context_by_case.get(case_id or "")
-        historical_provisional = (
-            historical_context.get("provisional_same_cause_group")
-            if isinstance(historical_context, Mapping)
-            else None
+        _restore_historical_provisional_relation_context(
+            relation_item,
+            historical_context,
         )
-        if isinstance(historical_provisional, Mapping):
-            relation_item["provisional_same_cause_group"] = deepcopy(
-                dict(historical_provisional)
-            )
-            relation_item["case_identity_status"] = historical_context.get(
-                "case_identity_status"
-            )
-            relation_item["case_identity_candidate_ids"] = _coerce_string_list(
-                historical_context.get("case_identity_candidate_ids")
-            )
-            integrity_errors = _coerce_string_list(
-                historical_context.get("provisional_same_cause_integrity_errors")
-            )
-            if integrity_errors:
-                relation_item["provisional_same_cause_integrity_errors"] = integrity_errors
     represented_case_ids = {
         case_id
         for record in relation_items
