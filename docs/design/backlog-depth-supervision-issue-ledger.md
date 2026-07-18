@@ -889,6 +889,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: attempt 32's passed/failed `probe_result` pair executes the production resolver and honestly declares only `runner_core.shell_capability._resolve_shell_capability` in `control_relationship.mechanism_symbols`. It challenges the claim that the parser's false result causes resolver blocking: if a passed probe still blocked, that causal link would be disproved. The proof adapter attested only that resolver subset, but `_falsification_attempt_receipts` substituted the full parser-plus-resolver hypothesis and emitted `shared_mechanism_subset_unverified` plus `primary_falsification_survival_missing`.
 - Correction: falsification now derives verified symbols from the adapter's actual mechanism graph and attested touchpoints, then requires exact agreement with the explicitly declared control subset and both experiment sides. It does not relax atom binding, command authorization, replay equality, assertion polarity, or source/outcome attestation. A general zero-error rescore materializer now appends an explicit `evidence_verification_rescore` terminal transition, retains the original authored attempt, requires a hash-bound model-free replay and verifier-finalized dossier, proves all model/upstream/downstream/Docker invocation counts are zero, and reruns persisted-evidence verification before downstream use.
 - Closure proof: the 126.622-second exact attempt-32 replay reduced two findings to zero. A second 119.873-second custody replay persisted the verifier-finalized dossier. Terminal materialization completed in about 6.2 seconds as attempt 34, with source attempt 32's 10-error frontier authenticated to an empty replacement frontier, full persisted-evidence verification green, and source files unchanged. Subscription provenance was rechecked as `Logged in using ChatGPT` under `C:\Users\jason\.codex`; all API-billing variables were blank. The correct case disposition is `evidence_sufficient` plus `already_addressed`, with `reproduction_status=partial` and the live-Docker boundary retained. It therefore terminates without optioning rather than generating a shallow ticket for code already fixed.
+- Fresh production confirmation: a new single-case Stage 3 at `U:\s3_docker_f0c83c71_run_20260718T042000` used one signed-in `gpt-5.6-terra` author session across five model calls and four same-author continuations. Its two output-contract findings corrected 2 -> 0; its verifier frontier corrected 19 -> 0, with an intermediate mechanically clean but substantively regressed candidate correctly retained for further repair rather than accepted or discarded. The final dossier binds the current operational aggregate and both source occurrences, directly checks the two source revisions against fix `b6191857`, replays their retained `aggregated_output` shape through current parser/resolver APIs, and ends `evidence_sufficient` / `already_addressed` with one explicit no-current-live-Docker boundary. Production Stage 4 at `U:\s3_docker_stage4_f0c83c71_run_20260718T045300` then recorded `not_required`, zero options, zero model calls, unchanged source hashes, the same 27 cases, and no Stage 5/6, export, ticket, implementation, removal, or Docker action.
 
 ### BDS-121 - Progression rejected the same author's valid readiness correction and forced a regression
 
@@ -1116,6 +1117,41 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor reporting-helper type error, not a model, pipeline-stage, or product failure
 - Exact evidence: the first elapsed-time command subtracted a `DateTimeOffset` start from the `DateTime` returned by `Get-Date`. PowerShell emitted `MethodCountCouldNotFindBest`, left the elapsed value null, and formatted a false zero duration. The ledger hash portion still completed.
 - Containment and result: the invalid duration was not written. The corrected command uses `DateTimeOffset::UtcNow` for both operands before updating the dashboard.
+
+### AN-31 - Read-only audit search had an unterminated PowerShell quote
+
+- Status: `closed_immediate_read_only_command_correction`
+- Classification: one supervisor audit-command syntax error, not a model, pipeline-stage, test, or product failure
+- Exact evidence: a helper search assembled a PowerShell command with a missing closing quote. The shell rejected it before `rg` executed, so it opened no evidence file and changed no state.
+- Containment and result: the search was reissued with a literal fixed-string expression. No model call, stage replay, artifact mutation, Docker action, or external action occurred.
+
+### AN-32 - Audit helper used a PowerShell JSON parameter unavailable on this host
+
+- Status: `closed_immediate_read_only_command_correction`
+- Classification: one supervisor audit-command compatibility error, not a pipeline or evidence-verifier failure
+- Exact evidence: the first dossier-shape inspection passed `-Depth 100` to this host's `ConvertFrom-Json`, which does not expose that parameter. PowerShell stopped before parsing the dossier.
+- Containment and result: the same immutable dossier was parsed with the host-supported command on the next invocation. No pipeline work or model work was repeated.
+
+### AN-33 - Audit helper supplied an invalid quoted regular expression to rg
+
+- Status: `closed_immediate_read_only_command_correction`
+- Classification: one supervisor audit-command quoting error, not a product search defect
+- Exact evidence: a PowerShell-quoted character-class expression reached `rg` as an unclosed class. `rg` rejected it before searching the research document.
+- Containment and result: the audit used explicit revision-field alternatives on the next command and completed against the same file. No stage or model work was consumed.
+
+### AN-34 - Repository-layout probe assumed absent root lock files
+
+- Status: `closed_immediate_read_only_command_correction`
+- Classification: one supervisor repository-inspection assumption, not a missing product dependency contract
+- Exact evidence: one read-only probe asked `rg` to inspect root `pyproject.toml` and `pdm.lock`, and a later dashboard-test search included a root `tests` directory. This repository revision has none of those three root paths. In both commands, the valid preceding inventory/search scope completed and only the nonexistent explicit path made `rg` return nonzero.
+- Containment and result: the next probes inspected the actual package layout, `requirements-dev.txt`, and tracked dashboard test path `tools/tests/test_update_backlog_depth_dashboard.py`. This is one repeated repository-layout assumption cluster; nothing was installed, created, removed, or rerun.
+
+### AN-35 - First Stage 4 preflight launcher omitted one repository source root
+
+- Status: `closed_preflight_correction_no_model_work`
+- Classification: one supervisor launcher/import error, not a Stage 4 or product failure
+- Exact evidence: the first Stage 4 no-change preflight manually listed repository source roots but omitted `packages/triage_engine/src`. Python stopped during import in 0.9 seconds with `ModuleNotFoundError: triage_engine`, before argument parsing, output-root creation, subscription preflight, stage execution, or model invocation.
+- Containment and result: the next launcher enumerated every existing `packages/*/src` directory from the sealed root. The model-free preflight passed in 6.9 seconds, and production Stage 4 completed in 7.844663 seconds with `not_required`, zero options, zero model calls, unchanged inputs, and no downstream or external action.
 
 ### AN-11 - Same-author correction launcher omitted required static path arguments
 

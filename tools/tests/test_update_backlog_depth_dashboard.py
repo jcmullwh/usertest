@@ -243,15 +243,15 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     current = lifecycle_runs[-1]
     assert current["lifecycle_id"] == "pipeline-cycle:338a373f:20260717"
     assert current["timing"]["start_at"] == "2026-07-17T03:10:20Z"
-    assert current["rework"]["author_invocations"] == 147
-    assert current["rework"]["continuation_launches"] == 80
-    assert current["rework"]["stage_reruns"] == 25
+    assert current["rework"]["author_invocations"] == 152
+    assert current["rework"]["continuation_launches"] == 84
+    assert current["rework"]["stage_reruns"] == 27
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 67
-    assert current["automatic_self_corrections"]["count"] == 19
-    assert current["supervisor_interventions"]["count"] == 85
+    assert current["errors"]["count"] == 73
+    assert current["automatic_self_corrections"]["count"] == 21
+    assert current["supervisor_interventions"]["count"] == 91
     assert current["furthest_stage"] == (
-        "Stage 4 complete for second current case; corrected Stage 2 schedule ready for "
+        "Stage 4 complete for third current case; corrected Stage 2 schedule ready for "
         "next distinct case"
     )
 
