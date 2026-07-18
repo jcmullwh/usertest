@@ -891,6 +891,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
         "evidence_verification_invalid",
         "evidence_verification_rescore_valid",
         "evidence_verification_promotion_valid",
+        "evidence_verification_persistence_replay_valid",
         "external_wait",
     }
     valid_attempt_kinds = {
@@ -902,6 +903,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
         "evidence_verification_research_continuation",
         "evidence_verification_rescore",
         "evidence_verification_promotion",
+        "evidence_verification_persistence_replay",
     }
     errors: list[str] = []
     seen_numbers: set[int] = set()
@@ -1099,6 +1101,38 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                 ):
                     errors.append(
                         f"research_dossier_evidence_verification_promotion_invalid: "
+                        f"{pid}: index={index}"
+                    )
+            elif attempt_kind == "evidence_verification_persistence_replay":
+                progress = attempt.get("repair_progress")
+                defect_ids = (
+                    progress.get("persistence_defect_ids")
+                    if isinstance(progress, dict)
+                    else None
+                )
+                if (
+                    not _valid_sha256(source_attempt_sha256)
+                    or not _valid_sha256(baseline_dossier_sha256)
+                    or baseline_projection_sha256 is not None
+                    or repair_contract_sha256 is not None
+                    or authorized_paths != []
+                    or attempt.get("validation_errors_before") != []
+                    or attempt.get("validation_errors_after") != []
+                    or attempt.get("outcome")
+                    != "evidence_verification_persistence_replay_valid"
+                    or not isinstance(progress, dict)
+                    or progress.get("decision") != "accepted"
+                    or not _is_nonempty_string(progress.get("reason"))
+                    or progress.get("model_invocation_count") != 0
+                    or not _is_nonempty_string(progress.get("replay_receipt_path"))
+                    or not _valid_sha256(progress.get("replay_receipt_sha256"))
+                    or not _valid_sha256(progress.get("replay_receipt_self_sha256"))
+                    or not isinstance(defect_ids, list)
+                    or not defect_ids
+                    or any(not _is_nonempty_string(item) for item in defect_ids)
+                ):
+                    errors.append(
+                        f"research_dossier_evidence_verification_persistence_replay_invalid: "
                         f"{pid}: index={index}"
                     )
             else:
@@ -1363,6 +1397,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                 "evidence_verification_research_continuation",
                 "evidence_verification_rescore",
                 "evidence_verification_promotion",
+                "evidence_verification_persistence_replay",
             }
             for kind in kinds[1:]
         ):
@@ -1482,6 +1517,22 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                                 f"research_dossier_promotion_attempt_binding_invalid: "
                                 f"{pid}: index={index}"
                             )
+                    if attempt.get(
+                        "attempt_kind"
+                    ) == "evidence_verification_persistence_replay" and (
+                        attempt.get("attempted_dossier")
+                        != source_attempt.get("attempted_dossier")
+                        or attempt.get("agent_session_id")
+                        != source_attempt.get("agent_session_id")
+                        or attempt.get("observed_agent_session_id")
+                        != source_attempt.get("observed_agent_session_id")
+                        or attempt.get("resumed_from_session_id")
+                        != source_attempt.get("agent_session_id")
+                    ):
+                        errors.append(
+                            f"research_dossier_persistence_replay_attempt_binding_invalid: "
+                            f"{pid}: index={index}"
+                        )
             attempt_hash = attempt.get("attempt_sha256")
             if isinstance(attempt_hash, str):
                 prior_hashes.add(attempt_hash)

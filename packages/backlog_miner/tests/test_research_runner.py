@@ -9256,6 +9256,122 @@ def test_verified_zero_error_rescore_completes_without_model_invocation(
     assert len(persisted) == 1
 
 
+def test_verified_persistence_replay_completes_zero_error_author_without_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    revision = _init_workspace(workspace)
+    source_run = tmp_path / "source-run"
+    copied_run = tmp_path / "copied-run"
+    for run_dir in (source_run, copied_run):
+        run_dir.mkdir()
+        _write_json(run_dir / "report.json", {"status": "complete"})
+        _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        _write_json(
+            run_dir / "target_ref.json",
+            {"agent": "codex", "ref": revision, "commit_sha": revision},
+        )
+        (run_dir / "normalized_events.jsonl").write_text("", encoding="utf-8")
+    session_id = "11111111-1111-4111-8111-111111111111"
+    candidate = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "evidence_sufficient",
+    }
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="repair_contract_valid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=[],
+        attempted_dossier=candidate,
+        attempt_kind="evidence_verification_research_continuation",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+    )
+    assignment = {"expected_atom_ids": ["atom:one"], "status": "complete"}
+    retained = {
+        **candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "evidence_verification": {
+            "status": "failed",
+            "errors": ["research_evidence_event_source_attempt_unmatched:0"],
+        },
+        "research_attempts": [source_attempt],
+    }
+    prepared = {
+        **candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+    }
+    verification = {
+        "status": "verified",
+        "errors": [],
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "run_dir": str(copied_run),
+        "planning_workspace_dir": str(workspace),
+        "claims_sha256": research_claims_sha256(prepared),
+    }
+    verification["receipt_sha256"] = evidence_verification_sha256(verification)
+    prepared_path = tmp_path / "verified-prepared.json"
+    _write_json(prepared_path, prepared)
+    replay = {
+        "kind": "stage3_persistence_model_free_evidence_replay",
+        "state": "completed",
+        "source_run_unchanged": True,
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "current_attempt_sha256": source_attempt["attempt_sha256"],
+        "candidate_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "copied_run": str(copied_run),
+        "raw_error_count": 0,
+        "errors": [],
+        "model_invocation_count": 0,
+        "stage1_or_stage2_invocation_count": 0,
+        "downstream_invocation_count": 0,
+        "docker_invocation_count": 0,
+        "verified_prepared_dossier": str(prepared_path),
+        "verified_prepared_dossier_sha256": sha256(prepared_path.read_bytes()).hexdigest(),
+        "verification": verification,
+    }
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    replay_path = tmp_path / "model-free-replay.json"
+    _write_json(replay_path, replay)
+    persisted: list[dict[str, object]] = []
+
+    def verify_persisted(dossier: dict[str, object]) -> tuple[bool, list[str]]:
+        persisted.append(dossier)
+        return True, []
+
+    monkeypatch.setattr(mod, "verify_persisted_research_evidence", verify_persisted)
+
+    result = mod.materialize_verified_research_persistence_replay(
+        dossier=retained,
+        replay_receipt_path=replay_path,
+        persistence_defect_ids=["BDS-test"],
+        reason="persist the recovered evidence-source catalog",
+    )
+
+    assert result["status"] == "corrected"
+    assert result["validation_errors"] == []
+    assert result["model_invocation_count"] == 0
+    terminal = result["dossier"]["research_attempts"][-1]
+    assert terminal["attempt_kind"] == "evidence_verification_persistence_replay"
+    assert terminal["outcome"] == "evidence_verification_persistence_replay_valid"
+    assert terminal["source_attempt_sha256"] == source_attempt["attempt_sha256"]
+    assert terminal["validation_errors_before"] == []
+    assert terminal["validation_errors_after"] == []
+    assert terminal["repair_progress"]["persistence_defect_ids"] == ["BDS-test"]
+    assert terminal["repair_progress"]["model_invocation_count"] == 0
+    assert len(persisted) == 1
+
+
 def _promotion_materialization_fixture(
     tmp_path: Path,
 ) -> tuple[dict[str, object], Path, str]:

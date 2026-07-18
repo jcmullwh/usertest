@@ -3761,6 +3761,196 @@ def materialize_verified_research_validation_error_rescore(
     }
 
 
+def materialize_verified_research_persistence_replay(
+    *,
+    dossier: Mapping[str, Any],
+    replay_receipt_path: str | Path,
+    persistence_defect_ids: Sequence[str],
+    reason: str,
+) -> dict[str, Any]:
+    """Promote unchanged zero-error research after repairing receipt persistence.
+
+    The author has no correction to make in this state: its latest attempt already
+    passed the model and evidence contracts, while the runner failed only when it
+    tried to revalidate the finalized receipt. A complete zero-model replay under the
+    corrected runner must independently verify the exact authored dossier before this
+    transition can complete Stage 3.
+    """
+
+    retained = json.loads(json.dumps(dict(dossier), ensure_ascii=False))
+    attempts_raw = retained.get("research_attempts")
+    attempts = (
+        [dict(item) for item in attempts_raw if isinstance(item, Mapping)]
+        if isinstance(attempts_raw, list)
+        else []
+    )
+    normalized_reason = _coerce_str(reason)
+    normalized_defect_ids = _dedupe_validation_errors(
+        _string_list(list(persistence_defect_ids))
+    )
+    replay_path = Path(replay_receipt_path).resolve()
+    try:
+        replay = _load_json_object(replay_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("research_persistence_replay_receipt_invalid") from exc
+    source_sha256 = _coerce_str(replay.get("current_attempt_sha256"))
+    source_matches = [
+        (index, attempt)
+        for index, attempt in enumerate(attempts)
+        if attempt.get("attempt_sha256") == source_sha256
+    ]
+    if (
+        len(source_matches) != 1
+        or source_matches[0][0] != len(attempts) - 1
+        or normalized_reason is None
+        or not normalized_defect_ids
+    ):
+        raise ValueError("research_persistence_replay_source_not_exact")
+    source_attempt = source_matches[0][1]
+    failed_receipt_raw = retained.get("evidence_verification")
+    failed_receipt = (
+        failed_receipt_raw if isinstance(failed_receipt_raw, Mapping) else {}
+    )
+    if (
+        source_attempt.get("attempt_sha256")
+        != research_attempt_sha256(source_attempt)
+        or source_attempt.get("validation_errors_after") != []
+        or not isinstance(source_attempt.get("attempted_dossier"), Mapping)
+        or failed_receipt.get("status") != "failed"
+        or not _string_list(failed_receipt.get("errors"))
+    ):
+        raise ValueError("research_persistence_replay_source_frontier_invalid")
+
+    replay_without_hash = {key: value for key, value in replay.items() if key != "receipt_sha256"}
+    invocation_fields = (
+        "model_invocation_count",
+        "stage1_or_stage2_invocation_count",
+        "downstream_invocation_count",
+        "docker_invocation_count",
+    )
+    if (
+        not str(replay.get("kind") or "").endswith("_model_free_evidence_replay")
+        or replay.get("state") != "completed"
+        or replay.get("source_run_unchanged") is not True
+        or replay.get("raw_error_count") != 0
+        or _string_list(replay.get("errors"))
+        or any(replay.get(field) != 0 for field in invocation_fields)
+        or replay.get("receipt_sha256") != _canonical_json_sha256(replay_without_hash)
+        or replay.get("candidate_dossier_sha256")
+        != source_attempt.get("attempted_dossier_sha256")
+    ):
+        raise ValueError("research_persistence_replay_custody_invalid")
+
+    prepared_path_raw = _coerce_str(replay.get("verified_prepared_dossier"))
+    prepared_sha256 = _coerce_str(replay.get("verified_prepared_dossier_sha256"))
+    prepared_path = Path(prepared_path_raw).resolve() if prepared_path_raw is not None else None
+    if (
+        prepared_path is None
+        or not prepared_path.is_file()
+        or prepared_sha256 is None
+        or sha256(prepared_path.read_bytes()).hexdigest() != prepared_sha256
+    ):
+        raise ValueError("research_persistence_replay_prepared_dossier_invalid")
+    try:
+        prepared = _load_json_object(prepared_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("research_persistence_replay_prepared_dossier_unreadable") from exc
+    if _model_owned_dossier_projection(prepared) != _model_owned_dossier_projection(
+        source_attempt["attempted_dossier"]
+    ):
+        raise ValueError("research_persistence_replay_authored_claims_changed")
+
+    verification_raw = replay.get("verification")
+    verification = (
+        json.loads(json.dumps(verification_raw, ensure_ascii=False))
+        if isinstance(verification_raw, Mapping)
+        else {}
+    )
+    copied_run_raw = _coerce_str(replay.get("copied_run"))
+    copied_run = Path(copied_run_raw).resolve() if copied_run_raw is not None else None
+    if (
+        verification.get("status") != "verified"
+        or _string_list(verification.get("errors"))
+        or verification.get("receipt_sha256")
+        != evidence_verification_sha256(verification)
+        or verification.get("claims_sha256") != research_claims_sha256(prepared)
+        or copied_run is None
+        or not copied_run.is_dir()
+        or Path(str(verification.get("run_dir") or "")).resolve() != copied_run
+    ):
+        raise ValueError("research_persistence_replay_verification_invalid")
+    for field in ("case_id", "problem_id", "repo_revision"):
+        if (
+            prepared.get(field) != retained.get(field)
+            or verification.get(field) != retained.get(field)
+            or replay.get(field) != retained.get(field)
+        ):
+            raise ValueError(f"research_persistence_replay_{field}_changed")
+    if prepared.get("evidence_assignment") != retained.get("evidence_assignment"):
+        raise ValueError("research_persistence_replay_assignment_changed")
+
+    session_id = _coerce_str(source_attempt.get("agent_session_id"))
+    observed_session_id = _coerce_str(source_attempt.get("observed_agent_session_id"))
+    attempt_number = max(
+        [
+            int(attempt.get("attempt_number"))
+            for attempt in attempts
+            if isinstance(attempt.get("attempt_number"), int)
+            and not isinstance(attempt.get("attempt_number"), bool)
+        ],
+        default=0,
+    ) + 1
+    terminal = _research_attempt_record(
+        attempt_number=attempt_number,
+        outcome="evidence_verification_persistence_replay_valid",
+        run_dir=copied_run,
+        report_path=copied_run / "report.json",
+        validation_errors=[],
+        attempted_dossier=json.loads(
+            json.dumps(source_attempt["attempted_dossier"], ensure_ascii=False)
+        ),
+        attempt_kind="evidence_verification_persistence_replay",
+        source_attempt_sha256=source_sha256,
+        baseline_dossier_sha256=source_attempt.get("attempted_dossier_sha256"),
+        validation_errors_before=[],
+        agent_session_id=session_id,
+        observed_agent_session_id=observed_session_id,
+        resumed_from_session_id=session_id,
+        attempt_wall_seconds=0.0,
+        repair_progress={
+            "decision": "accepted",
+            "reason": normalized_reason,
+            "model_invocation_count": 0,
+            "persistence_defect_ids": normalized_defect_ids,
+            "replay_receipt_path": str(replay_path),
+            "replay_receipt_sha256": sha256(replay_path.read_bytes()).hexdigest(),
+            "replay_receipt_self_sha256": replay.get("receipt_sha256"),
+        },
+    )
+    prepared["evidence_verification"] = verification
+    prepared["run_dir"] = str(copied_run)
+    prepared["repo_workspace"] = _coerce_str(verification.get("planning_workspace_dir"))
+    _set_research_attempts(prepared, [*attempts, terminal])
+    persisted_valid, persisted_errors = verify_persisted_research_evidence(prepared)
+    if not persisted_valid or persisted_errors:
+        raise ValueError(
+            "research_persistence_replay_persisted_evidence_invalid:"
+            + ",".join(_dedupe_validation_errors(persisted_errors))
+        )
+    return {
+        "status": "corrected",
+        "dossier": prepared,
+        "validation_errors": [],
+        "source_attempt_sha256": source_sha256,
+        "attempts": [terminal],
+        "repair_run_dirs": [],
+        "expected_session_id": session_id,
+        "observed_session_id": observed_session_id,
+        "model_invocation_count": 0,
+        "authored_work_disposition": "retained",
+    }
+
+
 def materialize_verified_research_attempt_promotion(
     *,
     dossier: Mapping[str, Any],

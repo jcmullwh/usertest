@@ -3956,6 +3956,53 @@ def test_research_attempt_rescore_accepts_zero_model_terminal_transition() -> No
     )
 
 
+def test_research_attempt_accepts_zero_model_persistence_replay_transition() -> None:
+    attempts, _ = _rescore_attempt_chain()
+    source = attempts[-1]
+    terminal: dict[str, object] = {
+        "attempt_number": 3,
+        "attempt_kind": "evidence_verification_persistence_replay",
+        "outcome": "evidence_verification_persistence_replay_valid",
+        "run_dir": "C:/retained/persistence-replay-3",
+        "report_path": "C:/retained/persistence-replay-3/report.json",
+        "validation_errors": [],
+        "validation_errors_before": [],
+        "validation_errors_after": [],
+        "attempted_dossier": deepcopy(source["attempted_dossier"]),
+        "attempted_dossier_sha256": source["attempted_dossier_sha256"],
+        "source_attempt_sha256": source["attempt_sha256"],
+        "authorized_paths": [],
+        "baseline_dossier_sha256": source["attempted_dossier_sha256"],
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": source["agent_session_id"],
+        "observed_agent_session_id": source["observed_agent_session_id"],
+        "resumed_from_session_id": source["agent_session_id"],
+        "attempt_wall_seconds": 0.0,
+        "repair_progress": {
+            "decision": "accepted",
+            "reason": "verified unchanged research after persistence repair",
+            "model_invocation_count": 0,
+            "persistence_defect_ids": ["BDS-test"],
+            "replay_receipt_path": "C:/retained/persistence-replay.json",
+            "replay_receipt_sha256": "d" * 64,
+            "replay_receipt_self_sha256": "e" * 64,
+        },
+        "attempt_artifacts": deepcopy(source["attempt_artifacts"]),
+    }
+    terminal["attempt_sha256"] = contracts.research_attempt_sha256(terminal)
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = [*attempts, terminal]
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert parsed[0]["research_attempts"][-1]["attempt_kind"] == (
+        "evidence_verification_persistence_replay"
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
