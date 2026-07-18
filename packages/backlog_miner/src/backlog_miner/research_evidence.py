@@ -4579,8 +4579,7 @@ def _harness_mechanism_touches(
         if assertion_field is not None:
             field_name, _field_value = assertion_field
             field_names: set[tuple[ast.AST | None, str]] = set()
-            for assignment in assignments:
-                value = assignment.value
+            for value in ast.walk(tree):
                 if not isinstance(value, ast.Dict):
                     continue
                 matching_values = [
@@ -4596,6 +4595,13 @@ def _harness_mechanism_touches(
                     )
                     for child in matching_values
                 ):
+                    continue
+                direct_sink = observable_sink(value)
+                if sink_matches_assertion_source(direct_sink):
+                    assert direct_sink is not None
+                    return direct_sink, value
+                assignment = parents.get(value)
+                if not isinstance(assignment, (ast.Assign, ast.AnnAssign)):
                     continue
                 targets = (
                     assignment.targets
@@ -13567,6 +13573,32 @@ def _resolved_proof_adapter_semantic_basis(
     if semantic_basis.get("kind") != "repository_contract_quote":
         return resolved
 
+    intervention = claim.get("intervention")
+    target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
+    locator = _text(semantic_basis.get("locator"))
+    touchpoints_raw = claim.get("implementation_touchpoints")
+    if (
+        semantic_basis.get("contract_type") == "api_contract"
+        and _text(semantic_basis.get("symbol")) is None
+        and locator is not None
+        and locator == target
+    ):
+        locator_candidates = {
+            str(symbol).strip()
+            for touchpoint in (touchpoints_raw if isinstance(touchpoints_raw, list) else [])
+            if isinstance(touchpoint, Mapping)
+            and _text(touchpoint.get("path")) == _text(semantic_basis.get("path"))
+            and _text(touchpoint.get("causal_locator")) == locator
+            for symbol in (
+                touchpoint.get("symbols")
+                if isinstance(touchpoint.get("symbols"), list)
+                else []
+            )
+            if _text(symbol) is not None
+        }
+        if len(locator_candidates) == 1:
+            resolved["symbol"] = next(iter(locator_candidates))
+
     positive_contract = experiment.get("positive_outcome_contract")
     retained_basis = (
         positive_contract.get("semantic_basis") if isinstance(positive_contract, Mapping) else None
@@ -13594,9 +13626,6 @@ def _resolved_proof_adapter_semantic_basis(
     if resolved.get("contract_type") != "api_contract" or _text(resolved.get("symbol")):
         return resolved
 
-    intervention = claim.get("intervention")
-    target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
-    touchpoints_raw = claim.get("implementation_touchpoints")
     candidates = {
         str(symbol).strip()
         for touchpoint in (touchpoints_raw if isinstance(touchpoints_raw, list) else [])

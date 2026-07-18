@@ -621,6 +621,8 @@ def test_output_retry_projection_and_field_hints_are_content_addressed() -> None
         "experiments[].control_relationship",
     ]
     assert "identical addressed source atoms" in hints[4]["required_change"]
+    assert "exact match only for disproved" in hints[4]["required_change"]
+    assert "same-source complement for survived" in hints[4]["required_change"]
 
 
 def test_repair_hints_give_exact_shapes_for_common_nondeterministic_errors() -> None:

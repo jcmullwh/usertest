@@ -7884,6 +7884,41 @@ def test_harness_mechanism_flow_follows_local_return_and_exact_json_field(
     assert link is None
 
 
+@pytest.mark.parametrize("operator", ["contains", "not_contains"])
+def test_harness_mechanism_flow_accepts_tainted_inline_json_field(
+    tmp_path: Path,
+    operator: str,
+) -> None:
+    workspace = tmp_path / "replay"
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text(
+        "import json\n"
+        "from core import run\n"
+        "result = run()\n"
+        "print(json.dumps({'reason_code': result[0], 'state': 'blocked'}))\n",
+        encoding="utf-8",
+    )
+
+    _, touched, link = mod._harness_mechanism_touches(
+        replay={
+            "executed_argv": ["python", ".usertest_research/probe.py"],
+            "workspace_dir": str(workspace),
+        },
+        mechanism_symbols=["core.run"],
+        symbol_paths={"core.run": "src/core.py"},
+        observable_assertion={
+            "source": "stdout",
+            "operator": operator,
+            "expected": '"reason_code": "shell_probe_failed"',
+        },
+    )
+
+    assert touched == ["core.run"]
+    assert link is not None
+    assert link["symbol_sinks"] == [{"symbol": "core.run", "sink": "stdout"}]
+
+
 def test_harness_mechanism_touch_resolves_function_local_imports(
     tmp_path: Path,
 ) -> None:
@@ -8131,6 +8166,43 @@ def test_proof_adapter_quote_cross_binding_requires_exact_same_contract() -> Non
         predicate={"kind": "equals", "expected": "blocked"},
     )
     assert wrong_expected == semantic
+
+
+def test_proof_adapter_quote_resolves_exact_intervention_locator_without_legacy_contract() -> None:
+    path = "packages/runner_core/src/runner_core/shell_capability.py"
+    locator = "runner_core.shell_capability._codex_shell_probe_failure_reason"
+    semantic = {
+        "kind": "repository_contract_quote",
+        "contract_type": "api_contract",
+        "path": path,
+        "exact_quote": 'return "codex_windows_sandbox_panic"',
+        "locator": locator,
+    }
+    claim = {
+        "intervention": {"target": locator},
+        "implementation_touchpoints": [
+            {
+                "causal_locator": locator,
+                "path": path,
+                "symbols": [locator],
+            }
+        ],
+    }
+
+    resolved = mod._resolved_proof_adapter_semantic_basis(
+        experiment={},
+        claim=claim,
+        semantic_basis=semantic,
+        predicate={"kind": "contains", "expected": "codex_windows_sandbox_panic"},
+    )
+
+    assert resolved == {**semantic, "symbol": locator}
+    assert mod._resolved_proof_adapter_semantic_basis(
+        experiment={},
+        claim={**claim, "intervention": {"target": "different"}},
+        semantic_basis=semantic,
+        predicate={"kind": "contains", "expected": "codex_windows_sandbox_panic"},
+    ) == semantic
 
 
 def test_failed_mechanism_surfaces_adapter_rejection_without_making_it_fatal() -> None:
