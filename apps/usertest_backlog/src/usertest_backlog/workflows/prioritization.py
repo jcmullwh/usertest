@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from backlog_core import provisional_same_cause_group_errors
 from backlog_miner.prompt_correction import (
     CorrectionRunResult,
     acquire_author_session,
@@ -27,6 +28,7 @@ _PRIORITY_FORBIDDEN_SOLUTION_FIELDS = frozenset(
 )
 
 _RESEARCH_ROUTE_REVISION = "runner_research_route_v3"
+_PROVISIONAL_RESEARCH_UNIT_WAIT_ROUTE = "await_provisional_research_unit"
 _RESEARCH_DISPATCH_ROUTES = frozenset(
     {"research_new", "research_update", "resume_prior", "reassess_actionability"}
 )
@@ -39,8 +41,9 @@ _RESEARCH_ROUTE_ORDER = {
     "resume_prior": 2,
     "reassess_actionability": 3,
     "await_evidence": 4,
-    "continue_downstream": 5,
-    "await_outcome": 6,
+    _PROVISIONAL_RESEARCH_UNIT_WAIT_ROUTE: 5,
+    "continue_downstream": 6,
+    "await_outcome": 7,
 }
 _PRIORITY_BUCKET_ORDER = {"p0": 0, "p1": 1, "p2": 2, "p3": 3, "watch": 4}
 
@@ -505,6 +508,230 @@ def _enforce_full_drain_research_policy(decisions: list[dict[str, Any]]) -> None
     """Compatibility wrapper for callers; routing now replaces unconditional full drain."""
 
     _enforce_research_routing_policy(decisions)
+
+
+def _priority_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        )
+    )
+
+
+def _apply_provisional_research_unit_schedule(
+    *,
+    decisions: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+) -> list[str]:
+    """Dispatch one evidence-complete provisional group as one research unit.
+
+    Provisional grouping does not merge durable cases.  It only prevents Stage 3 from
+    researching the same hypothesized cause twice when relation review has nominated one
+    evidence-complete research unit.  Fail open to independent scheduling whenever the
+    packet is inconsistent or a non-unit member carries retained research state that
+    cannot safely be transferred to the nominated author assignment.
+    """
+
+    records_by_problem_id = {
+        str(record["problem_id"]): record
+        for record in problem_records
+        if isinstance(record, dict)
+        and isinstance(record.get("problem_id"), str)
+        and str(record["problem_id"]).strip()
+    }
+    decisions_by_problem_id: dict[str, list[dict[str, Any]]] = {}
+    for decision in decisions:
+        problem_id = _coerce_string(decision.get("problem_id"))
+        if problem_id is not None:
+            decisions_by_problem_id.setdefault(problem_id, []).append(decision)
+
+    grouped_records: dict[str, list[dict[str, Any]]] = {}
+    warnings: list[str] = []
+    for record in problem_records:
+        if record.get("case_identity_status") != "provisional_same_cause":
+            continue
+        group_raw = record.get("provisional_same_cause_group")
+        group = group_raw if isinstance(group_raw, Mapping) else {}
+        group_id = _coerce_string(group.get("group_id"))
+        if group_id is None:
+            problem_id = _coerce_string(record.get("problem_id")) or "(missing)"
+            warnings.append(
+                f"provisional_research_schedule_group_id_missing:{problem_id}"
+            )
+            continue
+        grouped_records.setdefault(group_id, []).append(record)
+
+    for group_id, observed_records in sorted(grouped_records.items()):
+        exemplar_raw = observed_records[0].get("provisional_same_cause_group")
+        exemplar = exemplar_raw if isinstance(exemplar_raw, Mapping) else {}
+        member_problem_ids = _priority_string_list(exemplar.get("member_problem_ids"))
+        member_case_ids = _priority_string_list(exemplar.get("member_case_ids"))
+        research_unit_case_id = _coerce_string(exemplar.get("research_unit_case_id"))
+        group_errors: list[str] = []
+        facet_source_atom_ids: list[str] = []
+
+        for record in observed_records:
+            record_problem_id = _coerce_string(record.get("problem_id")) or "(missing)"
+            record_case_id = _coerce_string(record.get("case_id"))
+            group_raw = record.get("provisional_same_cause_group")
+            group = group_raw if isinstance(group_raw, Mapping) else {}
+            group_errors.extend(
+                f"{record_problem_id}:{error}"
+                for error in provisional_same_cause_group_errors(
+                    group_raw,
+                    owning_case_id=record_case_id,
+                )
+            )
+            if _coerce_string(group.get("group_id")) != group_id:
+                group_errors.append(f"{record_problem_id}:group_id_mismatch")
+            if set(_priority_string_list(group.get("member_problem_ids"))) != set(
+                member_problem_ids
+            ):
+                group_errors.append(f"{record_problem_id}:member_problem_ids_mismatch")
+            if set(_priority_string_list(group.get("member_case_ids"))) != set(
+                member_case_ids
+            ):
+                group_errors.append(f"{record_problem_id}:member_case_ids_mismatch")
+            if _coerce_string(group.get("research_unit_case_id")) != research_unit_case_id:
+                group_errors.append(f"{record_problem_id}:research_unit_case_id_mismatch")
+            for facet in (
+                group.get("member_facets")
+                if isinstance(group.get("member_facets"), list)
+                else []
+            ):
+                if isinstance(facet, Mapping):
+                    facet_source_atom_ids.extend(
+                        _priority_string_list(facet.get("source_evidence_atom_ids"))
+                    )
+
+        member_records = [
+            records_by_problem_id[problem_id]
+            for problem_id in member_problem_ids
+            if problem_id in records_by_problem_id
+        ]
+        if len(member_records) != len(member_problem_ids):
+            group_errors.append("member_problem_record_missing")
+        if {
+            _coerce_string(record.get("case_id")) for record in member_records
+        } != set(member_case_ids):
+            group_errors.append("member_case_record_mismatch")
+        member_decisions = [
+            decisions_by_problem_id[problem_id][0]
+            for problem_id in member_problem_ids
+            if len(decisions_by_problem_id.get(problem_id, [])) == 1
+        ]
+        if len(member_decisions) != len(member_problem_ids):
+            group_errors.append("member_priority_decision_missing_or_duplicated")
+        unit_records = [
+            record
+            for record in member_records
+            if _coerce_string(record.get("case_id")) == research_unit_case_id
+        ]
+        if research_unit_case_id is None or len(unit_records) != 1:
+            group_errors.append("research_unit_record_invalid")
+
+        source_atom_ids = list(dict.fromkeys(facet_source_atom_ids))
+        unit_record = unit_records[0] if len(unit_records) == 1 else None
+        unit_problem_id = (
+            _coerce_string(unit_record.get("problem_id"))
+            if unit_record is not None
+            else None
+        )
+        unit_evidence = {
+            *_priority_string_list(
+                unit_record.get("source_evidence_atom_ids")
+                if unit_record is not None
+                else []
+            ),
+            *_priority_string_list(
+                unit_record.get("evidence_atom_ids") if unit_record is not None else []
+            ),
+        }
+        if not source_atom_ids or not set(source_atom_ids).issubset(unit_evidence):
+            group_errors.append("research_unit_source_evidence_incomplete")
+
+        unit_decision = (
+            decisions_by_problem_id.get(unit_problem_id or "", [None])[0]
+            if len(decisions_by_problem_id.get(unit_problem_id or "", [])) == 1
+            else None
+        )
+        if not isinstance(unit_decision, dict) or unit_decision.get(
+            "selected_for_research"
+        ) is not True:
+            group_errors.append("research_unit_not_selected")
+
+        for member_decision in member_decisions:
+            if member_decision is unit_decision:
+                continue
+            if member_decision.get("selected_for_research") is not True:
+                continue
+            member_route = _coerce_string(member_decision.get("research_route"))
+            if member_route != "research_new":
+                group_errors.append(
+                    "nonunit_retained_research_state_requires_independent_dispatch:"
+                    + (_coerce_string(member_decision.get("problem_id")) or "(missing)")
+                    + ":"
+                    + (member_route or "(missing)")
+                )
+
+        if group_errors:
+            warnings.extend(
+                f"provisional_research_schedule_not_collapsed:{group_id}:{error}"
+                for error in dict.fromkeys(group_errors)
+            )
+            continue
+
+        assert isinstance(unit_decision, dict)
+        assert unit_problem_id is not None
+        schedule_base = {
+            "schema_version": 1,
+            "group_id": group_id,
+            "research_unit_case_id": research_unit_case_id,
+            "research_unit_problem_id": unit_problem_id,
+            "member_case_ids": member_case_ids,
+            "member_problem_ids": member_problem_ids,
+            "source_evidence_atom_ids": source_atom_ids,
+        }
+        for member_decision in member_decisions:
+            member_problem_id = _coerce_string(member_decision.get("problem_id"))
+            member_decision.setdefault(
+                "individual_research_route", member_decision.get("research_route")
+            )
+            member_decision.setdefault(
+                "individual_selected_for_research",
+                member_decision.get("selected_for_research") is True,
+            )
+            if member_decision is unit_decision:
+                member_decision["provisional_research_schedule"] = {
+                    **schedule_base,
+                    "status": "research_unit",
+                }
+                continue
+            member_decision.update(
+                {
+                    "research_route": _PROVISIONAL_RESEARCH_UNIT_WAIT_ROUTE,
+                    "selected_for_research": False,
+                    "eligible_for_downstream": False,
+                    "route_reason": (
+                        "This provisional same-cause member is represented by the "
+                        f"evidence-complete research unit {unit_problem_id}; its durable "
+                        "identity and facet evidence remain attached to that assignment."
+                    ),
+                    "reconsider_when": (
+                        "The provisional relation is split or cleared, the nominated research "
+                        "unit changes, or new member evidence changes the group frontier."
+                    ),
+                    "provisional_research_schedule": {
+                        **schedule_base,
+                        "status": "represented_by_research_unit",
+                        "represented_problem_id": member_problem_id,
+                    },
+                }
+            )
+
+    return list(dict.fromkeys(warnings))
 
 
 def _server_normalize_priority_decisions(
@@ -1094,6 +1321,12 @@ def _run_problem_prioritization_stage(
     # research mission this cycle. Runner-owned routes retain every case and its explicit
     # retry trigger while selecting only new, updated, resumable, or one-time reassessment work.
     _enforce_research_routing_policy(decisions)
+    warnings_list.extend(
+        _apply_provisional_research_unit_schedule(
+            decisions=decisions,
+            problem_records=problem_records,
+        )
+    )
     decisions.sort(key=_research_dispatch_sort_key)
 
     # Guardrail: stage 2 must not contain solution fields.
@@ -1136,6 +1369,20 @@ def _run_problem_prioritization_stage(
             ),
             "prioritizer_fallback_decision_count": sum(
                 1 for decision in decisions if decision.get("model_priority_accepted") is not True
+            ),
+            "provisional_research_unit_count": sum(
+                1
+                for decision in decisions
+                if isinstance(decision.get("provisional_research_schedule"), Mapping)
+                and decision["provisional_research_schedule"].get("status")
+                == "research_unit"
+            ),
+            "provisional_research_member_wait_count": sum(
+                1
+                for decision in decisions
+                if isinstance(decision.get("provisional_research_schedule"), Mapping)
+                and decision["provisional_research_schedule"].get("status")
+                == "represented_by_research_unit"
             ),
             "neighborhood_count": len(neighborhoods),
         },

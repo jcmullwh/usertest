@@ -990,11 +990,12 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-130 - Stage 2 schedules both members of a provisional same-cause group
 
-- Status: `open`
+- Status: `closed_exact_retained_stage2_replay_green`
 - Priority: duplicate work, throughput
 - Objective impact: the source Stage 2 output independently selected `problem:windows-sandbox-command-execution-fails` for `research_update` and its provisional same-cause member `problem:windows-sandbox-command-execution-blocked` for `research_new`, even though the bounded canonical projection correctly contains one research unit. A full run can therefore spend two Stage 3 calls on one case.
-- Required action: apply the canonical relation decision to Stage 2 scheduling before Stage 3 selection, retaining member facets/evidence on the one scheduled case.
-- Closure proof: a bounded Stage 2 replay schedules one canonical research unit and preserves both member evidence sets without silently discarding either decision.
+- Correction: after ordinary priority/routing decisions, Stage 2 applies only structurally complete provisional same-cause packets. It preserves every durable decision and its individual route, schedules the nominated evidence-complete research unit with the union of all member evidence, and parks only a non-unit member whose individual route is new research. It fails open to independent dispatch when member records/decisions are incomplete, the nominated unit lacks the complete evidence union, or a non-unit already has retained research that must be assessed independently.
+- Closure proof: exact model-free replay of all 24 retained Stage 2 decisions reduced research dispatches from 24 to 23, changed only `problem:windows-sandbox-command-execution-blocked`, retained its original `research_new` route as provenance, scheduled `problem:windows-sandbox-command-execution-fails` with all 25 member atoms, and left every model priority projection and unrelated selection unchanged. Two unrelated incomplete provisional packets emitted explicit fail-open warnings and were not collapsed. Source hashes were unchanged and the replay made zero model, Stage 1, Stage 3+, Docker, export, or implementation calls. Receipt: `U:\s2_bds130_replay_f8ac59c6_r2_20260718T035540\receipt.json`; output SHA-256 `c1f2d254c044c1d4e134e9f5215ac7f9c98cce94d67f5ce809457fb1d5fdfb90`.
+- Verification: all 512 `backlog_core` tests pass; the complete `usertest_backlog` application suite passes 810 tests with two existing skips in 309.5 seconds; the 149-test directly affected set and Ruff also pass.
 
 ### BDS-131 - Nested local research helpers were invisible to harness dataflow verification
 
@@ -1039,6 +1040,22 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Historical disposition: the supervised Windows ledger and every underlying run remain retained on `U:` and are marked `integrity_unknown`; they will not be normalized, deleted, or represented as a production completion. A fresh single-case Stage 3 will establish a valid ledger under the corrected controller.
 - Closure proof: focused and full affected tests pass. The fresh production Stage 3 at `U:\s3c2_fresh_2d430151_run_20260718T031627` persisted six sequential records numbered 1-6: one full research call, two output-contract correction calls, one verifier-feedback record, and two evidence-correction calls. Every model record carries the same requested and observed author session `019f7416-4b6f-7320-a6f0-9b0dc418eed6`; final evidence verification is green and the Stage 3 document is persistable.
 
+### BDS-136 - Provisional member aliases overwrote direct durable case identities
+
+- Status: `closed_exact_retained_stage2_replay_green`
+- Priority: case lineage integrity and provisional scheduling
+- Objective impact: the first exact BDS-130 replay correctly kept both provisional problem records, but downstream lineage propagation mapped `problem:windows-sandbox-command-execution-fails` to its sibling's `case:7df...` identity. The provisional-member alias map had last-write precedence over a direct problem-to-case record, so a valid one-unit schedule failed before persistence with an expected `case:fe...`, observed `case:7df...` mismatch.
+- Correction: direct problem records now retain their own durable case identity. Alias lookup remains a fallback for a problem ID that does not have a direct record, preserving canonical alias behavior without collapsing provisional member identities before the same-cause hypothesis is proven.
+- Closure proof: regressions cover direct provisional member identity and canonical alias fallback. The second exact replay completed all 24 decisions with the intended one-dispatch reduction and zero unrelated changes; the complete core and application suites are green. The failed first replay is retained at `U:\s2_bds130_replay_f8ac59c6_20260718T035412`; no model, Docker, source mutation, or downstream stage ran.
+
+### BDS-137 - Research prompt contract test retained an obsolete wording literal
+
+- Status: `closed_semantic_assertion_restored`
+- Priority: reliable full-suite validation
+- Objective impact: after the mission was deliberately rewritten to distinguish terminal research from change planning, one core test still required the deleted literal `stage guidance` in the mission file. The production runner continued to load `repro_research.md`, label it `Stage guidance (repo-owned)`, and append it to every case; the stale assertion nevertheless stopped the complete suite after 509 passing tests.
+- Correction: the assertion now requires the mission's current semantic handoff, `system prompt's adapter and output contracts`, instead of the obsolete phrase. Dedicated assembled-prompt tests continue to verify that the repo-owned guidance contents are actually present, so this does not weaken live prompt coverage.
+- Closure proof: the exact stopped test and all five dedicated live research-prompt tests pass; the complete 512-test core suite and complete application suite are green.
+
 ### AN-22 - Retained-frontier launcher preflight omitted required invocation context
 
 - Status: `contained`
@@ -1071,6 +1088,34 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor launcher/import cluster, not a model, research, or pipeline-stage failure
 - Exact evidence: the first fresh Stage 3 command used a nested PowerShell array while constructing `PYTHONPATH`. Python consequently imported `backlog_core` from `I:\code\usertest` instead of the sealed `U:\usertest_backlog_qualification\execution_roots\2d430151` source and stopped at module import with `cannot import name 'write_case_registry'`. The failure occurred before argument parsing, output-root creation, subscription activation, model invocation, or stage execution.
 - Containment and result: the launcher flattened every sealed app/package `src` directory into one path-separated value and verified the imported `backlog_core` and `backlog_miner` origins before rerunning. The next model-free preflight completed in 4.6 seconds, hash-bound the one case and all upstream artifacts, and the subsequent production Stage 3 completed normally. No failed artifact was deleted and no product code changed for the launcher mistake.
+
+### AN-27 - Narrow prompt-test rerun used an incomplete ad-hoc source path
+
+- Status: `closed_immediate_environment_correction`
+- Classification: one supervisor test-launch environment error, not a model, pipeline-stage, or product failure
+- Exact evidence: the first narrow rerun manually listed only four source packages. Test collection stopped in 1.2 seconds with missing `run_artifacts` and `agent_adapters` imports; no test body, pipeline stage, model, Docker, export, or implementation work ran.
+- Containment and result: the next command dot-sourced the repository-owned `scripts/set_pythonpath.ps1`. The exact stopped assertion and five prompt tests then passed, followed by the complete 512-test core and 810-pass/two-skip application suites. The failed collection is counted once and was not represented as a code failure.
+
+### AN-28 - Dashboard hash-report helper used an invalid PowerShell pipeline shape
+
+- Status: `closed_immediate_read_only_command_correction`
+- Classification: one supervisor reporting-helper syntax error, not a model, pipeline-stage, test, or product failure
+- Exact evidence: a read-only `foreach` hash-report command placed a pipeline directly after the loop without collecting or grouping its output. PowerShell rejected the command at parse time with `An empty pipe element is not allowed`; no path was opened or changed.
+- Containment and result: the next command accumulated the three hash rows before formatting them and returned the ledger, replay receipt, and Stage 2 output hashes. It did not repeat any pipeline stage or model work.
+
+### AN-29 - Dashboard overstated the Windows case as P0
+
+- Status: `closed_reporting_correction`
+- Classification: one supervisor reporting error, not a pipeline priority or model error
+- Exact evidence: the current dashboard called the Windows-sandbox lifecycle the second real P0 case. The retained full 24-decision Stage 2 artifact classifies `problem:windows-sandbox-command-execution-fails` as `priority_bucket=p1` with pre-score `0.816364`; only the first completed Codex-config case is P0 in that retained decision set.
+- Containment and result: the dashboard now calls it the second current case without changing the recorded Stage 2 decision. This preserves the distinction between a bounded Stage 3 case selection and the priority assigned by the complete retained Stage 2 output.
+
+### AN-30 - Dashboard elapsed-time helper mixed incompatible timestamp types
+
+- Status: `closed_before_dashboard_write`
+- Classification: one supervisor reporting-helper type error, not a model, pipeline-stage, or product failure
+- Exact evidence: the first elapsed-time command subtracted a `DateTimeOffset` start from the `DateTime` returned by `Get-Date`. PowerShell emitted `MethodCountCouldNotFindBest`, left the elapsed value null, and formatted a false zero duration. The ledger hash portion still completed.
+- Containment and result: the invalid duration was not written. The corrected command uses `DateTimeOffset::UtcNow` for both operands before updating the dashboard.
 
 ### AN-11 - Same-author correction launcher omitted required static path arguments
 

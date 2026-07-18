@@ -245,13 +245,14 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["timing"]["start_at"] == "2026-07-17T03:10:20Z"
     assert current["rework"]["author_invocations"] == 147
     assert current["rework"]["continuation_launches"] == 80
-    assert current["rework"]["stage_reruns"] == 23
+    assert current["rework"]["stage_reruns"] == 25
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 61
+    assert current["errors"]["count"] == 67
     assert current["automatic_self_corrections"]["count"] == 19
-    assert current["supervisor_interventions"]["count"] == 78
+    assert current["supervisor_interventions"]["count"] == 85
     assert current["furthest_stage"] == (
-        "Stage 4 complete for second P0 case; duplicate scheduling correction next"
+        "Stage 4 complete for second current case; corrected Stage 2 schedule ready for "
+        "next distinct case"
     )
 
     rendered = mod._render_dashboard(dashboard)

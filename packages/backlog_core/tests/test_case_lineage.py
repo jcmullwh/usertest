@@ -1327,6 +1327,68 @@ def test_atom_dispositions_and_group_lineage_propagate() -> None:
     assert downstream[0]["same_cause_group_id"] == "cause:one"
 
 
+def test_provisional_member_lineage_prefers_each_direct_problem_record() -> None:
+    members = ["problem:member", "problem:unit"]
+    problem_cases = [
+        {
+            "problem_id": "problem:member",
+            "canonical_problem_id": "problem:member",
+            "case_id": "case:member",
+            "case_member_problem_ids": members,
+        },
+        {
+            "problem_id": "problem:unit",
+            "canonical_problem_id": "problem:unit",
+            "case_id": "case:unit",
+            "case_member_problem_ids": members,
+        },
+    ]
+
+    downstream = propagate_case_lineage(
+        [
+            {"problem_id": "problem:member", "case_id": "case:member"},
+            {"problem_id": "problem:unit", "case_id": "case:unit"},
+        ],
+        problem_cases,
+    )
+
+    assert downstream == [
+        {
+            "problem_id": "problem:member",
+            "case_id": "case:member",
+            "canonical_problem_id": "problem:member",
+            "case_member_problem_ids": members,
+        },
+        {
+            "problem_id": "problem:unit",
+            "case_id": "case:unit",
+            "canonical_problem_id": "problem:unit",
+            "case_member_problem_ids": members,
+        },
+    ]
+
+
+def test_canonical_member_alias_lineage_still_uses_canonical_record() -> None:
+    [downstream] = propagate_case_lineage(
+        [{"problem_id": "problem:alias"}],
+        [
+            {
+                "problem_id": "problem:canonical",
+                "canonical_problem_id": "problem:canonical",
+                "case_id": "case:canonical",
+                "case_member_problem_ids": ["problem:canonical", "problem:alias"],
+            }
+        ],
+    )
+
+    assert downstream["case_id"] == "case:canonical"
+    assert downstream["canonical_problem_id"] == "problem:canonical"
+    assert downstream["case_member_problem_ids"] == [
+        "problem:canonical",
+        "problem:alias",
+    ]
+
+
 def test_source_atom_can_support_distinct_canonical_facets_without_losing_evidence() -> None:
     atom_id = "target/run/agent/1:confusion_point:1"
     atoms = normalize_atom_lineage([_atom(atom_id)], strict_new_output=True)

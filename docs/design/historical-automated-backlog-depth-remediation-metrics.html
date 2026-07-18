@@ -512,15 +512,15 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat warn">
+            <div class="stat good">
               <span class="label">Current pipeline state</span>
-              <span class="value">Stage 4 complete for the second real P0 case</span>
-              <span class="detail">Two current cases now have evidence-sufficient terminal dispositions without false tickets. BDS-130 duplicate scheduling is the next narrow mechanical blocker before a third distinct case.</span>
+              <span class="value">Stage 2 duplicate scheduling corrected; next case ready</span>
+              <span class="detail">Two current cases have evidence-sufficient terminal dispositions without false tickets. The exact 24-decision replay now dispatches one Windows research unit instead of two while preserving both durable cases and all 25 atoms.</span>
             </div>
             <div class="stat good">
               <span class="label">Current bounded throughput</span>
-              <span class="value">Stage 3: 2/2 correct; explicit Stage 4 terminal handoff: 1/1; delivered: 0</span>
-              <span class="detail">The Windows case self-corrected 3 -&gt; 1 -&gt; 0 and 40 -&gt; 1 -&gt; 0 in one author session. Both cases are useful terminal throughput, not delivered fixes.</span>
+              <span class="value">Stage 3: 2/2 correct; Stage 4 terminal: 1/1; Stage 2 schedule replay: 1/1; delivered: 0</span>
+              <span class="detail">The Windows case self-corrected 3 -&gt; 1 -&gt; 0 and 40 -&gt; 1 -&gt; 0 in one author session. Stage 2 then removed one duplicate dispatch without changing model priorities or unrelated selections. These are useful qualification outcomes, not delivered fixes.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
@@ -529,8 +529,8 @@
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Deduplicate Stage 2 scheduling, then research the next distinct case</span>
-              <span class="detail">Fix and replay only BDS-130. Preserve both provisional-member evidence facets, avoid rerunning completed stages, and then continue the retained backlog.</span>
+              <span class="value">Research the next retained distinct case</span>
+              <span class="detail">Start `problem:docker-shell-probe-preflight-block` from the corrected retained Stage 2 output. Do not rerun Stage 1 or either completed Stage 3 case.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -660,19 +660,19 @@
               </tr>
               <tr class="ops-current">
                 <td><strong>Clean exact-revision backlog qualification cycle</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>28 h 27 m 43 s as of 07:38:03Z</strong><span class="ops-kind">active</span></td>
-                <td><span class="tag warn">Stage 4 complete for second P0 case; duplicate scheduling correction next</span><span class="ops-detail">Two real current cases have completed Stage 3 with evidence-sufficient, already-addressed dispositions and no false ticket. The Windows-sandbox case used one signed-in Terra…</span></td>
+                <td><strong>28 h 59 m 25 s as of 08:09:46Z</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Stage 4 complete for second current case; corrected Stage 2 schedule ready for next distinct case</span><span class="ops-detail">Two real current cases have completed Stage 3 with evidence-sufficient, already-addressed dispositions and no false ticket. The Windows-sandbox case used one signed-in Terra…</span></td>
                 <td><strong>Two of two researched current cases correctly dispositioned; zero delivered improvements</strong></td>
-                <td><strong>61</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Sixty-one deduplicated clusters are retained. The new set adds seven product boundaries (BDS-129 through BDS-135), five supervisor/tooling clusters (AN-22 through AN-26), and one…</span></td>
+                <td><strong>67</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Sixty-seven deduplicated clusters are retained. Since the prior dashboard, BDS-136 records direct-case alias corruption, BDS-137 records the stale semantic test literal, and…</span></td>
                 <td><strong>19</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Nineteen nondeterministic quality clusters have improved automatically. The fresh Windows author adds two: output-contract falsification binding improved 3 -&gt; 1 -&gt; 0, and…</span></td>
-                <td><strong>78</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Seventy-eight deduplicated interventions are retained. The new twelve are six product corrections, five supervisor/helper corrections, and the explicit Stage 4 terminal handoff.…</span></td>
-                <td><strong>147</strong> author calls; 80 continuations; 23 stage reruns; 0 full restarts<span class="ops-detail">Since the prior checkpoint, the structurally unusable Windows research chain retained 33 Terra reports (one original call and 32 continuations) before its universal-gate defect…</span></td>
-                <td>Correct BDS-130 narrowly in Stage 2 so one canonical same-cause case schedules one research unit while retaining both evidence facets. Replay only Stage 2 scheduling, then start…</td>
+                <td><strong>85</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Eighty-five deduplicated interventions are retained. The seven added since the prior dashboard are the BDS-130 scheduling correction, BDS-136 lineage correction, BDS-137 semantic…</span></td>
+                <td><strong>147</strong> author calls; 80 continuations; 25 stage reruns; 0 full restarts<span class="ops-detail">Since the prior checkpoint, the structurally unusable Windows research chain retained 33 Terra reports (one original call and 32 continuations) before its universal-gate defect…</span></td>
+                <td>Start `problem:docker-shell-probe-preflight-block` from the corrected retained Stage 2 output, using one bounded Stage 3 component run. Do not rerun Stage 1, the completed…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-18T07:38:02.508344Z. Showing 12 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-18T08:09:45.661163Z. Showing 12 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

@@ -3871,23 +3871,25 @@ def propagate_case_lineage(
 ) -> list[dict[str, Any]]:
     """Copy canonical case fields from problem work units onto downstream stage items."""
 
-    by_problem: dict[str, dict[str, Any]] = {}
+    direct_by_problem: dict[str, dict[str, Any]] = {}
+    member_by_problem: dict[str, dict[str, Any]] = {}
     for case in problem_cases:
-        problem_ids = list(
-            dict.fromkeys(
-                [_clean_string(case.get("problem_id")) or ""]
-                + _clean_string_list(case.get("case_member_problem_ids"))
-            )
-        )
-        for problem_id in problem_ids:
-            if problem_id:
-                by_problem[problem_id] = case
+        direct_problem_id = _clean_string(case.get("problem_id"))
+        if direct_problem_id is not None:
+            direct_by_problem[direct_problem_id] = case
+        for problem_id in _clean_string_list(case.get("case_member_problem_ids")):
+            member_by_problem[problem_id] = case
 
     propagated: list[dict[str, Any]] = []
     for index, raw_item in enumerate(items):
         item = dict(raw_item)
         item_problem_id = _clean_string(item.get("problem_id"))
-        matching_case = by_problem.get(item_problem_id or "")
+        # A provisional group keeps each durable problem/case record while exposing the
+        # full member set on both records.  Prefer the record whose own problem_id matches;
+        # use member aliases only when no direct record exists (the canonical-merge case).
+        matching_case = direct_by_problem.get(item_problem_id or "") or member_by_problem.get(
+            item_problem_id or ""
+        )
         if matching_case is None:
             if strict_new_output:
                 raise ValueError(

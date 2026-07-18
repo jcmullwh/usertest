@@ -4770,7 +4770,7 @@ def test_research_prompts_expose_causal_boundary_and_correction_contract() -> No
             "authenticated origin/repository meaning",
             "open registered proof adapter",
             "future solution oracle is optional",
-            "stage guidance",
+            "system prompt's adapter and output contracts",
             "exact author session",
             "do not start over",
         },
