@@ -4304,12 +4304,6 @@ def _harness_mechanism_touches(
         visitor = _FunctionScopeVisitor(candidate)
         visitor.visit(candidate)
         function_scopes[candidate] = visitor
-    function_definitions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
     assertion_source = str(observable_assertion.get("source") or "")
 
     def sink_matches_assertion_source(sink: str | None) -> bool:
@@ -4391,6 +4385,25 @@ def _harness_mechanism_touches(
             cursor = parents.get(cursor)
         return None
 
+    def enclosing_function(
+        node: ast.AST,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        cursor = parents.get(node)
+        while cursor is not None:
+            if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cursor
+            cursor = parents.get(cursor)
+        return None
+
+    function_definitions: dict[
+        tuple[ast.FunctionDef | ast.AsyncFunctionDef | None, str],
+        list[ast.FunctionDef | ast.AsyncFunctionDef],
+    ] = {}
+    for definition in function_scopes:
+        function_definitions.setdefault(
+            (enclosing_function(definition), definition.name), []
+        ).append(definition)
+
     def import_aliases_at(node: ast.AST) -> dict[str, str]:
         """Resolve imports visible at *node*, including function-local imports.
 
@@ -4436,7 +4449,16 @@ def _harness_mechanism_touches(
 
     def local_function(call: ast.Call) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         expression = _dotted_expression(call.func)
-        return function_definitions.get(expression or "")
+        if expression is None or "." in expression:
+            return None
+        scope = containing_function(call)
+        while True:
+            matches = function_definitions.get((scope, expression), [])
+            if len(matches) == 1:
+                return matches[0]
+            if matches or scope is None:
+                return None
+            scope = enclosing_function(scope)
 
     def expression_is_tainted(
         node: ast.AST,

@@ -7958,6 +7958,44 @@ def test_harness_mechanism_touch_resolves_function_local_imports(
     assert link["symbol_sinks"] == [{"symbol": "core.run", "sink": "stdout"}]
 
 
+def test_harness_mechanism_touch_follows_nested_local_helper_return(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "replay"
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text(
+        "import json\n"
+        "from core import run\n\n"
+        "def main():\n"
+        "    def invoke(marker):\n"
+        "        result = run(marker)\n"
+        "        return result[0]\n\n"
+        "    reason_code = invoke('historical-marker')\n"
+        "    print(json.dumps({'reason_code': reason_code}))\n\n"
+        "main()\n",
+        encoding="utf-8",
+    )
+
+    _, touched, link = mod._harness_mechanism_touches(
+        replay={
+            "executed_argv": ["python", ".usertest_research/probe.py"],
+            "workspace_dir": str(workspace),
+        },
+        mechanism_symbols=["core.run"],
+        symbol_paths={"core.run": "src/core.py"},
+        observable_assertion={
+            "source": "stdout",
+            "operator": "contains",
+            "expected": '"reason_code": "historical-failure"',
+        },
+    )
+
+    assert touched == ["core.run"]
+    assert link is not None
+    assert link["symbol_sinks"] == [{"symbol": "core.run", "sink": "stdout"}]
+
+
 def test_harness_mechanism_touch_rejects_shadowed_module_import(
     tmp_path: Path,
 ) -> None:
