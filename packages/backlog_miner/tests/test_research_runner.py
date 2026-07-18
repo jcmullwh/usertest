@@ -1515,6 +1515,46 @@ def test_unseen_validator_error_is_generic_same_session_feedback() -> None:
     assert paths == ["extensions.backlog_repro_research"]
 
 
+def test_next_attempt_number_uses_retained_maximum_not_history_length() -> None:
+    assert mod._next_research_attempt_number([]) == 1
+    assert mod._next_research_attempt_number(
+        [
+            {"attempt_number": 15},
+            {"attempt_number": 2},
+            {"attempt_number": "ignored"},
+        ]
+    ) == 16
+
+
+def test_repair_path_narrows_colon_delimited_experiment_and_hypothesis_ids() -> None:
+    dossier = {
+        "experiments": [
+            {"experiment_id": "experiment:assigned-context"},
+            {"experiment_id": "experiment:current-controlled-windows-route"},
+        ],
+        "root_cause_hypotheses": [
+            {"hypothesis_id": "hypothesis:historical-worker-panic"},
+        ],
+    }
+
+    assert mod._narrow_repair_path(
+        "experiments[].result",
+        error=(
+            "experiment_replay_exit_mismatch:"
+            "experiment:current-controlled-windows-route:0:1"
+        ),
+        dossier=dossier,
+    ) == "experiments[1].result"
+    assert mod._narrow_repair_path(
+        "root_cause_hypotheses[].falsification_attempts[]",
+        error=(
+            "falsification_attempt_unbound:"
+            "hypothesis:historical-worker-panic:attempt:one"
+        ),
+        dossier=dossier,
+    ) == "root_cause_hypotheses[0].falsification_attempts[]"
+
+
 def test_immutable_change_is_never_accepted_and_repetition_stalls() -> None:
     common = {
         "before_errors": ["shape:error"],
@@ -2922,6 +2962,92 @@ def test_substantive_coverage_distinguishes_operational_contract_from_causal_con
     assert experiment_contract in legacy_coverage
 
 
+def test_repair_preserves_only_omitted_unchanged_origin_bindings() -> None:
+    bindings = [
+        {"atom_id": "atom:one", "observed_value": "panic"},
+        {"atom_id": "atom:two", "observed_value": "panic"},
+    ]
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:assigned-context",
+                "scenario_kind": "assigned_evidence_audit",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python audit.py",
+                "result": "both atoms contain the same panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"kind": "json_equals", "expected": 2},
+                "origin_evidence_bindings": bindings,
+            }
+        ]
+    }
+    authored = deepcopy(baseline)
+    authored["experiments"][0].pop("origin_evidence_bindings")
+
+    resolved, resolution = mod._preserve_omitted_unchanged_origin_bindings(
+        baseline_dossier=baseline,
+        authored_dossier=authored,
+        authorized_paths=["experiments[]", "experiments[1].result"],
+    )
+
+    assert resolution is not None
+    assert resolution["authored_dossier"] == authored
+    assert resolution["authored_dossier"] is not authored
+    assert resolved["experiments"][0]["origin_evidence_bindings"] == bindings
+    assert resolution["preserved_bindings"] == [
+        {
+            "experiment_id": "experiment:assigned-context",
+            "path": "experiments[0].origin_evidence_bindings",
+            "authored_binding_count": 0,
+            "resolved_binding_count": 2,
+            "resolved_bindings_sha256": mod._canonical_json_sha256(bindings),
+        }
+    ]
+    unsigned = dict(resolution)
+    assert unsigned.pop("resolution_sha256") == mod._canonical_json_sha256(unsigned)
+
+
+@pytest.mark.parametrize("reason", ["binding_authorized", "experiment_changed"])
+def test_repair_does_not_restore_bindings_when_their_meaning_may_have_changed(
+    reason: str,
+) -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:one",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python replay.py",
+                "result": "panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"expected": "panic"},
+                "origin_evidence_bindings": [
+                    {"atom_id": "atom:one"},
+                    {"atom_id": "atom:two"},
+                ],
+            }
+        ]
+    }
+    authored = deepcopy(baseline)
+    authored["experiments"][0]["origin_evidence_bindings"] = [{"atom_id": "atom:one"}]
+    authorized_paths: list[str] = []
+    if reason == "binding_authorized":
+        authorized_paths = ["experiments[0].origin_evidence_bindings"]
+    else:
+        authored["experiments"][0]["result"] = "different observation"
+
+    resolved, resolution = mod._preserve_omitted_unchanged_origin_bindings(
+        baseline_dossier=baseline,
+        authored_dossier=authored,
+        authorized_paths=authorized_paths,
+    )
+
+    assert resolution is None
+    assert resolved == authored
+
+
 def _run_substantive_repair_sequence(
     *,
     tmp_path: Path,
@@ -3029,6 +3155,44 @@ def test_substantive_coverage_loss_is_general_and_evidence_backed_revision_is_al
 
     assert supported_loss == []
     assert supported_basis == ["hypothesis_counterevidence_added"]
+
+
+def test_terminal_disposition_can_remove_planning_only_proof_without_losing_symptoms() -> None:
+    baseline = _established_substantive_frontier()
+    baseline["research_status"] = "evidence_sufficient"
+    baseline["actionability_assessment"] = {
+        "disposition": "already_addressed",
+        "evidence_refs": ["experiment:primary"],
+    }
+    corrected = deepcopy(baseline)
+    corrected["root_cause_hypotheses"][0]["mechanism_symbols"] = []
+    corrected["root_cause_hypotheses"][0]["falsification_attempts"] = []
+    adapter = corrected["experiments"][0]["proof_adapter"]
+    for field in (
+        "adapter_id",
+        "baseline_experiment_id",
+        "challenge_experiment_id",
+        "implementation_touchpoints",
+    ):
+        adapter.pop(field)
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+    )
+
+    assert unsupported_loss == []
+    assert basis == ["terminal_disposition_removed_planning_only_proof"]
+
+    without_symptom_coverage = deepcopy(corrected)
+    without_symptom_coverage["experiments"][0]["addresses_atom_ids"] = []
+    without_symptom_coverage["experiments"][2]["addresses_atom_ids"] = []
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        without_symptom_coverage,
+    )
+    assert any(role.startswith("origin_atom[") for role in unsupported_loss)
+    assert basis == []
 
 
 def test_readiness_adjudicated_noncompeting_alternative_removal_is_progress() -> None:
@@ -5271,7 +5435,8 @@ def test_research_prompts_state_exact_causal_and_output_contract_rules() -> None
         "pinned repository revision",
         "direct argv",
         "tracked repository entrypoint",
-        "registered proof adapter",
+        "For `requires_change`",
+        "proof adapter",
         "runner-evaluated",
         "author session",
         "material unknown",
@@ -5763,8 +5928,8 @@ def test_full_runner_preserves_verified_insufficient_research(
     assert {
         "research_status_insufficient_evidence",
         "material_unknown_blocks_implementation_decision",
-        "research_mechanism_evidence_missing",
     }.issubset(reasons)
+    assert "research_mechanism_evidence_missing" not in reasons
 
 
 def test_output_repair_continues_same_author_session_and_invalid_then_valid(
@@ -8875,6 +9040,7 @@ def test_authenticated_evaluator_rescore_replaces_obsolete_findings_without_feed
     report_path.write_text("{}\n", encoding="utf-8")
     baseline = {"case_id": "case:one", "problem_id": "problem:one"}
     source_attempt = {
+        "attempt_number": 1,
         "attempt_sha256": "a" * 64,
         "agent_session_id": session_id,
         "attempt_wall_seconds": 10.0,
@@ -9371,6 +9537,166 @@ def test_verified_persistence_replay_completes_zero_error_author_without_model(
     assert terminal["validation_errors_after"] == []
     assert terminal["repair_progress"]["persistence_defect_ids"] == ["BDS-test"]
     assert terminal["repair_progress"]["model_invocation_count"] == 0
+    assert len(persisted) == 1
+
+
+def test_verified_authored_resolution_preserves_raw_report_without_another_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "f" * 40
+    session_id = "11111111-1111-4111-8111-111111111111"
+    source_run = tmp_path / "source-run"
+    authored_run = tmp_path / "authored-run"
+    copied_run = tmp_path / "copied-run"
+    workspace = tmp_path / "workspace"
+    for run_dir in (source_run, authored_run, copied_run):
+        run_dir.mkdir()
+        _write_json(run_dir / "report.json", {"status": "complete"})
+        _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        _write_json(
+            run_dir / "target_ref.json",
+            {
+                "agent": "codex",
+                "ref": revision,
+                "commit_sha": revision,
+                "requested_codex_resume_session_id": (
+                    session_id if run_dir == authored_run else None
+                ),
+            },
+        )
+        (run_dir / "normalized_events.jsonl").write_text("", encoding="utf-8")
+    workspace.mkdir()
+    bindings = [{"atom_id": "atom:one"}, {"atom_id": "atom:two"}]
+    baseline = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "evidence_sufficient",
+        "experiments": [
+            {
+                "experiment_id": "experiment:one",
+                "scenario_kind": "assigned_evidence_audit",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python audit.py",
+                "result": "panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"expected": "panic"},
+                "origin_evidence_bindings": bindings,
+            }
+        ],
+    }
+    source_errors = ["inspected_file_unresolved:one.py"]
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="evidence_verification_invalid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=source_errors,
+        attempted_dossier=baseline,
+        attempt_kind="full_research",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+    )
+    authored_dossier = deepcopy(baseline)
+    authored_dossier["experiments"][0].pop("origin_evidence_bindings")
+    authored_attempt = mod._research_attempt_record(
+        attempt_number=2,
+        outcome="repair_contract_invalid",
+        run_dir=authored_run,
+        report_path=authored_run / "report.json",
+        validation_errors=["experiment_not_bound_to_atom:atom:one"],
+        attempted_dossier=authored_dossier,
+        attempt_kind="evidence_verification_research_continuation",
+        source_attempt_sha256=source_attempt["attempt_sha256"],
+        authorized_paths=["inspected_files"],
+        baseline_dossier_sha256=source_attempt["attempted_dossier_sha256"],
+        baseline_projection_sha256="a" * 64,
+        repair_contract_sha256="b" * 64,
+        validation_errors_before=source_errors,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+        repair_progress={"decision": "continue", "reason": "old_controller_rejected"},
+    )
+    raw_document_path = tmp_path / "raw-attempt.json"
+    _write_json(raw_document_path, {"attempts": [authored_attempt]})
+    resolved, resolution = mod._preserve_omitted_unchanged_origin_bindings(
+        baseline_dossier=baseline,
+        authored_dossier=authored_dossier,
+        authorized_paths=["inspected_files"],
+    )
+    assert resolution is not None
+    assignment = {"expected_atom_ids": ["atom:one", "atom:two"], "status": "complete"}
+    retained = {
+        **baseline,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "research_attempts": [source_attempt],
+    }
+    prepared = {**resolved, "repo_revision": revision, "evidence_assignment": assignment}
+    verification = {
+        "status": "verified",
+        "errors": [],
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "run_dir": str(copied_run),
+        "planning_workspace_dir": str(workspace),
+        "claims_sha256": research_claims_sha256(prepared),
+    }
+    verification["receipt_sha256"] = evidence_verification_sha256(verification)
+    prepared_path = tmp_path / "prepared.json"
+    _write_json(prepared_path, prepared)
+    replay = {
+        "kind": "authored_resolution_model_free_evidence_replay",
+        "state": "completed",
+        "source_run_unchanged": True,
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "current_attempt_sha256": source_attempt["attempt_sha256"],
+        "candidate_dossier_sha256": mod._canonical_json_sha256(resolved),
+        "raw_attempt_document_path": str(raw_document_path),
+        "raw_attempt_document_sha256": sha256(raw_document_path.read_bytes()).hexdigest(),
+        "binding_resolution": resolution,
+        "copied_run": str(copied_run),
+        "raw_error_count": 0,
+        "errors": [],
+        "model_invocation_count": 0,
+        "stage1_or_stage2_invocation_count": 0,
+        "downstream_invocation_count": 0,
+        "docker_invocation_count": 0,
+        "verified_prepared_dossier": str(prepared_path),
+        "verified_prepared_dossier_sha256": sha256(prepared_path.read_bytes()).hexdigest(),
+        "verification": verification,
+    }
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    replay_path = tmp_path / "replay.json"
+    _write_json(replay_path, replay)
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        mod,
+        "verify_persisted_research_evidence",
+        lambda dossier: (persisted.append(dossier) is None, []),
+    )
+
+    result = mod.materialize_verified_research_authored_resolution(
+        dossier=retained,
+        authored_attempt=authored_attempt,
+        replay_receipt_path=replay_path,
+        controller_defect_ids=["BDS-test"],
+        reason="preserve omitted unchanged bindings",
+    )
+
+    assert result["status"] == "corrected"
+    assert result["model_invocation_count"] == 0
+    terminal = result["dossier"]["research_attempts"][-1]
+    assert terminal["attempted_dossier"] == resolved
+    assert terminal["repair_progress"]["authored_dossier_resolution"][
+        "authored_dossier"
+    ] == authored_dossier
+    assert terminal["validation_errors_after"] == []
     assert len(persisted) == 1
 
 

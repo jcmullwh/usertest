@@ -848,6 +848,210 @@ def _research_attempt_rescore_errors(
     return not errors, errors
 
 
+def _research_attempt_resolution_local_errors(
+    attempt: Mapping[str, Any], *, pid: str, index: int
+) -> list[str]:
+    """Validate the content-bound authored/effective dossier projection on one repair."""
+
+    progress = attempt.get("repair_progress")
+    resolution = (
+        progress.get("authored_dossier_resolution")
+        if isinstance(progress, Mapping)
+        else None
+    )
+    if resolution is None:
+        return []
+    prefix = f"research_dossier_research_attempt_resolution_invalid: {pid}: index={index}"
+    if not isinstance(resolution, dict):
+        return [prefix + ":type"]
+    allowed = {
+        "schema_version",
+        "kind",
+        "baseline_dossier_sha256",
+        "authored_dossier",
+        "authored_dossier_sha256",
+        "resolved_dossier_sha256",
+        "preserved_bindings",
+        "resolution_sha256",
+    }
+    errors: list[str] = []
+    if set(resolution) != allowed:
+        errors.append(prefix + ":fields")
+    if (
+        resolution.get("schema_version") != 1
+        or resolution.get("kind")
+        != "preserve_omitted_unchanged_origin_bindings"
+    ):
+        errors.append(prefix + ":contract")
+    authored = resolution.get("authored_dossier")
+    if not isinstance(authored, dict) or resolution.get(
+        "authored_dossier_sha256"
+    ) != _canonical_sha256(authored):
+        errors.append(prefix + ":authored_hash")
+    if resolution.get("resolved_dossier_sha256") != attempt.get(
+        "attempted_dossier_sha256"
+    ):
+        errors.append(prefix + ":resolved_hash")
+    if resolution.get("baseline_dossier_sha256") != attempt.get(
+        "baseline_dossier_sha256"
+    ):
+        errors.append(prefix + ":baseline_hash")
+    preserved = resolution.get("preserved_bindings")
+    if not isinstance(preserved, list) or not preserved:
+        errors.append(prefix + ":preserved_bindings")
+    else:
+        seen_ids: set[str] = set()
+        for binding_index, item in enumerate(preserved):
+            item_prefix = prefix + f":binding={binding_index}"
+            if not isinstance(item, dict) or set(item) != {
+                "experiment_id",
+                "path",
+                "authored_binding_count",
+                "resolved_binding_count",
+                "resolved_bindings_sha256",
+            }:
+                errors.append(item_prefix + ":fields")
+                continue
+            experiment_id = item.get("experiment_id")
+            if not _is_nonempty_string(experiment_id) or experiment_id in seen_ids:
+                errors.append(item_prefix + ":experiment_id")
+            elif isinstance(experiment_id, str):
+                seen_ids.add(experiment_id)
+            authored_count = item.get("authored_binding_count")
+            resolved_count = item.get("resolved_binding_count")
+            if (
+                isinstance(authored_count, bool)
+                or not isinstance(authored_count, int)
+                or isinstance(resolved_count, bool)
+                or not isinstance(resolved_count, int)
+                or authored_count < 0
+                or resolved_count <= authored_count
+            ):
+                errors.append(item_prefix + ":counts")
+            if not _valid_sha256(item.get("resolved_bindings_sha256")):
+                errors.append(item_prefix + ":bindings_hash")
+    unsigned = {key: item for key, item in resolution.items() if key != "resolution_sha256"}
+    if resolution.get("resolution_sha256") != _canonical_sha256(unsigned):
+        errors.append(prefix + ":self_hash")
+    return errors
+
+
+def _research_attempt_resolution_source_errors(
+    attempt: Mapping[str, Any],
+    *,
+    source_attempt: Mapping[str, Any],
+    pid: str,
+    index: int,
+) -> list[str]:
+    """Prove that a resolution only restored unchanged bindings from its source dossier."""
+
+    progress = attempt.get("repair_progress")
+    resolution = (
+        progress.get("authored_dossier_resolution")
+        if isinstance(progress, Mapping)
+        else None
+    )
+    if not isinstance(resolution, Mapping):
+        return []
+    prefix = f"research_dossier_research_attempt_resolution_invalid: {pid}: index={index}"
+    authored = resolution.get("authored_dossier")
+    resolved = attempt.get("attempted_dossier")
+    baseline = source_attempt.get("attempted_dossier")
+    preserved = resolution.get("preserved_bindings")
+    if not all(isinstance(item, dict) for item in (authored, resolved, baseline)) or not isinstance(
+        preserved, list
+    ):
+        return [prefix + ":source_shape"]
+    if resolution.get("baseline_dossier_sha256") != _canonical_sha256(baseline):
+        return [prefix + ":source_hash"]
+
+    reconstructed = json.loads(json.dumps(authored, ensure_ascii=False))
+    authored_experiments = reconstructed.get("experiments")
+    resolved_experiments = resolved.get("experiments")
+    baseline_experiments = baseline.get("experiments")
+    if not all(
+        isinstance(items, list)
+        for items in (authored_experiments, resolved_experiments, baseline_experiments)
+    ):
+        return [prefix + ":experiment_shape"]
+    baseline_by_id = {
+        item.get("experiment_id"): item
+        for item in baseline_experiments
+        if isinstance(item, Mapping) and _is_nonempty_string(item.get("experiment_id"))
+    }
+    immutable_fields = (
+        "experiment_id",
+        "scenario_kind",
+        "addresses_atom_ids",
+        "command",
+        "result",
+        "outcome",
+        "exit_code",
+        "observable_assertion",
+        "control_relationship",
+    )
+    errors: list[str] = []
+    for binding_index, item in enumerate(preserved):
+        item_prefix = prefix + f":binding={binding_index}"
+        if not isinstance(item, Mapping):
+            continue
+        experiment_id = item.get("experiment_id")
+        authored_indexes = [
+            candidate_index
+            for candidate_index, experiment in enumerate(authored_experiments)
+            if isinstance(experiment, dict)
+            and experiment.get("experiment_id") == experiment_id
+        ]
+        if len(authored_indexes) != 1 or experiment_id not in baseline_by_id:
+            errors.append(item_prefix + ":experiment_binding")
+            continue
+        authored_index = authored_indexes[0]
+        authored_experiment = authored_experiments[authored_index]
+        baseline_experiment = baseline_by_id[experiment_id]
+        expected_path = f"experiments[{authored_index}].origin_evidence_bindings"
+        if item.get("path") != expected_path:
+            errors.append(item_prefix + ":path")
+        if any(
+            authored_experiment.get(field) != baseline_experiment.get(field)
+            for field in immutable_fields
+        ):
+            errors.append(item_prefix + ":experiment_changed")
+            continue
+        authored_bindings_raw = authored_experiment.get("origin_evidence_bindings")
+        authored_bindings = (
+            []
+            if "origin_evidence_bindings" not in authored_experiment
+            else authored_bindings_raw
+        )
+        baseline_bindings = baseline_experiment.get("origin_evidence_bindings")
+        if not isinstance(authored_bindings, list) or not isinstance(baseline_bindings, list):
+            errors.append(item_prefix + ":binding_shape")
+            continue
+        authored_hashes = [_canonical_sha256(binding) for binding in authored_bindings]
+        baseline_hashes = [_canonical_sha256(binding) for binding in baseline_bindings]
+        if (
+            len(authored_hashes) >= len(baseline_hashes)
+            or any(
+                authored_hashes.count(binding_hash) > baseline_hashes.count(binding_hash)
+                for binding_hash in set(authored_hashes)
+            )
+        ):
+            errors.append(item_prefix + ":not_subset")
+            continue
+        if (
+            item.get("authored_binding_count") != len(authored_bindings)
+            or item.get("resolved_binding_count") != len(baseline_bindings)
+            or item.get("resolved_bindings_sha256") != _canonical_sha256(baseline_bindings)
+        ):
+            errors.append(item_prefix + ":receipt")
+        authored_experiment["origin_evidence_bindings"] = json.loads(
+            json.dumps(baseline_bindings, ensure_ascii=False)
+        )
+    if reconstructed != resolved:
+        errors.append(prefix + ":projection")
+    return errors
+
+
 def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
     """Validate runner-owned, non-advancing research-attempt provenance."""
     if value is None:
@@ -1286,6 +1490,9 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
             errors.append(
                 f"research_dossier_research_attempt_dossier_hash_mismatch: {pid}: index={index}"
             )
+        errors.extend(
+            _research_attempt_resolution_local_errors(attempt, pid=pid, index=index)
+        )
 
         artifacts = attempt.get("attempt_artifacts")
         required_artifact_kinds = {
@@ -1430,6 +1637,14 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         f"research_dossier_research_attempt_source_not_prior: {pid}: index={index}"
                     )
                 else:
+                    errors.extend(
+                        _research_attempt_resolution_source_errors(
+                            attempt,
+                            source_attempt=source_attempt,
+                            pid=pid,
+                            index=index,
+                        )
+                    )
                     rescore_valid, rescore_errors = _research_attempt_rescore_errors(
                         attempt,
                         source_attempt=source_attempt,

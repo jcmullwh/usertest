@@ -3692,6 +3692,92 @@ def test_research_attempt_history_is_bounded_and_content_addressed() -> None:
         parse_research_dossier_list(json.dumps([dossier]))
 
 
+def test_research_attempt_resolution_is_bound_to_raw_author_output_and_source() -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:one",
+                "scenario_kind": "assigned_evidence_audit",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python audit.py",
+                "result": "panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"expected": "panic"},
+                "origin_evidence_bindings": [
+                    {"atom_id": "atom:one"},
+                    {"atom_id": "atom:two"},
+                ],
+            }
+        ]
+    }
+    authored = deepcopy(baseline)
+    authored["experiments"][0].pop("origin_evidence_bindings")
+    resolved = deepcopy(baseline)
+    preserved = [
+        {
+            "experiment_id": "experiment:one",
+            "path": "experiments[0].origin_evidence_bindings",
+            "authored_binding_count": 0,
+            "resolved_binding_count": 2,
+            "resolved_bindings_sha256": _fixture_json_sha256(
+                baseline["experiments"][0]["origin_evidence_bindings"]
+            ),
+        }
+    ]
+    resolution: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "preserve_omitted_unchanged_origin_bindings",
+        "baseline_dossier_sha256": _fixture_json_sha256(baseline),
+        "authored_dossier": authored,
+        "authored_dossier_sha256": _fixture_json_sha256(authored),
+        "resolved_dossier_sha256": _fixture_json_sha256(resolved),
+        "preserved_bindings": preserved,
+    }
+    resolution["resolution_sha256"] = _fixture_json_sha256(resolution)
+    source = {"attempted_dossier": baseline}
+    attempt = {
+        "attempted_dossier": resolved,
+        "attempted_dossier_sha256": _fixture_json_sha256(resolved),
+        "baseline_dossier_sha256": _fixture_json_sha256(baseline),
+        "repair_progress": {"authored_dossier_resolution": resolution},
+    }
+
+    assert contracts._research_attempt_resolution_local_errors(
+        attempt, pid="problem:one", index=1
+    ) == []
+    assert contracts._research_attempt_resolution_source_errors(
+        attempt,
+        source_attempt=source,
+        pid="problem:one",
+        index=1,
+    ) == []
+
+    tampered = deepcopy(attempt)
+    tampered["attempted_dossier"]["experiments"][0]["result"] = "fabricated"
+    tampered["attempted_dossier_sha256"] = _fixture_json_sha256(
+        tampered["attempted_dossier"]
+    )
+    tampered_resolution = tampered["repair_progress"]["authored_dossier_resolution"]
+    tampered_resolution["resolved_dossier_sha256"] = tampered["attempted_dossier_sha256"]
+    unsigned = dict(tampered_resolution)
+    unsigned.pop("resolution_sha256")
+    tampered_resolution["resolution_sha256"] = _fixture_json_sha256(unsigned)
+
+    assert contracts._research_attempt_resolution_local_errors(
+        tampered, pid="problem:one", index=1
+    ) == []
+    assert contracts._research_attempt_resolution_source_errors(
+        tampered,
+        source_attempt=source,
+        pid="problem:one",
+        index=1,
+    ) == [
+        "research_dossier_research_attempt_resolution_invalid: "
+        "problem:one: index=1:projection"
+    ]
+
+
 def test_current_research_attempt_history_allows_adaptive_same_session_corrections() -> None:
     session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
 

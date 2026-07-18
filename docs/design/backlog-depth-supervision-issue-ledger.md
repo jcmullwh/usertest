@@ -1013,6 +1013,32 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Verification: the complete affected Stage 3 evidence, stage-contract, and prompt suites passed 411 tests with one expected skip in 87 seconds. New tests prove both terminal dispositions quarantine planning-only mechanism diagnostics and that an authenticated complete negative is ready with no mechanism projection/falsification receipt; the existing actionable negative test still rejects missing causal falsification and exact code path.
 - Closure proof: the exact retained Windows author removes the invalid classifier falsification without losing its evidence, deterministic replay verifies the terminal disposition, production Stage 3 persists it, and Stage 4 records `not_required` with no ticket. A subsequent unrelated `requires_change` case must still be blocked when causal depth is absent.
 
+### BDS-133 - Complete-report correction discarded unchanged origin bindings
+
+- Status: `local_correction_and_exact_model_free_replay_green`
+- Priority: Stage 3 self-healing throughput and evidence custody
+- Objective impact: the author made the correct terminal correction but omitted two unchanged `origin_evidence_bindings` arrays while re-emitting the complete dossier. The old controller treated 26 missing binding objects as new research errors even though experiment IDs, atom scope, command, result, exit code, assertion, and control relationship were unchanged.
+- Correction: a targeted correction may carry forward an omitted strict subset of baseline bindings only when all observation and atom-scope fields are unchanged and feedback did not explicitly authorize changing bindings. The exact raw authored dossier, baseline/resolved hashes, restored paths, and binding hashes remain in a content-bound attempt resolution; persisted validation reconstructs the projection and rejects tampering.
+- Exact proof: the retained author report at `U:\s3c2_resume_27b6c01e_r8\repair_result.json` omitted 25 assigned-context bindings and one baseline binding. Model-free replay at `U:\s3c2_controller_resolution_worktree_r3` restored exactly those 26 bindings and passed the real evidence verifier with zero findings in 66.3 seconds. It made zero model, Stage 1/2, downstream, or Docker calls and left the source run unchanged.
+- Closure proof: a fresh production Stage 3 records the raw/effective resolution in its attempt ledger and reaches the same zero-finding terminal dossier without supervisor-authored evidence.
+
+### BDS-134 - Colon-delimited IDs prevented path-specific repair authorization
+
+- Status: `closed_local_and_exact_case_verified`
+- Priority: correction-scope accuracy and throughput
+- Objective impact: validator errors delimit IDs with `:`, but the path narrower treated `:` as part of the surrounding identifier. An error for `experiment:current-controlled-windows-route` therefore authorized all `experiments[]`, making unrelated binding omission look intentional and defeating deterministic preservation.
+- Correction: identifier boundaries still protect letters, digits, dot, underscore, and hyphen, while allowing colon as the validator delimiter after an exact experiment or hypothesis ID. Binding preservation requires an explicit binding target rather than a generic experiment path.
+- Verification: focused tests cover colon-delimited experiment and hypothesis IDs plus broad-experiment versus explicit-binding authorization. The exact Windows errors now narrow the route replay to `experiments[3]` and falsification to hypothesis index 0; unrelated assigned bindings remain protected.
+
+### BDS-135 - Continuation attempt numbering used history length instead of retained maximum
+
+- Status: `local_correction_verified_fresh_run_pending`
+- Priority: attempt-ledger integrity and resumability
+- Objective impact: a recovered partial prefix whose first retained record was numbered 15 received new attempts numbered 2 onward. The resulting `15,2,...,20` ledger could not satisfy sequential provenance or be persisted even after the research itself verified cleanly.
+- Correction: every continuation now allocates `max(valid retained attempt_number) + 1`, not `len(history) + 1`. Invalid/non-numeric values do not influence allocation.
+- Historical disposition: the supervised Windows ledger and every underlying run remain retained on `U:` and are marked `integrity_unknown`; they will not be normalized, deleted, or represented as a production completion. A fresh single-case Stage 3 will establish a valid ledger under the corrected controller.
+- Closure proof: focused and full affected tests pass, and the fresh Stage 3 attempt history is sequential, source-linked, subscription-authenticated, verifier-clean, and persistable.
+
 ### AN-22 - Retained-frontier launcher preflight omitted required invocation context
 
 - Status: `contained`
@@ -1032,6 +1058,12 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Driver: the verifier, readiness gate, mission, and correction feedback all encoded `evidence_sufficient` as synonymous with implementation planning, and supervision over-weighted decreasing mechanical error counts instead of the stated actionability/output purpose.
 - Containment: further model correction stopped after the 35 -> 8 -> 1 mechanical progression exposed the eight deeper planning-only findings. BDS-132 changes the contract rather than asking the author to make a false causal claim. The next call is limited to removing the now-optional invalid classifier mechanism/falsification while preserving all retained research and terminal evidence.
 - Closure proof: the same author reaches the correct terminal disposition under the corrected gate, and future dashboard reporting separates substantive frontier quality from mechanical error count.
+
+### AN-25 - Durable replay attempted to promote a structurally corrupt supervised ledger
+
+- Status: `contained_without_new_model_work`
+- Supervisor impact: after the exact author report verified with zero findings, two model-free materialization checks attempted to persist the old supervised ledger. The first rejected a baseline-hash mismatch; the second rejected invalid historical session provenance and exposed the `15,2,...,20` numbering defect. No model, Docker, upstream, downstream, ticket, or implementation action occurred, and no retained artifact was changed or removed.
+- Containment: the corrupt run is preserved as `integrity_unknown`. Further normalization work stopped; the next qualification is one fresh single-case Stage 3 under the corrected controller.
 
 ### AN-11 - Same-author correction launcher omitted required static path arguments
 
