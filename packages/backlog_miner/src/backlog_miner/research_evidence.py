@@ -2917,6 +2917,76 @@ def _load_evidence_event_stream(
     return events, sources, _canonical_json_sha256(sources)
 
 
+def _evidence_source_attempt_catalog(
+    evidence_attempts: Sequence[Mapping[str, Any]],
+    evidence_event_sources: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retain the attempt records needed to reauthenticate prior event sources.
+
+    Recovered attempts can supply evidence after a process restart without belonging
+    to the dossier's current authoring history. The persisted receipt must retain
+    those records separately; otherwise its prior-attempt event bindings become
+    unverifiable as soon as the in-memory recovery catalog is gone.
+    """
+
+    attempts_by_sha: dict[str, dict[str, Any]] = {}
+    for attempt in evidence_attempts:
+        attempt_sha = _text(attempt.get("attempt_sha256"))
+        if attempt_sha is not None and attempt_sha not in attempts_by_sha:
+            attempts_by_sha[attempt_sha] = dict(attempt)
+
+    retained: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in evidence_event_sources:
+        if _text(source.get("source_kind")) != "prior_attempt":
+            continue
+        attempt_sha = _text(source.get("attempt_sha256"))
+        attempt = attempts_by_sha.get(attempt_sha or "")
+        if attempt_sha is None or attempt is None or attempt_sha in seen:
+            continue
+        retained.append(attempt)
+        seen.add(attempt_sha)
+    return retained
+
+
+def _persisted_evidence_attempt_catalog(
+    receipt: Mapping[str, Any],
+    research_attempts: Sequence[Mapping[str, Any]],
+    *,
+    errors: list[str],
+) -> list[Mapping[str, Any]]:
+    """Return one conflict-free catalog for persisted event-source verification."""
+
+    source_attempts_raw = receipt.get("evidence_source_attempts")
+    source_attempts: list[Mapping[str, Any]] = []
+    if source_attempts_raw is not None:
+        if not isinstance(source_attempts_raw, list) or any(
+            not isinstance(attempt, Mapping) for attempt in source_attempts_raw
+        ):
+            errors.append("research_evidence_source_attempts_invalid")
+        else:
+            source_attempts = list(source_attempts_raw)
+            if receipt.get("evidence_source_attempts_sha256") != _canonical_json_sha256(
+                source_attempts_raw
+            ):
+                errors.append("research_evidence_source_attempts_hash_changed")
+
+    combined: list[Mapping[str, Any]] = []
+    by_sha: dict[str, Mapping[str, Any]] = {}
+    for attempt in [*source_attempts, *research_attempts]:
+        attempt_sha = _text(attempt.get("attempt_sha256"))
+        if attempt_sha is None:
+            combined.append(attempt)
+            continue
+        prior = by_sha.get(attempt_sha)
+        if prior is None:
+            by_sha[attempt_sha] = attempt
+            combined.append(attempt)
+        elif _canonical_json_sha256(prior) != _canonical_json_sha256(attempt):
+            errors.append(f"research_evidence_source_attempt_conflict:{attempt_sha}")
+    return combined
+
+
 def _load_persisted_evidence_event_stream(
     receipt: Mapping[str, Any],
     *,
@@ -14043,6 +14113,10 @@ def verify_research_evidence(
         current_run_lineage=current_run_lineage,
         errors=errors,
     )
+    evidence_source_attempts = _evidence_source_attempt_catalog(
+        evidence_attempts,
+        evidence_event_sources,
+    )
     clean_replays: dict[str, dict[str, Any]] = {}
     executor: ReplayExecutor = replay_executor or BlockedReplayExecutor()
     replay_isolation = executor.isolation_receipt(
@@ -14309,6 +14383,10 @@ def verify_research_evidence(
         ),
         "evidence_event_sources": evidence_event_sources,
         "evidence_event_sources_sha256": evidence_event_sources_sha256,
+        "evidence_source_attempts": evidence_source_attempts,
+        "evidence_source_attempts_sha256": _canonical_json_sha256(
+            evidence_source_attempts
+        ),
         "run_report_sha256": (
             _sha256_path(report_path) if report_path.exists() and report_path.is_file() else None
         ),
@@ -14726,10 +14804,15 @@ def verify_persisted_research_evidence(
         if isinstance(attempts_raw, list)
         else []
     )
+    persisted_evidence_attempts = _persisted_evidence_attempt_catalog(
+        receipt,
+        research_attempts,
+        errors=errors,
+    )
     persisted_events = _load_persisted_evidence_event_stream(
         receipt,
         current_run_dir=run_dir,
-        research_attempts=research_attempts,
+        research_attempts=persisted_evidence_attempts,
         errors=errors,
     )
     errors.extend(

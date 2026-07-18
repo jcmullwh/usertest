@@ -565,6 +565,99 @@ def test_persisted_evidence_event_stream_rejects_tamper_and_reordering(
     assert "research_evidence_event_source_changed:0" in tampered_errors
 
 
+def test_recovered_event_source_attempt_is_persisted_outside_authoring_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "verify_controlled_codex_execpolicy_receipt", lambda _path: [])
+    source_run = tmp_path / "recovered-source"
+    current_run = tmp_path / "current-correction"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    revision = "d" * 40
+    session_id = "55555555-5555-4555-8555-555555555555"
+    source_events: list[dict[str, object]] = [
+        {"type": "run_command", "data": {"command": "python proof.py", "exit_code": 0}}
+    ]
+    recovered_attempt = _event_source_attempt(
+        run_dir=source_run,
+        workspace=workspace,
+        revision=revision,
+        case_id="case:one",
+        problem_id="problem:one",
+        session_id=session_id,
+        events=source_events,
+    )
+    _write_normalized_events(current_run / "normalized_events.jsonl", [])
+    current_lineage = _write_current_correction_lineage(
+        run_dir=current_run,
+        revision=revision,
+        session_id=session_id,
+    )
+    build_errors: list[str] = []
+    _events, sources, sources_sha256 = mod._load_evidence_event_stream(
+        run_dir=current_run,
+        evidence_attempts=[recovered_attempt],
+        case_id="case:one",
+        problem_id="problem:one",
+        repo_revision=revision,
+        workspace=workspace,
+        agent_session_id=session_id,
+        current_run_lineage=current_lineage,
+        errors=build_errors,
+    )
+    assert build_errors == []
+
+    source_attempts = mod._evidence_source_attempt_catalog([recovered_attempt], sources)
+    assert source_attempts == [recovered_attempt]
+    receipt: dict[str, object] = {
+        "run_dir": str(current_run.resolve()),
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "workspace_dir": str(workspace.resolve()),
+        "evidence_agent_session_id": session_id,
+        "evidence_event_sources": sources,
+        "evidence_event_sources_sha256": sources_sha256,
+        "evidence_source_attempts": source_attempts,
+        "evidence_source_attempts_sha256": mod._canonical_json_sha256(source_attempts),
+    }
+
+    catalog_errors: list[str] = []
+    persisted_catalog = mod._persisted_evidence_attempt_catalog(
+        receipt,
+        [],
+        errors=catalog_errors,
+    )
+    assert catalog_errors == []
+    persisted_errors: list[str] = []
+    assert mod._load_persisted_evidence_event_stream(
+        receipt,
+        current_run_dir=current_run,
+        research_attempts=persisted_catalog,
+        errors=persisted_errors,
+    ) == source_events
+    assert persisted_errors == []
+
+    without_catalog_errors: list[str] = []
+    mod._load_persisted_evidence_event_stream(
+        receipt,
+        current_run_dir=current_run,
+        research_attempts=[],
+        errors=without_catalog_errors,
+    )
+    assert without_catalog_errors == ["research_evidence_event_source_attempt_unmatched:0"]
+
+    tampered = deepcopy(receipt)
+    tampered_attempts = tampered["evidence_source_attempts"]
+    assert isinstance(tampered_attempts, list)
+    assert isinstance(tampered_attempts[0], dict)
+    tampered_attempts[0]["outcome"] = "changed"
+    tamper_errors: list[str] = []
+    mod._persisted_evidence_attempt_catalog(tampered, [], errors=tamper_errors)
+    assert "research_evidence_source_attempts_hash_changed" in tamper_errors
+
+
 def test_evidence_event_stream_current_run_only_and_legacy_receipt_compatibility(
     tmp_path: Path,
 ) -> None:
@@ -6102,6 +6195,10 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
     assert (
         correction_receipt["evidence_event_sources"][0]["attempt_sha256"]
         == source_attempt["attempt_sha256"]
+    )
+    assert correction_receipt["evidence_source_attempts"] == [source_attempt]
+    assert correction_receipt["evidence_source_attempts_sha256"] == (
+        mod._canonical_json_sha256([source_attempt])
     )
     assert correction_receipt["evidence_event_sources"][-1]["event_count"] == 0
     correction_dossier["evidence_verification"] = correction_receipt
