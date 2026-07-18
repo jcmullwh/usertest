@@ -9108,18 +9108,29 @@ def _partition_mechanism_validation_errors(
 ) -> tuple[list[str], list[str]]:
     """Separate claim-integrity failure from an honestly incomplete research boundary.
 
-    A sufficient dossier promises a planning-grade *primary* mechanism, so defects bound to that
-    hypothesis (and integrity defects that cannot be bound to any declared alternative) remain
-    fatal.  An incomplete secondary hypothesis is retained as a diagnostic instead: readiness
-    separately requires every plausible/unresolved alternative to be materialized as an unknown,
-    so quarantining its projection cannot silently erase the open question.
+    A sufficient ``requires_change`` dossier promises a planning-grade *primary* mechanism, so
+    defects bound to that hypothesis (and integrity defects that cannot be bound to any declared
+    alternative) remain fatal. A complete ``already_addressed`` or ``non_actionable`` result
+    instead promises evidence for its terminal disposition; it must not be forced to invent an
+    implementation path through inaccessible or irrelevant internals. Its optional mechanism
+    projection is retained as diagnostic evidence, just like mechanism evidence in a blocked or
+    insufficient dossier.
 
     Blocked/insufficient dossiers preserve all diagnostics but cannot advance; their lack of a
     verified mechanism is the reported outcome rather than a malformed report.
     """
 
     normalized = list(dict.fromkeys(str(error) for error in mechanism_errors))
-    if dossier.get("research_status") != "evidence_sufficient":
+    actionability_raw = dossier.get("actionability_assessment")
+    actionability = (
+        actionability_raw.get("disposition")
+        if isinstance(actionability_raw, Mapping)
+        else "requires_change"
+    )
+    if (
+        dossier.get("research_status") != "evidence_sufficient"
+        or actionability != "requires_change"
+    ):
         return [], normalized
 
     hypotheses_raw = dossier.get("root_cause_hypotheses")
@@ -12720,9 +12731,15 @@ def _falsification_attempt_receipts(
                     ),
                 }
             )
+        actionability_raw = dossier.get("actionability_assessment")
+        requires_change = (
+            isinstance(actionability_raw, Mapping)
+            and actionability_raw.get("disposition") == "requires_change"
+        )
         if (
             hypothesis_index == 0
             and dossier.get("research_status") == "evidence_sufficient"
+            and requires_change
             and not any(receipt.get("outcome") == "survived" for receipt in bound)
             and hypothesis_id not in deterministic_hypotheses
         ):

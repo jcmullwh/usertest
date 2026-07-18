@@ -980,6 +980,59 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Verification: Ruff and the complete `test_research_runner.py` module pass: 150 tests in 81.4 seconds. New positive and negative regressions prove exact verifier-rejected removal is accepted and an unrelated hypothesis/attempt finding remains blocked. The correction is committed and pushed to PR #217 as `abcd5307`.
 - Closure proof: model-free replay of the exact retained zero-finding first correction on an execution root containing `abcd5307` accepted the deletion through the exact verifier-backed revision basis, preserved two retained invocations and subscription provenance, made zero new model calls, reported zero substantive-coverage regressions and zero attempt-provenance errors, and changed no source file. The 46.796-second receipt is `U:\usertest_backlog_qualification\abcd5307_20260717T085000Z\component_frontiers\stage3_windows_retained_output_replay_v3_20260717T090300Z\retained_stage3_replay_receipt.json` with SHA-256 `2419FE7E6286055D1F003D099BB9B0B3960FFD16E8C303A0B7E663B57F99BB4E`. It did not enter Stage 4; subsequent evidence findings remain a separate, currently blocked boundary under BDS-108.
 
+### BDS-129 - Relation canonicalization left provisional research membership stale
+
+- Status: `closed`
+- Priority: case identity, Stage 3 evidence completeness
+- Objective impact: the relation reviewer could canonicalize a provisional same-cause group while the persisted case membership still reflected the pre-review records, allowing Stage 3 to receive a canonical case without all authenticated member evidence.
+- Correction: provisional membership is synchronized only after relation canonicalization and is persisted on the canonical records consumed downstream.
+- Closure proof: focused relation-lineage tests pass; commit `a64258f6` is on PR #217 and the bounded Windows Stage 2 projection contains the canonical case with both member facets.
+
+### BDS-130 - Stage 2 schedules both members of a provisional same-cause group
+
+- Status: `open`
+- Priority: duplicate work, throughput
+- Objective impact: the source Stage 2 output independently selected `problem:windows-sandbox-command-execution-fails` for `research_update` and its provisional same-cause member `problem:windows-sandbox-command-execution-blocked` for `research_new`, even though the bounded canonical projection correctly contains one research unit. A full run can therefore spend two Stage 3 calls on one case.
+- Required action: apply the canonical relation decision to Stage 2 scheduling before Stage 3 selection, retaining member facets/evidence on the one scheduled case.
+- Closure proof: a bounded Stage 2 replay schedules one canonical research unit and preserves both member evidence sets without silently discarding either decision.
+
+### BDS-131 - Nested local research helpers were invisible to harness dataflow verification
+
+- Status: `closed`
+- Priority: causal-verifier correctness, throughput
+- Objective impact: an exact retained Windows route harness invoked a nested local helper that returned production output to stdout, but the verifier resolved only module-level helpers and falsely reported that the production result did not reach the observable assertion.
+- Correction: lexical nested helper definitions are resolved when following harness return/dataflow edges; unrelated nested calls remain excluded.
+- Closure proof: commit `d55dd337` is on PR #217. The exact retained harness now resolves `_codex_shell_probe_failure_reason` to stdout, seven focused regressions pass, and the complete research-evidence suite passed 203 tests with one expected skip in 88.3 seconds.
+
+### BDS-132 - Universal planning-grade mechanism gate distorted complete negative research
+
+- Status: `local_correction_verified_live_replay_pending`
+- Priority: objective-critical, good-throughput blocking
+- Objective impact: every `evidence_sufficient` dossier was required to carry an implementation-ready causal mechanism and survived falsification even when actionability was `already_addressed` or `non_actionable`. The Windows author correctly identified a real external sandbox panic, the old runner's missing controlled route, commit `7651f965`'s mitigation, and the remaining vendor/live boundary. The verifier rejected that boundary-level conclusion and repeated feedback progressively converted a diagnostic classifier into the supposed cause. This produced zero terminal throughput and directly undermined root-cause depth.
+- Correction: common sufficiency still requires authenticated symptoms, complete assigned-evidence accounting, current actionability evidence, repository inspection, and no unknown capable of changing the disposition. Only `requires_change` now requires the planning-grade mechanism projection, connected change surface, and causal falsification/closure. Complete negatives may retain inaccessible internals as bounded unknowns and may omit an unverified optional mechanism/falsification claim. Mission and repair prompts state the same distinction and explicitly prohibit relabeling a diagnostic as the cause.
+- Verification: the complete affected Stage 3 evidence, stage-contract, and prompt suites passed 411 tests with one expected skip in 87 seconds. New tests prove both terminal dispositions quarantine planning-only mechanism diagnostics and that an authenticated complete negative is ready with no mechanism projection/falsification receipt; the existing actionable negative test still rejects missing causal falsification and exact code path.
+- Closure proof: the exact retained Windows author removes the invalid classifier falsification without losing its evidence, deterministic replay verifies the terminal disposition, production Stage 3 persists it, and Stage 4 records `not_required` with no ticket. A subsequent unrelated `requires_change` case must still be blocked when causal depth is absent.
+
+### AN-22 - Retained-frontier launcher preflight omitted required invocation context
+
+- Status: `contained`
+- Supervisor impact: two relaunches stopped before model work because the first omitted the two required 86,400-second timeout variables and the second used a saved prompt path missing the target-repository directory level. No research state was changed, no model call was made, and the third launch resumed the same author/session/frontier.
+- Prevention: resolve retained paths from disk and run the helper's complete environment preflight before launching the paid continuation.
+
+### AN-23 - Formatter check initially rewrote unrelated legacy formatting
+
+- Status: `contained_before_commit`
+- Supervisor impact: an earlier `ruff format` invocation rewrote hundreds of unrelated lines in two large files while validating the nested-helper fix. The mass rewrite was fully reversed before the intended patch was reapplied; `.tmp/format_reversal.patch` is retained and no unrelated formatting entered commit `d55dd337`.
+- Prevention: use `ruff format --check` only on legacy large files unless formatting the whole file is explicitly in scope; rely on Ruff lint and diff inspection for narrow edits.
+
+### AN-24 - Supervisor followed a wrong universal gate through 33 same-session outputs
+
+- Status: `root_cause_corrected_live_closure_pending`
+- Supervisor impact: the retained Terra session produced 33 research reports from 02:07 through 06:00 on 2026-07-18. At 04:33 it had already authored the substantively correct boundary-level conclusion: external Windows sandbox panic, pre-`7651f965` controlled-route omission, current mitigation, and unknown vendor trigger. Instead of challenging the universal planning-grade gate, supervision continued feeding verifier findings. Later reports narrowed the hypothesis to `_codex_shell_probe_failure_reason`, a classifier the author explicitly said was neither cause nor mitigation. This was excessive intervention and zero useful terminal throughput.
+- Driver: the verifier, readiness gate, mission, and correction feedback all encoded `evidence_sufficient` as synonymous with implementation planning, and supervision over-weighted decreasing mechanical error counts instead of the stated actionability/output purpose.
+- Containment: further model correction stopped after the 35 -> 8 -> 1 mechanical progression exposed the eight deeper planning-only findings. BDS-132 changes the contract rather than asking the author to make a false causal claim. The next call is limited to removing the now-optional invalid classifier mechanism/falsification while preserving all retained research and terminal evidence.
+- Closure proof: the same author reaches the correct terminal disposition under the corrected gate, and future dashboard reporting separates substantive frontier quality from mechanical error count.
+
 ### AN-11 - Same-author correction launcher omitted required static path arguments
 
 - Status: `closed_immediate_command_correction`

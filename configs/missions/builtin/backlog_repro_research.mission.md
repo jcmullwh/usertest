@@ -15,40 +15,33 @@ requires_edits: true
 You are researching one automatically mined backlog case at a pinned repository revision.
 ## Goal
 
-Determine whether the assigned source evidence describes a real, unactioned problem. Establish the
-causal mechanism deeply enough that a later planner can choose a root-cause solution, challenge the best
-alternative explanation, and carry desired behavior, constraints, and verification obligations forward.
-
-Do not implement the product change. Research-only harnesses are allowed under
-`.usertest_research/`; tracked product changes are not.
+Determine whether the assigned source evidence describes a real, unactioned problem. Establish enough
+causal depth for a later planner to choose a root-cause solution, challenge alternatives, and carry
+constraints and verification forward. Do not implement; research harnesses belong in `.usertest_research/`.
 
 ## Required behavior
 
-1. Read the complete assigned-evidence index. Open every complete source atom needed to account for
-   the assignment, and read each retained attachment chunk actually relied on by a claim. Do not
-   claim unread optional attachment material was reviewed.
+1. Read the complete assigned-evidence index, every source atom needed to account for it, and each
+   retained attachment chunk relied on by a claim. Do not claim unread material was reviewed.
 2. Inspect the actual repository revision and relevant mechanism surface.
 3. Establish current actionability from the pinned revision, Git history, regression coverage, and
    retained outcomes. A historical failure predating a verified fix is not unactioned work.
 4. Run faithful experiments when possible. Commands are shell-free direct argv and must bind to a
    tracked repository entrypoint or an attested research harness. Any language/runtime is valid.
-5. Compare a baseline with a controlled challenge. Use an open registered proof adapter when the
-   mechanism is environment, filesystem/config state, platform, command/event behavior, a code
-   path, or another registered domain type.
-6. Attempt to falsify the primary hypothesis and retain counterevidence.
+5. For `requires_change`, compare a baseline with a controlled challenge using an open registered
+   proof adapter. For a complete negative, test decisive actionability without manufacturing a change mechanism.
+6. Falsify implementation-driving hypotheses. For terminal dispositions, challenge the disposition
+   but do not invent a causal intervention or vendor-internal mechanism merely to populate a field.
 7. Use a runner-evaluated registered predicate for each causal adapter and bind it to authenticated
    origin/repository meaning. A `positive_outcome` with role `causal_contrast` is mechanism evidence,
    not a future success contract. Carry desired behavior and constraints forward without inventing
    an algorithm, interface, safety matrix, or command.
 8. Report material unknowns honestly. Confidence is telemetry, never a substitute for evidence.
 
-For a non-code file/config/schema/template/asset/platform mechanism, `inspected_symbols` may be
-empty only when a symbol-less `implementation_touchpoints` entry connects the causal locator to a
-runner-observed repository file. Code-symbol mechanisms still require exact symbol inspection.
-
-The stage guidance in the system prompt contains the current adapter, semantic-basis, predicate,
-setup, and output contracts. Follow that contract; do not impose Python/pytest-only evidence shapes
-or fixed scenario/platform vocabularies.
+For non-code mechanisms, `inspected_symbols` may be empty only when a symbol-less
+`implementation_touchpoints` entry connects the locator to a runner-observed repository file.
+Code mechanisms require exact symbols. Follow the system prompt's adapter and output contracts;
+do not impose Python/pytest-only evidence shapes or fixed scenario/platform vocabularies.
 
 ## Evidence sufficiency
 
@@ -57,10 +50,14 @@ Use `evidence_sufficient` only when retained evidence establishes:
 - an assigned source symptom and its current actionability status;
 - for a provisional same-cause research unit, every retained member facet and evidence that the
   same mechanism explains each member (the grouping is a hypothesis, not permission to merge);
-- a connected causal path from source condition through the intervention target to the outcome;
-- a survived adversarial challenge or authenticated deterministic closure;
-- no unresolved empirical unknown that could change the root cause, current actionability, or
-  connected production change surface.
+- no unresolved empirical unknown that could change the current actionability disposition.
+
+For `requires_change`, also establish a connected source-to-outcome causal path, a survived challenge
+or authenticated deterministic closure, and no unknown that could change the root cause/change surface.
+
+For `already_addressed` or `non_actionable`, establish that no new change is warranted and preserve
+the verification boundary. Internals may remain unknown if no answer can change that disposition.
+Do not relabel diagnostics as causes or manufacture a mechanism for work that will not enter optioning.
 
 Evidence sufficiency is separate from actionability. Emit `actionability_assessment` as `requires_change`, `already_addressed`, `non_actionable`, or `undetermined`, with retained evidence
 references. A complete negative is valid Stage-3 throughput: keep it `evidence_sufficient`; do not

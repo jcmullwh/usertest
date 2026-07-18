@@ -4619,6 +4619,66 @@ def test_research_readiness_requires_causal_falsification_and_exact_code_path() 
     assert any("falsification_attempt" in reason for reason in reasons)
 
 
+def test_complete_negative_readiness_does_not_require_planning_grade_mechanism() -> None:
+    dossier = _valid_dossier()
+    dossier["root_cause_hypotheses"] = [
+        {
+            "hypothesis_id": "hypothesis:external-runtime",
+            "statement": "The retained failure occurred in an external runtime boundary.",
+            "supporting_evidence": ["exp-support"],
+            "counterevidence": [],
+            "falsification_attempts": [],
+            "mechanism_symbols": [],
+            "disposition": "primary",
+            "disposition_evidence": ["exp-support"],
+        }
+    ]
+    dossier["inspected_symbols"] = []
+    dossier["actionability_assessment"] = {
+        "disposition": "already_addressed",
+        "rationale": "The pinned revision contains the controlled route; no new change is due.",
+        "evidence_refs": ["exp-support", "artifact:source"],
+    }
+    receipt = dossier["evidence_verification"]
+    receipt["inspected_symbols"] = []
+    receipt["hypothesis_refs"] = [
+        {
+            "hypothesis_id": "hypothesis:external-runtime",
+            "supporting_refs": ["exp-support"],
+            "counterevidence_refs": [],
+            "mechanism_symbols": [],
+            "disposition": "primary",
+            "disposition_evidence_refs": ["exp-support"],
+            "control_links": [],
+            "falsification_attempts": [],
+        }
+    ]
+    for field in (
+        "causal_links",
+        "mechanism_evidence",
+        "outcome_oracles",
+        "test_selections",
+        "control_verifications",
+        "falsification_interventions",
+        "deterministic_mechanism_closures",
+        "failure_paths",
+    ):
+        receipt[field] = []
+    for field in (
+        "verified_mechanism",
+        "verified_mechanism_sha256",
+        "verified_mechanism_provenance",
+        "verified_mechanism_provenance_sha256",
+    ):
+        receipt[field] = None
+    _refresh_receipt_hashes(dossier)
+
+    assert contracts.research_evidence_verification_contract_errors(dossier) == []
+    ready, reasons = assess_research_readiness(dossier)
+    assert reasons == []
+    assert ready is True
+
+
 def test_research_readiness_does_not_relax_missing_code_symbol_inspection() -> None:
     dossier = _valid_dossier()
     dossier["inspected_symbols"] = []

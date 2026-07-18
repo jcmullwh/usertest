@@ -2050,7 +2050,12 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
     return errors
 
 
-def _validate_hypotheses(value: Any, *, pid: str) -> list[str]:
+def _validate_hypotheses(
+    value: Any,
+    *,
+    pid: str,
+    allow_empty_mechanism: bool = False,
+) -> list[str]:
     """Validate root-cause hypotheses and explicit causal challenges."""
     if not isinstance(value, list):
         return [
@@ -2095,7 +2100,7 @@ def _validate_hypotheses(value: Any, *, pid: str) -> list[str]:
                 hypothesis.get("mechanism_symbols"),
                 field=f"hypotheses_{idx}_mechanism_symbols",
                 pid=pid,
-                require_nonempty=True,
+                require_nonempty=not allow_empty_mechanism,
             )
         )
         disposition = hypothesis.get("disposition")
@@ -3888,6 +3893,22 @@ def research_actionability_assessment(item: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
+def _requires_planning_grade_mechanism(item: Mapping[str, Any]) -> bool:
+    """Return whether this dossier is asking downstream stages to design a change.
+
+    ``evidence_sufficient`` describes confidence in the research disposition, not always a
+    promise that an implementation-ready causal path exists. A complete negative can establish
+    that the retained problem was already addressed or is non-actionable without reverse
+    engineering inaccessible vendor internals. Only ``requires_change`` dossiers need the
+    planning-grade mechanism projection consumed by optioning and planning.
+    """
+
+    return (
+        item.get("research_status") == "evidence_sufficient"
+        and research_actionability_assessment(item).get("disposition") == "requires_change"
+    )
+
+
 def _control_call_arguments(
     selection: dict[str, Any],
     symbol: str,
@@ -4962,7 +4983,7 @@ def _validate_verified_mechanism_projection(
             and provenance_digest is None
             else [f"research_verified_mechanism_present_on_failed_receipt: {pid}"]
         )
-    if item.get("research_status") != "evidence_sufficient" and all(
+    if not _requires_planning_grade_mechanism(item) and all(
         value is None
         for value in (
             projection,
@@ -4983,7 +5004,7 @@ def _validate_verified_mechanism_projection(
         )
     )
     current_projection_required = current_schema and (
-        item.get("research_status") == "evidence_sufficient" or projection_present
+        _requires_planning_grade_mechanism(item) or projection_present
     )
     if current_projection_required:
         schema_errors: list[str] = []
@@ -6285,7 +6306,7 @@ def _validate_typed_mechanism_evidence(
     primary_evidence = False
     primary_covered_symbols: set[str] = set()
     primary_origin_entrypoint_verified = False
-    advancing = item.get("research_status") == "evidence_sufficient"
+    advancing = _requires_planning_grade_mechanism(item)
 
     def valid_link(value: Any, *, mechanism_symbols: list[Any]) -> bool:
         if not isinstance(value, dict) or not _is_nonempty_string(value.get("entrypoint")):
@@ -8951,7 +8972,17 @@ def _validate_research_dossier(
     errors.extend(
         _validate_string_list(item.get("inspected_symbols"), field="inspected_symbols", pid=pid)
     )
-    errors.extend(_validate_hypotheses(item.get("root_cause_hypotheses"), pid=pid))
+    actionability_disposition = research_actionability_assessment(item).get("disposition")
+    errors.extend(
+        _validate_hypotheses(
+            item.get("root_cause_hypotheses"),
+            pid=pid,
+            allow_empty_mechanism=(
+                status == "evidence_sufficient"
+                and actionability_disposition in {"already_addressed", "non_actionable"}
+            ),
+        )
+    )
     errors.extend(_validate_research_evidence_links(item, pid=pid))
     confidence = item.get("root_cause_confidence")
     if (
@@ -9251,6 +9282,7 @@ def assess_research_readiness(item: dict[str, Any] | None) -> tuple[bool, list[s
     actionability_disposition = research_actionability_assessment(item).get("disposition")
     if actionability_disposition == "undetermined":
         reasons.append("research_actionability_undetermined")
+    requires_planning_grade_mechanism = actionability_disposition == "requires_change"
 
     artifact_refs = item.get("artifact_refs")
     if not isinstance(artifact_refs, list) or not artifact_refs:
@@ -9266,7 +9298,7 @@ def assess_research_readiness(item: dict[str, Any] | None) -> tuple[bool, list[s
         for hypothesis in hypotheses
     ):
         reasons.append("root_cause_supporting_evidence_missing")
-    if isinstance(hypotheses, list) and hypotheses:
+    if isinstance(hypotheses, list) and hypotheses and requires_planning_grade_mechanism:
         primary = hypotheses[0] if isinstance(hypotheses[0], dict) else {}
         primary_id = str(primary.get("hypothesis_id") or "")
         declared_attempts = primary.get("falsification_attempts")
@@ -9291,6 +9323,7 @@ def assess_research_readiness(item: dict[str, Any] | None) -> tuple[bool, list[s
                 reasons.append("primary_hypothesis_disproved_by_replayed_challenge")
             if "survived" not in outcomes:
                 reasons.append("primary_hypothesis_missing_survived_replayed_challenge")
+    if isinstance(hypotheses, list) and hypotheses:
         unresolved_alternative_ids = {
             str(hypothesis.get("hypothesis_id"))
             for hypothesis in hypotheses[1:]
@@ -9371,7 +9404,7 @@ def assess_research_readiness(item: dict[str, Any] | None) -> tuple[bool, list[s
     verification = item.get("evidence_verification")
     if not isinstance(verification, dict) or verification.get("status") != "verified":
         reasons.append("research_evidence_unverified")
-    elif not verification.get("mechanism_evidence"):
+    elif requires_planning_grade_mechanism and not verification.get("mechanism_evidence"):
         reasons.append("research_mechanism_evidence_missing")
     assignment = item.get("evidence_assignment")
     if not isinstance(assignment, dict) or assignment.get("status") != "complete":

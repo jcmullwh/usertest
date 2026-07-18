@@ -8080,6 +8080,61 @@ def test_sufficient_research_keeps_primary_mechanism_errors_fatal_and_quarantine
     assert diagnostics == [secondary_error]
 
 
+@pytest.mark.parametrize("disposition", ["already_addressed", "non_actionable"])
+def test_complete_negative_quarantines_planning_mechanism_errors(
+    disposition: str,
+) -> None:
+    mechanism_errors = [
+        "primary_hypothesis_mechanism_evidence_missing:hypothesis:external-runtime",
+        "primary_hypothesis_causal_root_missing:hypothesis:external-runtime",
+    ]
+    dossier = {
+        "research_status": "evidence_sufficient",
+        "actionability_assessment": {"disposition": disposition},
+        "root_cause_hypotheses": [
+            {"hypothesis_id": "hypothesis:external-runtime"}
+        ],
+    }
+
+    fatal, diagnostics = mod._partition_mechanism_validation_errors(
+        dossier,
+        mechanism_errors,
+    )
+
+    assert fatal == []
+    assert diagnostics == mechanism_errors
+
+
+def test_complete_negative_does_not_require_causal_falsification_receipt() -> None:
+    errors: list[str] = []
+
+    receipts = mod._falsification_attempt_receipts(
+        {
+            "research_status": "evidence_sufficient",
+            "actionability_assessment": {"disposition": "already_addressed"},
+            "experiments": [],
+            "root_cause_hypotheses": [
+                {
+                    "hypothesis_id": "hypothesis:external-runtime",
+                    "statement": "The retained failure occurred outside the repository.",
+                    "supporting_evidence": ["artifact:origin"],
+                    "counterevidence": [],
+                    "falsification_attempts": [],
+                    "mechanism_symbols": [],
+                }
+            ],
+        },
+        clean_replays={},
+        mechanism_evidence=[],
+        falsification_interventions=[],
+        deterministic_closures=[],
+        errors=errors,
+    )
+
+    assert receipts == {"hypothesis:external-runtime": []}
+    assert errors == []
+
+
 def test_harness_mechanism_touch_follows_only_immediate_result_method_chain(
     tmp_path: Path,
 ) -> None:
