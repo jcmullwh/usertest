@@ -52,11 +52,9 @@ def _restore_historical_provisional_relation_context(
     """Restore one authenticated provisional research unit onto a relation item.
 
     Registry entries deliberately retain each provisional member as a separate durable
-    case, so an individual entry can name only its own problem ID.  The attached
-    provisional-group receipt is the runner-owned research-unit boundary and names all
-    member problems.  When that receipt is valid, the Stage-1 work unit must expose the
-    same problem membership or Stage 3 will correctly reject the contradictory packet.
-    Invalid historical groups remain visible but are not trusted to widen membership.
+    case, so an individual relation item continues to name only its own problem ID.
+    Membership is synchronized only after relation canonicalization has produced the
+    single research work unit; widening every input item would make aliases ambiguous.
     """
 
     if not isinstance(historical_context, Mapping):
@@ -79,16 +77,28 @@ def _restore_historical_provisional_relation_context(
     if integrity_errors:
         relation_item["provisional_same_cause_integrity_errors"] = integrity_errors
 
-    case_id = _coerce_string(relation_item.get("case_id"))
+
+
+def _synchronize_provisional_research_unit_membership(
+    candidate: dict[str, Any],
+) -> None:
+    """Bind a canonical provisional work unit to its authenticated member problems."""
+
+    if candidate.get("case_identity_status") != "provisional_same_cause":
+        return
+    provisional_raw = candidate.get("provisional_same_cause_group")
+    if not isinstance(provisional_raw, Mapping):
+        return
+    case_id = _coerce_string(candidate.get("case_id"))
     group_errors = provisional_same_cause_group_errors(
-        provisional_group,
+        provisional_raw,
         owning_case_id=case_id,
     )
     member_problem_ids = _coerce_string_list(
-        provisional_group.get("member_problem_ids")
+        provisional_raw.get("member_problem_ids")
     )
     if not group_errors and member_problem_ids:
-        relation_item["case_member_problem_ids"] = member_problem_ids
+        candidate["case_member_problem_ids"] = member_problem_ids
 
 
 def _render_problem_records_markdown(
@@ -6506,6 +6516,8 @@ def _run_problem_case_relation_review(
         ),
         verified_relation_edges=verified_relation_edges,
     )
+    for candidate in canonical_candidates:
+        _synchronize_provisional_research_unit_membership(candidate)
     canonical_records: list[dict[str, Any]] = []
     for candidate in canonical_candidates:
         member_problem_ids = {

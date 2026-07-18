@@ -48,13 +48,13 @@ from usertest_backlog.workflows.problem_mining import (
     _relation_case_preview,
     _relation_decision_item_errors,
     _relation_review_payload,
-    _restore_historical_provisional_relation_context,
     _retained_relation_correction_candidate,
     _run_cross_job_problem_synthesis,
     _run_independently_reviewed_problem_pass,
     _run_problem_mining_job_with_response_retry,
     _run_problem_mining_stage,
     _run_relation_review_batches,
+    _synchronize_provisional_research_unit_membership,
     _verified_problem_mining_controller_manifest,
     _verified_problem_mining_prior_events_path,
     _verified_relation_edges_from_case_registry,
@@ -80,7 +80,7 @@ from usertest_backlog.workflows.problem_mining_evidence import (
 )
 
 
-def test_historical_provisional_group_restores_complete_research_unit_membership() -> None:
+def test_canonical_provisional_group_restores_complete_research_unit_membership() -> None:
     relation_item = {
         "problem_id": "problem:canonical",
         "case_id": "case:canonical",
@@ -108,14 +108,14 @@ def test_historical_provisional_group_restores_complete_research_unit_membership
         ],
     }
 
-    _restore_historical_provisional_relation_context(
-        relation_item,
+    relation_item.update(
         {
             "case_identity_status": "provisional_same_cause",
             "case_identity_candidate_ids": ["case:member", "case:canonical"],
             "provisional_same_cause_group": group,
-        },
+        }
     )
+    _synchronize_provisional_research_unit_membership(relation_item)
 
     assert relation_item["case_member_problem_ids"] == [
         "problem:member",
@@ -124,15 +124,14 @@ def test_historical_provisional_group_restores_complete_research_unit_membership
     assert relation_item["provisional_same_cause_group"] == group
 
 
-def test_invalid_historical_provisional_group_cannot_widen_problem_membership() -> None:
+def test_invalid_canonical_provisional_group_cannot_widen_problem_membership() -> None:
     relation_item = {
         "problem_id": "problem:canonical",
         "case_id": "case:canonical",
         "case_member_problem_ids": ["problem:canonical"],
     }
 
-    _restore_historical_provisional_relation_context(
-        relation_item,
+    relation_item.update(
         {
             "case_identity_status": "provisional_same_cause",
             "case_identity_candidate_ids": ["case:member", "case:canonical"],
@@ -144,8 +143,9 @@ def test_invalid_historical_provisional_group_cannot_widen_problem_membership() 
                 "member_problem_ids": ["problem:injected", "problem:canonical"],
                 "member_facets": [],
             },
-        },
+        }
     )
+    _synchronize_provisional_research_unit_membership(relation_item)
 
     assert relation_item["case_member_problem_ids"] == ["problem:canonical"]
 
