@@ -8,6 +8,7 @@ from pathlib import Path
 from backlog_core.case_lineage import source_evidence_atom_projection
 from backlog_core.stage_contracts import evidence_assignment_sha256
 
+import backlog_miner.origin_evidence as origin_evidence
 import backlog_miner.research_runner as research_runner
 from backlog_miner.origin_evidence import (
     materialize_origin_attachments,
@@ -871,3 +872,84 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
             evidence_assignment=assignment,
         )
     )
+
+
+def test_large_multi_run_context_falls_back_to_hash_bound_run_inventory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    atoms: list[dict[str, object]] = []
+    receipts: list[dict[str, object]] = []
+    for index in range(12):
+        run_dir = tmp_path / "runs" / f"source-{index:02d}"
+        run_dir.mkdir(parents=True)
+        metrics = run_dir / "metrics.json"
+        metrics.write_text(
+            json.dumps(
+                {
+                    f"diagnostic_field_{field:02d}_{'x' * 28}": field
+                    for field in range(48)
+                }
+            ),
+            encoding="utf-8",
+        )
+        atom = {
+            "atom_id": f"atom:source-context:{index:02d}",
+            "run_dir": str(run_dir),
+        }
+        raw = metrics.read_bytes()
+        atoms.append(atom)
+        receipts.append(
+            {
+                "atom_id": atom["atom_id"],
+                "atom_sha256": sha256(
+                    json.dumps(atom, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "atom_snapshot": atom,
+                "artifact_receipts": [
+                    {
+                        "path": str(metrics),
+                        "sha256": sha256(raw).hexdigest(),
+                        "size_bytes": len(raw),
+                        "source_relpath": "metrics.json",
+                        "research_context_role": "metrics",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(origin_evidence, "RUN_CONTEXT_INDEX_MAX_BYTES", 12 * 1024)
+    assignment = {"atom_receipts": receipts}
+    workspace = tmp_path / "workspace"
+    manifest = materialize_origin_attachments(
+        atoms=atoms,
+        workspace_dir=workspace,
+        source_root=tmp_path,
+        evidence_assignment=assignment,
+    )
+    assignment["origin_attachment_evidence"] = manifest
+
+    assert manifest["errors"] == []
+    context = manifest["run_context"]
+    assert context["index_compacted"] is True
+    assert context["index_compaction"] == "run_inventory_v1"
+    assert context["source_run_count"] == 12
+    assert context["source_artifact_count"] == 12
+    assert context["index_file_size_bytes"] <= 12 * 1024
+    assert all(
+        set(run) == {
+            "atom_ids",
+            "context_id",
+            "source_artifact_count",
+            "source_roles",
+            "source_set_sha256",
+        }
+        for run in context["runs"]
+    )
+    assert all(run["source_roles"] == ["metrics"] for run in context["runs"])
+    assert all(len(run["source_set_sha256"]) == 64 for run in context["runs"])
+    assert verify_materialized_origin_attachments(
+        workspace_dir=workspace,
+        manifest=manifest,
+        evidence_assignment=assignment,
+    ) == []

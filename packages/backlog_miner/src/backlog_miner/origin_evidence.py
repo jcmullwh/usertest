@@ -1067,6 +1067,10 @@ def _project_run_context(
         # Preserve one mandatory context index rather than dropping all source-run
         # evidence. The original projection hashes remain bound to the raw receipts;
         # only verbose projected bodies are reduced to a structural inventory.
+        source_set_hashes = {
+            str(run["context_id"]): _canonical_sha256(run["sources"])
+            for run in payload["runs"]
+        }
         for run in payload["runs"]:
             for source in run["sources"]:
                 projection = source.get("projection")
@@ -1082,6 +1086,33 @@ def _project_run_context(
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
             "utf-8"
         )
+        if len(encoded) > RUN_CONTEXT_INDEX_MAX_BYTES:
+            # A large assignment can contain dozens of independent source runs. Even
+            # the field-level projection inventory above then repeats enough
+            # per-source structure to exceed the bounded model-facing index. Keep a
+            # deterministic run inventory instead. The context and source-set hashes
+            # still bind every omitted source record, while the main attachment
+            # manifest retains the exact source receipts and raw artifact hashes.
+            payload["runs"] = [
+                {
+                    "atom_ids": list(run["atom_ids"]),
+                    "context_id": run["context_id"],
+                    "source_artifact_count": len(run["sources"]),
+                    "source_roles": sorted(
+                        {
+                            str(source["role"])
+                            for source in run["sources"]
+                            if isinstance(source, Mapping) and source.get("role")
+                        }
+                    ),
+                    "source_set_sha256": source_set_hashes[str(run["context_id"])],
+                }
+                for run in payload["runs"]
+            ]
+            payload["index_compaction"] = "run_inventory_v1"
+            encoded = (
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            ).encode("utf-8")
     if len(encoded) > RUN_CONTEXT_INDEX_MAX_BYTES:
         reject("multiple", "run_context_compact_index_exceeds_max_bytes")
         return None, errors
