@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-19T17:07:32Z",
+    "as_of": "2026-07-19T17:50:48Z",
     "current_run_id": "qualification-cycle-383cf41f-20260719",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Stage 2 verified; Stage 3 next",
-        "detail": "The corrected relation artifact has 25 canonical cases and zero relation-application errors. Sol/high Stage 2 returned all 25 decisions, routed 24 forward, and used no fallback.",
-        "tone": "warn"
+        "value": "Two cases terminal; next case pending",
+        "detail": "The corrected frontier has 25 canonical cases and 24 selected research units. The report-contract and Claude duplicate-tool-ID cases now both terminate as evidence_sufficient/already_addressed with no downstream ticket.",
+        "tone": "good"
       },
       {
         "label": "Current bounded throughput",
-        "value": "27 -> 25 cases; 1 terminal negative",
-        "detail": "Two exact duplicate-source records were absorbed. One source-backed split child was preserved, 51 derived atoms returned to parent lineage, and the researched report case ended already_addressed without optioning.",
+        "value": "27 -> 25 cases; 2 terminal negatives",
+        "detail": "Two exact duplicate-source records were absorbed. The Claude source child retained three original atoms, its 51 derived atoms returned to parent lineage, and its current bounded-retry evidence independently reverified.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "This cycle is active and has not completed Stage 3-6 for the corrected selected frontier. It contributes no completed qualification cycle and no export authorization.",
+        "detail": "This cycle is active: 2 of 24 selected research units have reached a correct terminal disposition. It contributes no completed qualification cycle and no export authorization.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "One source-backed Stage 3 case",
-        "detail": "Run the Claude duplicate-tool-use child through research and its correct terminal disposition before increasing volume. Export, implementation, Docker mutation, and removal remain disabled at this checkpoint.",
+        "value": "Next distinct selected case",
+        "detail": "Select one unprocessed source-backed case and take it through Stage 3 and its correct terminal path before increasing volume. Export, implementation, Docker mutation, and removal remain disabled.",
         "tone": "warn"
       }
     ],
@@ -3084,29 +3084,29 @@
         "lifecycle_id": "pipeline-cycle:383cf41f:20260719",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 33,
-          "continuation_launches": 3,
-          "stage_reruns": 3,
+          "author_invocations": 36,
+          "continuation_launches": 5,
+          "stage_reruns": 5,
           "full_restarts": 0,
-          "summary": "Twenty-nine recorded Stage-1/2 invocations include three pre-turn oversized-relation rejections, four successful bounded relation batches, and two narrow Stage-2 recomputations after the initial cycle result. The report Stage 3 used one author session with two output corrections and one evidence continuation. No miner, author, case, or full pipeline restart occurred."
+          "summary": "Twenty-nine recorded Stage-1/2 invocations include three pre-turn oversized-relation rejections, four successful bounded relation batches, and two narrow Stage-2 recomputations. Report Stage 3 used one session with two output corrections and one evidence continuation. Claude Stage 3 used one session with one output repair and one evidence continuation; its first pre-model launch exposed a split-receipt handoff defect. One model-free terminal rerun corrected a supervisor lineage-wrapper omission. No miner, author, case, or full pipeline restart occurred."
         },
-        "label": "Fresh sealed cycle through corrected canonical Stage 2",
-        "scope": "Export-disabled non-IDEA qualification cycle over 2,854 atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 recomputation, and one terminal Stage-3 report case; signed-in gpt-5.6-sol/high, no API fallback, no Docker mutation, no removal, no ticket export, and no implementation",
+        "label": "Fresh sealed cycle through two terminal research cases",
+        "scope": "Export-disabled non-IDEA qualification cycle over 2,854 atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 recomputation, and terminal report-contract and Claude duplicate-tool-ID cases; signed-in gpt-5.6-sol/high, no API fallback, no Docker mutation, no removal, no ticket export, and no implementation",
         "timing": {
           "start_at": "2026-07-19T13:15:00Z",
           "end_at": null,
-          "elapsed_seconds": 13952,
+          "elapsed_seconds": 16548,
           "coverage": "active",
-          "display": "3 h 52 m active",
-          "note": "Active wall time through the corrected Stage-2 checkpoint. The final bounded relation review used four model calls; the accepted Stage-2 recomputation took 138.1 seconds. Earlier invalid Stage-2 output is retained as upstream-loss detection evidence, not counted as a valid result."
+          "display": "4 h 36 m active",
+          "note": "Active wall time through the second terminal case. The final bounded relation review used four model calls; accepted Stage 2 took 138.1 seconds; Claude Stage 3 took 939 seconds across one original call, one output repair, model-free evidence feedback, and one evidence continuation. Earlier invalid artifacts remain retained and are not counted as valid results."
         },
-        "furthest_stage": "Corrected Stage 2 for the complete canonical frontier; one previously selected report case has a terminal Stage-3 disposition",
-        "current_state": "Stage 1 began with 27 provisional records. Four bounded Sol/high relation batches completed with zero failed batches. Exact materialization now produces 25 cases: two duplicate pairs are absorbed, the Claude source child retains three original atoms, and its 51 derived-only atoms update parent lineage instead of creating a new case. Shadow relation application has zero errors. The final Sol/high Stage 2 conserves all 25 cases and selects 24; one Windows facet explicitly awaits its provisional research unit. The existing report dossier is evidence_sufficient/partial/already_addressed. The corrected source-backed Claude child has not yet run Stage 3 in this cycle.",
-        "outcome": "Valid corrected Stage-1/2 checkpoint, one successful negative research disposition, zero bad-ready escapes, and no option, plan, ticket, or implementation output yet",
+        "furthest_stage": "Corrected Stage 2 for the complete canonical frontier; two selected cases have completed their correct terminal Stage-3-to-ticket path",
+        "current_state": "Stage 1 began with 27 provisional records and now produces 25 cases after two exact duplicate pairs are absorbed, the Claude source child retains three original atoms, and 51 derived-only atoms return to parent lineage. Stage 2 conserves all 25 cases and selects 24. The report case is evidence_sufficient/partial/already_addressed. The Claude case is also evidence_sufficient/partial/already_addressed: source-bound classification and the production retry regression pass at the pinned revision, while fresh live-provider recurrence remains explicitly unverified. Production Stage 4 records not_required for both; neither produces an option, plan, ticket, export, or implementation.",
+        "outcome": "Valid corrected Stage-1/2 checkpoint, two successful negative research dispositions, zero bad-ready escapes, and no unwarranted option, plan, ticket, or implementation output",
         "errors": {
-          "count": 8,
+          "count": 17,
           "count_kind": "deduplicated_clusters",
-          "summary": "Six reusable controller/integration defects required supervisor correction. Two nondeterministic report-research clusters self-corrected in the original author session. The unresolved Windows relation disagreement is tracked separately as a nonblocking recall measurement and is not counted as an execution error.",
+          "summary": "Seven reusable controller/integration defects required correction. Four nondeterministic research-author clusters self-corrected in their original sessions. Six supervisor diagnostic/wrapper/reporting/test-construction mistakes were corrected without restarting research. The unresolved Windows relation disagreement remains a nonblocking recall measurement and is not counted as an execution error.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
@@ -3114,35 +3114,53 @@
             "BDS-158",
             "BDS-159",
             "BDS-160",
+            "BDS-161",
             "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
-            "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01"
+            "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01",
+            "AUTHOR-STAGE3-CLAUDE-V4-OUTPUT-01",
+            "AUTHOR-STAGE3-CLAUDE-V4-EVIDENCE-01",
+            "AN-51",
+            "AN-52",
+            "AN-53",
+            "AN-54",
+            "AN-55",
+            "AN-56"
           ]
         },
         "automatic_self_corrections": {
-          "count": 2,
+          "count": 4,
           "count_kind": "deduplicated_clusters",
-          "summary": "The report researcher corrected five initial output findings through two same-session revisions while preserving substantive progress, then corrected 16 evidence-binding findings in the same author session. No restart or supervisor-authored dossier content was used.",
+          "summary": "The report researcher corrected five output findings and 16 evidence findings in one retained session. The Claude researcher corrected one output finding and ten evidence findings in a second retained session. Both results preserved substantive progress; no author restart or supervisor-authored dossier content was used.",
           "cluster_ids": [
             "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
-            "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01"
+            "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01",
+            "AUTHOR-STAGE3-CLAUDE-V4-OUTPUT-01",
+            "AUTHOR-STAGE3-CLAUDE-V4-EVIDENCE-01"
           ]
         },
         "supervisor_interventions": {
-          "count": 6,
+          "count": 13,
           "count_kind": "deduplicated_clusters",
-          "summary": "Supervision corrected remote-tracking revision acquisition, relation prompt sizing, stale provisional identity, split-child case conservation, derived-evidence parent return, and validation of exact controller downgrades. These corrections changed transport, lineage, and validation mechanics; the supervisor did not author a problem conclusion, solution, plan, or implementation.",
+          "summary": "Seven interventions corrected reusable transport, canonicalization, validation, and split-evidence mechanics. Six additional diagnostic/wrapper/reporting/test-construction mistakes were corrected by reusing existing artifacts, production materializers, exact timestamp arithmetic, current ledger state, or the receipt's authoritative paths. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
             "BDS-156",
             "BDS-158",
             "BDS-159",
-            "BDS-160"
+            "BDS-160",
+            "BDS-161",
+            "AN-51",
+            "AN-52",
+            "AN-53",
+            "AN-54",
+            "AN-55",
+            "AN-56"
           ]
         },
-        "next_action": "Commit the verified Stage-1/2 mechanics, then run only the source-backed Claude duplicate-tool-use child through production Stage 3 and its correct downstream disposition. Do not restart mining or relation review, increase volume, export tickets, or begin implementation until that bounded chain is verified.",
+        "next_action": "Commit the verified split-evidence handoff, then choose one distinct unprocessed source-backed Stage-2 selection and run only that case through production Stage 3 and its correct downstream disposition. Do not restart mining or relation review, increase volume, export tickets, or begin implementation yet.",
         "tone": "warn",
-        "data_quality": "Final Stage 1 is U:\\usertest_backlog_qualification\\383cf41f_20260719T131500Z\\cycles\\cycle_001\\relation_requalification_66302d1_materialized_v3\\usertest.problem_records.json, SHA-256 13ceba0eee62f8595035867238e5fa02fadd155da96a843352ee339d7da22b28. Final Stage 2 is stage2_requalification_split_v3\\usertest.prioritized_problems.json, SHA-256 8f20343a999c3cad219ff32829e73c50b07d91ae447c752d5c9b807648cd8843. Its author receipt verifies session 019f7b4e-d64e-7753-a304-f66d6ad70eb0, host ChatGPT subscription, API fallback disabled, and high reasoning. The retained report dossier is SHA-256 39fcdaa53b4c50983126cece742f53f160c6730286b3c4aea0b0834cec3a76d5. Current affected verification is 129 Stage-1 evidence tests, 140 shadow-invariant tests, and 66 backlog-command tests, all passing; Ruff and diff checks pass. Full cycle completion remains unmeasured.",
+        "data_quality": "Final Stage 1 v4 is U:\\usertest_backlog_qualification\\383cf41f_20260719T131500Z\\cycles\\cycle_001\\relation_requalification_66302d1_materialized_v4\\usertest.problem_records.json, SHA-256 2a8c39ce1d863a7b8888bbe619cf8c4697602d16f85bf172d714c6103bcf784c. Production-lineage Stage 2 is stage2_requalification_split_v4_lineage\\usertest.prioritized_problems.json, SHA-256 e0da7720ea08720530a11d50885a37651cc56c9d4ff5d58af9e290c366fefca6; it preserves the original signed Sol/high Stage-2 contract. Claude Stage 3 is stage3_claude_split_v4\\usertest.research.json, SHA-256 72a2fd9a7f2f9d1d5b98ed3d6ce3d9d970b1d0eded339139fcc1330031f828fd; persisted verification returns true with zero errors, session 019f7b67-2ac1-7f90-8138-333b81663099 is retained, and host ChatGPT subscription/high reasoning/API-fallback-disabled provenance verifies. Terminal summary SHA-256 is 1437dd5b740af75f249da76ec9386f38836b04cc0fbf93fc8d2ff69b7ee1379d. Current affected verification is 19 post-research relation tests, 129 Stage-1 evidence tests, 21 reproduction-workflow tests, 140 shadow-invariant tests, and 66 backlog-command tests, all passing; Ruff and diff checks pass. Full cycle completion remains unmeasured.",
         "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]

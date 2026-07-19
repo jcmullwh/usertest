@@ -235,25 +235,25 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     )
 
     lifecycle_runs = mod._lifecycle_runs(dashboard)
-    assert len(lifecycle_runs) == 14
-    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 14
+    assert len(lifecycle_runs) == 15
+    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 15
     assert mod._entry_count(dashboard, "supporting_activity") >= 1
     assert mod._entry_count(dashboard, "baseline") == 1
     assert dashboard["current_run_id"] == lifecycle_runs[-1]["run_id"]
     current = lifecycle_runs[-1]
-    assert current["lifecycle_id"] == "pipeline-cycle:2b0e7048:20260719"
-    assert current["timing"]["start_at"] == "2026-07-19T06:45:39Z"
+    assert current["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
+    assert current["timing"]["start_at"] == "2026-07-19T13:15:00Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 38
-    assert current["rework"]["continuation_launches"] == 16
-    assert current["rework"]["stage_reruns"] == 3
+    assert current["rework"]["author_invocations"] == 36
+    assert current["rework"]["continuation_launches"] == 5
+    assert current["rework"]["stage_reruns"] == 5
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 25
-    assert current["automatic_self_corrections"]["count"] == 7
-    assert current["supervisor_interventions"]["count"] == 18
+    assert current["errors"]["count"] == 17
+    assert current["automatic_self_corrections"]["count"] == 4
+    assert current["supervisor_interventions"]["count"] == 13
     assert current["furthest_stage"] == (
-        "Terminal Stage 6 and ticket assembly for both selected canonical cases; "
-        "no downstream work required"
+        "Corrected Stage 2 for the complete canonical frontier; two selected cases "
+        "have completed their correct terminal Stage-3-to-ticket path"
     )
 
     rendered = mod._render_dashboard(dashboard)

@@ -426,6 +426,8 @@ _PROBLEM_RELATION_REVIEW_MAX_FOCI = 16
 # substantial allowance for the runner-owned system prompt and CLI envelope;
 # this budget applies only to the rendered relation-review user prompt.
 _PROBLEM_RELATION_REVIEW_MAX_PROMPT_CHARS = 900_000
+_PROBLEM_MINING_RELATION_SPLIT_RECEIPT_SCHEMA_VERSION = 1
+_PROBLEM_MINING_RELATION_SPLIT_RECEIPT_KIND = "problem_mining_relation_split"
 
 
 def _format_problem_mining_atom_markdown(atom: dict[str, Any]) -> str:
@@ -6174,6 +6176,116 @@ def _persist_canonical_relation_receipts(
     return relation_receipt_refs, immutable_receipt_path
 
 
+def _bind_problem_mining_relation_split_receipts(
+    *,
+    canonical_records: list[dict[str, Any]],
+    registry: dict[str, Any],
+    relation_decisions: Sequence[Mapping[str, Any]],
+    relation_receipt_path: Path,
+) -> None:
+    """Bind Stage-1 split children to the immutable relation response snapshot."""
+
+    receipt_bytes = relation_receipt_path.read_bytes()
+    receipt_raw = json.loads(receipt_bytes.decode("utf-8"))
+    if not isinstance(receipt_raw, Mapping):
+        raise ValueError("problem_mining_relation_split_receipt_invalid")
+    receipt = validate_case_relation_receipt(receipt_raw)
+    if receipt.get("stage") != "problem_mining":
+        raise ValueError("problem_mining_relation_split_receipt_stage_invalid")
+    receipt_sha256 = sha256(receipt_bytes).hexdigest()
+    registry_cases_raw = registry.get("cases")
+    registry_cases = registry_cases_raw if isinstance(registry_cases_raw, dict) else {}
+
+    for record in canonical_records:
+        parent_case_id = _coerce_string(record.get("split_from_case_id"))
+        parent_problem_id = _coerce_string(record.get("split_parent_problem_id"))
+        child_case_id = _coerce_string(record.get("case_id"))
+        child_problem_id = _coerce_string(record.get("problem_id"))
+        if parent_case_id is None and parent_problem_id is None:
+            continue
+        evidence_atom_ids = sorted(_coerce_string_list(record.get("evidence_atom_ids")))
+        occurrence_atom_ids = sorted(
+            _coerce_string_list(record.get("source_evidence_atom_ids"))
+        )
+        if (
+            parent_case_id is None
+            or parent_problem_id is None
+            or child_case_id is None
+            or child_problem_id is None
+            or not evidence_atom_ids
+            or not occurrence_atom_ids
+            or not set(occurrence_atom_ids).issubset(evidence_atom_ids)
+        ):
+            raise ValueError(
+                "problem_mining_relation_split_child_binding_invalid:"
+                + (child_problem_id or "unknown")
+            )
+
+        matches: list[tuple[int, int, Mapping[str, Any]]] = []
+        for decision_index, decision in enumerate(relation_decisions):
+            if (
+                decision.get("action") != "split"
+                or _coerce_string(decision.get("focus_id")) != parent_problem_id
+            ):
+                continue
+            groups_raw = decision.get("split_groups")
+            groups = groups_raw if isinstance(groups_raw, list) else []
+            for group_index, group in enumerate(groups):
+                if not isinstance(group, Mapping):
+                    continue
+                if sorted(_coerce_string_list(group.get("evidence_atom_ids"))) == (
+                    evidence_atom_ids
+                ):
+                    matches.append((decision_index, group_index, decision))
+        if len(matches) != 1:
+            raise ValueError(
+                "problem_mining_relation_split_decision_binding_invalid:"
+                + child_problem_id
+            )
+        decision_index, split_group_index, decision = matches[0]
+        split_ref: dict[str, Any] = {
+            "schema_version": _PROBLEM_MINING_RELATION_SPLIT_RECEIPT_SCHEMA_VERSION,
+            "producer": "usertest_backlog.problem_mining",
+            "receipt_kind": _PROBLEM_MINING_RELATION_SPLIT_RECEIPT_KIND,
+            "relation_receipt_path": str(relation_receipt_path.resolve()),
+            "relation_receipt_sha256": receipt_sha256,
+            "relation_receipt_content_sha256": receipt["content_sha256"],
+            "decision_index": decision_index,
+            "split_group_index": split_group_index,
+            "decision_sha256": sha256(
+                json.dumps(
+                    decision,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "parent_case_id": parent_case_id,
+            "parent_problem_id": parent_problem_id,
+            "child_case_id": child_case_id,
+            "child_problem_id": child_problem_id,
+            "evidence_atom_ids": evidence_atom_ids,
+            "occurrence_evidence_atom_ids": occurrence_atom_ids,
+        }
+        split_ref["content_sha256"] = sha256(
+            json.dumps(
+                split_ref,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        record["occurrence_evidence_atom_ids"] = occurrence_atom_ids
+        record["problem_mining_relation_split_receipt"] = split_ref
+        registry_entry = registry_cases.get(child_case_id)
+        if not isinstance(registry_entry, dict):
+            raise ValueError(
+                "problem_mining_relation_split_registry_child_missing:" + child_case_id
+            )
+        registry_entry["occurrence_evidence_atom_ids"] = occurrence_atom_ids
+        registry_entry["problem_mining_relation_split_receipt"] = deepcopy(split_ref)
+
+
 def _case_evidence_retraction_sha256(value: Any) -> str:
     """Return the canonical hash used by embedded case-evidence receipts."""
 
@@ -7008,6 +7120,12 @@ def _run_problem_case_relation_review(
         registry=registry,
         review_response_path=review_dir / f"{tag}.response.txt",
         receipt_path=relation_receipt_path,
+    )
+    _bind_problem_mining_relation_split_receipts(
+        canonical_records=canonical_records,
+        registry=registry,
+        relation_decisions=decisions,
+        relation_receipt_path=immutable_relation_receipt_path,
     )
 
     evidence_receipt_path = out_json.with_name(f"{out_json.stem}.evidence_receipt.json")

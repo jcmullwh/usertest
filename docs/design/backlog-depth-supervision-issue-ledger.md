@@ -1263,6 +1263,15 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: relation application accepts either an applied canonical relation or an exact controller downgrade. A downgrade counts only when it is attached to the decision's focus record, retains nonempty validation errors, and its normalized proposal hash exactly matches the immutable response decision. Missing or altered annotations still fail.
 - Closure proof: the live 25-case artifact now returns zero relation-application errors without changing any model decision or forcing a Windows union. Focused positive and mutation-negative tests pass, as do the complete 140-test shadow-invariant file, 129-test Stage-1 evidence file, 66-test backlog-command file, Ruff, and `git diff --check`.
 
+### BDS-161 - Pre-research relation splits were required to present a post-research split receipt
+
+- Status: `closed_live_stage3_and_terminal_disposition_verified`
+- Priority: Stage-1-to-3 evidence transport, research throughput, objective-blocking
+- Objective impact: a real source-backed split child with three authenticated occurrence atoms stopped before any researcher call. Treating that stop as partial or blocked research would report zero throughput for evidence that the system had already retained correctly.
+- Exact evidence: `stage3_claude_split_v3_f7dbe98` returned `blocked` in 3.5 seconds with `split_occurrence_evidence_missing` and `split_receipt_reference_missing`, despite all three assigned source atoms and their artifact hashes being present. `authenticated_split_child_occurrence_evidence` entered the post-research receipt path solely because the Stage-1 record carried `split_from_case_id`; it therefore required a receipt that only post-research splitting can produce.
+- Correction: Stage-1 relation splitting now emits its own content-addressed `problem_mining_relation_split` receipt. It binds the child and parent identities, exact evidence and source-occurrence atoms, relation-receipt bytes, immutable response snapshot, exact decision index/hash, and split-group index. Stage 3 validates this receipt independently; the stricter post-research split receipt path is unchanged.
+- Closure proof: model-free Stage-1 v4 retains 25 cases, authenticates all three Claude occurrence atoms, and reports zero relation-application errors. The bounded Sol/high Stage 3 then used one author session and three model calls over 939 seconds, persisted a verifier-clean `evidence_sufficient/partial/already_addressed` dossier, and preserved the missing-live-provider-recurrence boundary as nonmaterial to current actionability. Production Stage 4 records `not_required`; Stages 5 and 6 and ticket assembly emit zero artifacts. The complete 19-test post-research relation file, 129-test Stage-1 evidence file, 21-test reproduction workflow file, 140-test shadow-validation file, and 66-test backlog-command file pass; Ruff and `git diff --check` pass.
+
 ### AN-42 - A combined lint/test shell invocation initially masked the lint exit code
 
 - Status: `closed_separate_commands_green`
@@ -1281,6 +1290,8 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-REPORT-READINESS-SEMANTIC-01`: the same researcher removed an alternative hypothesis labeled plausible even though its own statement and cited origin evidence said it did not explain the occurrence. The corrected dossier preserved the established primary mechanism, `already_addressed` disposition, and honest live-runtime boundary. Two later author calls were caused by the supervisor's omitted replay executor in AN-48, not by a new author-quality defect.
 - `AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01`: the new single-case Sol/high run began with five output-contract findings. Its first same-session correction removed all five mechanical findings but lost two substantive alternative-hypothesis properties; the controller retained that progress without promoting the regressed candidate. The second same-session correction restored the lost mechanism/support coverage and reached zero findings. The three calls took 489.579, 146.171, and 150.853 seconds; no restart or supervisor-authored dossier content was used.
 - `AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01`: independent evidence verification exposed 16 binding/resolution findings after output acceptance. One 181.819-second continuation in the same author session added explicit origin-atom observation predicates, removed unresolved runner-injected paths from repository-inspection claims, and reached verified evidence with zero findings. The terminal dossier is `evidence_sufficient`, `partial`, and `already_addressed`; no option or plan is warranted for this case at the pinned revision.
+- `AUTHOR-STAGE3-CLAUDE-V4-OUTPUT-01`: the Claude collision researcher produced one invalid output-contract finding: a falsification attempt lacked the shared-mechanism artifact needed to make its claim checkable. One 82.06-second correction in the same Sol/high session reduced `1 -> 0`; the dossier and session were retained rather than restarted.
+- `AUTHOR-STAGE3-CLAUDE-V4-EVIDENCE-01`: model-free evidence verification then exposed ten findings covering origin-atom binding for the current retry/fix experiments, direct symptom coverage, a replay workspace changed by generated JUnit output, and one unresolved `run_once` symbol reference. One research-capable continuation in the same author session corrected `10 -> 0` without changing the established historical mechanism or inventing live-provider proof. The terminal result is a correct negative: code/test evidence supports `already_addressed`, while live recurrence remains explicitly unverified.
 
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
@@ -1337,6 +1348,48 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor launcher import error, not a stage, model, or product failure
 - Exact evidence: the wrapper failed during import before creating its output root, invoking Stage 4, or making a model call.
 - Containment and result: the loader was imported from its owning module. The production Stage-4 handoff then completed for both cases, followed by model-free Stage 5, Stage 6, and ticket assembly with zero downstream artifacts.
+
+### AN-51 - A persisted-proof diagnostic loaded a stale installed verifier
+
+- Status: `closed_immediate_exact_source_rerun_green`
+- Classification: one supervisor diagnostic-environment error, not a pipeline, research, auth, or persisted-proof failure
+- Exact evidence: the first manual `verify_persisted_research_evidence` call exposed `backlog_miner` source but allowed `runner_core` to resolve from the application virtual environment's older installed copy. It reported 25 execution-policy errors against three otherwise verified run receipts.
+- Containment and result: the same immutable dossier was immediately rechecked with the complete canonical repository source graph and returned `(True, [])`. Direct current-source validation of all three execution-policy receipts also returned zero errors; the retained runs bind `gpt-5.6-sol`, high reasoning, host ChatGPT subscription auth, and API fallback disabled. No stage or model work was repeated.
+
+### AN-52 - The first Claude terminal wrapper consumed the raw Stage-2 author artifact
+
+- Status: `closed_existing_production_lineage_materializer_green`
+- Classification: one supervisor integration error and one bounded model-free Stage-4 rerun, not a Stage-2 author or product defect
+- Exact evidence: the raw Stage-2 model output correctly selected `problem:claude-duplicate-tool-use-id-request:split:1` but, by contract, did not author runner-owned case lineage. The first isolated Stage-4 wrapper consumed it directly and stopped with `priority_case_id_mismatch`.
+- Containment and result: existing production `_persist_downstream_case_lineage` attached the exact Stage-1 child case ID to all 25 unchanged Stage-2 decisions while preserving the authenticated model-invocation contract. Re-running only the model-free terminal chain produced Stage-4 `not_required/already_addressed`, zero Stage-5 selections, zero Stage-6 plans, and zero tickets. No model stage or research was restarted.
+
+### AN-53 - A post-write model-contract check used an unsupported keyword
+
+- Status: `closed_existing_artifacts_rechecked_without_stage_rerun`
+- Classification: one supervisor verification-helper invocation error, not a stage or model failure
+- Exact evidence: after production Stages 4-6 had already written all three valid terminal documents, the wrapper called `verify_stage_model_invocation_contract(..., stage=...)`; that function has no `stage` keyword and raised `TypeError` after the stage outputs were complete.
+- Containment and result: the existing immutable outputs were loaded and checked with the supported signature. All three contracts returned zero errors, correctly recorded `invocation_expected=false`, and contained zero manifests. Ticket assembly over those same outputs returned zero. No stage, model, or experiment was rerun.
+
+### AN-54 - Dashboard elapsed time rounded beyond its exact receipt timestamp
+
+- Status: `closed_immediate_exact_arithmetic_correction`
+- Classification: one supervisor reporting-helper arithmetic error, not a pipeline, model, or benchmark failure
+- Exact evidence: the first dashboard receipt used 16,549 elapsed seconds by rounding a live clock reading with fractional seconds, while its fixed `as_of=17:50:48Z` and `start_at=13:15:00Z` encode exactly 16,548 seconds. The dashboard validator rejected the mismatch before changing the metrics files.
+- Containment and result: the receipt now uses the exact timestamp difference, 16,548 seconds. The renderer then updated the JSON/HTML dashboard successfully. No pipeline artifact, benchmark result, or lifecycle conclusion changed.
+
+### AN-55 - Dashboard regression test still named the superseded current lifecycle
+
+- Status: `closed_full_dashboard_test_green`
+- Classification: one stale reporting-test fixture, not a pipeline, model, or benchmark failure
+- Exact evidence: the renderer and `--check` passed, but the complete dashboard test file expected 14 lifecycle rows and `qualification-cycle-2b0e7048-20260719` as current. The ledger now contains 15 unique lifecycle rows and explicitly closes that previous lifecycle in favor of `qualification-cycle-383cf41f-20260719`.
+- Containment and result: the checked-in snapshot assertions now bind the actual current lifecycle ID, start time, rework counts, error/intervention counts, and furthest stage. All 13 dashboard tests pass. No dashboard contract was relaxed and no pipeline result changed.
+
+### AN-56 - Receipt mutation coverage initially targeted the non-authoritative response path
+
+- Status: `closed_full_receipt_test_green`
+- Classification: one supervisor test-construction cluster, not an evidence-authentication defect
+- Exact evidence: the first negative test changed the original relation response, while the durable receipt intentionally points to its immutable response snapshot; authentication correctly remained green. The next assertion expected the generic relation parser to reject an unknown field even though the split reference's exact file hash is the enforcing boundary and correctly reported only `relation_receipt_sha256_mismatch`.
+- Containment and result: the test now mutates the receipt-bound immutable response and separately mutates the exact receipt bytes. It proves rejection of changed child occurrence binding, changed decision hash, changed immutable response, and changed receipt file. The focused test and complete 19-test relation file pass without changing production behavior.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
