@@ -6702,6 +6702,37 @@ def continue_research_dossier_from_independent_feedback(
         prepared["repo_workspace"] = workspace_dir if isinstance(workspace_dir, str) else None
         completed_attempts = [*attempt_history, *new_attempts]
         _set_research_attempts(prepared, completed_attempts)
+        try:
+            validated_prepared, _ = parse_research_dossier_list(
+                json.dumps([prepared], ensure_ascii=False)
+            )
+        except ValueError as exc:
+            terminal_errors = [f"research_persisted_contract_invalid:{exc}"]
+            _fail_evidence_verification(receipt, errors=terminal_errors)
+            _set_research_attempts(prepared, completed_attempts)
+            return {
+                "status": "repairable_paused:research_persisted_contract_invalid",
+                "dossier": prepared,
+                "validation_errors": terminal_errors,
+                "source_attempt_sha256": (
+                    new_attempts[-1].get("attempt_sha256") if new_attempts else None
+                ),
+                "attempts": [*feedback_attempts, *new_attempts],
+                "repair_run_dirs": list(repair.get("repair_run_dirs") or []),
+                "expected_session_id": repair.get("expected_session_id"),
+                "observed_session_id": repair.get("observed_session_id"),
+                "objective_best_frontier": repair.get("objective_best_frontier"),
+                "validation_error_rescore": (
+                    dict(validation_error_rescore)
+                    if validation_error_rescore is not None
+                    else None
+                ),
+                "authored_work_disposition": "retained",
+            }
+        prepared = validated_prepared[0]
+        parsed_receipt = prepared.get("evidence_verification")
+        if isinstance(parsed_receipt, dict):
+            receipt = parsed_receipt
         persisted_valid, persisted_errors = verify_persisted_research_evidence(prepared)
         if not persisted_valid or persisted_errors:
             terminal_errors = _dedupe_validation_errors(

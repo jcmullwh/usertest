@@ -1316,6 +1316,12 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
     seen_numbers: set[int] = set()
     current_contract_flags: list[bool] = []
     attempts_by_hash: dict[str, dict[str, Any]] = {}
+    later_source_hashes = {
+        str(attempt.get("source_attempt_sha256"))
+        for attempt in value[1:]
+        if isinstance(attempt, dict)
+        and _is_nonempty_string(attempt.get("source_attempt_sha256"))
+    }
     for index, attempt in enumerate(value):
         if not isinstance(attempt, dict):
             errors.append(
@@ -1572,13 +1578,18 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                             f"research_dossier_invalid_research_attempt_repair_contract_sha256: "
                             f"{pid}: index={index}"
                         )
+                    evidence_transition = bool(
+                        attempt.get("outcome") == "evidence_verification_invalid"
+                        and attempt.get("validation_errors_after")
+                        and attempt.get("attempt_sha256") in later_source_hashes
+                    )
                     if attempt.get("outcome") not in {
                         "repair_contract_valid",
                         "repair_contract_invalid",
                         "repair_scope_rejected",
                         "invocation_failed",
                         "external_wait",
-                    }:
+                    } and not evidence_transition:
                         errors.append(
                             f"research_dossier_invalid_repair_attempt_outcome: {pid}: index={index}"
                         )
@@ -1589,13 +1600,27 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                             f"{pid}: index={index}"
                         )
                     progress = attempt.get("repair_progress")
-                    if not isinstance(progress, dict):
+                    continued_scope_rejection = bool(
+                        attempt.get("outcome") == "repair_scope_rejected"
+                        and attempt.get("attempt_sha256") in later_source_hashes
+                    )
+                    if not isinstance(progress, dict) and not (
+                        evidence_transition or continued_scope_rejection
+                    ):
                         errors.append(
                             f"research_dossier_repair_attempt_progress_missing: "
                             f"{pid}: index={index}"
                         )
-                    else:
-                        if progress.get("decision") not in {
+                    elif isinstance(progress, dict):
+                        scope_rejection_assessment = bool(
+                            attempt.get("outcome") == "repair_scope_rejected"
+                            and progress.get("decision") is None
+                            and _valid_sha256(progress.get("candidate_dossier_sha256"))
+                            and _is_nonempty_string(progress.get("assessment_reason"))
+                        )
+                        if not scope_rejection_assessment and progress.get(
+                            "decision"
+                        ) not in {
                             "continue",
                             "accepted",
                             "restart",
@@ -1606,7 +1631,9 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                                 f"research_dossier_repair_attempt_progress_decision_invalid: "
                                 f"{pid}: index={index}"
                             )
-                        if not _is_nonempty_string(progress.get("reason")):
+                        if not scope_rejection_assessment and not _is_nonempty_string(
+                            progress.get("reason")
+                        ):
                             errors.append(
                                 f"research_dossier_repair_attempt_progress_reason_missing: "
                                 f"{pid}: index={index}"
@@ -1855,6 +1882,13 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         index=index,
                     )
                     errors.extend(rescore_errors)
+                    rejected_source_branch = bool(
+                        source_attempt.get("outcome") == "repair_scope_rejected"
+                        and attempt.get("baseline_dossier_sha256")
+                        == source_attempt.get("baseline_dossier_sha256")
+                        and attempt.get("validation_errors_before")
+                        == source_attempt.get("validation_errors_before")
+                    )
                     # A feedback record is the runner's immutable transition from the
                     # source attempt's existing error frontier into the combined
                     # verifier/independent-review frontier. It deliberately has no
@@ -1864,7 +1898,9 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         "attempt_kind"
                     ) != "evidence_verification_feedback" and attempt.get(
                         "baseline_dossier_sha256"
-                    ) != source_attempt.get("attempted_dossier_sha256"):
+                    ) != source_attempt.get("attempted_dossier_sha256") and not (
+                        rejected_source_branch
+                    ):
                         errors.append(
                             f"research_dossier_research_attempt_baseline_hash_mismatch: "
                             f"{pid}: index={index}"
@@ -1882,7 +1918,9 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                     )
                     if not legacy_feedback_replacement and attempt.get(
                         "validation_errors_before"
-                    ) != source_attempt.get("validation_errors_after") and not rescore_valid:
+                    ) != source_attempt.get("validation_errors_after") and not (
+                        rescore_valid or rejected_source_branch
+                    ):
                         errors.append(
                             f"research_dossier_research_attempt_prior_errors_mismatch: "
                             f"{pid}: index={index}"

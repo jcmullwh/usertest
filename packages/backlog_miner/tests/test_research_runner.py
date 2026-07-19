@@ -9189,6 +9189,11 @@ def test_independent_feedback_resumes_research_author_and_reverifies_candidate(
         "verify_persisted_research_evidence",
         lambda _dossier: (True, []),
     )
+    monkeypatch.setattr(
+        mod,
+        "parse_research_dossier_list",
+        lambda text: ([json.loads(text)[0]], []),
+    )
     monkeypatch.setattr(mod, "_canonical_repo_revision", lambda _run_dir: "b" * 40)
     monkeypatch.setattr(mod, "_load_diff_numstat", lambda _path: [])
     monkeypatch.setattr(mod, "_runner_artifact_refs", lambda _path: [])
@@ -9248,6 +9253,35 @@ def test_independent_feedback_resumes_research_author_and_reverifies_candidate(
         source_attempt,
         feedback_attempt,
     ]
+
+    if not source_errors:
+        def reject_persisted_contract(_text: str) -> tuple[list[dict[str, object]], list[str]]:
+            raise ValueError("invalid retained attempt history")
+
+        monkeypatch.setattr(mod, "parse_research_dossier_list", reject_persisted_contract)
+        invalid = mod.continue_research_dossier_from_independent_feedback(
+            dossier=dossier,
+            validation_errors=["independent_qualification_finding:new_failure_mode"],
+            repo_input=str(tmp_path),
+            requested_repo_ref="dev",
+            resolved_repo_ref="dev",
+            agent="codex",
+            model=None,
+            cfg=object(),
+            replay_timeout_seconds=None,
+            replay_executor=None,
+            artifacts_dir=tmp_path / "artifacts-invalid-contract",
+            independent_feedback=independent_feedback,
+            retained_evidence_attempts=[retained_evidence_attempt],
+        )
+
+        assert invalid["status"] == (
+            "repairable_paused:research_persisted_contract_invalid"
+        )
+        assert invalid["validation_errors"] == [
+            "research_persisted_contract_invalid:invalid retained attempt history"
+        ]
+        assert invalid["authored_work_disposition"] == "retained"
 
 
 def test_authenticated_evaluator_rescore_replaces_obsolete_findings_without_feedback_attempt(
@@ -10556,6 +10590,11 @@ def test_independent_feedback_correction_rehydrates_origin_proof_from_assignment
         "verify_persisted_research_evidence",
         verify_persisted,
     )
+    monkeypatch.setattr(
+        mod,
+        "parse_research_dossier_list",
+        lambda text: ([json.loads(text)[0]], []),
+    )
 
     result = mod.continue_research_dossier_from_independent_feedback(
         dossier=dossier,
@@ -10789,7 +10828,7 @@ def test_provider_wait_resume_reaches_origin_attachment_correction_path(
     monkeypatch.setattr(
         mod,
         "parse_research_dossier_list",
-        lambda _raw: ([dossier], []),
+        lambda raw: ([json.loads(raw)[0]], []),
     )
     monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
     monkeypatch.setattr(

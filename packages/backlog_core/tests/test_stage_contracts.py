@@ -4281,6 +4281,140 @@ def test_research_attempt_prior_error_mismatch_still_fails_without_rescore() -> 
         parse_research_dossier_list(json.dumps([dossier]))
 
 
+def _rejected_repair_branch_attempt_chain() -> list[dict[str, object]]:
+    """Model correction may branch from the retained safe pre-rejection baseline."""
+
+    [initial, template], _ = _rescore_attempt_chain()
+    initial.pop("validation_error_rescore", None)
+    initial["attempt_sha256"] = contracts.research_attempt_sha256(initial)
+    session_id = str(initial["agent_session_id"])
+
+    rejected = deepcopy(template)
+    rejected.pop("validation_error_rescore", None)
+    rejected.update(
+        {
+            "attempt_number": 2,
+            "attempt_kind": "model_output_repair",
+            "outcome": "repair_scope_rejected",
+            "validation_errors": [],
+            "validation_errors_before": deepcopy(initial["validation_errors_after"]),
+            "validation_errors_after": [],
+            "attempted_dossier": {"phase": "rejected-candidate"},
+            "source_attempt_sha256": initial["attempt_sha256"],
+            "baseline_dossier_sha256": initial["attempted_dossier_sha256"],
+            "agent_session_id": session_id,
+            "observed_agent_session_id": session_id,
+            "resumed_from_session_id": session_id,
+            "repair_progress": None,
+        }
+    )
+    rejected["attempted_dossier_sha256"] = _fixture_json_sha256(
+        rejected["attempted_dossier"]
+    )
+    rejected["repair_progress"] = {
+        "candidate_dossier_sha256": rejected["attempted_dossier_sha256"],
+        "assessment_reason": "candidate_removed_established_substantive_coverage",
+    }
+    rejected["attempt_sha256"] = contracts.research_attempt_sha256(rejected)
+
+    evidence_transition = deepcopy(template)
+    evidence_transition.pop("validation_error_rescore", None)
+    evidence_transition.update(
+        {
+            "attempt_number": 3,
+            "attempt_kind": "model_output_repair",
+            "outcome": "evidence_verification_invalid",
+            "validation_errors": ["deep:evidence-finding"],
+            "validation_errors_before": deepcopy(initial["validation_errors_after"]),
+            "validation_errors_after": ["deep:evidence-finding"],
+            "attempted_dossier": {"phase": "evidence-transition"},
+            "source_attempt_sha256": rejected["attempt_sha256"],
+            "baseline_dossier_sha256": rejected["baseline_dossier_sha256"],
+            "agent_session_id": session_id,
+            "observed_agent_session_id": session_id,
+            "resumed_from_session_id": session_id,
+            "repair_progress": None,
+        }
+    )
+    evidence_transition["attempted_dossier_sha256"] = _fixture_json_sha256(
+        evidence_transition["attempted_dossier"]
+    )
+    evidence_transition["attempt_sha256"] = contracts.research_attempt_sha256(
+        evidence_transition
+    )
+
+    accepted = deepcopy(template)
+    accepted.pop("validation_error_rescore", None)
+    accepted.update(
+        {
+            "attempt_number": 4,
+            "attempt_kind": "evidence_verification_research_continuation",
+            "outcome": "repair_contract_valid",
+            "validation_errors": [],
+            "validation_errors_before": deepcopy(
+                evidence_transition["validation_errors_after"]
+            ),
+            "validation_errors_after": [],
+            "attempted_dossier": {"phase": "accepted"},
+            "source_attempt_sha256": evidence_transition["attempt_sha256"],
+            "baseline_dossier_sha256": evidence_transition[
+                "attempted_dossier_sha256"
+            ],
+            "agent_session_id": session_id,
+            "observed_agent_session_id": session_id,
+            "resumed_from_session_id": session_id,
+            "repair_progress": {
+                "decision": "accepted",
+                "reason": "evidence_verification_satisfied",
+            },
+        }
+    )
+    accepted["attempted_dossier_sha256"] = _fixture_json_sha256(
+        accepted["attempted_dossier"]
+    )
+    accepted["attempt_sha256"] = contracts.research_attempt_sha256(accepted)
+    return [initial, rejected, evidence_transition, accepted]
+
+
+def test_research_attempt_history_accepts_safe_branch_after_rejected_candidate() -> None:
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = _rejected_repair_branch_attempt_chain()
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert [
+        attempt["outcome"] for attempt in parsed[0]["research_attempts"]
+    ] == [
+        "output_contract_invalid",
+        "repair_scope_rejected",
+        "evidence_verification_invalid",
+        "repair_contract_valid",
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["baseline", "prior_errors", "terminal_transition"])
+def test_research_attempt_rejected_branch_rejects_changed_custody(mutation: str) -> None:
+    attempts = _rejected_repair_branch_attempt_chain()
+    if mutation == "baseline":
+        attempts[2]["baseline_dossier_sha256"] = "f" * 64
+    elif mutation == "prior_errors":
+        attempts[2]["validation_errors_before"] = ["different:error"]
+    else:
+        attempts = attempts[:3]
+    attempts[2]["attempt_sha256"] = contracts.research_attempt_sha256(attempts[2])
+    if len(attempts) == 4:
+        attempts[3]["source_attempt_sha256"] = attempts[2]["attempt_sha256"]
+        attempts[3]["attempt_sha256"] = contracts.research_attempt_sha256(attempts[3])
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
 @pytest.mark.parametrize(
     ("feedback_before", "feedback_after"),
     [
