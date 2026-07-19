@@ -3845,7 +3845,11 @@ def research_required_experiment_coverage_atom_ids(item: Mapping[str, Any]) -> s
     }
     relation_raw = item.get("case_relation_assessment")
     relation = relation_raw if isinstance(relation_raw, Mapping) else {}
-    if relation.get("disposition") != "retain":
+    # ``keep_separate`` separates this work unit from relation candidates; it does
+    # not split the signed occurrences inside the current unit.  Requiring every
+    # represented occurrence in that state defeats the authenticated aggregate and
+    # turns one repeated evidence shape into redundant per-run proof work.
+    if relation.get("disposition") not in {"retain", "keep_separate"}:
         return expected
     case_ids, occurrence_ids, _source = research_evidence_role_partition(assignment)
     represented = set(case_ids) | set(occurrence_ids)

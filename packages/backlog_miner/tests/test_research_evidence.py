@@ -4517,11 +4517,14 @@ def test_one_replay_cannot_cover_unrelated_commandless_atoms_by_exit_code(
     assert "supporting_experiments_do_not_cover_origin_atoms" in errors
 
 
-def test_signed_case_aggregate_covers_redundant_occurrence_shape() -> None:
+@pytest.mark.parametrize("relation_disposition", ["retain", "keep_separate"])
+def test_signed_case_aggregate_covers_redundant_occurrence_shape(
+    relation_disposition: str,
+) -> None:
     dossier = {
         "research_status": "evidence_sufficient",
         "case_relation_assessment": {
-            "disposition": "retain",
+            "disposition": relation_disposition,
             "rationale": "One signed aggregate authenticates the repeated evidence shape.",
             "facets": [],
             "material_unknowns": [],

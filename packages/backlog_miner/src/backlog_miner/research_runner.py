@@ -37,6 +37,7 @@ from backlog_core.stage_contracts import (
     research_attempt_sha256,
     research_claims_sha256,
     research_dossier_output_contract_errors,
+    research_required_experiment_coverage_atom_ids,
 )
 from runner_core import RunnerConfig, RunRequest, run_once
 from runner_core.runner import validate_report
@@ -1967,7 +1968,9 @@ def _research_retry_remediation_hints(
                 "$.field[index] syntax, never a leading / JSON pointer. For a symptom binding "
                 "with observation_predicate, omit value when the runner should derive and hash "
                 "the immutable field value; otherwise put the exact scalar in value, never "
-                "source_value. When the "
+                "source_value. When the binding targets a signed retained aggregate, correct "
+                "that aggregate binding in place; do not expand it into redundant "
+                "per-occurrence experiments or bindings. When the "
                 "validation_error includes candidate_field_paths, those are exact runner-derived "
                 "locations for the declared value; choose one only when its field meaning matches "
                 "the claim. role=symptom must make the assertion or structured predicate directly "
@@ -2994,6 +2997,14 @@ def _substantive_research_coverage(dossier: Mapping[str, Any]) -> set[str]:
     """
 
     coverage: set[str] = set()
+    assignment_raw = dossier.get("evidence_assignment")
+    assignment = assignment_raw if isinstance(assignment_raw, Mapping) else {}
+    expected_atom_ids = set(_string_list(assignment.get("expected_atom_ids")))
+    required_atom_ids = (
+        research_required_experiment_coverage_atom_ids(dossier)
+        if expected_atom_ids
+        else None
+    )
     hypotheses_raw = dossier.get("root_cause_hypotheses")
     hypotheses_by_experiment: dict[str, set[str]] = {}
     for hypothesis in hypotheses_raw if isinstance(hypotheses_raw, list) else []:
@@ -3029,6 +3040,8 @@ def _substantive_research_coverage(dossier: Mapping[str, Any]) -> set[str]:
         experiment_id = _coerce_str(experiment.get("experiment_id")) or "unbound"
         if experiment.get("outcome") in {"supports", "refutes"}:
             for atom_id in _string_list(experiment.get("addresses_atom_ids")):
+                if required_atom_ids is not None and atom_id not in required_atom_ids:
+                    continue
                 coverage.add(f"origin_atom[{atom_id}].direct_experimental_coverage")
         adapter = experiment.get("proof_adapter")
         if isinstance(adapter, Mapping):
@@ -5673,16 +5686,22 @@ def _run_targeted_dossier_repairs(
                 after_dossier=candidate,
             )
         )
+        coverage_forward_dossier = dict(forward_dossier)
+        coverage_forward_dossier["evidence_assignment"] = evidence_assignment
+        coverage_candidate_dossier = dict(candidate)
+        coverage_candidate_dossier["evidence_assignment"] = evidence_assignment
+        coverage_prior_feedback_dossier = dict(immediate_prior_feedback_dossier)
+        coverage_prior_feedback_dossier["evidence_assignment"] = evidence_assignment
         substantive_coverage_regressions, substantive_revision_basis = (
             _unsupported_substantive_coverage_loss(
-                forward_dossier,
-                candidate,
+                coverage_forward_dossier,
+                coverage_candidate_dossier,
                 validation_errors=current_errors,
             )
         )
         substantive_coverage_added_since_feedback = sorted(
-            _substantive_research_coverage(candidate)
-            - _substantive_research_coverage(immediate_prior_feedback_dossier)
+            _substantive_research_coverage(coverage_candidate_dossier)
+            - _substantive_research_coverage(coverage_prior_feedback_dossier)
         )
         if fundamental_changes:
             # Immutable evidence mutation has its own stricter recovery contract; do not let this

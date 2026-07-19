@@ -806,6 +806,8 @@ def test_verifier_hints_give_attestable_read_and_disposable_state_protocols() ->
     assert "restricted $.field[index] syntax" in hints[6]["required_change"]
     assert "never source_value" in hints[6]["required_change"]
     assert "candidate_field_paths" in hints[6]["required_change"]
+    assert "correct that aggregate binding in place" in hints[6]["required_change"]
+    assert "do not expand it" in hints[6]["required_change"]
     assert "context/corroborating" in hints[6]["required_change"]
     assert "retain insufficient_evidence" in hints[6]["required_change"]
     assert hints[7]["target_fields"] == [
@@ -3378,6 +3380,83 @@ def test_verifier_rejected_direct_support_can_be_reclassified_without_false_regr
 
     assert unsupported_loss == []
     assert basis == ["validator_rejected_direct_support[experiment:history-audit]"]
+
+
+def test_keep_separate_aggregate_does_not_protect_redundant_occurrence_coverage() -> None:
+    aggregate_atom = "operational_failure:aggregate"
+    occurrence_atoms = ["run:one", "run:two"]
+    baseline = {
+        "case_relation_assessment": {
+            "disposition": "keep_separate",
+            "rationale": "Keep this signed aggregate separate from relation candidates.",
+            "facets": [],
+            "material_unknowns": [],
+        },
+        "evidence_assignment": {
+            "status": "complete",
+            "expected_atom_ids": [aggregate_atom, *occurrence_atoms],
+            "case_evidence_atom_ids": [aggregate_atom],
+            "occurrence_evidence_atom_ids": occurrence_atoms,
+        },
+        "experiments": [
+            {
+                "experiment_id": "experiment:aggregate-replay",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": [aggregate_atom, *occurrence_atoms],
+            }
+        ],
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = [aggregate_atom]
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+    )
+
+    assert unsupported_loss == []
+    assert basis == []
+
+
+def test_split_case_still_protects_occurrence_level_coverage() -> None:
+    aggregate_atom = "operational_failure:aggregate"
+    occurrence_atoms = ["run:one", "run:two"]
+    baseline = {
+        "case_relation_assessment": {
+            "disposition": "split",
+            "rationale": "The occurrences represent distinct causal units.",
+            "facets": [],
+            "material_unknowns": [],
+        },
+        "evidence_assignment": {
+            "status": "complete",
+            "expected_atom_ids": [aggregate_atom, *occurrence_atoms],
+            "case_evidence_atom_ids": [aggregate_atom],
+            "occurrence_evidence_atom_ids": occurrence_atoms,
+        },
+        "experiments": [
+            {
+                "experiment_id": "experiment:occurrence-replay",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": [aggregate_atom, *occurrence_atoms],
+            }
+        ],
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = [aggregate_atom]
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+    )
+
+    assert unsupported_loss == [
+        "origin_atom[run:one].direct_experimental_coverage",
+        "origin_atom[run:two].direct_experimental_coverage",
+    ]
+    assert basis == []
 
 
 def test_unrelated_binding_error_cannot_excuse_direct_support_loss() -> None:
