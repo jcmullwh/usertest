@@ -1535,6 +1535,27 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: the first read-only problem/priority projection assigned the problem ID to `$pid`. Windows PowerShell variable names are case-insensitive and `$PID` is a read-only automatic variable, so the command stopped before loading or printing the requested records.
 - Containment and result: the immediate retry used `$problemId` and returned the exact problem record, priority decision, prior malformed-proof lineage, and 31 evidence IDs. The failure occurred before the Docker-daemon Stage 3 launch and caused no file write, model call, stage rerun, artifact mutation, restart, export, or removal.
 
+### AN-70 - Next-case priority comparison repeated the direct `foreach` pipeline parse error
+
+- Status: `closed_immediate_read_only_correction`
+- Classification: one supervisor diagnostic-command error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first comparison of the retained Stage-2 and post-split priority records piped directly from a `foreach` block into `Format-List`. Windows PowerShell rejected the command with `An empty pipe element is not allowed`, repeating the command shape already seen in AN-64, AN-66, and AN-68.
+- Containment and result: the immediate retry accumulated rows in an array and proved both sources select `problem:windows-sandbox-command-execution-fails` as P1, score `0.816364`, route `research_update`, case `case:fe517dafc2a12d5779ab`, with the same frontier and snapshot IDs. No file write, model call, stage rerun, restart, export, or removal occurred.
+
+### AN-71 - Atom-corpus diagnostic parsed a JSONL artifact as one JSON document
+
+- Status: `closed_immediate_read_only_correction`
+- Classification: one supervisor diagnostic-command error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: a read-only preflight sent `post_research_split_storage_exhaustion_v1/usertest.backlog.atoms.json` to PowerShell `ConvertFrom-Json`. Despite its `.json` suffix, this retained artifact is a JSONL atom stream, so parsing failed after printing a large fragment of subsequent records.
+- Containment and result: the canonical `load_atoms_jsonl` loader was used in the actual preflight and authenticated all 2,856 atoms, including 25 source atoms and zero derived atoms assigned to the selected case. The failed read caused no write, model call, stage rerun, restart, export, or removal.
+
+### AN-72 - Sol/high preflight inspected the wrong runner-config field
+
+- Status: `closed_immediate_read_only_correction`
+- Classification: one supervisor reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first model-setting preflight searched the loaded Codex config's `args`/`extra_args` fields and printed `reasoning_configured: false`. The repo-owned setting is actually stored in `agents.codex.config_overrides`, which contains the exact value `model_reasoning_effort=high`.
+- Containment and result: direct config inspection corrected the false report before launch. The Stage-3 invocation explicitly selects `gpt-5.6-sol`, while the runner applies the repo-owned high-reasoning override and receipts the effective model/auth route. No model call was launched under the false diagnostic, and no stage or artifact was changed.
+
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
 - Status: `closed_immediate_unbounded_read`
