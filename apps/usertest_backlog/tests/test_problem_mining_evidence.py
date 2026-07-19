@@ -5627,6 +5627,18 @@ def test_failed_relation_batch_keeps_only_that_batch_provisionally_separate(
             "relation_review_batch_failure"
         )
     assert decisions[2]["review_confidence"] == 0.9
+    failed_response = (
+        review_dir / "problem_mining_relation_review_001_batch_001.response.txt"
+    )
+    provisional_response = (
+        review_dir / "problem_mining_relation_review_001_batch_001.provisional.json"
+    )
+    assert not failed_response.exists()
+    assert provisional_response.is_file()
+    assert batches[0]["response_path"] == str(provisional_response)
+    assert json.loads(provisional_response.read_text(encoding="utf-8"))["status"] == (
+        "failed_provisional_keep_separate"
+    )
     checkpoint = json.loads(
         (review_dir / "problem_mining_relation_review_001.response.txt").read_text(encoding="utf-8")
     )
@@ -5748,6 +5760,60 @@ def test_receipt_revalidation_detects_required_index_tampering(tmp_path: Path) -
 
     assert any(
         error.startswith("problem_mining_required_read_attestation_changed") for error in errors
+    )
+
+
+def test_receipt_does_not_require_a_decision_for_attested_terminal_context(
+    tmp_path: Path,
+) -> None:
+    stage1, atoms = _verified_stage1(tmp_path)
+    atoms.append(
+        {
+            "atom_id": "atom:terminal-context",
+            "source": "run_outcome_context",
+            "evidence_role": "observation",
+            "problem_mining_context_only": True,
+            "lineage_mining_blocker": "runner_terminal_context_only",
+            "terminal_context_scope": "origin_run_outcome_not_case_resolution",
+            "disposition": "unresolved",
+            "disposition_status": "pending",
+            "disposition_receipt": None,
+        }
+    )
+
+    assert verify_problem_mining_evidence_receipt(
+        stage1=stage1,
+        atoms=atoms,
+        require_live=True,
+    ) == []
+
+
+def test_receipt_still_requires_a_decision_for_untrusted_context_shape(
+    tmp_path: Path,
+) -> None:
+    stage1, atoms = _verified_stage1(tmp_path)
+    atoms.append(
+        {
+            "atom_id": "atom:untrusted-context",
+            "source": "run_outcome_context",
+            "evidence_role": "observation",
+            "problem_mining_context_only": True,
+            "lineage_mining_blocker": "untrusted_blocker",
+            "terminal_context_scope": "origin_run_outcome_not_case_resolution",
+            "disposition": "unresolved",
+            "disposition_status": "pending",
+            "disposition_receipt": None,
+        }
+    )
+
+    assert (
+        "source_atom_without_explicit_disposition:atom:untrusted-context:"
+        "disposition_decision_pending"
+        in verify_problem_mining_evidence_receipt(
+            stage1=stage1,
+            atoms=atoms,
+            require_live=True,
+        )
     )
 
 

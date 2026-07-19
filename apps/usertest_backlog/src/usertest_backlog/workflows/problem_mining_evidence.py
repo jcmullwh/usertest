@@ -238,6 +238,18 @@ def _atom_evidence_row(atom: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_runner_terminal_context_only(atom: Mapping[str, Any]) -> bool:
+    """Identify synthetic run-outcome context that is read but never decision-owned."""
+
+    return bool(
+        atom.get("problem_mining_context_only") is True
+        and _text(atom.get("source")) == "run_outcome_context"
+        and _text(atom.get("lineage_mining_blocker")) == "runner_terminal_context_only"
+        and _text(atom.get("terminal_context_scope"))
+        == "origin_run_outcome_not_case_resolution"
+    )
+
+
 def build_problem_mining_evidence_draft(
     *,
     atoms: Sequence[Mapping[str, Any]],
@@ -2575,7 +2587,11 @@ def verify_problem_mining_evidence_receipt(
     # derived atom can never compensate for a missing source decision.
     for atom_id, atom in atoms_by_id.items():
         role = _text(atom.get("evidence_role")) or "observation"
-        if role in _DERIVED_EVIDENCE_ROLES or atom_is_idea_originated(atom):
+        if (
+            role in _DERIVED_EVIDENCE_ROLES
+            or atom_is_idea_originated(atom)
+            or _is_runner_terminal_context_only(atom)
+        ):
             continue
         disposition_errors = atom_disposition_receipt_errors(atom, require_decided=True)
         if disposition_errors:

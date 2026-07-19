@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import backlog_miner.pipeline as pipeline_module
 import pytest
 import yaml
 from backlog_core.case_lineage import eligible_problem_mining_atoms
@@ -25,6 +26,7 @@ from usertest_backlog.cli import _write_chunked_problem_mining_atoms_workspace, 
 from usertest_backlog.parser import build_parser
 from usertest_backlog.workflows.problem_mining import _validate_relation_decision_focuses
 from usertest_backlog.workflows.staged import (
+    _load_stage1_relation_resume,
     _reset_stale_unproven_actioned_atoms,
     _sync_case_registry_outcomes,
 )
@@ -38,6 +40,110 @@ def _write_json(path: Path, obj: object) -> None:
 def _write_yaml(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
+
+
+def test_stage1_relation_resume_reuses_complete_attempt_frontier(tmp_path: Path) -> None:
+    def write_invocation(tag: str, *, response: str | None, error: str | None) -> Path:
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / f"{tag}.prompt.txt").write_text("prompt", encoding="utf-8")
+        (review_dir / f"{tag}.raw_events.jsonl").write_text("{}\n", encoding="utf-8")
+        (review_dir / f"{tag}.last_message.txt").write_text(
+            response or "", encoding="utf-8"
+        )
+        (review_dir / f"{tag}.stderr.txt").write_text("", encoding="utf-8")
+        if response is not None:
+            (review_dir / f"{tag}.response.txt").write_text(response, encoding="utf-8")
+        return pipeline_module._write_model_invocation_manifest(
+            stage="problem_mining",
+            tag=tag,
+            agent="claude",
+            out_dir=review_dir,
+            prompt="prompt",
+            response=response,
+            error_kind=error,
+        )
+
+    artifacts_dir = tmp_path / "artifacts"
+    review_dir = artifacts_dir / "problem_mining" / "problem_mining_relation_review_001"
+    base_dir = artifacts_dir / "problem_mining" / "base"
+    base_dir.mkdir(parents=True)
+    base_tag = "problem_mining_001"
+    for suffix, content in (
+        ("prompt.txt", "base prompt"),
+        ("response.txt", "{}"),
+        ("raw_events.jsonl", "{}\n"),
+        ("last_message.txt", "{}"),
+        ("stderr.txt", ""),
+    ):
+        (base_dir / f"{base_tag}.{suffix}").write_text(content, encoding="utf-8")
+    base_manifest = pipeline_module._write_model_invocation_manifest(
+        stage="problem_mining",
+        tag=base_tag,
+        agent="claude",
+        out_dir=base_dir,
+        prompt="base prompt",
+        response="{}",
+        error_kind=None,
+    )
+    stage_doc = pipeline_module.attach_stage_model_invocation_contract(
+        {
+            "stage": "problem_mining",
+            "items": [{"problem_id": "problem:new", "case_id": "case:new"}],
+            "input_meta": {"problem_mining_evidence_draft": {"status": "verified"}},
+        },
+        agent="claude",
+        dry_run=False,
+        manifest_refs=[pipeline_module.model_invocation_manifest_ref(base_manifest)],
+        invocation_expected=True,
+    )
+    problem_records = tmp_path / "problem_records.json"
+    _write_json(problem_records, stage_doc)
+
+    failed_tag = "problem_mining_relation_review_001_batch_001"
+    completed_tag = "problem_mining_relation_review_001_batch_002"
+    write_invocation(failed_tag, response=None, error="RuntimeError")
+    write_invocation(completed_tag, response="[]", error=None)
+    batches = [
+        {
+            "tag": failed_tag,
+            "focus_ids": ["problem:new"],
+            "status": "failed_provisional_keep_separate",
+            "decision_count": 1,
+            "attempt_history": [{"tag": failed_tag}],
+        },
+        {
+            "tag": completed_tag,
+            "focus_ids": ["problem:old"],
+            "status": "completed",
+            "decision_count": 1,
+            "successful_attempt_tag": completed_tag,
+            "attempt_history": [{"tag": completed_tag}],
+        },
+    ]
+    _write_json(
+        review_dir / "problem_mining_relation_review_001.prompt.txt",
+        {
+            "schema_version": "problem_relation_review_batches_v1",
+            "batch_count": 2,
+            "batches": batches,
+        },
+    )
+    _write_json(
+        review_dir / "problem_mining_relation_review_001.response.txt",
+        [
+            {"focus_id": "problem:new", "action": "keep_separate"},
+            {"focus_id": "problem:old", "action": "keep_separate"},
+        ],
+    )
+
+    resumed = _load_stage1_relation_resume(
+        problem_records_path=problem_records,
+        artifacts_dir=artifacts_dir,
+    )
+
+    assert resumed is not None
+    assert len(resumed["decisions"]) == 2
+    assert [ref["status"] for ref in resumed["manifest_refs"]] == ["failed", "verified"]
 
 
 def test_stage3_progress_checkpoint_integrity_detects_dossier_tampering() -> None:

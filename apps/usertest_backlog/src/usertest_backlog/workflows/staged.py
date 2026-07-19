@@ -9,6 +9,7 @@ from hashlib import sha256
 from uuid import uuid4
 
 from backlog_core import assess_research_readiness, build_operational_failure_candidates
+from backlog_miner.pipeline import model_invocation_manifest_ref
 from backlog_miner.research_evidence import BlockedReplayExecutor
 from backlog_miner.research_runner import (
     _resolve_repo_ref,
@@ -641,6 +642,121 @@ def _require_stage_model_invocation_provenance(stage_doc: dict[str, Any]) -> Non
             + ":"
             + ",".join(errors)
         )
+
+
+def _load_stage1_relation_resume(
+    *,
+    problem_records_path: Path,
+    artifacts_dir: Path,
+) -> dict[str, Any] | None:
+    """Load an interrupted post-mining relation checkpoint without rerunning miners."""
+
+    if not problem_records_path.is_file():
+        return None
+    try:
+        stage_doc_raw = json.loads(problem_records_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"stage1_relation_resume_document_unreadable:{type(exc).__name__}"
+        ) from exc
+    if not isinstance(stage_doc_raw, dict):
+        raise ValueError("stage1_relation_resume_document_not_object")
+    stage_doc = dict(stage_doc_raw)
+    meta_raw = stage_doc.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    if stage_doc.get("stage") != "problem_mining":
+        return None
+    if not isinstance(meta.get("problem_mining_evidence_draft"), Mapping):
+        return None
+    items = stage_doc.get("items")
+    if not isinstance(items, list) or not all(isinstance(item, Mapping) for item in items):
+        raise ValueError("stage1_relation_resume_problem_records_invalid")
+    _require_stage_model_invocation_provenance(stage_doc)
+
+    tag = "problem_mining_relation_review_001"
+    review_dir = artifacts_dir / "problem_mining" / tag
+    batch_path = review_dir / f"{tag}.prompt.txt"
+    decisions_path = review_dir / f"{tag}.response.txt"
+    try:
+        checkpoint_raw = json.loads(batch_path.read_text(encoding="utf-8"))
+        decisions_raw = json.loads(decisions_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"stage1_relation_resume_checkpoint_unreadable:{type(exc).__name__}"
+        ) from exc
+    if not isinstance(checkpoint_raw, dict) or (
+        checkpoint_raw.get("schema_version") != "problem_relation_review_batches_v1"
+    ):
+        raise ValueError("stage1_relation_resume_checkpoint_schema_invalid")
+    batches_raw = checkpoint_raw.get("batches")
+    if not isinstance(batches_raw, list) or not all(
+        isinstance(batch, Mapping) for batch in batches_raw
+    ):
+        raise ValueError("stage1_relation_resume_batches_invalid")
+    batches = [dict(batch) for batch in batches_raw]
+    if checkpoint_raw.get("batch_count") != len(batches):
+        raise ValueError("stage1_relation_resume_batch_count_invalid")
+    if not isinstance(decisions_raw, list) or not all(
+        isinstance(decision, Mapping) for decision in decisions_raw
+    ):
+        raise ValueError("stage1_relation_resume_decisions_invalid")
+    decisions = [dict(decision) for decision in decisions_raw]
+    focus_ids = [
+        focus_id
+        for batch in batches
+        for focus_id in (
+            batch.get("focus_ids") if isinstance(batch.get("focus_ids"), list) else []
+        )
+        if isinstance(focus_id, str) and focus_id.strip()
+    ]
+    decision_focus_ids = [
+        str(decision["focus_id"])
+        for decision in decisions
+        if isinstance(decision.get("focus_id"), str)
+    ]
+    if (
+        len(focus_ids) != len(set(focus_ids))
+        or len(decision_focus_ids) != len(decisions)
+        or sorted(decision_focus_ids) != sorted(focus_ids)
+        or sum(int(batch.get("decision_count") or 0) for batch in batches)
+        != len(decisions)
+    ):
+        raise ValueError("stage1_relation_resume_decision_partition_invalid")
+
+    manifest_paths = sorted(review_dir.glob("*.model_invocation.json"))
+    manifest_refs = [
+        model_invocation_manifest_ref(path, require_verified=False)
+        for path in manifest_paths
+    ]
+    manifest_status_by_tag = {
+        str(ref.get("tag") or ""): str(ref.get("status") or "")
+        for ref in manifest_refs
+    }
+    attempted_tags = {
+        str(attempt.get("tag") or "")
+        for batch in batches
+        for attempt in (
+            batch.get("attempt_history")
+            if isinstance(batch.get("attempt_history"), list)
+            else []
+        )
+        if isinstance(attempt, Mapping) and attempt.get("tag")
+    }
+    if attempted_tags != set(manifest_status_by_tag):
+        raise ValueError("stage1_relation_resume_manifest_frontier_mismatch")
+    for batch in batches:
+        if batch.get("status") != "completed":
+            continue
+        successful_tag = str(batch.get("successful_attempt_tag") or "")
+        if manifest_status_by_tag.get(successful_tag) != "verified":
+            raise ValueError("stage1_relation_resume_completed_batch_unverified")
+
+    return {
+        "stage_doc": stage_doc,
+        "decisions": decisions,
+        "batches": batches,
+        "manifest_refs": manifest_refs,
+    }
 
 
 def _stage3_provider_external_wait(stage_doc: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -7209,6 +7325,14 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     change_plans_md = out_json.parent / f"{default_name}.change_plans.md"
 
     try:
+        stage1_relation_resume = (
+            _load_stage1_relation_resume(
+                problem_records_path=problem_records_json,
+                artifacts_dir=artifacts_dir,
+            )
+            if resume and preexisting_stage3_resume_document is None
+            else None
+        )
         stage3_resume_document: dict[str, Any] | None = None
         retained_stage1: dict[str, Any] | None = None
         retained_stage2: dict[str, Any] | None = None
@@ -7233,6 +7357,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         stage1_doc = (
             retained_stage1
             if retained_stage1 is not None
+            else stage1_relation_resume["stage_doc"]
+            if stage1_relation_resume is not None
             else _run_problem_mining_stage(
                 repo_root=repo_root,
                 atoms=atoms,
@@ -7308,6 +7434,21 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 cfg=cfg,
                 dry_run=dry_run,
                 stage_guidance_text=stage1_guidance,
+                relation_decisions_override=(
+                    stage1_relation_resume["decisions"]
+                    if stage1_relation_resume is not None
+                    else None
+                ),
+                relation_review_batches_override=(
+                    stage1_relation_resume["batches"]
+                    if stage1_relation_resume is not None
+                    else None
+                ),
+                relation_manifest_refs=(
+                    stage1_relation_resume["manifest_refs"]
+                    if stage1_relation_resume is not None
+                    else None
+                ),
             )
         problem_records = _attach_current_case_registry_context(
             problem_records,

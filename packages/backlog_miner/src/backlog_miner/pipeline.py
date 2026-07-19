@@ -220,10 +220,19 @@ def verify_model_invocation_manifest(
         receipt = receipt_raw if isinstance(receipt_raw, dict) else {}
         path_raw = receipt.get("path")
         artifact_path = Path(path_raw) if isinstance(path_raw, str) else None
-        if artifact_path is None or receipt != _file_receipt(artifact_path):
+        current_receipt = _file_receipt(artifact_path) if artifact_path is not None else None
+        absent_failed_response = bool(
+            kind == "response"
+            and raw.get("status") == "failed"
+            and raw.get("response_sha256") is None
+            and receipt.get("exists") is False
+        )
+        if artifact_path is None or (
+            receipt != current_receipt and not absent_failed_response
+        ):
             errors.append(f"model_invocation_artifact_changed:{kind}")
             continue
-        if artifact_path.is_file():
+        if artifact_path.is_file() and not absent_failed_response:
             resolved_paths[kind] = artifact_path
     prompt_path = resolved_paths.get("prompt")
     response_path = resolved_paths.get("response")
@@ -459,6 +468,7 @@ def verify_stage_model_invocation_contract(
     subscription_expected = agent == "codex" and contract.get("dry_run") is False
     if contract.get("subscription_required") is not subscription_expected:
         errors.append("stage_model_invocation_subscription_requirement_invalid")
+    verified_manifest_count = 0
     for index, ref_raw in enumerate(refs):
         ref = ref_raw if isinstance(ref_raw, dict) else {}
         path_raw = ref.get("path")
@@ -470,10 +480,10 @@ def verify_stage_model_invocation_contract(
         ):
             errors.append(f"stage_model_invocation_ref_changed:{index}")
             continue
-        manifest_errors = verify_model_invocation_manifest(
-            path,
-            require_verified=require_verified,
-        )
+        # Failed attempts are retained telemetry, not a reason to discard a later
+        # verified result.  Their bytes and auth receipts still have to be intact.
+        # Stage-specific validators decide whether the resulting work is usable.
+        manifest_errors = verify_model_invocation_manifest(path, require_verified=False)
         errors.extend(f"stage_model_invocation:{error}" for error in manifest_errors)
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -481,12 +491,20 @@ def verify_stage_model_invocation_contract(
             continue
         if not isinstance(manifest, dict):
             continue
+        if manifest.get("status") == "verified":
+            verified_manifest_count += 1
         if manifest.get("stage") not in allowed_invocation_stages:
             errors.append(f"stage_model_invocation_stage_mismatch:{index}")
         if manifest.get("agent") != agent:
             errors.append(f"stage_model_invocation_agent_mismatch:{index}")
         if ref.get("manifest_sha256") != manifest.get("manifest_sha256"):
             errors.append(f"stage_model_invocation_manifest_identity_changed:{index}")
+    if (
+        require_verified
+        and contract.get("invocation_expected") is True
+        and verified_manifest_count == 0
+    ):
+        errors.append("stage_model_invocation_verified_manifest_missing")
     return list(dict.fromkeys(errors))
 
 

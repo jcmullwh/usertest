@@ -5472,6 +5472,7 @@ def _run_relation_review_batches(
         )
         prompt_path = review_dir / f"{batch_tag}.prompt.txt"
         response_path = review_dir / f"{batch_tag}.response.txt"
+        provisional_path = review_dir / f"{batch_tag}.provisional.json"
         prompt_path.write_text(prompt, encoding="utf-8")
         workspace_dir = review_dir / f"{batch_tag}.workspace"
         workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -5815,19 +5816,23 @@ def _run_relation_review_batches(
             meta["response_path"] = retained.payload.get("response_path")
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
-            if not response_path.exists():
-                response_path.write_text(
-                    _json.dumps(
-                        {
-                            "status": "failed_provisional_keep_separate",
-                            "error": error,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+            provisional_path.write_text(
+                _json.dumps(
+                    {
+                        "status": "failed_provisional_keep_separate",
+                        "error": error,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
                 )
+                + "\n",
+                encoding="utf-8",
+            )
+            # The model invocation owns ``*.response.txt``.  A failed invocation may
+            # legitimately leave that path absent; writing controller fallback bytes to
+            # it after the invocation manifest is sealed corrupts otherwise valid failure
+            # telemetry.  Keep the conservative controller disposition separate.
+            meta["response_path"] = str(provisional_path)
             partial: list[dict[str, Any]] = []
             if retained_observation is not None:
                 candidates = retained_observation.payload.get("decisions")
