@@ -3799,8 +3799,11 @@ def _repair_contract(
             "Return the complete dossier. The verifier found that the retained proof is not yet "
             "sufficient. Continue the same investigation in this exact workspace. You may add or "
             "change evidence only by actually running and retaining the corresponding experiment, "
-            "read, or artifact in this turn. Rerun every claimed experiment needed by the complete "
-            "dossier. Do not implement a product fix or fabricate a result."
+            "read, or artifact in this turn. Preserve and reuse already-attested experiments, "
+            "reads, and artifacts when their commands, observations, and claims remain unchanged. "
+            "Run only the additional or changed evidence needed to correct the current validation "
+            "errors; do not rerun unaffected evidence merely to return the complete dossier. Do "
+            "not implement a product fix or fabricate a result."
             if research_capabilities
             else (
                 "Return the complete dossier. The baseline dossier is an unverified draft, and the "

@@ -10883,6 +10883,48 @@ def test_independent_research_feedback_is_embedded_exactly_in_repair_contract() 
     assert feedback["source_adjudication_sha256"] in prompt
 
 
+def test_research_capable_repair_reuses_unchanged_attested_evidence() -> None:
+    source_attempt = {
+        "attempt_sha256": "a" * 64,
+        "attempt_number": 1,
+        "outcome": "evidence_verification_invalid",
+        "validation_errors": ["experiment_atom_binding_invalid:experiment:one:atom:one"],
+        "attempted_dossier": {
+            "case_id": "case:one",
+            "problem_id": "problem:one",
+            "experiments": [
+                {
+                    "experiment_id": "experiment:one",
+                    "command": "python retained_harness.py",
+                    "result": "retained result",
+                    "exit_code": 0,
+                },
+                {
+                    "experiment_id": "experiment:unaffected",
+                    "command": "python unaffected_harness.py",
+                    "result": "already attested",
+                    "exit_code": 0,
+                },
+            ],
+        },
+    }
+
+    contract = mod._repair_contract(
+        case_id="case:one",
+        problem_id="problem:one",
+        source_attempt=source_attempt,
+        validation_errors=source_attempt["validation_errors"],
+        authorized_paths=["experiments[0].origin_evidence_bindings"],
+        research_capabilities=True,
+    )
+
+    rule = contract["immutable_rule"]
+    assert "Preserve and reuse already-attested experiments" in rule
+    assert "Run only the additional or changed evidence needed" in rule
+    assert "do not rerun unaffected evidence" in rule
+    assert "Rerun every claimed experiment" not in rule
+
+
 def test_authenticated_prior_feedback_is_foregrounded_before_research_contract() -> None:
     prior = {
         "source_attempt_sha256": "c" * 64,
