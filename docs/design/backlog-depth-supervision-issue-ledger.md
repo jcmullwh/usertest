@@ -1161,6 +1161,20 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: a read-only atom-ID family enumeration redundantly requested full bundle-file verification and was killed at 124 seconds by the shell timeout before producing output. It made no model, Docker, export, ticket, implementation, or repository mutation call.
 - Containment and result: the already-sealed bundle was read directly under the normal long ceiling; it completed in 1.9 seconds and showed exactly five non-run-shaped IDs, all canonical `operational_failure` atoms. No incomplete output was used as evidence and no test was shortened.
 
+### AN-40 - Qualification preparation was first launched with a moving research ref
+
+- Status: `closed_exact_revision_retry_passed`
+- Classification: one supervisor launcher-argument error, not a product, model, or pipeline-stage failure
+- Exact evidence: the model-free preparation rejected `origin/dev` after 67.6 seconds with `qualification_input_research_ref_not_exact_40hex`; no bundle, model call, ticket mutation, Docker call, or removal action occurred.
+- Containment and result: only preparation reran with the already-fetched exact target commit `8fff1c16dfaedf317e2ef25924773fa5efe90f08`. It completed in 878.8 seconds and sealed 2,854 atoms. Future qualification launchers must resolve moving refs before invoking preparation.
+
+### AN-41 - New operational-outcome regression fixture initially violated the outcome schema
+
+- Status: `closed_fixture_corrected_full_suite_green`
+- Classification: one supervisor test-construction cluster, not a product or pipeline failure
+- Exact evidence: the first focused run omitted mandatory original-scenario evidence for a `mitigated` fixture; the next used `mitigation` instead of the required `mitigation_effect` receipt role. The parser assertions passed in both runs, and neither failure reached model, stage, export, implementation, Docker, or product code.
+- Containment and result: the fixture now carries structurally valid test, original-scenario, and mitigation-effect receipts. The five focused checks, complete `backlog_repo` suite, and seven integration checks pass without weakening the outcome validator.
+
 ### AN-38 - First focused rerun used a stale package-local dependency copy
 
 - Status: `closed_canonical_source_graph_rerun_green`

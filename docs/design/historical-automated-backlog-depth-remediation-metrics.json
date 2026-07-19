@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-19T06:28:30Z",
-    "current_run_id": "report-schema-case-4f134107-20260718",
+    "as_of": "2026-07-19T07:21:32Z",
+    "current_run_id": "qualification-cycle-2b0e7048-20260719",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "First actionable case delivered; controller checkpoint green",
-        "detail": "The report-schema case reached an honestly mitigated terminal outcome. Its reusable controller corrections are committed to draft PR #217 at 99ce948f; 2,877 affected tests pass with six expected skips, all seven lint tasks pass, and GitHub reports 80/80 successful checks.",
-        "tone": "good"
+        "value": "Delivered case retained; regeneration lineage fix green",
+        "detail": "A pre-model regeneration gate found that canonical operational-failure atom IDs were not projected from completed tickets. BDS-148 is committed at 2b0e7048; the exact retained outcome now verifies and changes the case from active to mitigated.",
+        "tone": "warn"
       },
       {
         "label": "Current bounded throughput",
         "value": "Actionable case 1/1 delivered; mitigated 1; resolved 0",
-        "detail": "For this one case, Stages 3-6, implementation, review, merge, original-scenario replay, and mitigation-effect replay completed. This is one successful delivery sample, not a general throughput rate.",
+        "detail": "No new model-backed case disposition has completed in the current cycle. The prior report-schema delivery remains the only delivered sample and is still bounded honestly to mitigation.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No standard export-disabled full shadow cycle has completed on stable final controller bytes. One delivered case proves a baseline path but not autonomous continuous operation or recurrence stability.",
+        "detail": "The current cycle has not entered Stage 1. A previously prepared bundle was invalidated by the controller correction and receives no qualification credit.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Regenerate current evidence, then process the next distinct case with Sol/high",
-        "detail": "Use exact clean controller revision 99ce948f, keep export disabled, reuse completed cases and stages, and pass gpt-5.6-sol plus high reasoning explicitly for every substantive backlog, implementation, and review call.",
+        "value": "Reseal 2b0e7048, then run Stage 1/2 with Sol/high",
+        "detail": "Regenerate the model-free bundle from the exact clean controller revision, prove the mitigated case is not re-mined, and preserve the resulting frontier before any Stage 3 replay executor is engaged.",
         "tone": "warn"
       }
     ],
@@ -2972,6 +2972,66 @@
           "report_schema_mitigation_effect_outcome_20260719",
           "report_schema_complete_ticket_20260719",
           "controller_pr217_checkpoint_99ce948f",
+          "backlog_depth_supervision_issue_ledger"
+        ]
+      },
+      {
+        "run_id": "qualification-cycle-2b0e7048-20260719",
+        "entry_kind": "lifecycle_run",
+        "lifecycle_id": "pipeline-cycle:2b0e7048:20260719",
+        "lifecycle_kind": "pipeline_cycle",
+        "rework": {
+          "author_invocations": 0,
+          "continuation_launches": 0,
+          "stage_reruns": 0,
+          "full_restarts": 0,
+          "summary": "No model author or pipeline stage ran. Preparation was retried once for an exact-ref launcher correction; the first Stage 1/2 component launch stopped at its pre-model lifecycle assertion and retained no authored work to discard."
+        },
+        "label": "Current backlog regeneration and lifecycle reconciliation",
+        "scope": "Model-free resealing and pre-Stage-1 reconciliation of 2,854 non-IDEA atoms after the first delivered case; export disabled, signed-in Sol/high reserved for the next substantive call, and no Docker, removal, ticket, implementation, or model action performed",
+        "timing": {
+          "start_at": "2026-07-19T06:45:39Z",
+          "end_at": null,
+          "elapsed_seconds": 2153,
+          "coverage": "active",
+          "display": "35 m 53 s active",
+          "note": "The lifecycle is still active. Completed substeps include a 67.6-second rejected preparation, an 878.8-second successful preparation, a 148.2-second pre-model lifecycle stop, and bounded diagnostics/tests; no incomplete wall-time total is claimed."
+        },
+        "furthest_stage": "Pre-Stage-1 lifecycle reconciliation corrected and verified",
+        "current_state": "The first sealed bundle contained 2,854 atoms but correctly received no model calls because exact retained reconciliation left the delivered report-schema case active. BDS-148 identified the canonical operational-failure atom parser gap. Commit 2b0e7048 accepts the exact content-addressed synthetic identity, and a real retained rescore now projects the full outcome with verified provenance and case state mitigated. The prior bundle is stale because controller bytes changed; Stage 1 has not started.",
+        "outcome": "No new disposition throughput yet; one material duplicate-mining defect corrected before model work",
+        "errors": {
+          "count": 4,
+          "count_kind": "deduplicated_clusters",
+          "summary": "One pipeline defect (BDS-148) and three supervisor invocation/test-construction clusters (AN-39 through AN-41). Repeated symptoms, individual validator messages, and focused reruns are not counted separately.",
+          "cluster_ids": [
+            "BDS-148",
+            "AN-39",
+            "AN-40",
+            "AN-41"
+          ]
+        },
+        "automatic_self_corrections": {
+          "count": 0,
+          "count_kind": "deduplicated_clusters",
+          "summary": "No model author existed in this cycle, so no model self-correction is claimed.",
+          "cluster_ids": []
+        },
+        "supervisor_interventions": {
+          "count": 4,
+          "count_kind": "deduplicated_clusters",
+          "summary": "Supervision corrected the operational atom lineage parser, supplied the required exact research revision, replaced one redundant timed diagnostic with a direct sealed read, and repaired one synthetic outcome-fixture cluster. No case conclusion, dossier, plan, or implementation content was authored manually.",
+          "cluster_ids": [
+            "BDS-148",
+            "AN-39",
+            "AN-40",
+            "AN-41"
+          ]
+        },
+        "next_action": "Commit the dashboard checkpoint, reseal the same evidence against exact controller head 2b0e7048 plus the docs-only checkpoint, then run canonical Stage 1/2 with gpt-5.6-sol/high and reject any rediscovery of the mitigated report-schema case.",
+        "tone": "warn",
+        "data_quality": "Successful preparation: 878.8 seconds, 2,854 atoms, zero model/ticket mutations, bundle ec19716a.... Exact retained rescore: state mitigated, provenance verified, invalid outcomes 0, provenance failures 0, tickets-without-evidence 24 -> 23. Verification: five focused checks, complete backlog_repo suite, seven backlog integration checks, Ruff and diff checks green. Controller commit 2b0e7048 is pushed; full GitHub CI remains pending.",
+        "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]
       }

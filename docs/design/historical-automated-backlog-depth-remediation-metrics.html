@@ -512,25 +512,25 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat good">
+            <div class="stat warn">
               <span class="label">Current pipeline state</span>
-              <span class="value">First actionable case delivered; controller checkpoint green</span>
-              <span class="detail">The report-schema case reached an honestly mitigated terminal outcome. Its reusable controller corrections are committed to draft PR #217 at 99ce948f; 2,877 affected tests pass with six expected skips, all seven lint tasks pass, and GitHub reports 80/80 successful checks.</span>
+              <span class="value">Delivered case retained; regeneration lineage fix green</span>
+              <span class="detail">A pre-model regeneration gate found that canonical operational-failure atom IDs were not projected from completed tickets. BDS-148 is committed at 2b0e7048; the exact retained outcome now verifies and changes the case from active to mitigated.</span>
             </div>
             <div class="stat good">
               <span class="label">Current bounded throughput</span>
               <span class="value">Actionable case 1/1 delivered; mitigated 1; resolved 0</span>
-              <span class="detail">For this one case, Stages 3-6, implementation, review, merge, original-scenario replay, and mitigation-effect replay completed. This is one successful delivery sample, not a general throughput rate.</span>
+              <span class="detail">No new model-backed case disposition has completed in the current cycle. The prior report-schema delivery remains the only delivered sample and is still bounded honestly to mitigation.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">No standard export-disabled full shadow cycle has completed on stable final controller bytes. One delivered case proves a baseline path but not autonomous continuous operation or recurrence stability.</span>
+              <span class="detail">The current cycle has not entered Stage 1. A previously prepared bundle was invalidated by the controller correction and receives no qualification credit.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Regenerate current evidence, then process the next distinct case with Sol/high</span>
-              <span class="detail">Use exact clean controller revision 99ce948f, keep export disabled, reuse completed cases and stages, and pass gpt-5.6-sol plus high reasoning explicitly for every substantive backlog, implementation, and review call.</span>
+              <span class="value">Reseal 2b0e7048, then run Stage 1/2 with Sol/high</span>
+              <span class="detail">Regenerate the model-free bundle from the exact clean controller revision, prove the mitigated case is not re-mined, and preserve the resulting frontier before any Stage 3 replay executor is engaged.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -669,7 +669,7 @@
                 <td><strong>152</strong> author calls; 84 continuations; 27 stage reruns; 0 full restarts<span class="ops-detail">Since the prior checkpoint, the Docker-shell case used five Terra calls (one original and four same-session corrections), one model-free verifier-feedback record, and no author…</span></td>
                 <td>Start P0 `problem:task-run-report-schema-validation-blocker` from the corrected retained Stage 2 output, using one bounded Stage 3 component run. Do not rerun Stage 1 or any…</td>
               </tr>
-              <tr class="ops-current">
+              <tr class="">
                 <td><strong>Task-run report-schema validation blocker case</strong><span class="ops-kind">case</span></td>
                 <td><strong>20 h 28 m 24 s</strong><span class="ops-kind">complete</span></td>
                 <td><span class="tag warn">PR merged to dev; mitigated outcome and terminal provenance verified</span><span class="ops-detail">Stage 3 established a reproduced, requires-change mechanism at the pinned revision; Stages 4-6 selected and planned one bounded mitigation. PR #218 implemented the exact plan,…</span></td>
@@ -680,10 +680,21 @@
                 <td><strong>47</strong> author calls; 37 continuations; Unknown stage reruns; 0 full restarts<span class="ops-detail">The planning checkpoint retained 42 unique model invocations and 36 same-author continuations. Delivery added two implementation-author calls, three review calls including one…</span></td>
                 <td>Regenerate the non-IDEA backlog from exact clean controller revision 99ce948f with export disabled, then start the next distinct current case with explicit gpt-5.6-sol/high.…</td>
               </tr>
+              <tr class="ops-current">
+                <td><strong>Current backlog regeneration and lifecycle reconciliation</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>35 m 53 s active</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Pre-Stage-1 lifecycle reconciliation corrected and verified</span><span class="ops-detail">The first sealed bundle contained 2,854 atoms but correctly received no model calls because exact retained reconciliation left the delivered report-schema case active. BDS-148…</span></td>
+                <td><strong>No new disposition throughput yet; one material duplicate-mining defect corrected before model work</strong></td>
+                <td><strong>4</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">One pipeline defect (BDS-148) and three supervisor invocation/test-construction clusters (AN-39 through AN-41). Repeated symptoms, individual validator messages, and focused…</span></td>
+                <td><strong>0</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">No model author existed in this cycle, so no model self-correction is claimed.</span></td>
+                <td><strong>4</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision corrected the operational atom lineage parser, supplied the required exact research revision, replaced one redundant timed diagnostic with a direct sealed read, and…</span></td>
+                <td><strong>0</strong> author calls; 0 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">No model author or pipeline stage ran. Preparation was retried once for an exact-ref launcher correction; the first Stage 1/2 component launch stopped at its pre-model lifecycle…</span></td>
+                <td>Commit the dashboard checkpoint, reseal the same evidence against exact controller head 2b0e7048 plus the docs-only checkpoint, then run canonical Stage 1/2 with gpt-5.6-sol/high…</td>
+              </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-19T06:28:30Z. Showing 13 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-19T07:21:32Z. Showing 14 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">
