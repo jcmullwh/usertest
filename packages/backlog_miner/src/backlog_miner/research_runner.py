@@ -30,6 +30,7 @@ from uuid import uuid4
 
 from backlog_core.stage_contracts import (
     RESEARCH_PROOF_SCHEMA_VERSION,
+    assess_research_readiness,
     build_stage_document,
     evidence_assignment_sha256,
     evidence_verification_sha256,
@@ -1344,6 +1345,20 @@ def _set_research_attempts(
     return dossier
 
 
+def _advancing_research_readiness_errors(dossier: dict[str, Any]) -> list[str]:
+    """Return downstream readiness findings for an advancing Stage-3 claim.
+
+    ``insufficient_evidence`` and ``blocked`` are honest terminal Stage-3 outcomes, so they do
+    not need to satisfy the optioning contract.  An ``evidence_sufficient`` dossier does: letting
+    it leave Stage 3 with a semantic readiness defect strands the retained author work at Stage 4,
+    where the same author can no longer self-correct it.
+    """
+    if dossier.get("research_status") != "evidence_sufficient":
+        return []
+    ready, reasons = assess_research_readiness(dossier)
+    return [] if ready else list(reasons)
+
+
 def _research_attempt_request_summary(attempt: dict[str, Any]) -> dict[str, Any]:
     """Project attempt provenance into the compact request ledger."""
     return {
@@ -2175,6 +2190,23 @@ def _research_retry_remediation_hints(
                 "touchpoint when the historical failure path did not depend on it. Narrow an "
                 "overbroad symbol list and preserve the already-run causal harness before doing "
                 "new research."
+            )
+        elif code == "unresolved_alternative_hypothesis_not_materialized":
+            target_fields = [
+                "root_cause_hypotheses[]",
+                "material_unknowns[]",
+                "research_status",
+                "evidence_boundaries",
+            ]
+            required_change = (
+                "Adjudicate the alternative from retained evidence instead of preserving a "
+                "plausible label mechanically. If it genuinely competes with the primary cause, "
+                "add a hypothesis-bound material unknown and downgrade to "
+                "insufficient_evidence when that unknown affects the root cause, interface, or "
+                "change surface. If it is adjacent context rather than a competing explanation, "
+                "remove the hypothesis while retaining its experiments unchanged as context and "
+                "add an explicit evidence boundary. Do not delete observations, fabricate a "
+                "refutation, or keep evidence_sufficient by hiding a material unknown."
             )
         elif "hypothesis" in code:
             target_fields = ["root_cause_hypotheses[]"]
@@ -6655,12 +6687,14 @@ def continue_research_dossier_from_independent_feedback(
             receipt,
             verification_run_dir,
         )
-        return (
-            []
-            if receipt.get("status") == "verified"
-            else _string_list(receipt.get("errors"))
-            or ["research_evidence_verification_failed_without_diagnostic"]
-        )
+        if receipt.get("status") != "verified":
+            return _string_list(receipt.get("errors")) or [
+                "research_evidence_verification_failed_without_diagnostic"
+            ]
+        prepared["evidence_verification"] = receipt
+        receipt["claims_sha256"] = research_claims_sha256(prepared)
+        receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
+        return _advancing_research_readiness_errors(prepared)
 
     repair = _run_targeted_dossier_repairs(
         repo_input=repo_input,
@@ -9029,9 +9063,18 @@ def run_repro_research_stage(
         effective_report_obj = report_obj
 
         verification_errors = _string_list(evidence_verification.get("errors"))
+        correction_frontier = "evidence_verification"
+        if evidence_verification.get("status") == "verified":
+            # Bind the exact attempt ledger before applying the contract Stage 4 will consume.
+            # This makes a semantic handoff defect ordinary same-author feedback while the
+            # research session and workspace are still available.
+            _set_research_attempts(dossier, research_attempt_history)
+            readiness_errors = _advancing_research_readiness_errors(dossier)
+            if readiness_errors:
+                verification_errors = readiness_errors
+                correction_frontier = "research_readiness"
         if (
-            evidence_verification.get("status") != "verified"
-            and verification_errors
+            verification_errors
             and agent == "codex"
             and _coerce_str(result.agent_session_id) is not None
         ):
@@ -9197,12 +9240,16 @@ def run_repro_research_stage(
                     correction_result,
                     correction_report,
                 )
-                return (
-                    []
-                    if candidate_receipt.get("status") == "verified"
-                    else _string_list(candidate_receipt.get("errors"))
-                    or ["research_evidence_verification_failed_without_diagnostic"]
+                if candidate_receipt.get("status") != "verified":
+                    return _string_list(candidate_receipt.get("errors")) or [
+                        "research_evidence_verification_failed_without_diagnostic"
+                    ]
+                prepared["evidence_verification"] = candidate_receipt
+                candidate_receipt["claims_sha256"] = research_claims_sha256(prepared)
+                candidate_receipt["receipt_sha256"] = evidence_verification_sha256(
+                    candidate_receipt
                 )
+                return _advancing_research_readiness_errors(prepared)
 
             verifier_source_attempt = _evidence_feedback_source_attempt(
                 current_attempt=current_attempt,
@@ -9253,6 +9300,7 @@ def run_repro_research_stage(
             research_attempt_history.extend(verifier_attempts)
             req_meta["evidence_verification_corrections"] = {
                 "status": verifier_repair.get("status"),
+                "correction_frontier": correction_frontier,
                 "research_capabilities": research_capabilities,
                 "attempt_count": len(verifier_attempts),
                 "repair_run_dirs": verifier_repair.get("repair_run_dirs", []),
@@ -9334,6 +9382,10 @@ def run_repro_research_stage(
             blocking_reasons.append(report_status_reason)
         if evidence_verification.get("status") != "verified":
             blocking_reasons.append("research_evidence_verification_failed")
+        else:
+            _set_research_attempts(dossier, research_attempt_history)
+            for readiness_error in _advancing_research_readiness_errors(dossier):
+                blocking_reasons.append("research_readiness_failed:" + readiness_error)
         if blocking_reasons:
             # This is a failure-state override, never a success-like default.
             dossier["research_status"] = "blocked"

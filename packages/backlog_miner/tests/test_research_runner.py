@@ -6428,6 +6428,169 @@ def test_sufficient_blocker_contradiction_returns_focused_feedback_to_same_autho
     assert result["attempts"][0]["repair_progress"]["decision"] == "accepted"
 
 
+def test_stage3_readiness_failure_returns_to_same_author_before_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    workspace = tmp_path / "readiness_workspace"
+    revision = _init_workspace(workspace)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    baseline = _research_extension(
+        actionability_assessment={
+            "disposition": "already_addressed",
+            "rationale": "The pinned revision already contains the provenance-sensitive fix.",
+            "evidence_refs": ["exp-1"],
+        }
+    )
+    baseline["root_cause_hypotheses"].append(
+        {
+            "hypothesis_id": "h2",
+            "statement": "The warning text alone always proves invalid configuration.",
+            "supporting_evidence": ["exp-1"],
+            "counterevidence": ["exp-control"],
+            "mechanism_symbols": ["core.run"],
+            "disposition": "plausible",
+            "disposition_evidence": [],
+            "falsification_attempts": [],
+        }
+    )
+    corrected = deepcopy(baseline)
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["evidence_boundaries"].append(
+        "The warning-only theory is retained as non-attribution context, not a competing cause."
+    )
+    calls: list[RunRequest] = []
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        calls.append(request)
+        run_dir = tmp_path / f"readiness_run_{len(calls)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        extension = baseline if len(calls) == 1 else corrected
+        _write_json(
+            run_dir / "report.json",
+            {
+                "schema_version": 1,
+                "kind": "troubleshoot_v1",
+                "status": "success",
+                "goal": "Bound the already-addressed historical case",
+                "failure_point": "An adjacent theory was misclassified as competing",
+                "evidence": {"what_happened": "The retained evidence supports one mechanism"},
+                "attempted_fixes": [],
+                "recommended_fix_path": ["Do not open a new implementation ticket"],
+                "extensions": {"backlog_repro_research": extension},
+            },
+        )
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=request.resume_workspace_dir or workspace,
+            revision=revision,
+            ref=request.ref,
+            requested_codex_resume_session_id=request.codex_resume_session_id,
+            assigned_evidence_workspace=request.resume_workspace_dir,
+        )
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    def fake_verify(dossier: dict[str, Any], **_kwargs: object) -> dict[str, Any]:
+        return {
+            "status": "verified",
+            "errors": [],
+            "planning_workspace_dir": str(workspace),
+            "claims_sha256": research_claims_sha256(dossier),
+        }
+
+    def fake_readiness(dossier: dict[str, Any]) -> tuple[bool, list[str]]:
+        alternatives = dossier.get("root_cause_hypotheses", [])[1:]
+        if any(
+            isinstance(item, dict) and item.get("disposition") in {"plausible", "unresolved"}
+            for item in alternatives
+        ):
+            return False, ["unresolved_alternative_hypothesis_not_materialized"]
+        return True, []
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(mod, "verify_research_evidence", fake_verify)
+    monkeypatch.setattr(mod, "assess_research_readiness", fake_readiness)
+    monkeypatch.setattr(
+        mod,
+        "parse_research_dossier_list",
+        lambda payload: (json.loads(payload), []),
+    )
+
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model="gpt-5.6-sol",
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+    )
+
+    assert len(calls) == 2
+    assert calls[1].codex_resume_session_id == session_id
+    assert calls[1].resume_workspace_dir == calls[0].resume_workspace_dir
+    continuation_prompt = calls[1].agent_user_prompt or ""
+    marker = "## Verifier feedback payload (JSON)"
+    repair_payload, _ = json.JSONDecoder().raw_decode(
+        continuation_prompt.split(marker, maxsplit=1)[1].lstrip()
+    )
+    assert repair_payload["validation_errors"] == [
+        "unresolved_alternative_hypothesis_not_materialized"
+    ]
+    assert repair_payload["remediation_hints"][0]["target_fields"] == [
+        "root_cause_hypotheses[]",
+        "material_unknowns[]",
+        "research_status",
+        "evidence_boundaries",
+    ]
+    assert "retaining its experiments unchanged as context" in repair_payload[
+        "remediation_hints"
+    ][0]["required_change"]
+    dossier = document["items"][0]
+    assert dossier["research_status"] == "evidence_sufficient"
+    assert dossier["actionability_assessment"]["disposition"] == "already_addressed"
+    assert len(dossier["root_cause_hypotheses"]) == 1
+    assert dossier["blocking_reasons"] == []
+    assert document["input_meta"]["stage_status"] == "completed"
+    requests_path = (
+        tmp_path
+        / "compiled"
+        / "x.backlog_artifacts"
+        / "repro_research"
+        / "repro_research_requests.json"
+    )
+    request_ledger = json.loads(requests_path.read_text(encoding="utf-8"))
+    assert request_ledger["requests"][0]["evidence_verification_corrections"][
+        "correction_frontier"
+    ] == "research_readiness"
+
+
+def test_nonadvancing_research_status_does_not_require_optioning_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "assess_research_readiness",
+        lambda _dossier: (_ for _ in ()).throw(AssertionError("must not assess")),
+    )
+
+    assert mod._advancing_research_readiness_errors(
+        {"research_status": "insufficient_evidence"}
+    ) == []
+    assert mod._advancing_research_readiness_errors({"research_status": "blocked"}) == []
+
+
 def test_output_repair_parks_subscription_wait_and_retains_author_frontier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
