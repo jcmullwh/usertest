@@ -4,14 +4,14 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-19T05:30:53Z",
+    "as_of": "2026-07-19T06:28:30Z",
     "current_run_id": "report-schema-case-4f134107-20260718",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "First current actionable case delivered; outcome is mitigated",
-        "detail": "The report-schema case traversed evidence-sufficient research, optioning, adversarial selection, code-grounded planning, system implementation, system review, green exact-head CI, merge to dev, and terminal outcome verification. The evidence supports mitigation, not root-cause resolution.",
+        "value": "First actionable case delivered; controller checkpoint green",
+        "detail": "The report-schema case reached an honestly mitigated terminal outcome. Its reusable controller corrections are committed to draft PR #217 at 99ce948f; 2,877 affected tests pass with six expected skips, all seven lint tasks pass, and GitHub reports 80/80 successful checks.",
         "tone": "good"
       },
       {
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Checkpoint PR #217, then process the next distinct case with Sol/high",
-        "detail": "Preserve the delivery fixes in the controller PR, verify its complete affected surface without shortening tests, and regenerate from current evidence without rerunning completed case stages. Use signed-in gpt-5.6-sol with high reasoning for every substantive call.",
+        "value": "Regenerate current evidence, then process the next distinct case with Sol/high",
+        "detail": "Use exact clean controller revision 99ce948f, keep export disabled, reuse completed cases and stages, and pass gpt-5.6-sol plus high reasoning explicitly for every substantive backlog, implementation, and review call.",
         "tone": "warn"
       }
     ],
@@ -2958,9 +2958,9 @@
             "report_schema_ci_transient_rerun"
           ]
         },
-        "next_action": "Commit and push the controller/delivery corrections to PR #217 after the full affected verification remains green, then regenerate the non-IDEA backlog and start the next distinct current case with explicit gpt-5.6-sol/high. Reuse completed stages and retain this case as mitigated unless new same-class evidence updates it.",
+        "next_action": "Regenerate the non-IDEA backlog from exact clean controller revision 99ce948f with export disabled, then start the next distinct current case with explicit gpt-5.6-sol/high. Reuse completed stages and retain this case as mitigated unless new same-class evidence updates it.",
         "tone": "warn",
-        "data_quality": "Outcome ledger SHA-256 8789AC4B... records PR #218, implementation head a91d7d9d, merge 8fff1c16, terminal state mitigated, and no terminal verification errors. Original-scenario role SHA-256 7BA5A645... passes 11/11 predicates; mitigation role SHA-256 17EBF316... passes 4/4; implementation verification SHA-256 F8A15294... passes; final review summary SHA-256 17FA025F... approves exact head. The completed ticket restores immutable body/plan hashes cdfad2f2... and d45faf18.... This evidence proves the bounded mitigation only; live recurrence and root-mechanism resolution remain unproven.",
+        "data_quality": "Outcome ledger SHA-256 8789AC4B... records PR #218, implementation head a91d7d9d, merge 8fff1c16, terminal state mitigated, and no terminal verification errors. Original-scenario role SHA-256 7BA5A645... passes 11/11 predicates; mitigation role SHA-256 17EBF316... passes 4/4; implementation verification SHA-256 F8A15294... passes; final review summary SHA-256 17FA025F... approves exact head. Controller checkpoint 99ce948f adds 2,877 passed tests, six expected skips, seven green lint tasks, and 80/80 green GitHub checks. This evidence proves the bounded mitigation and controller mechanics only; live recurrence, root-mechanism resolution, and 2/2 shadow qualification remain unproven.",
         "source_ids": [
           "report_schema_stage3_canonical_v6_20260718",
           "report_schema_stage4_sol_high_20260718",
@@ -2971,6 +2971,7 @@
           "report_schema_original_scenario_outcome_20260719",
           "report_schema_mitigation_effect_outcome_20260719",
           "report_schema_complete_ticket_20260719",
+          "controller_pr217_checkpoint_99ce948f",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -8889,6 +8890,21 @@
       "canonical_ticket_body_sha256": "cdfad2f267fbf875ca4bd99be2672e76eebd2d6659c7dbdd8eb76d9d2a63fad8",
       "canonical_local_plan_sha256": "d45faf189f067f73960b90d436bfcce380307765603bbd637a680daf0f1f16c6",
       "limitations": "The raw file includes a large retained historical evidence section plus mutable lifecycle/outcome state. Canonical hashes bind the immutable ticket and plan; the raw-file hash binds this exact completed snapshot."
+    },
+    {
+      "id": "controller_pr217_checkpoint_99ce948f",
+      "path": "https://github.com/jcmullwh/usertest/pull/217",
+      "kind": "controller_pull_request_checkpoint",
+      "head_revision": "99ce948fca658f1cd3f8b7e68e3919ef10239745",
+      "local_affected_tests_collected": 2883,
+      "local_affected_tests_passed": 2877,
+      "local_expected_skips": 6,
+      "local_affected_lint_projects_passed": 7,
+      "github_checks_passed": 80,
+      "github_checks_failed": 0,
+      "github_checks_pending": 0,
+      "last_check_completed_at": "2026-07-19T06:28:30Z",
+      "limitations": "This proves the controller checkpoint is locally and remotely green against the current dev base. PR #217 remains draft and full export-disabled shadow qualification remains 0/2; CI success is not evidence of autonomous backlog quality."
     },
     {
       "id": "executive_summary",
