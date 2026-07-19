@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from normalized_events import iter_events_jsonl
+from reporter import validate_report
+from run_artifacts.history import load_run_record
 
 from runner_core import RunnerConfig, RunRequest, run_once
 
@@ -208,6 +210,29 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 ),
                 "        return 0",
                 "",
+                "    if mode in {'task_run_valid', 'task_run_missing_kind'}:",
+                "        report = {",
+                "            'schema_version': 1,",
+                "            'kind': 'task_run_v1',",
+                "            'status': 'success',",
+                "            'goal': 'Exercise runner finalization',",
+                "            'summary': 'Dummy agent completed successfully.',",
+                "            'steps': [{",
+                "                'name': 'dummy',",
+                "                'attempts': [{'action': 'return report'}],",
+                "                'outcome': 'report returned',",
+                "            }],",
+                "            'outputs': [],",
+                "            'next_actions': ['No action required.'],",
+                "        }",
+                "        if mode == 'task_run_missing_kind':",
+                "            report.pop('kind')",
+                "        if out_path is not None:",
+                "            Path(out_path).write_text(",
+                "                json.dumps(report) + '\\n', encoding='utf-8'",
+                "            )",
+                "        return 0",
+                "",
                 "    report = {'ok': 'yes'}",
                 "    if out_path is not None:",
                 (
@@ -318,6 +343,20 @@ def _setup_target_repo(tmp_path: Path) -> Path:
     _write(target / "README.md", "# hi\n")
     _write(target / "USERS.md", "# Users\n")
     return target
+
+
+def _use_task_run_schema(runner_root: Path) -> dict[str, object]:
+    repo_root = Path(__file__).resolve().parents[3]
+    schema = json.loads(
+        (repo_root / "configs" / "report_schemas" / "task_run_v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    (runner_root / "configs" / "report_schemas" / "s.schema.json").write_text(
+        json.dumps(schema, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return schema
 
 
 def test_run_once_retries_provider_capacity_then_succeeds(
@@ -690,6 +729,12 @@ def test_run_once_verification_gate_triggers_followup_until_checks_pass(
     assert result.exit_code == 0
     assert result.report_validation_errors == []
     assert (result.run_dir / "verification.json").exists()
+    assert not (result.run_dir / "verification_errors.json").exists()
+    assert not (result.run_dir / "report_validation_errors.json").exists()
+    assert not (result.run_dir / "error.json").exists()
+    history_record = load_run_record(result.run_dir, runs_dir=cfg.runs_dir)
+    assert history_record is not None
+    assert history_record["status"] == "ok"
 
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
     assert len(attempts["attempts"]) == 2
@@ -698,6 +743,136 @@ def test_run_once_verification_gate_triggers_followup_until_checks_pass(
     prompts_text = prompts_file.read_text(encoding="utf-8")
     assert prompts_text.count("===PROMPT===") >= 2
     assert "required verification checks failed" in prompts_text
+
+
+def test_run_once_failed_verification_uses_typed_error_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    schema = _use_task_run_schema(runner_root)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    (target / "verify_fail.py").write_text(
+        "import sys\nprint('verification failed', file=sys.stderr)\nraise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    state_file = tmp_path / "attempt_state_failed_verification.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "task_run_valid")
+
+    if os.name == "nt":
+        verify_cmd = f'& "{sys.executable}" verify_fail.py'
+    else:
+        verify_cmd = f'"{sys.executable}" verify_fail.py'
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=0,
+            verification_commands=(verify_cmd,),
+        ),
+    )
+
+    report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
+    verification = json.loads(
+        (result.run_dir / "verification.json").read_text(encoding="utf-8")
+    )
+    verification_errors = json.loads(
+        (result.run_dir / "verification_errors.json").read_text(encoding="utf-8")
+    )
+    error = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    history_record = load_run_record(result.run_dir, runs_dir=cfg.runs_dir)
+
+    assert validate_report(report, schema) == []
+    assert result.exit_code == 1
+    assert result.report_validation_errors == []
+    assert verification["terminal_reason"] == "failed"
+    assert verification["commands"][-1]["command"] == verify_cmd
+    assert verification_errors["errors"][0] == "verification_failed"
+    assert f"command={verify_cmd}" in verification_errors["errors"]
+    assert error["type"] == "VerificationFailed"
+    assert error["subtype"] == "failed"
+    assert error["code"] == "verification_failed"
+    assert error["exit_code"] == 1
+    assert error["failure_phase"] == "verification"
+    assert error["verification"]["terminal_reason"] == "failed"
+    assert error["verification"]["failure_reason"] == "verification_failed"
+    assert error["verification"]["command"] == verify_cmd
+    assert error["verification"]["exit_code"] == 1
+    assert error["verification"]["stderr_path"] == "cmd_01.stderr.txt"
+    assert not (result.run_dir / "report_validation_errors.json").exists()
+    assert history_record is not None
+    assert history_record["status"] == "error"
+
+    print(
+        json.dumps(
+            {
+                "lifecycle_status": history_record["status"],
+                "report_validation_artifact_exists": (
+                    result.run_dir / "report_validation_errors.json"
+                ).exists(),
+                "report_schema_errors": validate_report(report, schema),
+                "result_exit_code": result.exit_code,
+                "verification_error_code": error["code"],
+                "verification_error_type": error["type"],
+                "verification_terminal_reason": verification["terminal_reason"],
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def test_run_once_genuine_task_run_schema_failure_stays_report_validation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    _use_task_run_schema(runner_root)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(tmp_path / "attempt_state_missing_kind.txt"))
+    monkeypatch.setenv("DUMMY_MODE", "task_run_missing_kind")
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=0,
+        ),
+    )
+
+    assert result.report_validation_errors
+    assert (result.run_dir / "report_validation_errors.json").exists()
+    assert not (result.run_dir / "error.json").exists()
+    history_record = load_run_record(result.run_dir, runs_dir=cfg.runs_dir)
+    assert history_record is not None
+    assert history_record["status"] == "report_validation_error"
 
 
 def test_run_once_verification_rejection_sentinel_fails_fast_without_followup(
@@ -736,10 +911,8 @@ def test_run_once_verification_rejection_sentinel_fails_fast_without_followup(
     )
 
     assert result.exit_code == 1
-    assert result.report_validation_errors
-    assert any(
-        "verification_rejected_sentinel" in str(line) for line in result.report_validation_errors
-    )
+    assert result.report_validation_errors == []
+    assert not (result.run_dir / "report_validation_errors.json").exists()
 
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
     assert len(attempts["attempts"]) == 1

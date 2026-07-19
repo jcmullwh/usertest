@@ -7572,8 +7572,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     report_validation_errors = [
                         f"{request.agent} exited with code {agent_exit_code}"
                     ]
-            if not report_validation_errors and selected_verification_errors:
-                report_validation_errors = selected_verification_errors
+            if selected_verification_errors:
                 _write_json(
                     run_dir / "verification_errors.json",
                     {
@@ -7581,6 +7580,68 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "errors": selected_verification_errors,
                     },
                 )
+                if isinstance(selected_verification_summary, dict):
+                    verification_summary = _normalize_verification_summary(
+                        selected_verification_summary
+                    )
+                    terminal_reason = _verification_terminal_reason(verification_summary)
+                    if terminal_reason != "passed":
+                        forced_exit_code = 1
+                        if not (run_dir / "error.json").exists():
+                            commands = verification_summary.get("commands")
+                            failed_command = (
+                                commands[-1]
+                                if isinstance(commands, list)
+                                and commands
+                                and isinstance(commands[-1], dict)
+                                else {}
+                            )
+                            artifacts_dir = verification_summary.get("artifacts_dir")
+                            artifacts_dir_s = (
+                                artifacts_dir.strip()
+                                if isinstance(artifacts_dir, str) and artifacts_dir.strip()
+                                else None
+                            )
+                            verification_details = {
+                                "summary_path": (
+                                    str(Path(artifacts_dir_s) / "verification.json")
+                                    if artifacts_dir_s is not None
+                                    else None
+                                ),
+                                "artifacts_dir": artifacts_dir_s,
+                                "terminal_reason": terminal_reason,
+                                "failure_reason": verification_summary.get("failure_reason"),
+                                "command": failed_command.get("command"),
+                                "effective_command": failed_command.get("effective_command"),
+                                "exit_code": failed_command.get("exit_code"),
+                                "stdout_path": failed_command.get("stdout_path"),
+                                "stderr_path": failed_command.get("stderr_path"),
+                                "command_prefix": list(command_prefix),
+                            }
+                            _write_json(
+                                run_dir / "error.json",
+                                {
+                                    "type": "VerificationFailed",
+                                    "subtype": terminal_reason,
+                                    "code": selected_verification_errors[0],
+                                    "message": (
+                                        "Verification did not pass; see verification artifacts "
+                                        "for command output and diagnostics."
+                                    ),
+                                    "failure_phase": "verification",
+                                    "exit_code": 1,
+                                    "attempt": (
+                                        selected_attempt_index + 1
+                                        if selected_attempt_index is not None
+                                        else None
+                                    ),
+                                    "details": {
+                                        "errors": selected_verification_errors,
+                                        "verification_summary": verification_details,
+                                    },
+                                    "verification": verification_details,
+                                },
+                            )
         finally:
             if sandbox is not None:
                 capture_container_artifacts(
