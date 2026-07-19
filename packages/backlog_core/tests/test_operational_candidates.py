@@ -15,6 +15,7 @@ from backlog_core.case_lineage import (
     write_case_registry,
 )
 from backlog_core.operational_candidates import (
+    _report_contract_signal,
     build_operational_failure_candidates,
     operational_candidate_receipt_errors,
 )
@@ -1153,6 +1154,63 @@ def test_bare_nonterminal_and_stderr_warning_do_not_create_candidates() -> None:
     )
 
     assert build_operational_failure_candidates([record], [atom]) == []
+
+
+def test_verification_failed_error_record_has_no_report_contract_signal() -> None:
+    run_id = "implementation/run/verification-failed"
+    record = _record(
+        run_id,
+        status="error",
+        error={
+            "type": "VerificationFailed",
+            "subtype": "failed",
+            "code": "verification_failed",
+            "failure_phase": "verification",
+            "exit_code": 1,
+        },
+        mission_id="implement_ticket",
+        report_status="success",
+        report_validation_errors=None,
+        terminal_artifact_reads={
+            "report.json": {
+                "path": "report.json",
+                "exists": True,
+                "decode_ok": True,
+                "parse_ok": True,
+            },
+            "error.json": {
+                "path": "error.json",
+                "exists": True,
+                "decode_ok": True,
+                "parse_ok": True,
+            },
+            "report_validation_errors.json": {
+                "path": "report_validation_errors.json",
+                "exists": False,
+            },
+        },
+    )
+    record["report"] = {
+        "schema_version": 1,
+        "kind": "task_run_v1",
+        "status": "success",
+    }
+    atom = _atom(run_id, f"{run_id}:run_failure_event:1")
+
+    report_contract_signal = _report_contract_signal(record)
+    candidates = build_operational_failure_candidates([record], [atom])
+
+    assert report_contract_signal is None
+    assert candidates == []
+    print(
+        json.dumps(
+            {
+                "backlog_report_contract_signal": report_contract_signal,
+                "operational_failure_candidate": len(candidates),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def test_typed_policy_block_can_create_candidate_but_report_failure_alone_cannot() -> None:

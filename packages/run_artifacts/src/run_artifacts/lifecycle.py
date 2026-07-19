@@ -106,7 +106,9 @@ def classify_run_lifecycle(
     - terminal JSON artifacts are `report.json`, `error.json`, and
       `report_validation_errors.json`;
     - unreadable terminal artifacts win so diagnostics stay loud;
-    - terminal error and validation artifacts win over a successful report;
+    - terminal error and validation artifacts win over a successful report; typed
+      verification failures use the generic `error.json` terminal-error path and remain
+      distinct from report-contract validation failures;
     - `report.json` is terminal success when no higher-precedence terminal artifact exists;
     - if no terminal artifact exists, `run_meta.json["run_finished_utc"]` is the best
       available completion signal used to distinguish completed-but-missing-report from a
