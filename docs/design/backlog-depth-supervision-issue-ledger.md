@@ -1281,6 +1281,35 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: every advancing `evidence_sufficient` candidate now receives the same `assess_research_readiness` contract before Stage 3 completion and after every evidence-capable correction. A readiness defect returns to the retained author/session and workspace through the existing cumulative-evidence loop. Feedback allows two general outcomes: preserve a genuinely competing theory as a hypothesis-bound material unknown and downgrade honestly, or remove a non-competing theory while retaining its experiments unchanged and adding an evidence boundary. `insufficient_evidence` and `blocked` remain valid terminal Stage-3 outcomes and are not forced through an optioning gate.
 - Closure proof: attempt 8 records the model-free readiness finding and attempt 9 resumes session `019f7b8b-9fc3-7f52-8dd7-5ed6892fa980` with `gpt-5.6-sol`, high mission reasoning, host ChatGPT subscription auth, and API fallback disabled. The author removed only the non-competing hypothesis, preserved all four accepted experiments, and retained two nonmaterial unknowns and five boundaries. Persisted evidence and readiness both return true with zero errors. Production Stage 4 now records `not_required/already_addressed`; Stages 5-6, ticket assembly, and all model manifests are zero. The complete 186-test Stage-3 runner file, 205-test core stage-contract file, and 233 application research/planning/shadow tests pass; Ruff and `git diff --check` pass.
 
+### BDS-163 - Successful research turns inherit failure subtypes from researched text
+
+- Status: `open_contained_export_disabled`
+- Priority: evidence-feedback control and operational atom quality; nonblocking for the current case
+- Objective impact: a successful research turn that discusses a historical failure can be recorded as a fresh failure of the same class. If ordinary atom mining consumes that metadata, research about `disk_full` can manufacture another apparent `disk_full` occurrence and recreate the historical self-amplifying feedback loop.
+- Exact evidence: the first provider-child research run at `runs/usertest/usertest/20260719T205011Z/codex/1556620173` completed its Codex turn with exit code 0, yet `agent_attempts.json` records `failure_subtype: disk_full`. The classifier scanned the successful last-message text, which necessarily discussed ENOSPC and `disk_full`; the same behavior was observed on the storage-parent run. No execution failure occurred.
+- Containment: ticket export and regeneration remain disabled for this qualification cycle, and these research-run records are not being treated as independent source occurrences. The current storage cases continue from their authenticated parent/split lineage.
+- Required correction: distinguish execution-failure classification from content classification. A successful completed turn must not receive an operational failure subtype merely because its response mentions a failure token. Add positive tests for successful research about every registered failure class and retain negative tests for real nonzero/unfinished turns.
+- Closure proof: a successful research turn containing ENOSPC text records no execution failure subtype, produces no operational-failure atom, and still preserves the discussed historical evidence under its parent case.
+
+### BDS-164 - Ticket readiness revalidated runner-owned research lineage as model schema
+
+- Status: `closed_full_affected_suites_green_live_terminal_verified`
+- Priority: Stage-3-to-ticket correctness and nonterminal frontier preservation; case-blocking
+- Objective impact: a valid blocked or insufficient-evidence dossier acquired canonical lineage after Stage 3, then ticket assembly passed those runner-owned fields back into the strict model-output parser. The resulting false `research_proof_invalid` reason obscured the real investigation frontier and made a correct nonterminal result look corrupt.
+- Exact evidence: the first checkout-child terminal handoff contained `research_dossier_unknown_fields` for `canonical_problem_id` and `case_member_problem_ids` plus `research_proof_invalid`, even though the persisted evidence verifier returned `(True, [])`. `_persist_downstream_case_lineage` is the trusted owner of exactly those fields.
+- Correction: commit `73f7264` adds a ticket-readiness contract projection that strips only those two runner-owned lineage fields before research, selection, and plan readiness checks. Raw research remains available to the independent cross-stage lineage checks, so real case mismatches are still rejected.
+- Closure proof: the new regression proves a lineaged `insufficient_evidence` dossier remains `research_required` with its genuine readiness reasons and without either false schema error. The full `backlog_core` test tree and both adjacent backlog-report/export integration files pass under full-day ceilings. The live checkout-child terminal rerun contains only its four research blockers plus missing selection/plan, made zero Stage-4-to-6 model calls, and preserved the exact two investigation steps.
+
+### BDS-165 - Split-child prioritization omits authenticated occurrence breadth
+
+- Status: `open_nonblocking_selected_by_research_route`
+- Priority: problem prioritization fidelity and useful-throughput ordering
+- Objective impact: a real split child can be selected despite an artificially low deterministic score today, but a later capacity-constrained cycle could defer repeated evidence as a single observation. That works against the objective of mining and ranking actual available problems rather than generated context prose.
+- Exact evidence: provider child `case:e9f59ec3c5702e287e99` carries two authenticated occurrence IDs from distinct derived run IDs, `c3233a...` and `f1e0e4...`. Its one-call Stage-2 result nevertheless reports `distinct_runs: 1`, `evidence_atoms_cited: 1`, `effective_observations: 1`, and zero verified occurrences because scoring saw only the generated facet-context atom. The runner route still selected it for first research, so no current evidence was lost.
+- Containment: Stage 3 independently hydrated and verified both exact occurrence atoms, and the resulting dossier addresses both. The case was not promoted or rejected based on the understated score.
+- Required correction: include authenticated split occurrence references and receipts in deterministic breadth/recurrence signals while preserving their derived/source classification and avoiding double counting the facet-context atom. Do not special-case storage or Claude.
+- Closure proof: a split child with two authenticated distinct-run occurrences reports two effective occurrences in Stage 2, while duplicate references and unauthenticated derived prose do not increase breadth.
+
 ### AN-42 - A combined lint/test shell invocation initially masked the lint exit code
 
 - Status: `closed_separate_commands_green`
@@ -1304,6 +1333,12 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-CODEX-MESSAGES-V1-OUTPUT-01`: the Codex model-messages researcher began with six output-contract findings. Its first correction reached zero mechanical findings but lost substantive alternative-hypothesis support and was retained without promotion; the next correction had one falsification mismatch; the third reached zero. This was one `6 -> 0 (substantive regression) -> 1 -> 0` same-author cluster, not four discarded investigations.
 - `AUTHOR-STAGE3-CODEX-MESSAGES-V1-EVIDENCE-01`: independent evidence verification exposed 13 findings across origin binding, replay side effects, one nonportable regression command, symbol resolution, falsification binding, and alternative support. Two research-capable continuations in the retained session improved `13 -> 1 -> 0`. The final evidence receipt remained verified after persistence and no author restart occurred.
 - `AUTHOR-STAGE3-CODEX-MESSAGES-V1-READINESS-01`: downstream readiness exposed one semantic inconsistency after evidence verification: an adjacent warning-only theory was labeled `plausible` without a material unknown. One 154.0-second Sol/high continuation in the same session reduced `1 -> 0`, retained all observations, added an explicit non-attribution boundary, and preserved `already_addressed`. The complete correction and independent replay took 385.4 seconds; no fresh research or supervisor-authored dossier content was used.
+- `AUTHOR-STAGE3-STORAGE-PARENT-V1-OUTPUT-01`: the storage-umbrella researcher began with seven output-contract findings and corrected `7 -> 1 -> 1 -> 0` in its retained Sol/high session. The final report did not force one root cause across incompatible I:-checkout and C:-provider-write evidence; it requested an authenticated split instead.
+- `AUTHOR-STAGE3-STORAGE-PARENT-V1-EVIDENCE-01`: independent verification exposed 21 evidence findings after the parent contract was valid. Same-author continuations reached zero, briefly re-exposed four and then three findings while preserving the best frontier, and finally returned to zero. The accepted parent remained `blocked/partial`, with a verified split relation and no option or plan.
+- `AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-OUTPUT-01`: the checkout child began with five contract findings. Its first `5 -> 0` repair deleted substantive coverage and was quarantined; the next same-session repair restored that coverage and reached zero. No fresh research session was started.
+- `AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-EVIDENCE-01`: evidence verification began at 21 findings. The same author improved `21 -> 4 -> 0`, with the first zero-error candidate quarantined for substantive regression, then restored the safe frontier and reached accepted zero evidence findings. The final dossier honestly remained `insufficient_evidence/partial`, not implementation-ready.
+- `AUTHOR-STAGE3-STORAGE-PROVIDER-V1-OUTPUT-01`: the provider child began with 11 contract findings. Its first `11 -> 0` repair removed established causal roles and was quarantined; the retained-session sequence then reached `11 -> 1 -> 0`. The accepted dossier preserved the repeated historical ENOSPC boundary without inventing a storage producer.
+- `AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01`: evidence verification began at 24 findings. Five same-session continuations followed `24 -> 2 (substantive regression) -> 13 -> 6 -> 2 -> 0`; fewer errors counted as progress, regressed candidates did not replace the safe frontier, and all ten total provider turns used session `019f7c25-5258-7ad0-9e2d-2321213791b5`. The final dossier is verifier-clean `blocked/partial`, and Stage 4 correctly did not run a model.
 
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
@@ -1430,6 +1465,34 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor verification-invocation error, not a product, model, pipeline, or dashboard-contract failure
 - Exact evidence: the combined command printed one failing dashboard assertion that still expected two terminal cases, then later Ruff and diff checks returned zero and supplied the shell's final exit code. This repeated the command-shaping mistake already identified in AN-42; the visible pytest failure was not accepted as green evidence.
 - Containment and result: the stale assertion now expects the actual three-case terminal frontier. Its first edit carried an accidental extra indentation level and failed during collection; that same test-construction cluster was corrected before any green claim. Dashboard rendering, the dashboard test file, Ruff, and `git diff --check` are rerun as separately evaluated commands below; none relies on a later command to mask its exit status.
+
+### AN-61 - Storage-parent diagnostics used the wrong verifier import and an unsafe history projection
+
+- Status: `closed_read_only_diagnostics_corrected_no_model_work`
+- Classification: one supervisor diagnostic cluster, not a pipeline, author, evidence, or product failure
+- Exact evidence: the first parent Stage-3 wrapper imported `verify_research_dossier_evidence` from `backlog_miner.research_runner`, where it does not exist, and stopped before creating the output directory or invoking a model. A later read-only attempt-summary projection assumed every optional history object was non-null and raised `NoneType.get` after the real stage had already completed.
+- Containment and result: the actual production run used the verifier from its owning package and persisted a verifier-clean parent dossier. Attempt history was then read from the retained request ledger without changing any dossier, session, or stage output. No paid turn or prior stage was repeated for either diagnostic error.
+
+### AN-62 - The first split-child Stage-2 launcher parsed a JSONL atom corpus as one JSON document
+
+- Status: `closed_canonical_atom_loader_used_no_model_work`
+- Classification: one supervisor launcher-input error, not a Stage-2 author or product failure
+- Exact evidence: the post-research split correctly persisted `usertest.backlog.atoms.json` using the repository's JSONL atom contract. The first checkout-child launcher called `json.loads` on the whole file and stopped with `Extra data` before model activation.
+- Containment and result: the next invocation used production `load_atoms_jsonl`, retained all 2,856 atoms, and ran the one intended child through Stage 2. No failed output was accepted, no atom was changed, and no model call was wasted.
+
+### AN-63 - The first narrow child wrapper omitted production Stage-2 lineage persistence
+
+- Status: `closed_model_free_lineage_recovery_and_terminal_rerun`
+- Classification: one supervisor integration cluster and three bounded model-free stage re-executions, not a Stage-2 or Stage-3 author failure
+- Exact evidence: the checkout child's one-call Stage-2 decision was valid but, by contract, did not author runner-owned case lineage. The wrapper passed that raw decision directly downstream. The first terminal handoff rejected it with `priority_case_id_mismatch` after Stage 3 had already completed successfully.
+- Containment and result: production `_persist_downstream_case_lineage` attached the authenticated split-child case ID; the already verified Stage-3 dossier was imported through the native authenticated-prefix contract and closed model-free; then only the terminal chain reran. A final terminal rerun after BDS-164 removed false ticket-readiness schema errors. No research model call, experiment, split, Stage 1, or Stage 2 author turn was repeated.
+
+### AN-64 - Live status extraction used two PowerShell shapes unsupported by the host shell
+
+- Status: `closed_read_only_reporting_commands_corrected`
+- Classification: one supervisor status/reporting cluster, not a pipeline, model, test, or product failure
+- Exact evidence: one process-status command piped directly from a `foreach` block and failed at parse time with `An empty pipe element is not allowed`. A later dossier-summary command used PowerShell-7 `ConvertFrom-Json -Depth` while the host ran Windows PowerShell 5.1; it returned no usable summary and emitted a parameter error.
+- Containment and result: the status command accumulated rows before formatting, and the JSON read used the supported parser form. Both were read-only. The live Stage-3 process continued uninterrupted under its full-day ceiling, and no stage, author turn, verifier, or artifact was rerun because of these reporting mistakes.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
@@ -2012,10 +2075,12 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-001 — Stage 3 treated future design choices as material research unknowns
 
-- Status: `verification_pending`
+- Status: `verification_failed_partial_correction_required`
 - Evidence: researcher repeatedly demanded an approved future ceiling/interface and completed post-change proof before optioning.
 - Local correction: mission and guidance now distinguish empirical unknowns from future design parameters and permit fail-first/parameterized outcomes. Five focused prompt-guidance tests pass.
-- Closure proof: the maintenance dossier advances on established causal evidence while leaving the exact ceiling/interface to Stage 4, with no false material unknown.
+- Live qualification result: the provider-storage dossier correctly marks "fail earlier, reclaim owned storage, relocate state, or recover the same turn" as `material: false`, so it does not block readiness. Ticket assembly nevertheless emits that nonmaterial future-design item as the fifth mandatory `Resolve material unknown` investigation step. The hard gate is corrected, but the preserved frontier still sends future design work back to research.
+- Required correction: blocked/research-required ticket investigation steps must contain only material empirical unknowns. Nonmaterial future-design parameters may remain as downstream notes but must not be phrased or routed as prerequisites for more Stage-3 research.
+- Closure proof: the maintenance and provider-storage dossiers advance or park on empirical evidence only, while future ceiling/interface/recovery choices flow to Stage 4 notes without appearing in the Stage-3 investigation queue.
 
 ### BDS-002 — Independent-feedback lineage could bind to a stale source attempt
 

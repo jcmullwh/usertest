@@ -1,30 +1,30 @@
 {
   "schema_version": 3,
-  "as_of": "2026-07-19T19:10:47Z",
+  "as_of": "2026-07-19T21:29:44Z",
   "current_run_id": "qualification-cycle-383cf41f-20260719",
   "summary_cards": [
     {
       "label": "Current pipeline state",
-      "value": "Three cases terminal; next case pending",
-      "detail": "The corrected frontier has 25 canonical cases and 24 selected research units. The report-contract, Claude duplicate-tool-ID, and Codex model-messages cases terminate as evidence_sufficient/already_addressed with no downstream ticket.",
-      "tone": "good"
+      "value": "3 terminal; 2 research frontiers parked",
+      "detail": "The effective frontier now has 26 canonical cases and 25 selected research units after one authenticated storage split. The I:-checkout child is insufficient_evidence and the C:-provider child is blocked; neither advanced to optioning.",
+      "tone": "warn"
     },
     {
       "label": "Current bounded throughput",
-      "value": "27 -> 25 cases; 3 terminal negatives",
-      "detail": "Two exact duplicate-source records were absorbed. The third bounded case authenticated all 14 historical occurrences, retained its current provenance-gating proof, and stopped without manufacturing a new product change.",
+      "value": "27 -> 26 cases; 3 terminal, 2 nonterminal",
+      "detail": "Relation review first reduced 27 records to 25 cases. Research then split one mixed storage umbrella into two causal units, producing 26 cases. Three earlier cases are terminal negatives; both storage children retain precise evidence-acquisition frontiers.",
       "tone": "good"
     },
     {
       "label": "Full qualification",
       "value": "0 / 2 cycles",
-      "detail": "This cycle is active: 3 of 24 selected research units have reached a correct terminal disposition. It contributes no completed qualification cycle and no export authorization.",
+      "detail": "This cycle is active: 3 of 25 effective selected research units are terminal. Two more have correct but explicitly nonterminal blocked/insufficient-evidence dispositions. No qualification cycle or export authorization is earned.",
       "tone": "bad"
     },
     {
       "label": "Next delivery gate",
-      "value": "Next distinct selected case",
-      "detail": "Select one unprocessed source-backed case and take it through Stage 3 and its correct terminal path before increasing volume. Export, implementation, Docker mutation, and removal remain disabled.",
+      "value": "Next source-backed case",
+      "detail": "Preserve the two storage frontiers until their named evidence becomes available, then process the next unworked selected case at one-case volume. Export, implementation, and removal remain disabled.",
       "tone": "warn"
     }
   ],
@@ -34,29 +34,29 @@
     "lifecycle_id": "pipeline-cycle:383cf41f:20260719",
     "lifecycle_kind": "pipeline_cycle",
     "rework": {
-      "author_invocations": 43,
-      "continuation_launches": 11,
-      "stage_reruns": 6,
+      "author_invocations": 71,
+      "continuation_launches": 34,
+      "stage_reruns": 9,
       "full_restarts": 0,
-      "summary": "Twenty-nine recorded Stage-1/2 invocations include three pre-turn oversized-relation rejections, four successful bounded relation batches, and two narrow Stage-2 recomputations. Report Stage 3 used four calls in one session; Claude used three in one session. The Codex model-messages case used seven Sol/high calls in one retained session: one investigation, three output corrections, two evidence continuations, and one readiness correction. One bounded model-free Stage-4 rerun followed the readiness handoff fix. No miner, author, case, or full pipeline restart occurred."
+      "summary": "The prior 43 calls are retained. Storage processing added 28 Sol/high calls: nine for the mixed parent, one checkout Stage-2 call, seven checkout research calls, one provider Stage-2 call, and ten provider research calls. The 23 added continuations all stayed in their original author sessions. Three model-free stage re-executions repaired a supervisor lineage omission and the ticket-readiness handoff; no miner, author, case, or full pipeline restart occurred."
     },
-    "label": "Fresh sealed cycle through three terminal research cases",
-    "scope": "Export-disabled non-IDEA qualification cycle over 2,854 atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 recomputation, and terminal report-contract, Claude duplicate-tool-ID, and Codex model-messages cases; signed-in gpt-5.6-sol/high, no API fallback, no Docker mutation, no removal, no ticket export, and no implementation",
+    "label": "Fresh sealed cycle through three terminal cases and a two-child storage split",
+    "scope": "Export-disabled non-IDEA qualification cycle over 2,856 post-split atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 decisions, three terminal negative cases, one authenticated mixed-cause split, and two verifier-clean nonterminal storage children; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
     "timing": {
       "start_at": "2026-07-19T13:15:00Z",
       "end_at": null,
-      "elapsed_seconds": 21347,
+      "elapsed_seconds": 29684,
       "coverage": "active",
-      "display": "5 h 55 m active",
-      "note": "Active wall time through the third terminal case. Its initial Stage 3 took 2,401.9 seconds across six Sol/high author calls in one session. The late readiness defect was returned to that same author; the complete correction plus independent replay took 385.4 seconds, of which 154.0 seconds was the author turn. The corrected model-free Stage 4-6 path took 7.3 seconds. Earlier invalid artifacts remain retained and are not counted as valid results."
+      "display": "8 h 14 m active",
+      "note": "Active wall time through both storage children. Parent research took 2,586.6 seconds and authenticated a split. Checkout Stage 2/3 took 9.0/1,448.7 seconds; provider Stage 2/3 took 13.9/2,122.4 seconds. Both terminal chains were model-free and subsecond after valid handoff. Activation delay is included in stage wall time but is not represented as model reasoning. Invalid supervisor-wrapper outputs remain retained and are not counted as results."
     },
-    "furthest_stage": "Corrected Stage 2 for the complete canonical frontier; three selected cases have completed their correct terminal Stage-3-to-ticket path",
-    "current_state": "Stage 1 produces 25 canonical cases and Stage 2 selects 24. Three cases are now terminal evidence_sufficient/partial/already_addressed. For the Codex model-messages case, all 14 assigned occurrences predate the retained provenance-gating fix; current controlled sanitizer behavior distinguishes repo-owned configuration from the same warning without that provenance. A late alternative-hypothesis readiness inconsistency returned to the same author, which preserved the evidence, removed the non-competing theory, and retained live-vendor behavior as an explicit nonmaterial boundary. Production Stage 4 records not_required; Stages 5-6 and ticket assembly emit zero items.",
-    "outcome": "Valid corrected Stage-1/2 checkpoint, three successful negative research dispositions, zero bad-ready escapes, and no unwarranted option, plan, ticket, or implementation output",
+    "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; three cases are terminal and both authenticated storage children reached their correct nonterminal Stage-3-to-ticket frontier",
+    "current_state": "The effective post-split corpus contains 26 canonical cases. Twenty-three retained selections plus two narrow child selections produce 25 effective selected research units. Three earlier cases remain terminal evidence_sufficient/partial/already_addressed. Storage research proved the original umbrella mixed an I:-checkout capacity failure with two C:-Claude append/write failures and applied a signed split. The checkout child is verifier-clean insufficient_evidence/partial with two material unknowns; the provider child is verifier-clean blocked/partial with four material unknowns. Stage 4 records insufficient_evidence for both, makes zero model calls, and emits no option, selection, or plan. Each child retains one nonready investigation ticket rather than being discarded or falsely resolved.",
+    "outcome": "Three terminal negative dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
     "errors": {
-      "count": 25,
+      "count": 39,
       "count_kind": "deduplicated_clusters",
-      "summary": "Eight reusable controller/integration defects required correction. Seven nondeterministic research-author clusters self-corrected in their original sessions. Ten supervisor diagnostic/wrapper/reporting/test-construction clusters were corrected without restarting research. The unresolved Windows relation disagreement remains a nonblocking recall measurement and is not counted as an execution error.",
+      "summary": "Twelve controller/integration clusters are retained: nine corrected or previously closed and three newly open/contained observations. Thirteen nondeterministic author clusters self-corrected in their original sessions. Fourteen supervisor diagnostic/wrapper/reporting/test-construction clusters were corrected without restarting research. The unresolved Windows relation disagreement remains a nonblocking recall measurement and is not counted as an execution error.",
       "cluster_ids": [
         "BDS-154",
         "BDS-155",
@@ -66,6 +66,10 @@
         "BDS-160",
         "BDS-161",
         "BDS-162",
+        "BDS-001",
+        "BDS-163",
+        "BDS-164",
+        "BDS-165",
         "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
         "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01",
         "AUTHOR-STAGE3-CLAUDE-V4-OUTPUT-01",
@@ -73,6 +77,12 @@
         "AUTHOR-STAGE3-CODEX-MESSAGES-V1-OUTPUT-01",
         "AUTHOR-STAGE3-CODEX-MESSAGES-V1-EVIDENCE-01",
         "AUTHOR-STAGE3-CODEX-MESSAGES-V1-READINESS-01",
+        "AUTHOR-STAGE3-STORAGE-PARENT-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-STORAGE-PARENT-V1-EVIDENCE-01",
+        "AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-EVIDENCE-01",
+        "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01",
         "AN-51",
         "AN-52",
         "AN-53",
@@ -82,13 +92,17 @@
         "AN-57",
         "AN-58",
         "AN-59",
-        "AN-60"
+        "AN-60",
+        "AN-61",
+        "AN-62",
+        "AN-63",
+        "AN-64"
       ]
     },
     "automatic_self_corrections": {
-      "count": 7,
+      "count": 13,
       "count_kind": "deduplicated_clusters",
-      "summary": "The report researcher corrected five output findings and 16 evidence findings in one retained session. The Claude researcher corrected one output finding and ten evidence findings in another. The Codex model-messages researcher corrected its output frontier, reduced evidence findings 13 -> 1 -> 0, and then corrected one readiness inconsistency. All results preserved substantive progress; no author restart or supervisor-authored dossier content was used.",
+      "summary": "The prior seven clusters remain. Storage added six: parent output/evidence, checkout output/evidence, and provider output/evidence. The parent used nine calls, checkout seven, and provider ten; every correction stayed in its original Sol/high session. Regressed zero-error candidates were quarantined, smaller error counts counted as progress, and safe frontiers were preserved. No author restart or supervisor-authored dossier content was used.",
       "cluster_ids": [
         "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
         "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01",
@@ -96,13 +110,19 @@
         "AUTHOR-STAGE3-CLAUDE-V4-EVIDENCE-01",
         "AUTHOR-STAGE3-CODEX-MESSAGES-V1-OUTPUT-01",
         "AUTHOR-STAGE3-CODEX-MESSAGES-V1-EVIDENCE-01",
-        "AUTHOR-STAGE3-CODEX-MESSAGES-V1-READINESS-01"
+        "AUTHOR-STAGE3-CODEX-MESSAGES-V1-READINESS-01",
+        "AUTHOR-STAGE3-STORAGE-PARENT-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-STORAGE-PARENT-V1-EVIDENCE-01",
+        "AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-EVIDENCE-01",
+        "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01"
       ]
     },
     "supervisor_interventions": {
-      "count": 18,
+      "count": 23,
       "count_kind": "deduplicated_clusters",
-      "summary": "Eight interventions corrected reusable transport, canonicalization, validation, split-evidence, and Stage-3 readiness-handoff mechanics. Ten diagnostic/wrapper/reporting/test-construction clusters were corrected without replacing authored research. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
+      "summary": "The prior eighteen intervention clusters remain. One new code intervention fixed runner-owned lineage revalidation in ticket readiness; four supervisor diagnostic/launcher/wrapper/status clusters were corrected without replacing authored research. The three newly logged nonblocking controller observations did not trigger speculative hardening or interrupt the cases. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
       "cluster_ids": [
         "BDS-154",
         "BDS-155",
@@ -112,6 +132,7 @@
         "BDS-160",
         "BDS-161",
         "BDS-162",
+        "BDS-164",
         "AN-51",
         "AN-52",
         "AN-53",
@@ -121,12 +142,16 @@
         "AN-57",
         "AN-58",
         "AN-59",
-        "AN-60"
+        "AN-60",
+        "AN-61",
+        "AN-62",
+        "AN-63",
+        "AN-64"
       ]
     },
-    "next_action": "Choose the next distinct unprocessed source-backed Stage-2 selection and run only that case through production Stage 3 and its correct downstream disposition. Reuse the corrected Stage-1/2 frontier; do not restart mining or relation review, increase volume, export tickets, or begin implementation yet.",
+    "next_action": "Preserve both storage children as nonterminal frontiers and do not rerun them without the named new evidence. Choose the next distinct unprocessed source-backed selection and run only that case through production Stage 3 and its correct downstream disposition. Reuse the current frontier; do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation yet.",
     "tone": "warn",
-    "data_quality": "Final Stage 1 v4 is U:\\usertest_backlog_qualification\\383cf41f_20260719T131500Z\\cycles\\cycle_001\\relation_requalification_66302d1_materialized_v4\\usertest.problem_records.json, SHA-256 2a8c39ce1d863a7b8888bbe619cf8c4697602d16f85bf172d714c6103bcf784c. Production-lineage Stage 2 is stage2_requalification_split_v4_lineage\\usertest.prioritized_problems.json, SHA-256 e0da7720ea08720530a11d50885a37651cc56c9d4ff5d58af9e290c366fefca6. Corrected Codex model-messages Stage 3 is stage3_codex_model_messages_v1_readiness_resume_b020b9f\\usertest.research.json, SHA-256 960eeab1dff652fe932c023bfb37074f211bf25a091fdb226427e7cf1582e5e3; its retained evidence verifier and readiness assessment both return true with zero errors. The same session 019f7b8b-9fc3-7f52-8dd7-5ed6892fa980 is present on attempts 1-9, and attempt 9 binds gpt-5.6-sol/high, host ChatGPT subscription auth, and API fallback disabled. Terminal summary SHA-256 is 8994b1adf8172336e12e7ab8011b7133bb6c873c7c6a5fce2fcbb17dbd8b9fba. Current verification is 186 Stage-3 runner tests, 205 core stage-contract tests, and 233 application research/planning/shadow tests, all passing; Ruff and diff checks pass. Full cycle completion remains unmeasured.",
+    "data_quality": "The authenticated post-research split problem corpus has SHA-256 e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Parent research is 3d43eaa54eb28a4d3e225a1c96971c95f9c40fe4ac9193881138fd332232d080. Checkout research/terminal hashes are 11b8761384fcb7e9899078ade7463a4bdee8e8bfb30b61b08bfc67d5f1a8cc75 and a449486d46f8d1bb23653bd2157a8042f203a922d4b826b2f30399d79b2ad438. Provider research/terminal hashes are c80352eb70cea78baa7f507da8cbb4b569e5d9900fd78d24767e08eb13053ac1 and 3227c07f088ce93a70e3bf42c28ba96a39342d44a6c203a140f204ea102513cb. Both child evidence verifiers return true with zero findings, both terminal paths record zero Stage-4-to-6 manifests, and all provider turns bind one session. Commit 73f7264 passed the full backlog_core tree and 115 adjacent report/export integration tests under full-day ceilings. At the receipt snapshot C: had 29.15 GiB free, I: 275.89 GiB, and U: 6,376.31 GiB; no image, container, workspace, artifact, or VHDX content was removed. Full cycle completion remains unmeasured.",
     "source_ids": [
       "backlog_depth_supervision_issue_ledger"
     ]
