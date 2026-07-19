@@ -512,25 +512,25 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat good">
+            <div class="stat warn">
               <span class="label">Current pipeline state</span>
-              <span class="value">Terminal no-change chain for 2 / 2 cases</span>
-              <span class="detail">Both verified dossiers reached production Stage 4 as not_required/already_addressed. Stage 5, Stage 6, and ticket assembly correctly emitted zero selections, plans, and tickets.</span>
+              <span class="value">Stage 2 verified; Stage 3 next</span>
+              <span class="detail">The corrected relation artifact has 25 canonical cases and zero relation-application errors. Sol/high Stage 2 returned all 25 decisions, routed 24 forward, and used no fallback.</span>
             </div>
             <div class="stat good">
               <span class="label">Current bounded throughput</span>
-              <span class="value">2 correct-negative; 0 bad-ready</span>
-              <span class="detail">Both cases were real historical signals but already corrected at the pinned revision. No option, plan, ticket, or implementation was emitted. Code/test evidence is verified; live recurrence remains unproven.</span>
+              <span class="value">27 -&gt; 25 cases; 1 terminal negative</span>
+              <span class="detail">Two exact duplicate-source records were absorbed. One source-backed split child was preserved, 51 derived atoms returned to parent lineage, and the researched report case ended already_addressed without optioning.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">This is a terminal component lifecycle, not a fresh full shadow cycle: controller corrections landed during it and a clean-revision export-disabled regeneration has not run yet.</span>
+              <span class="detail">This cycle is active and has not completed Stage 3-6 for the corrected selected frontier. It contributes no completed qualification cycle and no export authorization.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Fresh export-disabled shadow regeneration</span>
-              <span class="detail">Commit the combined controller and evidence records, then regenerate once from that clean revision. Substantive calls remain signed-in Sol/high; no export or implementation is authorized during qualification.</span>
+              <span class="value">One source-backed Stage 3 case</span>
+              <span class="detail">Run the Claude duplicate-tool-use child through research and its correct terminal disposition before increasing volume. Export, implementation, Docker mutation, and removal remain disabled at this checkpoint.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -680,9 +680,9 @@
                 <td><strong>47</strong> author calls; 37 continuations; Unknown stage reruns; 0 full restarts<span class="ops-detail">The planning checkpoint retained 42 unique model invocations and 36 same-author continuations. Delivery added two implementation-author calls, three review calls including one…</span></td>
                 <td>Regenerate the non-IDEA backlog from exact clean controller revision 99ce948f with export disabled, then start the next distinct current case with explicit gpt-5.6-sol/high.…</td>
               </tr>
-              <tr class="ops-current">
+              <tr class="">
                 <td><strong>Current backlog regeneration through terminal two-case no-change handoff</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>6 h 24 m 28 s active</strong><span class="ops-kind">active</span></td>
+                <td><strong>6 h 24 m 28 s complete</strong><span class="ops-kind">complete</span></td>
                 <td><span class="tag warn">Terminal Stage 6 and ticket assembly for both selected canonical cases; no downstream work required</span><span class="ops-detail">Stage 1 processed 2,854 non-IDEA atoms and emitted four provisional problem records. Exact relation review and materialization produced two canonical cases; Stage 2 selected…</span></td>
                 <td><strong>Two correct-negative terminal dispositions, zero bad-ready escapes, zero unnecessary options, plans, tickets, or implementation work</strong></td>
                 <td><strong>25</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Seven expected nondeterministic author-quality clusters self-corrected. Six reusable controller defects (BDS-148 through BDS-153) and twelve supervisor invocation/test clusters…</span></td>
@@ -691,10 +691,21 @@
                 <td><strong>38</strong> author calls; 16 continuations; 3 stage reruns; 0 full restarts<span class="ops-detail">Twenty Stage-1 miner/reviewer calls, one relation-review call, one Stage-2 call, six original report Stage-3 calls, five maintenance Stage-3 calls, and five report-readiness…</span></td>
                 <td>Commit the combined controller and evidence records, then run one fresh export-disabled shadow regeneration from that clean exact revision. Every substantive model call remains…</td>
               </tr>
+              <tr class="ops-current">
+                <td><strong>Fresh sealed cycle through corrected canonical Stage 2</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>3 h 52 m active</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Corrected Stage 2 for the complete canonical frontier; one previously selected report case has a terminal Stage-3 disposition</span><span class="ops-detail">Stage 1 began with 27 provisional records. Four bounded Sol/high relation batches completed with zero failed batches. Exact materialization now produces 25 cases: two duplicate…</span></td>
+                <td><strong>Valid corrected Stage-1/2 checkpoint, one successful negative research disposition, zero bad-ready escapes, and no option, plan, ticket, or implementation output yet</strong></td>
+                <td><strong>8</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Six reusable controller/integration defects required supervisor correction. Two nondeterministic report-research clusters self-corrected in the original author session. The…</span></td>
+                <td><strong>2</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The report researcher corrected five initial output findings through two same-session revisions while preserving substantive progress, then corrected 16 evidence-binding findings…</span></td>
+                <td><strong>6</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision corrected remote-tracking revision acquisition, relation prompt sizing, stale provisional identity, split-child case conservation, derived-evidence parent return, and…</span></td>
+                <td><strong>33</strong> author calls; 3 continuations; 3 stage reruns; 0 full restarts<span class="ops-detail">Twenty-nine recorded Stage-1/2 invocations include three pre-turn oversized-relation rejections, four successful bounded relation batches, and two narrow Stage-2 recomputations…</span></td>
+                <td>Commit the verified Stage-1/2 mechanics, then run only the source-backed Claude duplicate-tool-use child through production Stage 3 and its correct downstream disposition. Do not…</td>
+              </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-19T13:10:07Z. Showing 14 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-19T17:07:32Z. Showing 15 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

@@ -35,8 +35,10 @@ from backlog_repo import write_case_relation_receipt
 from usertest_backlog.workflows.problem_mining import (
     _apply_stage1_case_evidence_retractions,
     _atoms_for_problem_mining_prompt,
+    _canonical_candidate_represents_work_unit,
     _coverage_depth_review_prompt,
     _cross_job_leaf_routing_nodes,
+    _derived_split_return_to_parent_lineage,
     _failed_relation_review_batch_count,
     _order_problem_mining_atoms_for_local_context,
     _partition_problem_mining_chunks,
@@ -5656,6 +5658,65 @@ def test_failed_relation_batch_count_includes_partial_failures() -> None:
             ]
         )
         == 2
+    )
+
+
+def test_split_children_retain_their_active_parent_work_unit() -> None:
+    child = {
+        "problem_id": "problem:parent:split:1",
+        "case_member_problem_ids": ["problem:parent:split:1"],
+        "split_parent_problem_id": "problem:parent",
+        "split_parent_problem_ids": ["problem:parent", "problem:parent-alias"],
+    }
+
+    assert _canonical_candidate_represents_work_unit(
+        child,
+        work_unit_problem_ids={"problem:parent"},
+    )
+    assert not _canonical_candidate_represents_work_unit(
+        child,
+        work_unit_problem_ids={"problem:unrelated"},
+    )
+
+
+def test_derived_split_group_returns_to_existing_parent_lineage() -> None:
+    candidate = {
+        "problem_id": "problem:parent:split:2",
+        "case_id": "case:child-2",
+        "split_from_case_id": "case:parent",
+        "split_parent_problem_ids": ["problem:parent"],
+        "evidence_atom_ids": ["atom:research", "atom:implementation"],
+    }
+    atoms_by_id = {
+        "atom:research": {
+            "evidence_role": "research",
+            "disposition": "supports_case",
+            "parent_case_id": "case:research-parent",
+        },
+        "atom:implementation": {
+            "evidence_role": "implementation",
+            "disposition": "supports_case",
+            "parent_case_id": "case:implementation-parent",
+        },
+    }
+
+    returned = _derived_split_return_to_parent_lineage(
+        candidate,
+        atoms_by_id=atoms_by_id,
+    )
+
+    assert returned is not None
+    assert returned["return_kind"] == "derived_evidence_parent_lineage"
+    assert returned["evidence_atom_ids"] == ["atom:research", "atom:implementation"]
+    assert returned["parent_case_ids"] == [
+        "case:implementation-parent",
+        "case:research-parent",
+    ]
+    assert len(returned["content_sha256"]) == 64
+    atoms_by_id["atom:research"]["disposition"] = "novel_case"
+    assert (
+        _derived_split_return_to_parent_lineage(candidate, atoms_by_id=atoms_by_id)
+        is None
     )
 
 

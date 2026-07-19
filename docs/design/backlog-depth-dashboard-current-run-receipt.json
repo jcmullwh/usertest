@@ -1,132 +1,98 @@
 {
   "schema_version": 3,
-  "as_of": "2026-07-19T13:10:07Z",
-  "current_run_id": "qualification-cycle-2b0e7048-20260719",
+  "as_of": "2026-07-19T17:07:32Z",
+  "current_run_id": "qualification-cycle-383cf41f-20260719",
   "summary_cards": [
     {
       "label": "Current pipeline state",
-      "value": "Terminal no-change chain for 2 / 2 cases",
-      "detail": "Both verified dossiers reached production Stage 4 as not_required/already_addressed. Stage 5, Stage 6, and ticket assembly correctly emitted zero selections, plans, and tickets.",
-      "tone": "good"
+      "value": "Stage 2 verified; Stage 3 next",
+      "detail": "The corrected relation artifact has 25 canonical cases and zero relation-application errors. Sol/high Stage 2 returned all 25 decisions, routed 24 forward, and used no fallback.",
+      "tone": "warn"
     },
     {
       "label": "Current bounded throughput",
-      "value": "2 correct-negative; 0 bad-ready",
-      "detail": "Both cases were real historical signals but already corrected at the pinned revision. No option, plan, ticket, or implementation was emitted. Code/test evidence is verified; live recurrence remains unproven.",
+      "value": "27 -> 25 cases; 1 terminal negative",
+      "detail": "Two exact duplicate-source records were absorbed. One source-backed split child was preserved, 51 derived atoms returned to parent lineage, and the researched report case ended already_addressed without optioning.",
       "tone": "good"
     },
     {
       "label": "Full qualification",
       "value": "0 / 2 cycles",
-      "detail": "This is a terminal component lifecycle, not a fresh full shadow cycle: controller corrections landed during it and a clean-revision export-disabled regeneration has not run yet.",
+      "detail": "This cycle is active and has not completed Stage 3-6 for the corrected selected frontier. It contributes no completed qualification cycle and no export authorization.",
       "tone": "bad"
     },
     {
       "label": "Next delivery gate",
-      "value": "Fresh export-disabled shadow regeneration",
-      "detail": "Commit the combined controller and evidence records, then regenerate once from that clean revision. Substantive calls remain signed-in Sol/high; no export or implementation is authorized during qualification.",
+      "value": "One source-backed Stage 3 case",
+      "detail": "Run the Claude duplicate-tool-use child through research and its correct terminal disposition before increasing volume. Export, implementation, Docker mutation, and removal remain disabled at this checkpoint.",
       "tone": "warn"
     }
   ],
   "run": {
-    "run_id": "qualification-cycle-2b0e7048-20260719",
+    "run_id": "qualification-cycle-383cf41f-20260719",
     "entry_kind": "lifecycle_run",
-    "lifecycle_id": "pipeline-cycle:2b0e7048:20260719",
+    "lifecycle_id": "pipeline-cycle:383cf41f:20260719",
     "lifecycle_kind": "pipeline_cycle",
     "rework": {
-      "author_invocations": 38,
-      "continuation_launches": 16,
+      "author_invocations": 33,
+      "continuation_launches": 3,
       "stage_reruns": 3,
       "full_restarts": 0,
-      "summary": "Twenty Stage-1 miner/reviewer calls, one relation-review call, one Stage-2 call, six original report Stage-3 calls, five maintenance Stage-3 calls, and five report-readiness corrections used Sol/high. Sixteen calls continued existing author sessions. The maintenance Stage 3 and two Stage-4 integrations were rerun; no author, case, or pipeline restart occurred."
+      "summary": "Twenty-nine recorded Stage-1/2 invocations include three pre-turn oversized-relation rejections, four successful bounded relation batches, and two narrow Stage-2 recomputations after the initial cycle result. The report Stage 3 used one author session with two output corrections and one evidence continuation. No miner, author, case, or full pipeline restart occurred."
     },
-    "label": "Current backlog regeneration through terminal two-case no-change handoff",
-    "scope": "Export-disabled non-IDEA regeneration of 2,854 atoms through canonical Stage 1/2, two Stage-3 research lifecycles, production Stage-4 no-change persistence, Stage 5, Stage 6, and ticket assembly; signed-in gpt-5.6-sol/high, no Docker, no removal, no ticket export, no implementation, and no downstream author call",
+    "label": "Fresh sealed cycle through corrected canonical Stage 2",
+    "scope": "Export-disabled non-IDEA qualification cycle over 2,854 atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 recomputation, and one terminal Stage-3 report case; signed-in gpt-5.6-sol/high, no API fallback, no Docker mutation, no removal, no ticket export, and no implementation",
     "timing": {
-      "start_at": "2026-07-19T06:45:39Z",
+      "start_at": "2026-07-19T13:15:00Z",
       "end_at": null,
-      "elapsed_seconds": 23068,
+      "elapsed_seconds": 13952,
       "coverage": "active",
-      "display": "6 h 24 m 28 s active",
-      "note": "Active lifecycle wall time through the terminal component checkpoint. The report-readiness wrapper consumed 1,559.9 seconds across five same-session model calls: three calls converged on valid corrected output and two later calls were avoidable because the supervisor omitted the trusted replay executor. Model-free replays then took 69.4 and 72.9 seconds. The maintenance Stage-3 invocation records 2,802.1 seconds end to end, and the original report dossier retains 1,708.5 seconds across six author calls."
+      "display": "3 h 52 m active",
+      "note": "Active wall time through the corrected Stage-2 checkpoint. The final bounded relation review used four model calls; the accepted Stage-2 recomputation took 138.1 seconds. Earlier invalid Stage-2 output is retained as upstream-loss detection evidence, not counted as a valid result."
     },
-    "furthest_stage": "Terminal Stage 6 and ticket assembly for both selected canonical cases; no downstream work required",
-    "current_state": "Stage 1 processed 2,854 non-IDEA atoms and emitted four provisional problem records. Exact relation review and materialization produced two canonical cases; Stage 2 selected both. Each retained its Sol/high author session through correction and ended evidence_sufficient/partial/already_addressed with verified evidence and zero final findings. Production Stage 4 persisted not_required for both, Stage 5 and Stage 6 emitted no work, and ticket assembly emitted zero tickets. The absence of post-fix live recurrence proof remains explicit rather than being promoted to live resolution.",
-    "outcome": "Two correct-negative terminal dispositions, zero bad-ready escapes, zero unnecessary options, plans, tickets, or implementation work",
+    "furthest_stage": "Corrected Stage 2 for the complete canonical frontier; one previously selected report case has a terminal Stage-3 disposition",
+    "current_state": "Stage 1 began with 27 provisional records. Four bounded Sol/high relation batches completed with zero failed batches. Exact materialization now produces 25 cases: two duplicate pairs are absorbed, the Claude source child retains three original atoms, and its 51 derived-only atoms update parent lineage instead of creating a new case. Shadow relation application has zero errors. The final Sol/high Stage 2 conserves all 25 cases and selects 24; one Windows facet explicitly awaits its provisional research unit. The existing report dossier is evidence_sufficient/partial/already_addressed. The corrected source-backed Claude child has not yet run Stage 3 in this cycle.",
+    "outcome": "Valid corrected Stage-1/2 checkpoint, one successful negative research disposition, zero bad-ready escapes, and no option, plan, ticket, or implementation output yet",
     "errors": {
-      "count": 25,
+      "count": 8,
       "count_kind": "deduplicated_clusters",
-      "summary": "Seven expected nondeterministic author-quality clusters self-corrected. Six reusable controller defects (BDS-148 through BDS-153) and twelve supervisor invocation/test clusters (AN-39 through AN-50) were corrected or bounded. Individual verifier messages and repeated correction turns are not counted as separate errors.",
+      "summary": "Six reusable controller/integration defects required supervisor correction. Two nondeterministic report-research clusters self-corrected in the original author session. The unresolved Windows relation disagreement is tracked separately as a nonblocking recall measurement and is not counted as an execution error.",
       "cluster_ids": [
-        "BDS-148",
-        "BDS-149",
-        "BDS-150",
-        "BDS-151",
-        "BDS-152",
-        "BDS-153",
-        "AN-39",
-        "AN-40",
-        "AN-41",
-        "AN-42",
-        "AN-43",
-        "AN-44",
-        "AN-45",
-        "AN-46",
-        "AN-47",
-        "AN-48",
-        "AN-49",
-        "AN-50",
-        "AUTHOR-STAGE1-MINER002-01",
-        "AUTHOR-STAGE3-REPORT-REVALIDATION-OUTPUT-01",
-        "AUTHOR-STAGE3-REPORT-REVALIDATION-EVIDENCE-01",
-        "AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01",
-        "AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01",
-        "AUTHOR-STAGE3-REPORT-READINESS-OUTPUT-01",
-        "AUTHOR-STAGE3-REPORT-READINESS-SEMANTIC-01"
+        "BDS-154",
+        "BDS-155",
+        "BDS-156",
+        "BDS-158",
+        "BDS-159",
+        "BDS-160",
+        "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
+        "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01"
       ]
     },
     "automatic_self_corrections": {
-      "count": 7,
+      "count": 2,
       "count_kind": "deduplicated_clusters",
-      "summary": "One Stage-1 output cluster, two output/evidence clusters in each Stage-3 case, and two final report-readiness output/semantic clusters corrected in the original Sol/high author sessions. Report evidence moved 48 -> 3 -> 4 -> 0; maintenance evidence moved 71 -> 1 -> 2 -> 0; final report correction moved over-wrapped -> malformed -> valid and removed one internally contradicted alternative. Regressions were retained and corrected rather than used to discard the work.",
+      "summary": "The report researcher corrected five initial output findings through two same-session revisions while preserving substantive progress, then corrected 16 evidence-binding findings in the same author session. No restart or supervisor-authored dossier content was used.",
       "cluster_ids": [
-        "AUTHOR-STAGE1-MINER002-01",
-        "AUTHOR-STAGE3-REPORT-REVALIDATION-OUTPUT-01",
-        "AUTHOR-STAGE3-REPORT-REVALIDATION-EVIDENCE-01",
-        "AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01",
-        "AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01",
-        "AUTHOR-STAGE3-REPORT-READINESS-OUTPUT-01",
-        "AUTHOR-STAGE3-REPORT-READINESS-SEMANTIC-01"
+        "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
+        "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01"
       ]
     },
     "supervisor_interventions": {
-      "count": 18,
+      "count": 6,
       "count_kind": "deduplicated_clusters",
-      "summary": "Supervision corrected outcome lineage, historical-case recall, signed-aggregate accounting, large-context transport, evidence-rerun guidance, and downstream-invalid retained research history. Twelve bounded launcher, wrapper, evidence-rescore, local implementation, or test-invocation clusters were corrected. No problem statement, research conclusion, option, plan, or implementation content was authored by the supervisor.",
+      "summary": "Supervision corrected remote-tracking revision acquisition, relation prompt sizing, stale provisional identity, split-child case conservation, derived-evidence parent return, and validation of exact controller downgrades. These corrections changed transport, lineage, and validation mechanics; the supervisor did not author a problem conclusion, solution, plan, or implementation.",
       "cluster_ids": [
-        "BDS-148",
-        "BDS-149",
-        "BDS-150",
-        "BDS-151",
-        "BDS-152",
-        "BDS-153",
-        "AN-39",
-        "AN-40",
-        "AN-41",
-        "AN-42",
-        "AN-43",
-        "AN-44",
-        "AN-45",
-        "AN-46",
-        "AN-47",
-        "AN-48",
-        "AN-49",
-        "AN-50"
+        "BDS-154",
+        "BDS-155",
+        "BDS-156",
+        "BDS-158",
+        "BDS-159",
+        "BDS-160"
       ]
     },
-    "next_action": "Commit the combined controller and evidence records, then run one fresh export-disabled shadow regeneration from that clean exact revision. Every substantive model call remains gpt-5.6-sol with high reasoning through signed-in ChatGPT subscription provenance; export, implementation, Docker, and removal remain disabled.",
+    "next_action": "Commit the verified Stage-1/2 mechanics, then run only the source-backed Claude duplicate-tool-use child through production Stage 3 and its correct downstream disposition. Do not restart mining or relation review, increase volume, export tickets, or begin implementation until that bounded chain is verified.",
     "tone": "warn",
-    "data_quality": "Stage 1 retains 20 verified model-invocation manifests plus one relation-review author manifest; Stage 2 retains one signed Sol/high receipt. Report Stage 3 retains six original same-session attempts plus five readiness calls, a trusted model-free rescore at U:\\q\\s3_report_stage4_feedback_model_free_rescore_v2_20260719T125946Z, and zero final errors. Maintenance Stage 3 retains six attempt records, all 50 assigned atoms, 30 artifacts, six inspected files, eight symbols, five experiments, and zero final errors. Production Stage 4 is retained at U:\\q\\s4_combined_lineage_terminal_sol_high_20260719T130316Z; terminal Stage 5/6/ticket proof is retained at U:\\q\\s56_ticket_combined_terminal_no_change_20260719T130425Z. All 38 author calls bind gpt-5.6-sol/high to signed-in ChatGPT with API fallback disabled. Full fresh-shadow qualification remains unmeasured.",
+    "data_quality": "Final Stage 1 is U:\\usertest_backlog_qualification\\383cf41f_20260719T131500Z\\cycles\\cycle_001\\relation_requalification_66302d1_materialized_v3\\usertest.problem_records.json, SHA-256 13ceba0eee62f8595035867238e5fa02fadd155da96a843352ee339d7da22b28. Final Stage 2 is stage2_requalification_split_v3\\usertest.prioritized_problems.json, SHA-256 8f20343a999c3cad219ff32829e73c50b07d91ae447c752d5c9b807648cd8843. Its author receipt verifies session 019f7b4e-d64e-7753-a304-f66d6ad70eb0, host ChatGPT subscription, API fallback disabled, and high reasoning. The retained report dossier is SHA-256 39fcdaa53b4c50983126cece742f53f160c6730286b3c4aea0b0834cec3a76d5. Current affected verification is 129 Stage-1 evidence tests, 140 shadow-invariant tests, and 66 backlog-command tests, all passing; Ruff and diff checks pass. Full cycle completion remains unmeasured.",
     "source_ids": [
       "backlog_depth_supervision_issue_ledger"
     ]

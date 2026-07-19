@@ -658,8 +658,11 @@ def _relation_decisions(
 def _relation_application_errors(stage1: dict[str, Any]) -> list[str]:
     records = _items(stage1)
     decisions, receipt, errors = _relation_decisions(stage1)
+    meta_raw = stage1.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
     membership: dict[str, str] = {}
     split_children: dict[str, list[tuple[str, ...]]] = {}
+    downgraded_relations: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         case_id = _text(record.get("case_id")) or _text(record.get("problem_id"))
         if case_id is None:
@@ -681,6 +684,40 @@ def _relation_application_errors(stage1: dict[str, Any]) -> list[str]:
         }
         for member in members:
             membership[member] = case_id
+        actions_raw = record.get("case_relation_actions", [])
+        actions = actions_raw if isinstance(actions_raw, list) else []
+        for raw_action in actions:
+            if not isinstance(raw_action, Mapping) or raw_action.get("action") != "keep_separate":
+                continue
+            suggestion_raw = raw_action.get("provisional_relation_suggestion")
+            suggestion = (
+                dict(suggestion_raw) if isinstance(suggestion_raw, Mapping) else None
+            )
+            validation_errors = _clean_string_set(
+                raw_action.get("relation_validation_errors")
+            )
+            focus_id = _text(suggestion.get("focus_id")) if suggestion is not None else None
+            if (
+                suggestion is None
+                or focus_id is None
+                or focus_id not in members
+                or not validation_errors
+            ):
+                continue
+            submitted_group_id = _text(suggestion.pop("_submitted_group_id", None))
+            submitted_action = _text(suggestion.pop("_submitted_action", None))
+            submitted_alias_target_id = _text(
+                suggestion.pop("_submitted_alias_target_id", None)
+            )
+            for key in [key for key in suggestion if key.startswith("_")]:
+                suggestion.pop(key, None)
+            if submitted_group_id is not None:
+                suggestion["group_id"] = submitted_group_id
+            if submitted_action is not None:
+                suggestion["action"] = submitted_action
+                if submitted_alias_target_id is not None:
+                    suggestion["alias_target_id"] = submitted_alias_target_id
+            downgraded_relations.setdefault(focus_id, []).append(suggestion)
         evidence_group = tuple(
             sorted(
                 value
@@ -695,6 +732,33 @@ def _relation_application_errors(stage1: dict[str, Any]) -> list[str]:
         ):
             if isinstance(parent_problem_id, str) and parent_problem_id.strip():
                 split_children.setdefault(parent_problem_id, []).append(evidence_group)
+
+    derived_returns_raw = meta.get("relation_review_derived_split_returns", [])
+    if not isinstance(derived_returns_raw, list):
+        errors.append("relation_derived_split_returns_invalid")
+        derived_returns_raw = []
+    for index, raw_return in enumerate(derived_returns_raw):
+        if not isinstance(raw_return, Mapping):
+            errors.append(f"relation_derived_split_return_invalid:{index}")
+            continue
+        projected = dict(raw_return)
+        content_sha256 = _text(projected.pop("content_sha256", None))
+        evidence_group = tuple(sorted(_clean_string_set(raw_return.get("evidence_atom_ids"))))
+        parent_problem_ids = sorted(
+            _clean_string_set(raw_return.get("split_parent_problem_ids"))
+        )
+        parent_case_ids = sorted(_clean_string_set(raw_return.get("parent_case_ids")))
+        if (
+            raw_return.get("return_kind") != "derived_evidence_parent_lineage"
+            or not evidence_group
+            or not parent_problem_ids
+            or not parent_case_ids
+            or content_sha256 != _canonical_hash(projected)
+        ):
+            errors.append(f"relation_derived_split_return_invalid:{index}")
+            continue
+        for parent_problem_id in parent_problem_ids:
+            split_children.setdefault(parent_problem_id, []).append(evidence_group)
 
     expected_receipt_edges: list[dict[str, Any]] = []
     for record in records:
@@ -781,7 +845,12 @@ def _relation_application_errors(stage1: dict[str, Any]) -> list[str]:
         member_cases = {membership.get(member) for member in members}
         if action in {"merge", "alias", "same_cause_group"}:
             if None in member_cases or len(member_cases) != 1:
-                errors.append(f"relation_decision_not_applied:{index}:{action}")
+                exact_downgrade = any(
+                    _canonical_hash(candidate) == _canonical_hash(decision)
+                    for candidate in downgraded_relations.get(focus or "", [])
+                )
+                if not exact_downgrade:
+                    errors.append(f"relation_decision_not_applied:{index}:{action}")
         elif action == "keep_separate" and len(members) >= 2:
             if None in member_cases or len(member_cases) != len(set(members)):
                 errors.append(f"relation_keep_separate_not_applied:{index}")

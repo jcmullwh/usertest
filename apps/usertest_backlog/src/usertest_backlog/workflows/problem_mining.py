@@ -5413,6 +5413,89 @@ def _failed_relation_review_batch_count(batches: Sequence[Mapping[str, Any]]) ->
     )
 
 
+def _canonical_candidate_represents_work_unit(
+    candidate: Mapping[str, Any],
+    *,
+    work_unit_problem_ids: set[str],
+) -> bool:
+    """Return whether a canonical result descends from an active input work unit."""
+
+    represented_problem_ids = {
+        problem_id
+        for problem_id in [
+            _coerce_string(candidate.get("problem_id")),
+            *_coerce_string_list(candidate.get("case_member_problem_ids")),
+            _coerce_string(candidate.get("split_parent_problem_id")),
+            *_coerce_string_list(candidate.get("split_parent_problem_ids")),
+        ]
+        if problem_id is not None
+    }
+    return bool(represented_problem_ids.intersection(work_unit_problem_ids))
+
+
+def _derived_split_return_to_parent_lineage(
+    candidate: Mapping[str, Any],
+    *,
+    atoms_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Describe a derived-only split group that must update existing parent cases."""
+
+    split_from_case_id = _coerce_string(candidate.get("split_from_case_id"))
+    evidence_atom_ids = _coerce_string_list(candidate.get("evidence_atom_ids"))
+    if split_from_case_id is None or not evidence_atom_ids:
+        return None
+    atoms = [atoms_by_id.get(atom_id) for atom_id in evidence_atom_ids]
+    if any(not isinstance(atom, Mapping) for atom in atoms):
+        return None
+    derived_roles = {"research", "implementation", "verification"}
+    if any(_coerce_string(atom.get("evidence_role")) not in derived_roles for atom in atoms):
+        return None
+    if any(_coerce_string(atom.get("disposition")) == "novel_case" for atom in atoms):
+        return None
+    parent_case_ids = sorted(
+        {
+            parent_case_id
+            for atom in atoms
+            for parent_case_id in [_coerce_string(atom.get("parent_case_id"))]
+            if parent_case_id is not None
+        }
+    )
+    if len(parent_case_ids) == 0 or any(
+        _coerce_string(atom.get("parent_case_id")) is None for atom in atoms
+    ):
+        return None
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "return_kind": "derived_evidence_parent_lineage",
+        "split_from_case_id": split_from_case_id,
+        "split_parent_problem_ids": list(
+            dict.fromkeys(
+                [
+                    *_coerce_string_list(candidate.get("split_parent_problem_ids")),
+                    *(
+                        [_coerce_string(candidate.get("split_parent_problem_id"))]
+                        if _coerce_string(candidate.get("split_parent_problem_id")) is not None
+                        else []
+                    ),
+                ]
+            )
+        ),
+        "returned_child_case_id": _coerce_string(candidate.get("case_id")),
+        "returned_child_problem_id": _coerce_string(candidate.get("problem_id")),
+        "evidence_atom_ids": evidence_atom_ids,
+        "parent_case_ids": parent_case_ids,
+    }
+    record["content_sha256"] = sha256(
+        json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return record
+
+
 def _durable_collapse_problem_pairs(
     relation_items: Sequence[Mapping[str, Any]],
     verified_relation_edges: set[tuple[str, str]],
@@ -6701,16 +6784,19 @@ def _run_problem_case_relation_review(
     for candidate in canonical_candidates:
         _synchronize_provisional_research_unit_membership(candidate)
     canonical_records: list[dict[str, Any]] = []
+    derived_split_returns: list[dict[str, Any]] = []
     for candidate in canonical_candidates:
-        member_problem_ids = {
-            problem_id
-            for problem_id in [
-                _coerce_string(candidate.get("problem_id")),
-                *_coerce_string_list(candidate.get("case_member_problem_ids")),
-            ]
-            if problem_id is not None
-        }
-        if not member_problem_ids.intersection(work_unit_problem_ids):
+        derived_split_return = _derived_split_return_to_parent_lineage(
+            candidate,
+            atoms_by_id=atoms_by_id,
+        )
+        if derived_split_return is not None:
+            derived_split_returns.append(derived_split_return)
+            continue
+        if not _canonical_candidate_represents_work_unit(
+            candidate,
+            work_unit_problem_ids=work_unit_problem_ids,
+        ):
             continue
         state = _coerce_string(candidate.get("case_state")) or "active"
         if state in TERMINAL_CASE_STATES:
@@ -6952,6 +7038,7 @@ def _run_problem_case_relation_review(
             ),
             "relation_review_batches": relation_review_batches,
             "relation_review_decisions": decisions,
+            "relation_review_derived_split_returns": derived_split_returns,
             "pre_relation_problem_records": problem_records,
             "atom_dispositions": atom_disposition_summary(updated_atoms),
             "problem_mining_evidence_receipt": evidence_receipt_ref,

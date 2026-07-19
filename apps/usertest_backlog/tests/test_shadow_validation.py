@@ -4087,6 +4087,64 @@ def test_shadow_relation_check_uses_action_specific_target_fields(tmp_path: Path
     assert "relation_decision_not_applied:0:merge" in report["failures"]
 
 
+def test_shadow_relation_check_accepts_exact_controller_downgrade(
+    tmp_path: Path,
+) -> None:
+    decision: dict[str, object] = {
+        "focus_id": "problem:a",
+        "action": "same_cause_group",
+        "group_id": "provisional:shared-mechanism",
+        "member_ids": ["problem:a", "problem:b"],
+        "evidence_atom_ids": ["atom:a", "atom:b"],
+        "rationale": "The symptoms support a shared-mechanism research hypothesis.",
+        "review_confidence": 0.9,
+    }
+    relation_artifacts = _relation_review_artifacts(
+        tmp_path,
+        name="downgraded-relation",
+        decisions=[decision],
+        relations=[],
+    )
+    suggestion = {
+        **decision,
+        "group_id": "cause:provisional:canonical",
+        "_submitted_group_id": "provisional:shared-mechanism",
+        "_provisional_same_cause": True,
+    }
+    stage1 = {
+        "items": [
+            {
+                "problem_id": "problem:a",
+                "case_id": "case:a",
+                "case_member_problem_ids": ["problem:a"],
+                "case_relation_actions": [
+                    {
+                        "action": "keep_separate",
+                        "provisional_relation_suggestion": suggestion,
+                        "relation_validation_errors": [
+                            "collapse_not_reciprocal:case:b"
+                        ],
+                    }
+                ],
+            },
+            {
+                "problem_id": "problem:b",
+                "case_id": "case:b",
+                "case_member_problem_ids": ["problem:b"],
+            },
+        ],
+        "input_meta": {"relation_review_decision_count": 1},
+        "artifacts": relation_artifacts,
+    }
+
+    assert shadow_mod._relation_application_errors(stage1) == []
+
+    suggestion["member_ids"] = ["problem:a", "problem:c"]
+    assert shadow_mod._relation_application_errors(stage1) == [
+        "relation_decision_not_applied:0:same_cause_group"
+    ]
+
+
 def test_shadow_relation_check_accepts_exact_applied_split_groups(tmp_path: Path) -> None:
     inputs = _passing_inputs(tmp_path)
     split_groups = [
@@ -4156,6 +4214,88 @@ def test_shadow_relation_check_accepts_exact_applied_split_groups(tmp_path: Path
                 "blocking_reasons": ["Fixture stops after relation validation."],
             }
             for index in (1, 2)
+        ]
+    }
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is True
+    assert not any("relation_split_not_applied" in error for error in report["failures"])
+
+
+def test_shadow_relation_check_accepts_derived_split_returned_to_parent_lineage(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    decisions: list[dict[str, object]] = [
+        {
+            "focus_id": "problem:parent",
+            "action": "split",
+            "split_groups": [
+                {"evidence_atom_ids": ["atom:source"]},
+                {"evidence_atom_ids": ["atom:derived"]},
+            ],
+        }
+    ]
+    relation_artifacts = _relation_review_artifacts(
+        tmp_path,
+        name="derived-return-split-relation",
+        decisions=decisions,
+        relations=[],
+    )
+    returned_group = {
+        "schema_version": 1,
+        "return_kind": "derived_evidence_parent_lineage",
+        "split_from_case_id": "case:parent",
+        "split_parent_problem_ids": ["problem:parent"],
+        "returned_child_case_id": "case:derived-child",
+        "returned_child_problem_id": "problem:parent:split:2",
+        "evidence_atom_ids": ["atom:derived"],
+        "parent_case_ids": ["case:existing-parent"],
+    }
+    returned_group["content_sha256"] = shadow_mod._canonical_hash(returned_group)
+    base_stage1 = inputs["stage1"]
+    inputs["stage1"] = {
+        "items": [
+            {
+                "problem_id": "problem:parent:split:1",
+                "case_id": "case:source-child",
+                "case_member_problem_ids": ["problem:parent:split:1"],
+                "split_parent_problem_ids": ["problem:parent"],
+                "evidence_atom_ids": ["atom:source"],
+            }
+        ],
+        "input_meta": {
+            **base_stage1["input_meta"],
+            "relation_review_decision_count": 1,
+            "relation_review_derived_split_returns": [returned_group],
+        },
+        "artifacts": {
+            **relation_artifacts,
+            "problem_mining_evidence_receipt": base_stage1["artifacts"][
+                "problem_mining_evidence_receipt"
+            ],
+        },
+    }
+    inputs["stage2"] = {
+        "items": [
+            {
+                "problem_id": "problem:parent:split:1",
+                "case_id": "case:source-child",
+                "priority_bucket": "watch",
+                "selected_for_research": True,
+                "priority_rationale": "Source-backed child remains actionable.",
+            }
+        ]
+    }
+    inputs["stage3"] = {
+        "items": [
+            {
+                "problem_id": "problem:parent:split:1",
+                "case_id": "case:source-child",
+                "research_status": "blocked",
+                "blocking_reasons": ["Fixture stops after relation validation."],
+            }
         ]
     }
 
