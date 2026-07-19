@@ -24,6 +24,7 @@ _MINIMAL_RELATION_CONFIG: dict = {
     "defaults": {
         "top_k_by_semantic": 3,
         "top_k_by_evidence_overlap": 3,
+        "top_k_by_evidence_routing": 3,
         "top_k_by_metadata": 2,
         "top_k_by_path_anchor": 2,
         "union_cap": 8,
@@ -103,6 +104,7 @@ def test_rank_neighborhood_has_required_keys() -> None:
         "stage",
         "most_related_by_semantic",
         "most_related_by_evidence_overlap",
+        "most_related_by_evidence_routing",
         "most_related_by_metadata",
         "most_related_by_path_anchor",
         "split_hints",
@@ -134,6 +136,7 @@ def test_rank_neighborhood_signals_are_separate_lists() -> None:
         # Each signal list must be a list (even if empty).
         assert isinstance(nb["most_related_by_semantic"], list)
         assert isinstance(nb["most_related_by_evidence_overlap"], list)
+        assert isinstance(nb["most_related_by_evidence_routing"], list)
         assert isinstance(nb["most_related_by_metadata"], list)
         assert isinstance(nb["most_related_by_path_anchor"], list)
 
@@ -155,6 +158,40 @@ def test_rank_shared_evidence_produces_evidence_overlap_neighbor() -> None:
     nb_b = next(nb for nb in neighborhoods if nb["focus_id"] == "problem:b")
     assert any(n["item_id"] == "problem:b" for n in nb_a["most_related_by_evidence_overlap"])
     assert any(n["item_id"] == "problem:a" for n in nb_b["most_related_by_evidence_overlap"])
+
+
+def test_rank_exact_evidence_routing_surfaces_historical_candidate_without_deciding() -> None:
+    """Regenerated IDs can route a comparison without becoming an automatic merge."""
+
+    shared_channel = "source=monitor|origin=runner|surface=target"
+    current = _make_problem_record(
+        "problem:current",
+        evidence_atom_ids=["derived/current:observation:1"],
+        title="Growing retained records",
+    )
+    current["_relation_evidence_routing_keys"] = [shared_channel]
+    historical = _make_problem_record(
+        "problem:historical",
+        evidence_atom_ids=["derived/historical:observation:1"],
+        title="Bound old resource burst",
+    )
+    historical["_relation_evidence_routing_keys"] = [shared_channel]
+
+    neighborhoods = rank_stage_related_items(
+        [current, historical],
+        stage="problem_mining",
+        relation_config=_MINIMAL_RELATION_CONFIG,
+    )
+
+    assert neighborhoods[0]["most_related_by_evidence_routing"] == [
+        {
+            "item_id": "problem:historical",
+            "routing_key_overlap": 1,
+            "shared_routing_keys": [shared_channel],
+            "index": 1,
+        }
+    ]
+    assert len(neighborhoods) == 2
 
 
 def test_rank_automatic_logic_does_not_decide_grouping() -> None:

@@ -11,7 +11,11 @@ from agent_adapters import (
     CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS,
     CodexLoginStatusResult,
 )
-from backlog_core import build_operational_failure_candidates, extract_backlog_atoms
+from backlog_core import (
+    build_operational_failure_candidates,
+    extract_backlog_atoms,
+    rank_stage_related_items,
+)
 from backlog_core.case_lineage import (
     apply_atom_disposition_decision,
     apply_atom_dispositions,
@@ -41,6 +45,7 @@ from usertest_backlog.workflows.problem_mining import (
     _problem_mining_job_batches,
     _problem_mining_jobs_with_terminal_context,
     _problem_mining_routing_decision_errors,
+    _problem_relation_evidence_context,
     _recall_bearing_cross_job_groups,
     _reconcile_problem_mining_reviews,
     _relation_candidate_frontier_for_correction,
@@ -4903,6 +4908,87 @@ def test_relation_payload_omits_unrelated_global_case_index_entries() -> None:
     assert {item["problem_id"] for item in payload["case_index"]} == {
         "problem:0",
         "problem:4",
+    }
+
+
+def test_relation_routing_recalls_identity_only_historical_case_with_lifecycle() -> None:
+    """A changed atom ID and changed wording must not hide the prior case."""
+
+    atoms = {
+        "atom:old": {
+            "atom_id": "atom:old",
+            "source": "maintenance_image_cleanup",
+            "origin_stage": "runner_maintenance_image_cleanup",
+            "target_slug": "target-a",
+            "mission_id": "implement_maintenance_backlog_ticket_v1",
+            "timestamp_utc": "2026-07-04T10:00:00Z",
+        },
+        "atom:new": {
+            "atom_id": "atom:new",
+            "source": "maintenance_image_cleanup",
+            "origin_stage": "runner_maintenance_image_cleanup",
+            "target_slug": "target-a",
+            "mission_id": "implement_maintenance_backlog_ticket_v1",
+            "timestamp_utc": "2026-07-07T10:00:00Z",
+        },
+    }
+    current = {
+        "problem_id": "problem:growing-retained-tags",
+        "case_id": "case:new",
+        "title": "Cleanup reports no deletions while retained tags grow",
+        "evidence_atom_ids": ["atom:new"],
+    }
+    historical = {
+        "problem_id": "problem:bounded-image-burst",
+        "case_id": "case:historical",
+        "title": "problem:bounded-image-burst",
+        "evidence_atom_ids": ["atom:old"],
+        "_relation_candidate_only": True,
+        "case_state": "mitigated",
+        "prior_stage_context": {
+            "lifecycle": {
+                "state": "mitigated",
+                "outcome_reference": {
+                    "recorded_at": "2026-07-16T04:20:38Z",
+                    "validation_status": "verified",
+                    "plan_revision_id": "planrev:one",
+                },
+            }
+        },
+    }
+    for item in (current, historical):
+        item.update(_problem_relation_evidence_context(item, atoms_by_id=atoms))
+
+    relation_config = {
+        "defaults": {
+            "top_k_by_evidence_routing": 4,
+            "top_k_by_evidence_overlap": 4,
+            "top_k_by_metadata": 2,
+        }
+    }
+    neighborhoods = rank_stage_related_items(
+        [current, historical],
+        stage="problem_mining",
+        relation_config=relation_config,
+    )
+    payload = _relation_review_payload(
+        relation_items=[current, historical],
+        neighborhoods=neighborhoods,
+        focus_problem_ids={"problem:growing-retained-tags"},
+    )
+
+    routing = payload["focus_neighborhoods"][0][
+        "most_related_by_evidence_routing"
+    ]
+    assert routing[0]["item_id"] == "problem:bounded-image-burst"
+    historical_preview = routing[0]["candidate_item"]
+    assert historical_preview["candidate_only"] is True
+    assert historical_preview["evidence_observed_at_max"] == "2026-07-04T10:00:00Z"
+    assert historical_preview["lifecycle_context"] == {
+        "state": "mitigated",
+        "outcome_recorded_at": "2026-07-16T04:20:38Z",
+        "outcome_validation_status": "verified",
+        "plan_revision_id": "planrev:one",
     }
 
 

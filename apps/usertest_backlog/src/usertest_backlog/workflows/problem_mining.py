@@ -4582,6 +4582,9 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
             if case_owned_evidence_atom_ids is not None
             else evidence_atom_ids
         ),
+        "evidence_routing_keys": item.get("_relation_evidence_routing_keys") or [],
+        "evidence_observed_at_min": item.get("_relation_evidence_observed_at_min"),
+        "evidence_observed_at_max": item.get("_relation_evidence_observed_at_max"),
         "root_cause_status": item.get("root_cause_status") or "unestablished",
         "verified_mechanism_sha256": item.get("verified_mechanism_sha256"),
         "verified_causal_signature_sha256": item.get(
@@ -4598,6 +4601,31 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
         "carried_forward": bool(item.get("_carried_forward_case")),
         "candidate_only": bool(item.get("_relation_candidate_only")),
     }
+    prior_stage_context = item.get("prior_stage_context")
+    if isinstance(prior_stage_context, Mapping):
+        lifecycle = prior_stage_context.get("lifecycle")
+        if isinstance(lifecycle, Mapping):
+            outcome_reference = lifecycle.get("outcome_reference")
+            preview["lifecycle_context"] = {
+                "state": _coerce_string(lifecycle.get("state"))
+                or _coerce_string(item.get("case_state"))
+                or "active",
+                "outcome_recorded_at": (
+                    _coerce_string(outcome_reference.get("recorded_at"))
+                    if isinstance(outcome_reference, Mapping)
+                    else None
+                ),
+                "outcome_validation_status": (
+                    _coerce_string(outcome_reference.get("validation_status"))
+                    if isinstance(outcome_reference, Mapping)
+                    else None
+                ),
+                "plan_revision_id": (
+                    _coerce_string(outcome_reference.get("plan_revision_id"))
+                    if isinstance(outcome_reference, Mapping)
+                    else None
+                ),
+            }
     if (
         case_owned_evidence_atom_ids is not None
         and evidence_atom_ids != case_owned_evidence_atom_ids
@@ -4605,6 +4633,53 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
         preview["research_packet_evidence_atom_ids"] = evidence_atom_ids
         preview["evidence_scope"] = "case_owned_provisional_facet"
     return preview
+
+
+def _problem_relation_evidence_context(
+    item: Mapping[str, Any],
+    *,
+    atoms_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project exact evidence-channel and time context for candidate discovery.
+
+    Regenerated operational atoms intentionally receive content-derived IDs, so two
+    observations from the same monitor can have no atom-ID overlap. A compact exact
+    channel key restores candidate recall without asserting causal identity.
+    """
+
+    routing_keys: set[str] = set()
+    observed_at: list[str] = []
+    for atom_id in _coerce_string_list(item.get("evidence_atom_ids")):
+        atom = atoms_by_id.get(atom_id)
+        if not isinstance(atom, Mapping):
+            continue
+        source = _coerce_string(atom.get("source"))
+        origin_stage = _coerce_string(atom.get("origin_stage"))
+        surface = _coerce_string(atom.get("target_slug")) or _coerce_string(
+            atom.get("repo_input")
+        )
+        if source is not None and origin_stage is not None and surface is not None:
+            normalized_surface = surface.replace("\\", "/").casefold()
+            channel = (
+                f"source={source.casefold()}|origin={origin_stage.casefold()}|"
+                f"surface={normalized_surface}"
+            )
+            routing_keys.add(channel)
+            discriminator = _coerce_string(atom.get("operational_signature"))
+            if discriminator is None:
+                discriminator = _coerce_string(atom.get("mission_id"))
+            if discriminator is not None:
+                routing_keys.add(f"{channel}|discriminator={discriminator.casefold()}")
+        timestamp = _coerce_string(atom.get("timestamp_utc"))
+        if timestamp is not None:
+            observed_at.append(timestamp)
+    context: dict[str, Any] = {
+        "_relation_evidence_routing_keys": sorted(routing_keys),
+    }
+    if observed_at:
+        context["_relation_evidence_observed_at_min"] = min(observed_at)
+        context["_relation_evidence_observed_at_max"] = max(observed_at)
+    return context
 
 
 def _verified_relation_edges_from_case_registry(
@@ -4705,6 +4780,7 @@ def _relation_review_payload(
     neighbor_keys = (
         "most_related_by_semantic",
         "most_related_by_evidence_overlap",
+        "most_related_by_evidence_routing",
         "most_related_by_metadata",
         "most_related_by_path_anchor",
     )
@@ -6423,6 +6499,21 @@ def _run_problem_case_relation_review(
         candidate = dict(historical_case)
         candidate["_relation_candidate_only"] = True
         relation_items.append(candidate)
+
+    atoms_by_id = {
+        atom_id: atom
+        for atom in atoms
+        if isinstance(atom, Mapping)
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
+    for relation_item in relation_items:
+        relation_item.update(
+            _problem_relation_evidence_context(
+                relation_item,
+                atoms_by_id=atoms_by_id,
+            )
+        )
 
     neighborhoods = rank_stage_related_items(
         relation_items,

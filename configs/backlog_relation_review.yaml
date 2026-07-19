@@ -13,6 +13,7 @@ version: 1
 defaults:
   top_k_by_semantic: 3
   top_k_by_evidence_overlap: 3
+  top_k_by_evidence_routing: 3
   top_k_by_metadata: 2
   top_k_by_path_anchor: 2
   union_cap: 8
@@ -25,6 +26,7 @@ stages:
   problem_mining:
     top_k_by_semantic: 4
     top_k_by_evidence_overlap: 4
+    top_k_by_evidence_routing: 4
     top_k_by_metadata: 2
     top_k_by_path_anchor: 2
     union_cap: 10
