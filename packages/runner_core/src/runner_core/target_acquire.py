@@ -330,6 +330,15 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
                     git_dir = None
 
             if git_dir is not None and git_dir.exists():
+                resolved_ref: str | None = None
+                if ref is not None:
+                    # A local clone does not necessarily transfer commits that are reachable only
+                    # through the source repository's remote-tracking refs. Resolve the requested
+                    # revision while the source has its complete ref namespace, then explicitly
+                    # fetch that exact commit into the isolated workspace below.
+                    resolved_ref = _run_git(
+                        ["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=src
+                    )
                 try:
                     _git_clone(repo=str(src), dest_dir=dest_dir, no_local=True)
                 except RuntimeError as e:
@@ -344,8 +353,9 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
                         dest_dir = alt_dest
                     else:
                         raise
-                if ref is not None:
-                    _run_git(["checkout", ref], cwd=dest_dir)
+                if resolved_ref is not None:
+                    _run_git(["fetch", "--no-tags", str(src), resolved_ref], cwd=dest_dir)
+                    _run_git(["checkout", "--detach", resolved_ref], cwd=dest_dir)
                 _verify_git_workspace_connectivity(cwd=dest_dir)
                 sha = _run_git(["rev-parse", "HEAD"], cwd=dest_dir)
                 return AcquiredTarget(
