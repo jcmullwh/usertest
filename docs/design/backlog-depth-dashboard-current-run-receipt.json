@@ -1,24 +1,24 @@
 {
   "schema_version": 3,
-  "as_of": "2026-07-19T21:29:44Z",
+  "as_of": "2026-07-19T22:16:01Z",
   "current_run_id": "qualification-cycle-383cf41f-20260719",
   "summary_cards": [
     {
       "label": "Current pipeline state",
-      "value": "3 terminal; 2 research frontiers parked",
-      "detail": "The effective frontier now has 26 canonical cases and 25 selected research units after one authenticated storage split. The I:-checkout child is insufficient_evidence and the C:-provider child is blocked; neither advanced to optioning.",
+      "value": "4 terminal; 2 research frontiers parked",
+      "detail": "The effective frontier has 26 canonical cases and 25 selected research units. The Windows-shell P0 reassessment is now terminal already_addressed; the I:-checkout and C:-provider storage children remain honestly nonterminal and did not advance to optioning.",
       "tone": "warn"
     },
     {
       "label": "Current bounded throughput",
-      "value": "27 -> 26 cases; 3 terminal, 2 nonterminal",
-      "detail": "Relation review first reduced 27 records to 25 cases. Research then split one mixed storage umbrella into two causal units, producing 26 cases. Three earlier cases are terminal negatives; both storage children retain precise evidence-acquisition frontiers.",
+      "value": "27 -> 26 cases; 4 terminal, 2 nonterminal",
+      "detail": "Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Four cases now terminate without new work; both storage children retain precise evidence-acquisition frontiers.",
       "tone": "good"
     },
     {
       "label": "Full qualification",
       "value": "0 / 2 cycles",
-      "detail": "This cycle is active: 3 of 25 effective selected research units are terminal. Two more have correct but explicitly nonterminal blocked/insufficient-evidence dispositions. No qualification cycle or export authorization is earned.",
+      "detail": "This cycle is active: 4 of 25 effective selected research units are terminal. Two more have correct but explicitly nonterminal blocked/insufficient-evidence dispositions. No qualification cycle or export authorization is earned.",
       "tone": "bad"
     },
     {
@@ -34,29 +34,29 @@
     "lifecycle_id": "pipeline-cycle:383cf41f:20260719",
     "lifecycle_kind": "pipeline_cycle",
     "rework": {
-      "author_invocations": 71,
-      "continuation_launches": 34,
+      "author_invocations": 73,
+      "continuation_launches": 35,
       "stage_reruns": 9,
       "full_restarts": 0,
-      "summary": "The prior 43 calls are retained. Storage processing added 28 Sol/high calls: nine for the mixed parent, one checkout Stage-2 call, seven checkout research calls, one provider Stage-2 call, and ten provider research calls. The 23 added continuations all stayed in their original author sessions. Three model-free stage re-executions repaired a supervisor lineage omission and the ticket-readiness handoff; no miner, author, case, or full pipeline restart occurred."
+      "summary": "The prior 43 calls are retained. Storage added 25 model calls: eight parent research, one checkout Stage 2 plus six research, and one provider Stage 2 plus nine research. Windows reassessment added five calls. All 24 added continuations stayed in their original sessions; model-free evidence-feedback records are excluded. Three model-free stage re-executions repaired one supervisor lineage omission and the ticket-readiness handoff. No miner, author, case, or full pipeline restart occurred."
     },
-    "label": "Fresh sealed cycle through three terminal cases and a two-child storage split",
-    "scope": "Export-disabled non-IDEA qualification cycle over 2,856 post-split atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 decisions, three terminal negative cases, one authenticated mixed-cause split, and two verifier-clean nonterminal storage children; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
+    "label": "Fresh sealed cycle through four terminal cases and a two-child storage split",
+    "scope": "Export-disabled non-IDEA qualification cycle over 2,856 post-split atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 decisions, four terminal negative cases, one authenticated mixed-cause split, and two verifier-clean nonterminal storage children; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
     "timing": {
       "start_at": "2026-07-19T13:15:00Z",
       "end_at": null,
-      "elapsed_seconds": 29684,
+      "elapsed_seconds": 32461,
       "coverage": "active",
-      "display": "8 h 14 m active",
-      "note": "Active wall time through both storage children. Parent research took 2,586.6 seconds and authenticated a split. Checkout Stage 2/3 took 9.0/1,448.7 seconds; provider Stage 2/3 took 13.9/2,122.4 seconds. Both terminal chains were model-free and subsecond after valid handoff. Activation delay is included in stage wall time but is not represented as model reasoning. Invalid supervisor-wrapper outputs remain retained and are not counted as results."
+      "display": "9 h 1 m active",
+      "note": "Active wall time through the Windows terminal case. Parent storage research took 2,586.6 seconds; checkout Stage 2/3 took 9.0/1,448.7 seconds; provider Stage 2/3 took 13.9/2,122.4 seconds. Windows Stage 3 took 2,247.8 seconds across five model calls plus one model-free feedback record, and its terminal chain took 4.3 seconds with zero model calls. Activation delay is included in wall time but is not represented as model reasoning."
     },
-    "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; three cases are terminal and both authenticated storage children reached their correct nonterminal Stage-3-to-ticket frontier",
-    "current_state": "The effective post-split corpus contains 26 canonical cases. Twenty-three retained selections plus two narrow child selections produce 25 effective selected research units. Three earlier cases remain terminal evidence_sufficient/partial/already_addressed. Storage research proved the original umbrella mixed an I:-checkout capacity failure with two C:-Claude append/write failures and applied a signed split. The checkout child is verifier-clean insufficient_evidence/partial with two material unknowns; the provider child is verifier-clean blocked/partial with four material unknowns. Stage 4 records insufficient_evidence for both, makes zero model calls, and emits no option, selection, or plan. Each child retains one nonready investigation ticket rather than being discarded or falsely resolved.",
-    "outcome": "Three terminal negative dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
+    "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; four cases are terminal and both authenticated storage children retain their correct nonterminal Stage-3-to-ticket frontier",
+    "current_state": "The effective post-split corpus contains 26 canonical cases and 25 effective selected research units. Four cases are terminal evidence_sufficient/partial/already_addressed. The new Windows-shell result authenticates 34 assigned source atoms, proves the historical pre-payload sandbox symptom, and proves that the pinned revision's canonical shell resolver now blocks the source-like failure while allowing a passing payload-equivalent control; its dedicated 12-test regression file passes. Stage 4 records not_required and emits no option, plan, or ticket. The checkout child remains verifier-clean insufficient_evidence/partial with two material unknowns; the provider child remains verifier-clean blocked/partial with four material unknowns. Neither storage child advanced to optioning, and both retain nonready investigation tickets.",
+    "outcome": "Four terminal negative dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
     "errors": {
-      "count": 39,
+      "count": 43,
       "count_kind": "deduplicated_clusters",
-      "summary": "Twelve controller/integration clusters are retained: nine corrected or previously closed and three newly open/contained observations. Thirteen nondeterministic author clusters self-corrected in their original sessions. Fourteen supervisor diagnostic/wrapper/reporting/test-construction clusters were corrected without restarting research. The unresolved Windows relation disagreement remains a nonblocking recall measurement and is not counted as an execution error.",
+      "summary": "Twelve controller/integration clusters are retained: nine corrected or previously closed and three open/contained observations. Fifteen nondeterministic author clusters self-corrected in their original sessions. Sixteen supervisor diagnostic/wrapper/reporting/test-construction clusters were corrected without restarting research. The unresolved Windows relation disagreement remains a nonblocking recall measurement and is not counted as an execution error.",
       "cluster_ids": [
         "BDS-154",
         "BDS-155",
@@ -83,6 +83,8 @@
         "AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-EVIDENCE-01",
         "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-OUTPUT-01",
         "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-V1-EVIDENCE-01",
         "AN-51",
         "AN-52",
         "AN-53",
@@ -96,13 +98,15 @@
         "AN-61",
         "AN-62",
         "AN-63",
-        "AN-64"
+        "AN-64",
+        "AN-65",
+        "AN-66"
       ]
     },
     "automatic_self_corrections": {
-      "count": 13,
+      "count": 15,
       "count_kind": "deduplicated_clusters",
-      "summary": "The prior seven clusters remain. Storage added six: parent output/evidence, checkout output/evidence, and provider output/evidence. The parent used nine calls, checkout seven, and provider ten; every correction stayed in its original Sol/high session. Regressed zero-error candidates were quarantined, smaller error counts counted as progress, and safe frontiers were preserved. No author restart or supervisor-authored dossier content was used.",
+      "summary": "The prior seven clusters remain. Storage added six and Windows added two. Storage used 23 research model calls plus two Stage-2 calls; Windows used five research calls. Every correction stayed in its original Sol/high session. Regressed low-error candidates were quarantined, smaller error counts counted as progress, and safe frontiers were preserved. Model-free feedback records are excluded from invocation counts. No author restart or supervisor-authored dossier content was used.",
       "cluster_ids": [
         "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
         "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01",
@@ -116,13 +120,15 @@
         "AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-OUTPUT-01",
         "AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-EVIDENCE-01",
         "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-OUTPUT-01",
-        "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01"
+        "AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-V1-OUTPUT-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-V1-EVIDENCE-01"
       ]
     },
     "supervisor_interventions": {
-      "count": 23,
+      "count": 25,
       "count_kind": "deduplicated_clusters",
-      "summary": "The prior eighteen intervention clusters remain. One new code intervention fixed runner-owned lineage revalidation in ticket readiness; four supervisor diagnostic/launcher/wrapper/status clusters were corrected without replacing authored research. The three newly logged nonblocking controller observations did not trigger speculative hardening or interrupt the cases. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
+      "summary": "The prior eighteen intervention clusters remain. One code intervention fixed runner-owned lineage revalidation; four supervisor diagnostic/launcher/wrapper/status clusters repaired the storage handoff; and two reporting corrections reconciled real model calls and a repeated read-only PowerShell parse error. The three open nonblocking controller observations did not trigger speculative hardening. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
       "cluster_ids": [
         "BDS-154",
         "BDS-155",
@@ -146,12 +152,14 @@
         "AN-61",
         "AN-62",
         "AN-63",
-        "AN-64"
+        "AN-64",
+        "AN-65",
+        "AN-66"
       ]
     },
-    "next_action": "Preserve both storage children as nonterminal frontiers and do not rerun them without the named new evidence. Choose the next distinct unprocessed source-backed selection and run only that case through production Stage 3 and its correct downstream disposition. Reuse the current frontier; do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation yet.",
+    "next_action": "Preserve both storage children and do not rerun them without the named new evidence. Choose the next of 19 unworked source-backed selections and run only that case through production Stage 3 and its correct downstream disposition. Reuse the current frontier; do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation yet.",
     "tone": "warn",
-    "data_quality": "The authenticated post-research split problem corpus has SHA-256 e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Parent research is 3d43eaa54eb28a4d3e225a1c96971c95f9c40fe4ac9193881138fd332232d080. Checkout research/terminal hashes are 11b8761384fcb7e9899078ade7463a4bdee8e8bfb30b61b08bfc67d5f1a8cc75 and a449486d46f8d1bb23653bd2157a8042f203a922d4b826b2f30399d79b2ad438. Provider research/terminal hashes are c80352eb70cea78baa7f507da8cbb4b569e5d9900fd78d24767e08eb13053ac1 and 3227c07f088ce93a70e3bf42c28ba96a39342d44a6c203a140f204ea102513cb. Both child evidence verifiers return true with zero findings, both terminal paths record zero Stage-4-to-6 manifests, and all provider turns bind one session. Commit 73f7264 passed the full backlog_core tree and 115 adjacent report/export integration tests under full-day ceilings. At the receipt snapshot C: had 29.15 GiB free, I: 275.89 GiB, and U: 6,376.31 GiB; no image, container, workspace, artifact, or VHDX content was removed. Full cycle completion remains unmeasured.",
+    "data_quality": "The authenticated post-split problem corpus is e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Parent storage research is 3d43eaa54eb28a4d3e225a1c96971c95f9c40fe4ac9193881138fd332232d080. Checkout research/terminal hashes are 11b8761384fcb7e9899078ade7463a4bdee8e8bfb30b61b08bfc67d5f1a8cc75 and a449486d46f8d1bb23653bd2157a8042f203a922d4b826b2f30399d79b2ad438; provider hashes are c80352eb70cea78baa7f507da8cbb4b569e5d9900fd78d24767e08eb13053ac1 and 3227c07f088ce93a70e3bf42c28ba96a39342d44a6c203a140f204ea102513cb. Windows research/terminal hashes are 4e3959d62dba422ed7c98d101291b40021da2f81ba4a5e21f30ee1e8ec6690dd and fb1558c7fceae53c1091a0994926be5750d07004796e08e964db307cdbb91046. All four artifacts' evidence/readiness boundaries are retained; every terminal path records zero Stage-4-to-6 manifests. Commit 73f7264 passed the full backlog_core tree and 115 adjacent report/export integration tests under full-day ceilings. At this snapshot C: had 28.74 GiB free, I: 275.44 GiB, and U: 6,376.31 GiB; no image, container, workspace, artifact, or VHDX content was removed. Full cycle completion remains unmeasured.",
     "source_ids": [
       "backlog_depth_supervision_issue_ledger"
     ]

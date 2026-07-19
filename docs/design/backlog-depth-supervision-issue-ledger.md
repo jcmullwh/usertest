@@ -1338,7 +1338,9 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-OUTPUT-01`: the checkout child began with five contract findings. Its first `5 -> 0` repair deleted substantive coverage and was quarantined; the next same-session repair restored that coverage and reached zero. No fresh research session was started.
 - `AUTHOR-STAGE3-STORAGE-CHECKOUT-V1-EVIDENCE-01`: evidence verification began at 21 findings. The same author improved `21 -> 4 -> 0`, with the first zero-error candidate quarantined for substantive regression, then restored the safe frontier and reached accepted zero evidence findings. The final dossier honestly remained `insufficient_evidence/partial`, not implementation-ready.
 - `AUTHOR-STAGE3-STORAGE-PROVIDER-V1-OUTPUT-01`: the provider child began with 11 contract findings. Its first `11 -> 0` repair removed established causal roles and was quarantined; the retained-session sequence then reached `11 -> 1 -> 0`. The accepted dossier preserved the repeated historical ENOSPC boundary without inventing a storage producer.
-- `AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01`: evidence verification began at 24 findings. Five same-session continuations followed `24 -> 2 (substantive regression) -> 13 -> 6 -> 2 -> 0`; fewer errors counted as progress, regressed candidates did not replace the safe frontier, and all ten total provider turns used session `019f7c25-5258-7ad0-9e2d-2321213791b5`. The final dossier is verifier-clean `blocked/partial`, and Stage 4 correctly did not run a model.
+- `AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01`: evidence verification began at 24 findings. Five same-session continuations followed `24 -> 2 (substantive regression) -> 13 -> 6 -> 2 -> 0`; fewer errors counted as progress and regressed candidates did not replace the safe frontier. The request ledger has ten records—nine model calls plus one model-free evidence-feedback record—and every model call used session `019f7c25-5258-7ad0-9e2d-2321213791b5`. The final dossier is verifier-clean `blocked/partial`, and Stage 4 correctly did not run a model.
+- `AUTHOR-STAGE3-WINDOWS-SHELL-V1-OUTPUT-01`: the current-version actionability reassessment began with two output-contract findings and corrected `2 -> 0` in one 93.4-second continuation of session `019f7c4f-aaba-7041-a0d8-222d3ec7f9b6`. The accepted dossier retained the historical symptom and current dispatch-boundary proof rather than manufacturing a new root cause.
+- `AUTHOR-STAGE3-WINDOWS-SHELL-V1-EVIDENCE-01`: independent verification exposed 49 findings. The first `49 -> 1` candidate deleted substantive proof and was quarantined; the safe frontier then progressed `49 -> 47 -> 0` in the same session. Five model calls plus one model-free feedback record produced a verifier-clean and readiness-clean `evidence_sufficient/partial/already_addressed` dossier. Production Stage 4 recorded `not_required` and Stages 5-6 and ticket assembly emitted zero items.
 
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
@@ -1493,6 +1495,20 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor status/reporting cluster, not a pipeline, model, test, or product failure
 - Exact evidence: one process-status command piped directly from a `foreach` block and failed at parse time with `An empty pipe element is not allowed`. A later dossier-summary command used PowerShell-7 `ConvertFrom-Json -Depth` while the host ran Windows PowerShell 5.1; it returned no usable summary and emitted a parameter error.
 - Containment and result: the status command accumulated rows before formatting, and the JSON read used the supported parser form. Both were read-only. The live Stage-3 process continued uninterrupted under its full-day ceiling, and no stage, author turn, verifier, or artifact was rerun because of these reporting mistakes.
+
+### AN-65 - The storage dashboard counted model-free feedback records as author invocations
+
+- Status: `closed_exact_run-directory_reconciliation`
+- Classification: one supervisor metrics-counting error, not a model, pipeline, benchmark, or case-result failure
+- Exact evidence: receipt commit `5586123` reported 28 new storage author invocations and 23 continuations by counting every Stage-3 attempt-ledger record. Each of the parent, checkout, and provider ledgers contains one `evidence_verification_feedback` record that reuses the original run duration and does not invoke an author. The exact unique model run counts are eight, six, and nine; the two narrow Stage-2 calls bring storage to 25 model calls and 20 continuations.
+- Containment and result: the current receipt now reconciles invocation counts from non-feedback model run directories and reports 73 cumulative author calls and 35 continuations after adding the five-call Windows case. Error, correction, and lifecycle conclusions are unchanged; the historical incorrect receipt remains in Git history rather than being concealed.
+
+### AN-66 - Hash collection immediately repeated the corrected empty-pipe PowerShell shape
+
+- Status: `closed_read_only_recurrence_counted_separately`
+- Classification: one repeated supervisor reporting-command error, not a pipeline, model, test, artifact, or product failure
+- Exact evidence: while collecting the Windows terminal hashes, the command again placed a formatting pipeline directly after a `foreach` block and PowerShell stopped at parse time with `An empty pipe element is not allowed`. This occurred after AN-64 had documented the same unsafe shape, so it is not merged into the earlier cluster.
+- Containment and result: the next read accumulated hash rows before formatting and returned both exact SHA-256 values plus disk headroom. The failed command was read-only, opened no file, and caused no model call, stage rerun, artifact change, or removal.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
