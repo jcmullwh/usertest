@@ -1210,12 +1210,31 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-155 - Relation-review batching exceeded the provider input ceiling and silently inflated the research frontier
 
-- Status: `active_correction_required_before_scaling_stage3`
+- Status: `live_relation_verified_stage2_recompute_pending`
 - Priority: canonical grouping and good-throughput blocking
 - Objective impact: 16 of 27 pre-relation cases were provisionally kept separate without model review, so Stage 2 selected 26 research units from a grouping frontier that may contain same-cause duplicates. Processing that volume would waste research and could recreate the historical one-dossier-per-symptom failure.
 - Exact evidence: relation batch 1 persisted a 1,242,196-byte prompt and Codex rejected all three launches before a turn with `Input exceeds the maximum length of 1048576 characters`, reporting `actual_chars=1257953`. The controller then emitted 16 confidence-zero `keep_separate` decisions with `relation_review_batch_failed`. Batch 2's smaller prompt completed for 11 cases. The wrapper summarized the deterministic transport failure as `author_session_acquisition_nonadvancing`, obscuring the actual cause.
 - Required correction: partition relation work by the rendered prompt's provider-safe character budget, not only focus count; retain exact candidate packets and lineage across the smaller batches; report `input_too_large` as a transport/batching defect; and rerun only relation review from the authenticated miner checkpoint. Rerun Stage 2 only after the canonical case set is finalized. Do not discard the already completed Stage-3 report proof, but do not use it to validate provisional grouping.
+- Current proof: the retained 27-focus frontier reran without repeating any miner. It produced four complete prompts of 879,489, 492,510, 829,786, and 146,628 characters against the 900,000-character budget. All four Sol/high calls exited zero with verified host ChatGPT-subscription provenance, every focus appeared exactly once, and failed-batch count is zero. Applied decisions reduce the frontier from 27 records to 24 canonical outputs. Two exact-source duplicate pairs are durably absorbed, one mixed source/derived Claude record is split, and four incompatible Windows grouping proposals are conservatively retained rather than forced.
 - Closure proof: a focused regression reproduces a relation candidate set whose single count-bounded prompt exceeds the provider limit and proves every focus is assigned exactly once across safe rendered batches. The retained 27-case relation frontier then completes with zero failed/provisional batches, and the downstream research count is recomputed from those applied decisions without rerunning miners.
+
+### BDS-156 - Durable relation decisions retained a stale provisional identity flag
+
+- Status: `closed_live_materialization_verified`
+- Priority: canonical grouping and good-throughput blocking
+- Objective impact: four valid relation-review calls completed, but final case-registry materialization raised `problem_mining_relation_receipt_registry_direction_mismatch`. Restarting the relation reviewers would have discarded correct semantic work and still reproduced the controller defect.
+- Exact evidence: the plugin-sync pair shares the same two immutable source atoms. Canonicalization correctly selected `case:1cb9d67ee6a8d71d35e5`, absorbed `case:1f7294fcc2a5b33833cf`, and wrote the exact source-to-canonical receipt. The resulting canonical record nevertheless retained `case_identity_status=provisional_same_cause`; registry construction therefore preserved both cases as active and set no `alias_of`, causing its own receipt validator to reject `case:1f7294fcc2a5b33833cf -> case:1cb9d67ee6a8d71d35e5`.
+- Correction: when a non-provisional canonical component durably absorbs every member of a pending/provisional candidate set, canonicalization now marks the identity resolved and removes the stale provisional group, candidate IDs, and integrity errors. Disjoint provisional packets remain protected from self-verification because objective identity still uses immutable member-facet evidence.
+- Closure proof: the exact 27 retained model decisions rematerialize model-free into 24 canonical outputs with zero failed batches and three direction-consistent, receipt-bound registry aliases. The focused positive case and anti-self-verification negatives pass; the complete 29-test canonical-relation file, all 524 `backlog_core` tests, and all 127 Stage-1 evidence tests pass.
+
+### BDS-157 - Cross-batch Windows relation proposals were mutually incompatible
+
+- Status: `open_nonblocking_recall_measurement`
+- Priority: relation recall and duplicate-research efficiency
+- Objective impact: four of 27 authored focus decisions proposed overlapping Windows same-cause membership that was not reciprocal or contradicted a peer's `keep_separate` decision. Forcing the union would create bad throughput; retaining every facet may create some duplicate research.
+- Exact evidence: strict canonicalization recorded four local fallbacks containing `collapse_not_reciprocal`, `contradicted_collapse_from`, or `collapse_relation_incompatible`. It retained the prior two-case provisional research packet and kept the other conflicting facets separate. The two exact-source duplicate pairs and unrelated decisions still applied successfully.
+- Current handling: this is a semantic-disagreement cluster, not a failed batch or provider error. The safe fallback is accepted for the baseline run so some ambiguous evidence can reach prioritization/research. Do not block useful throughput or demand perfect relation agreement.
+- Follow-up boundary: measure whether Stage 2/research actually duplicates these Windows cases. Add same-author cross-batch feedback only if this class materially inflates downstream work or suppresses a demonstrated shared mechanism; do not overfit a mandatory correction loop to this one benchmark.
 
 ### AN-42 - A combined lint/test shell invocation initially masked the lint exit code
 

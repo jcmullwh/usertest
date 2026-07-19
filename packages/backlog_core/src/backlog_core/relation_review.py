@@ -1586,13 +1586,16 @@ def canonicalize_problem_cases(
                 _clean_relation_string_list(base.get("case_identity_candidate_ids"))
             )
             if (
-                base.get("case_identity_status") == "pending_relation"
+                base.get("case_identity_status")
+                in {"pending_relation", "provisional_same_cause"}
                 and pending_candidates
                 and pending_candidates.issubset(set(members))
                 and len(members) > 1
             ):
                 base["case_identity_status"] = "resolved"
                 base.pop("case_identity_candidate_ids", None)
+                base.pop("provisional_same_cause_group", None)
+                base.pop("provisional_same_cause_integrity_errors", None)
         canonical_records.append(base)
 
     _LOG.info(
