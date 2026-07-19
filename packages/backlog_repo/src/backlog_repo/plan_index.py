@@ -54,6 +54,9 @@ PLAN_TICKET_FILENAME_RE = re.compile(
 )
 _ATOM_ID_PATH_COMPONENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
 _ATOM_ID_SOURCE_RE = re.compile(r"[A-Za-z0-9_.-]+")
+_OPERATIONAL_FAILURE_ATOM_ID_RE = re.compile(
+    r"operational_failure:[0-9a-f]{64}:[0-9a-f]{64}"
+)
 _EVIDENCE_ATOM_IDS_HEADING_RE = re.compile(
     r"^#{1,6}\s+Evidence\s+atom\s+ids\s*$",
     flags=re.IGNORECASE | re.MULTILINE,
@@ -593,8 +596,14 @@ def _valid_plan_atom_id(value: str) -> bool:
 
     A run identifier is a slash-delimited path and may contain arbitrary namespace
     depth.  Splitting from the right preserves that namespace while still binding the
-    source kind and one-based atom index.
+    source kind and one-based atom index.  Runner-synthesized operational candidates
+    use their own content-addressed identity: ``operational_failure:<signature>:
+    <occurrence-set>``.  Those IDs are first-class evidence atoms too, even though the
+    final component is a digest rather than an integer index.
     """
+
+    if _OPERATIONAL_FAILURE_ATOM_ID_RE.fullmatch(value):
+        return True
 
     parts = value.rsplit(":", 2)
     if len(parts) != 3:

@@ -839,6 +839,92 @@ def test_evidence_atom_section_accepts_namespaced_run_ids_only() -> None:
     assert _extract_atom_ids_from_ticket_markdown(markdown) == [namespaced]
 
 
+def test_evidence_atom_section_accepts_content_addressed_operational_failure() -> None:
+    operational_atom = (
+        "operational_failure:"
+        + "a" * 64
+        + ":"
+        + "b" * 64
+    )
+    malformed = "operational_failure:" + "a" * 64 + ":not-a-digest"
+    markdown = (
+        "# Generated plan\n\n"
+        "## Evidence atom ids\n\n"
+        f"- `{operational_atom}`\n"
+        f"- `{malformed}`\n"
+    )
+
+    assert _extract_atom_ids_from_ticket_markdown(markdown) == [operational_atom]
+
+
+def test_plan_sync_projects_case_outcome_for_operational_failure_atom(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "fedcba9876543210"
+    atom_id = "operational_failure:" + "a" * 64 + ":" + "b" * 64
+    plan_revision_id = "plan:operational:v1"
+    path = owner_root / ".agents" / "plans" / "5 - complete" / (
+        f"20260709_{fingerprint}_operational.md"
+    )
+    _write_plan(path, fingerprint, "Operational")
+    markdown = path.read_text(encoding="utf-8").replace(
+        "- Plan revision ID: `plan:archive-test:v1`",
+        f"- Plan revision ID: `{plan_revision_id}`",
+    )
+    markdown += f"\n## Evidence atom ids\n\n- `{atom_id}`\n"
+    outcome = {
+        "schema_version": 1,
+        "case_id": "case:operational",
+        "plan_revision_id": plan_revision_id,
+        "state": "mitigated",
+        "outcome_scope": "case",
+        "recorded_at": "2026-07-09T00:00:00Z",
+        "requires_live_verification": False,
+        "target_branch": "dev",
+        "merged_commit": "abc123",
+        "test_evidence": [
+            _passed(
+                "test",
+                "tests/test_operational.py",
+                case_id="case:operational",
+                plan_revision_id=plan_revision_id,
+                fingerprint=fingerprint,
+            )
+        ],
+        "original_scenario_evidence": [
+            _passed(
+                "original_scenario",
+                "tests/test_operational.py",
+                case_id="case:operational",
+                plan_revision_id=plan_revision_id,
+                fingerprint=fingerprint,
+            )
+        ],
+        "live_evidence": [],
+        "mitigation_evidence": [
+            _passed(
+                "mitigation_effect",
+                "tests/test_operational.py",
+                case_id="case:operational",
+                plan_revision_id=plan_revision_id,
+                fingerprint=fingerprint,
+            )
+        ],
+        "remaining_risks": ["Underlying mechanism remains unresolved"],
+        "recurrence_check": {"status": "not_run"},
+    }
+    path.write_text(upsert_outcome_markdown(markdown, outcome), encoding="utf-8")
+    atom_actions: dict[str, dict[str, object]] = {}
+
+    sync_atom_actions_from_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=[owner_root],
+        generated_at="2026-07-10T00:00:00Z",
+    )
+
+    assert atom_actions[atom_id]["last_outcome_state"] == "mitigated"
+    assert atom_actions[atom_id]["last_outcome_record"]["case_id"] == "case:operational"
+
+
 def test_historical_evidence_atom_labels_preserve_provenance_only() -> None:
     metadata_atom = "project_scaffold/20260210T065815Z/codex/0:error_json:1"
     source_ticket_atom = "usertest/20260219T003604Z/codex/0:confusion_point:1"

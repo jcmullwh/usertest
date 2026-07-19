@@ -1145,6 +1145,22 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Root cause: the real report-schema failure involved a historical command that referenced an attested `.usertest_research` overlay absent from a clean implementation checkout. The gate encoded command equality as a proxy for that transport boundary instead of checking the verified overlay evidence directly.
 - Closure proof: equality is rejected only when the selected historical experiment's runner-attested argv references a path in its content-addressed research overlay. Repository-owned paired before/after commands remain valid. A focused negative proves the overlay command cannot be reused; the two general positive cases and qualification transaction pass. The complete `backlog_core` suite passes 518/518, the complete `usertest_backlog` suite passes 813 tests with two expected skips, and the seven-project affected checkpoint totals 2,877 passed with six expected skips. All seven configured lint tasks pass.
 
+### BDS-148 - Completed operational-failure tickets silently lost outcome lineage
+
+- Status: `local_and_exact_retained_rescore_green_new_sealed_cycle_pending`
+- Priority: lifecycle integrity, duplicate-mining prevention, objective-blocking
+- Objective impact: a correctly delivered and honestly `mitigated` case remained `active` during regeneration, so its source evidence could be mined again as novel work despite a verified PR, original-scenario proof, and outcome record. This is material evidence loss and correctly stopped the next model-backed frontier before its first call.
+- Exact evidence: the completed generated ticket `20260719_98bf1a4afbdd9048_Route-failed-verification-through-typed-run-error-artifacts.md` contains one explicit evidence atom, `operational_failure:ed1fb042...:0574a5ad...`. The plan index parsed the complete `mitigated` outcome, but plan-folder sync reported the ticket among 24 records without evidence and created no atom-action entry for its case. The atom-ID validator required the last component to be a one-based integer; all five current `operational_failure:<64-hex-signature>:<64-hex-occurrence-set>` atoms therefore failed even though this is the canonical runner-generated identity contract.
+- Correction: plan provenance accepts the exact content-addressed operational-failure shape in addition to run-namespaced atom IDs. It does not accept arbitrary colon-delimited strings, malformed digests, unrelated backticks, or prose.
+- Closure proof: five focused parser/outcome tests pass, the full `backlog_repo` suite passes, seven backlog integration outcome/plan-folder tests pass, and Ruff/diff checks pass. Exact retained rescore reduced tickets-without-evidence from 24 to 23, attached the full outcome to the historical operational atom, changed `case:4f13410712b8654b0e93` from `active` to `mitigated`, and returned `invalid_outcome_records=0` and `provenance_failed_outcome_records=0`. A fresh sealed bundle and Sol/high Stage 1/2 run must still prove the case is not re-mined.
+
+### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
+
+- Status: `closed_immediate_unbounded_read`
+- Classification: one supervisor diagnostic invocation error, not a product, test, model, or pipeline-stage failure
+- Exact evidence: a read-only atom-ID family enumeration redundantly requested full bundle-file verification and was killed at 124 seconds by the shell timeout before producing output. It made no model, Docker, export, ticket, implementation, or repository mutation call.
+- Containment and result: the already-sealed bundle was read directly under the normal long ceiling; it completed in 1.9 seconds and showed exactly five non-run-shaped IDs, all canonical `operational_failure` atoms. No incomplete output was used as evidence and no test was shortened.
+
 ### AN-38 - First focused rerun used a stale package-local dependency copy
 
 - Status: `closed_canonical_source_graph_rerun_green`
