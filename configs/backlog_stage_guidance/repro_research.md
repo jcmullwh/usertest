@@ -88,6 +88,20 @@ acceptable operational behavior. Record desired behavior, known-safe constraints
 paths, and the live-runtime obligation for downstream use.
 Keep code/test confidence separate from live-runtime proof.
 
+For an exact wrong-output scenario whose current command exits zero, a research-only pytest harness may
+assert the source-grounded corrected behavior so the current revision fails first. The harness must call
+the inspected production entrypoint and let that production result determine the assertion; it must not
+reimplement the mechanism or hard-code a synthetic marker. Run the exact pytest node and declare
+`positive_outcome_contract={"contract_kind":"retained_harness_semantic_assertion",
+"binds_hypothesis_id":"the primary hypothesis ID","expected_value":<typed desired value>,
+"semantic_relation":"exact_expected_value | logical_correction_of_source_failure |
+required_operational_property | repository_contract_requirement","semantic_rationale":"why the value
+is required","semantic_basis":{"kind":"authenticated_semantic_citation","atom_id":"assigned atom",
+"field_path":"$.source-grounded field"}}`. The command must fail nonzero only because that semantic
+assertion is currently false. When the runner verifies its data flow to the selected mechanism, it
+content-addresses the `.usertest_research` harness as a staged replay asset for later stages. This is an
+optional portability aid for useful wrong-output cases, not a universal readiness gate.
+
 ## Verification boundary
 
 An experiment may declare `verification_boundary={boundary_kind,requires_live_verification,

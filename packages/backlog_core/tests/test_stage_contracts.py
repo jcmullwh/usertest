@@ -2234,7 +2234,38 @@ def test_research_prompt_projection_excludes_runner_only_content() -> None:
     assert marker not in json.dumps(projection)
     assert "artifacts" not in projection
     assert "repo_workspace" not in projection
-    assert projection["evidence_verification"] == dossier["evidence_verification"]
+    assert projection["evidence_verification"] != dossier["evidence_verification"]
+    assert projection["evidence_verification"]["status"] == "verified"
+    assert (
+        projection["evidence_verification"]["receipt_sha256"]
+        == dossier["evidence_verification"]["receipt_sha256"]
+    )
+    assert "evidence_source_attempts" not in projection["evidence_verification"]
+    assignment = projection["evidence_assignment"]
+    assert assignment["assignment_sha256"] == dossier["evidence_assignment"][
+        "assignment_sha256"
+    ]
+    assert assignment["atom_receipts"][0]["snapshot"]["text"] == "failure"
+    assert "atom_snapshot" not in assignment["atom_receipts"][0]
+
+
+def test_research_prompt_projection_bounds_large_runner_custody_payload() -> None:
+    marker = "RUNNER_CUSTODY_PAYLOAD_DO_NOT_FORWARD"
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    receipt["evidence_source_attempts"] = [{"raw": marker + ("x" * 1_100_000)}]
+    receipt["evidence_source_attempts_sha256"] = "9" * 64
+    _refresh_receipt_hashes(dossier)
+
+    projection = research_prompt_projection(dossier)
+    encoded = json.dumps(projection, ensure_ascii=False)
+
+    assert marker not in encoded
+    assert len(encoded) < 100_000
+    custody = projection["evidence_verification"]["source_custody_summary"]
+    assert custody["evidence_source_attempt_count"] == 1
+    assert custody["evidence_source_attempts_sha256"] == "9" * 64
+    assert projection["experiments"] == dossier["experiments"]
 
 
 def test_parse_research_dossier_list_accepts_valid() -> None:

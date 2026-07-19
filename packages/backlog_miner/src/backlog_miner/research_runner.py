@@ -505,9 +505,7 @@ def _authenticate_assignment_source_classifications(
             expected = source_observation_classification(atom)
             observed = receipt.get("source_classification")
             if observed is not None and observed != expected:
-                raise ValueError(
-                    f"research_source_classification_mismatch:{atom_id}"
-                )
+                raise ValueError(f"research_source_classification_mismatch:{atom_id}")
             receipt["source_classification"] = expected
         authenticated_receipts.append(receipt)
     authenticated["atom_receipts"] = authenticated_receipts
@@ -549,6 +547,7 @@ def _model_owned_dossier_projection(dossier: Mapping[str, Any]) -> dict[str, Any
     runner later appends its own ``runner:*`` receipts. Remove only that reserved namespace
     when matching a persisted dossier back to the immutable model-output attempt.
     """
+
     def runner_owned_ref(value: Any) -> bool:
         if isinstance(value, str):
             return value.startswith("runner:")
@@ -574,9 +573,7 @@ def _model_owned_dossier_projection(dossier: Mapping[str, Any]) -> dict[str, Any
                 experiment = dict(item)
                 refs = experiment.get("artifact_refs")
                 if isinstance(refs, list):
-                    experiment["artifact_refs"] = [
-                        ref for ref in refs if not runner_owned_ref(ref)
-                    ]
+                    experiment["artifact_refs"] = [ref for ref in refs if not runner_owned_ref(ref)]
                 projected_value.append(experiment)
         projection[key] = json.loads(json.dumps(projected_value, ensure_ascii=False))
     return projection
@@ -1715,12 +1712,14 @@ def _research_retry_remediation_hints(
                 "interpretation of an authenticated source field rather than its exact value, use "
                 "authenticated_semantic_citation with the real atom_id, field_path, "
                 "semantic_relation, and a substantive semantic_rationale. Preserve the observed "
-                "selectors and implementation touchpoint unless the evidence disproves them."
+                "selectors and implementation touchpoint unless the evidence disproves them. "
+                "When the adapter belongs only to a non-primary refuted diagnostic and its "
+                "retained observations do not establish the claimed causal intervention, remove "
+                "that optional hypothesis and its linked adapter while retaining the experiments "
+                "and results; do not manufacture causal proof for a disproved explanation."
             )
         elif code == "research_dossier_proof_adapter_semantic_basis_invalid":
-            target_fields = [
-                "experiments[].proof_adapter.positive_outcome.semantic_basis"
-            ]
+            target_fields = ["experiments[].proof_adapter.positive_outcome.semantic_basis"]
             required_change = (
                 "Use one flat tagged semantic-basis object with a nonempty top-level kind. "
                 "For an authenticated inspected API quote, use "
@@ -1788,9 +1787,7 @@ def _research_retry_remediation_hints(
                 "do not invent evidence to satisfy the field."
             )
         elif code.startswith("research_actionability_assessment_"):
-            target_fields = [
-                "extensions.backlog_repro_research.actionability_assessment"
-            ]
+            target_fields = ["extensions.backlog_repro_research.actionability_assessment"]
             required_change = (
                 "Assess current actionability separately from evidence sufficiency. Use "
                 "requires_change, already_addressed, non_actionable, or undetermined; provide a "
@@ -1938,9 +1935,7 @@ def _research_retry_remediation_hints(
                 "file in inspected_files. Do not replace a useful observed harness with a "
                 "different test command merely to change this authorization error."
             )
-        elif code.startswith(
-            "research_dossier_invalid_experiment_repository_binding"
-        ):
+        elif code.startswith("research_dossier_invalid_experiment_repository_binding"):
             target_fields = ["experiments[].repository_bindings"]
             required_change = (
                 "repository_bindings is optional and, when present, must be a nonempty list of "
@@ -2038,6 +2033,7 @@ def _research_retry_remediation_hints(
         elif code == "experiment_replay_workspace_mutated":
             target_fields = ["experiments[].replay_setup.disposable_state_paths"]
             required_change = (
+                "The trailing finding identifies the exact undeclared path (or index/head state). "
                 "If the replay intentionally creates case-local state, declare only those exact "
                 "relative paths in replay_setup.disposable_state_paths; otherwise change the "
                 "research harness to avoid the mutation. Never declare tracked product paths or "
@@ -2080,13 +2076,26 @@ def _research_retry_remediation_hints(
                 "Emit one complete troubleshoot_v1 JSON report with the required research "
                 "extension; rerun the research rather than repairing JSON in isolation."
             )
+        elif code == "research_dossier_refuted_hypothesis_missing_disproved_attempt":
+            target_fields = ["root_cause_hypotheses[]"]
+            required_change = (
+                "A refuted hypothesis requires an actual disproved paired intervention. Preserve "
+                "it when the retained experiments establish that proof. When it is only a "
+                "non-primary diagnostic whose proposed intervention was rejected, remove the "
+                "optional hypothesis and its linked proof adapter while retaining the underlying "
+                "experiments as diagnostic or counterevidence. Do not invent a falsification "
+                "attempt merely to preserve the hypothesis shape."
+            )
         elif "falsification_attempt" in code:
             target_fields = ["root_cause_hypotheses[].falsification_attempts[]"]
             required_change = (
                 "Use an attempt only for a genuine paired causal intervention. Copy the exact "
                 "hypothesis ID and statement, bind distinct declared baseline/challenge "
                 "experiments, and state a machine-checkable disproof condition. An empty list is "
-                "correct when no honest counterfactual exists."
+                "correct when no honest counterfactual exists. When this invalid attempt is the "
+                "only reason to retain a non-primary refuted diagnostic, remove that optional "
+                "hypothesis and its linked proof adapter while preserving the experiments and "
+                "results; do not fabricate a replacement intervention."
             )
         elif code in {
             "falsification_intervention_shared_mechanism_missing",
@@ -2341,6 +2350,94 @@ def _narrow_repair_path(
     return normalized
 
 
+def _validation_error_names_identity(error: str, identity: str) -> bool:
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_.-]){re.escape(identity)}(?![A-Za-z0-9_.-])",
+            str(error),
+        )
+        is not None
+    )
+
+
+def _verifier_rejected_refuted_hypothesis_targets(
+    dossier: Mapping[str, Any],
+    validation_errors: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """Return optional refuted hypotheses whose authored causal proof was rejected.
+
+    A refuted diagnostic is useful only when its evidence supports the refutation.  It must not
+    become a permanent structure that the correction loop forces an author to defend after the
+    verifier rejects its falsification or proof adapter.  Bind the decision to an exact non-primary
+    hypothesis or one of its exact adapter experiments so an unrelated verifier finding cannot
+    authorize broad hypothesis deletion.
+    """
+
+    hypotheses_raw = dossier.get("root_cause_hypotheses")
+    hypotheses = hypotheses_raw if isinstance(hypotheses_raw, list) else []
+    experiments_raw = dossier.get("experiments")
+    experiments = experiments_raw if isinstance(experiments_raw, list) else []
+    adapter_indexes_by_hypothesis: dict[str, list[int]] = {}
+    adapter_experiment_ids_by_hypothesis: dict[str, set[str]] = {}
+    for index, experiment in enumerate(experiments):
+        if not isinstance(experiment, Mapping):
+            continue
+        adapter = experiment.get("proof_adapter")
+        hypothesis_id = (
+            _coerce_str(adapter.get("hypothesis_id")) if isinstance(adapter, Mapping) else None
+        )
+        experiment_id = _coerce_str(experiment.get("experiment_id"))
+        if hypothesis_id is None or experiment_id is None:
+            continue
+        adapter_indexes_by_hypothesis.setdefault(hypothesis_id, []).append(index)
+        adapter_experiment_ids_by_hypothesis.setdefault(hypothesis_id, set()).add(experiment_id)
+
+    proof_rejection_prefixes = (
+        "falsification_",
+        "proof_adapter_",
+        "research_dossier_falsification_",
+        "research_dossier_proof_adapter_",
+    )
+    exact_proof_rejections = {
+        "research_dossier_refuted_hypothesis_missing_disproved_attempt",
+    }
+    targets: dict[str, dict[str, Any]] = {}
+    for index, hypothesis in enumerate(hypotheses):
+        if (
+            index == 0
+            or not isinstance(hypothesis, Mapping)
+            or hypothesis.get("disposition") != "refuted"
+        ):
+            continue
+        hypothesis_id = _coerce_str(hypothesis.get("hypothesis_id"))
+        if hypothesis_id is None:
+            continue
+        adapter_experiment_ids = adapter_experiment_ids_by_hypothesis.get(hypothesis_id, set())
+        rejected = False
+        for validation_error in validation_errors:
+            error = str(validation_error)
+            code = error.partition(":")[0].strip()
+            if not (code in exact_proof_rejections or code.startswith(proof_rejection_prefixes)):
+                continue
+            if _validation_error_names_identity(error, hypothesis_id) or (
+                "proof_adapter" in code
+                and any(
+                    _validation_error_names_identity(error, experiment_id)
+                    for experiment_id in adapter_experiment_ids
+                )
+            ):
+                rejected = True
+                break
+        if rejected:
+            targets[hypothesis_id] = {
+                "hypothesis_index": index,
+                "adapter_experiment_indexes": list(
+                    adapter_indexes_by_hypothesis.get(hypothesis_id, [])
+                ),
+            }
+    return targets
+
+
 def _targeted_repair_authorized_paths(
     validation_errors: Sequence[str],
     *,
@@ -2356,6 +2453,19 @@ def _targeted_repair_authorized_paths(
             narrowed = _narrow_repair_path(str(path), error=error, dossier=dossier)
             if narrowed and narrowed not in paths:
                 paths.append(narrowed)
+    rejected_refuted_targets = _verifier_rejected_refuted_hypothesis_targets(dossier, errors)
+    if rejected_refuted_targets:
+        # List deletion is represented as a change to the collection, not an indexed field.
+        # Authorize that honest narrowing plus removal of only adapters attached to the rejected
+        # optional hypotheses.  The correction-frontier guard below still requires all underlying
+        # observations to remain intact.
+        if "root_cause_hypotheses[]" not in paths:
+            paths.append("root_cause_hypotheses[]")
+        for target in rejected_refuted_targets.values():
+            for experiment_index in target["adapter_experiment_indexes"]:
+                adapter_path = f"experiments[{experiment_index}].proof_adapter"
+                if adapter_path not in paths:
+                    paths.append(adapter_path)
     # Unknown validators are deliberately repairable. Their verbatim error and generic extension
     # target let the same author session self-correct without waiting for a prompt-code release.
     return paths or ["*"]
@@ -2431,8 +2541,7 @@ def _preserve_omitted_unchanged_origin_bindings(
     baseline_by_id = {
         str(item["experiment_id"]): item
         for item in baseline_experiments_raw
-        if isinstance(item, Mapping)
-        and _coerce_str(item.get("experiment_id")) is not None
+        if isinstance(item, Mapping) and _coerce_str(item.get("experiment_id")) is not None
     }
     immutable_fields = (
         "experiment_id",
@@ -2474,25 +2583,16 @@ def _preserve_omitted_unchanged_origin_bindings(
         baseline_bindings = baseline_experiment.get("origin_evidence_bindings")
         authored_bindings_raw = authored_experiment.get("origin_evidence_bindings")
         authored_bindings = (
-            []
-            if "origin_evidence_bindings" not in authored_experiment
-            else authored_bindings_raw
+            [] if "origin_evidence_bindings" not in authored_experiment else authored_bindings_raw
         )
         if not isinstance(baseline_bindings, list) or not isinstance(authored_bindings, list):
             continue
-        baseline_binding_hashes = [
-            _canonical_json_sha256(binding) for binding in baseline_bindings
-        ]
-        authored_binding_hashes = [
-            _canonical_json_sha256(binding) for binding in authored_bindings
-        ]
-        if (
-            len(authored_binding_hashes) >= len(baseline_binding_hashes)
-            or any(
-                authored_binding_hashes.count(binding_hash)
-                > baseline_binding_hashes.count(binding_hash)
-                for binding_hash in set(authored_binding_hashes)
-            )
+        baseline_binding_hashes = [_canonical_json_sha256(binding) for binding in baseline_bindings]
+        authored_binding_hashes = [_canonical_json_sha256(binding) for binding in authored_bindings]
+        if len(authored_binding_hashes) >= len(baseline_binding_hashes) or any(
+            authored_binding_hashes.count(binding_hash)
+            > baseline_binding_hashes.count(binding_hash)
+            for binding_hash in set(authored_binding_hashes)
         ):
             continue
         authored_experiment["origin_evidence_bindings"] = json.loads(
@@ -2828,9 +2928,7 @@ def _retained_advancement_regression_count(
     if (
         source_sha256 is None
         or source_sha256 != research_attempt_sha256(source_attempt)
-        or _dedupe_validation_errors(
-            _string_list(source_attempt.get("validation_errors_after"))
-        )
+        or _dedupe_validation_errors(_string_list(source_attempt.get("validation_errors_after")))
         != _dedupe_validation_errors(current_errors)
     ):
         return 0
@@ -3152,9 +3250,9 @@ def _verifier_rejected_falsification_roles(
             )
         }
         if rejected_attempt_ids == prior_attempt_ids:
-            revisions[
-                f"root_cause_hypotheses[{hypothesis_id}].falsification"
-            ] = rejected_attempt_ids
+            revisions[f"root_cause_hypotheses[{hypothesis_id}].falsification"] = (
+                rejected_attempt_ids
+            )
     return revisions
 
 
@@ -3200,9 +3298,7 @@ def _epistemic_downgrade_basis(
         if not isinstance(experiment, Mapping) or experiment.get("outcome") != "supports":
             return False
         prior = before_experiments.get(experiment_id)
-        return prior is None or _canonical_json_sha256(prior) != _canonical_json_sha256(
-            experiment
-        )
+        return prior is None or _canonical_json_sha256(prior) != _canonical_json_sha256(experiment)
 
     def hypotheses_by_id(dossier: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
         raw = dossier.get("root_cause_hypotheses")
@@ -3245,6 +3341,165 @@ def _epistemic_downgrade_basis(
     return list(dict.fromkeys(basis))
 
 
+def _experiment_attribution_projection(experiment: Mapping[str, Any]) -> dict[str, Any]:
+    """Project retained observation and source assignment, excluding authored proof wrappers."""
+
+    # Runner replay references are appended after model output and therefore legitimately
+    # disappear from a same-author candidate before the verifier rematerializes them.  Proof
+    # adapters are authored interpretations of these observations, so they are deliberately not
+    # part of the projection either.
+    fields = (
+        "experiment_id",
+        "scenario_kind",
+        "addresses_atom_ids",
+        "command",
+        "result",
+        "outcome",
+        "exit_code",
+        "observable_assertion",
+        "origin_evidence_bindings",
+        "control_relationship",
+    )
+    return {field: experiment.get(field) for field in fields if field in experiment}
+
+
+def _evidence_preserving_refuted_hypothesis_removals(
+    before_dossier: Mapping[str, Any],
+    after_dossier: Mapping[str, Any],
+    *,
+    validation_errors: Sequence[str],
+    lost_roles: Sequence[str],
+) -> tuple[set[str], list[str]]:
+    """Accept removal of verifier-rejected optional explanations without losing observations.
+
+    The primary mechanism remains protected.  This exception applies only to a non-primary
+    ``refuted`` hypothesis whose own falsification or proof adapter is named by the verifier, and
+    only when every experiment/artifact it cited remains unchanged at the attribution layer.
+    Consequently, the author may stop presenting a disproved diagnostic as causal research, but
+    cannot use the finding to delete the data, change actionability, or weaken the primary case.
+    """
+
+    rejected_targets = _verifier_rejected_refuted_hypothesis_targets(
+        before_dossier,
+        validation_errors,
+    )
+    if not rejected_targets:
+        return set(), []
+
+    before_hypotheses_raw = before_dossier.get("root_cause_hypotheses")
+    after_hypotheses_raw = after_dossier.get("root_cause_hypotheses")
+    before_hypotheses = [
+        item
+        for item in (before_hypotheses_raw if isinstance(before_hypotheses_raw, list) else [])
+        if isinstance(item, Mapping)
+    ]
+    after_hypotheses = [
+        item
+        for item in (after_hypotheses_raw if isinstance(after_hypotheses_raw, list) else [])
+        if isinstance(item, Mapping)
+    ]
+    if not before_hypotheses or not after_hypotheses:
+        return set(), []
+    if _canonical_json_sha256(before_hypotheses[0]) != _canonical_json_sha256(after_hypotheses[0]):
+        return set(), []
+    if before_dossier.get("research_status") != after_dossier.get(
+        "research_status"
+    ) or before_dossier.get("actionability_assessment") != after_dossier.get(
+        "actionability_assessment"
+    ):
+        return set(), []
+
+    before_hypotheses_by_id = {
+        str(item["hypothesis_id"]): item
+        for item in before_hypotheses
+        if _coerce_str(item.get("hypothesis_id")) is not None
+    }
+    after_hypothesis_ids = {
+        str(item["hypothesis_id"])
+        for item in after_hypotheses
+        if _coerce_str(item.get("hypothesis_id")) is not None
+    }
+    removed_ids = set(rejected_targets) - after_hypothesis_ids
+    if not removed_ids:
+        return set(), []
+
+    removable_roles = {
+        role
+        for hypothesis_id in removed_ids
+        for role in (
+            f"root_cause_hypotheses[{hypothesis_id}].mechanism",
+            f"root_cause_hypotheses[{hypothesis_id}].supported",
+            f"root_cause_hypotheses[{hypothesis_id}].falsification",
+            f"causal_proof[{hypothesis_id}].controlled_adapter",
+            f"causal_proof[{hypothesis_id}].implementation_touchpoint",
+        )
+    }
+    removable_lost_roles = set(lost_roles) & removable_roles
+    if not removable_lost_roles:
+        return set(), []
+
+    def records_by_id(
+        dossier: Mapping[str, Any], collection: str, identity_field: str
+    ) -> dict[str, Mapping[str, Any]]:
+        raw = dossier.get(collection)
+        return {
+            str(item[identity_field]): item
+            for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, Mapping) and _coerce_str(item.get(identity_field)) is not None
+        }
+
+    before_experiments = records_by_id(before_dossier, "experiments", "experiment_id")
+    after_experiments = records_by_id(after_dossier, "experiments", "experiment_id")
+    before_artifacts = records_by_id(before_dossier, "artifact_refs", "artifact_id")
+    after_artifacts = records_by_id(after_dossier, "artifact_refs", "artifact_id")
+
+    for hypothesis_id in removed_ids:
+        hypothesis = before_hypotheses_by_id[hypothesis_id]
+        evidence_ids = {
+            *_string_list(hypothesis.get("supporting_evidence")),
+            *_string_list(hypothesis.get("counterevidence")),
+            *_string_list(hypothesis.get("disposition_evidence")),
+        }
+        attempts_raw = hypothesis.get("falsification_attempts")
+        for attempt in attempts_raw if isinstance(attempts_raw, list) else []:
+            if not isinstance(attempt, Mapping):
+                continue
+            evidence_ids.update(
+                value
+                for value in (
+                    _coerce_str(attempt.get("baseline_experiment_id")),
+                    _coerce_str(attempt.get("challenge_experiment_id")),
+                )
+                if value is not None
+            )
+        evidence_ids.update(
+            experiment_id
+            for experiment_id, experiment in before_experiments.items()
+            if isinstance(experiment.get("proof_adapter"), Mapping)
+            and experiment["proof_adapter"].get("hypothesis_id") == hypothesis_id
+        )
+        for evidence_id in evidence_ids:
+            if evidence_id in before_experiments:
+                after_experiment = after_experiments.get(evidence_id)
+                if not isinstance(after_experiment, Mapping) or _canonical_json_sha256(
+                    _experiment_attribution_projection(before_experiments[evidence_id])
+                ) != _canonical_json_sha256(_experiment_attribution_projection(after_experiment)):
+                    return set(), []
+            elif evidence_id in before_artifacts:
+                after_artifact = after_artifacts.get(evidence_id)
+                if not isinstance(after_artifact, Mapping) or _canonical_json_sha256(
+                    before_artifacts[evidence_id]
+                ) != _canonical_json_sha256(after_artifact):
+                    return set(), []
+            else:
+                return set(), []
+
+    return removable_lost_roles, [
+        f"validator_rejected_noncausal_refuted_hypothesis_removed[{hypothesis_id}]"
+        for hypothesis_id in sorted(removed_ids)
+    ]
+
+
 def _unsupported_substantive_coverage_loss(
     before_dossier: Mapping[str, Any],
     after_dossier: Mapping[str, Any],
@@ -3277,16 +3532,12 @@ def _unsupported_substantive_coverage_loss(
         else None
     )
     after_disposition = (
-        after_actionability.get("disposition")
-        if isinstance(after_actionability, Mapping)
-        else None
+        after_actionability.get("disposition") if isinstance(after_actionability, Mapping) else None
     )
     terminal_dispositions = {"already_addressed", "non_actionable"}
     terminal_planning_roles = (
         re.compile(r"^root_cause_hypotheses\[[^]]+\]\.(?:mechanism|falsification)$"),
-        re.compile(
-            r"^causal_proof\[[^]]+\]\.(?:controlled_adapter|implementation_touchpoint)$"
-        ),
+        re.compile(r"^causal_proof\[[^]]+\]\.(?:controlled_adapter|implementation_touchpoint)$"),
     )
     if (
         before_dossier.get("research_status") == "evidence_sufficient"
@@ -3294,8 +3545,7 @@ def _unsupported_substantive_coverage_loss(
         and before_disposition == after_disposition
         and after_disposition in terminal_dispositions
         and all(
-            any(pattern.fullmatch(role) for pattern in terminal_planning_roles)
-            for role in lost
+            any(pattern.fullmatch(role) for pattern in terminal_planning_roles) for role in lost
         )
     ):
         after_coverage = _substantive_research_coverage(after_dossier)
@@ -3318,24 +3568,18 @@ def _unsupported_substantive_coverage_loss(
     # and leaves the primary mechanism and actionability unchanged. Without this
     # exception the self-healing loop rejects the exact correction it requested and
     # pressures the next turn to reconstruct a knowingly non-competing alternative.
-    error_identities = {
-        _validation_error_identity(error) for error in validation_errors
-    }
+    error_identities = {_validation_error_identity(error) for error in validation_errors}
     if "unresolved_alternative_hypothesis_not_materialized" in error_identities:
         before_hypotheses_raw = before_dossier.get("root_cause_hypotheses")
         after_hypotheses_raw = after_dossier.get("root_cause_hypotheses")
         before_hypotheses = [
             item
-            for item in (
-                before_hypotheses_raw if isinstance(before_hypotheses_raw, list) else []
-            )
+            for item in (before_hypotheses_raw if isinstance(before_hypotheses_raw, list) else [])
             if isinstance(item, Mapping)
         ]
         after_hypotheses = [
             item
-            for item in (
-                after_hypotheses_raw if isinstance(after_hypotheses_raw, list) else []
-            )
+            for item in (after_hypotheses_raw if isinstance(after_hypotheses_raw, list) else [])
             if isinstance(item, Mapping)
         ]
         after_ids = {
@@ -3349,9 +3593,7 @@ def _unsupported_substantive_coverage_loss(
             if item.get("disposition") in {"plausible", "unresolved"}
             and _coerce_str(item.get("hypothesis_id")) not in after_ids
         ]
-        removed_ids = {
-            str(item.get("hypothesis_id")) for item in removed_alternatives
-        }
+        removed_ids = {str(item.get("hypothesis_id")) for item in removed_alternatives}
         removable_roles = {
             f"root_cause_hypotheses[{hypothesis_id}].{role}"
             for hypothesis_id in removed_ids
@@ -3364,8 +3606,7 @@ def _unsupported_substantive_coverage_loss(
                 if isinstance(before_dossier.get("experiments"), list)
                 else []
             )
-            if isinstance(item, Mapping)
-            and _coerce_str(item.get("experiment_id")) is not None
+            if isinstance(item, Mapping) and _coerce_str(item.get("experiment_id")) is not None
         }
         after_experiments = {
             str(item.get("experiment_id")): item
@@ -3374,42 +3615,18 @@ def _unsupported_substantive_coverage_loss(
                 if isinstance(after_dossier.get("experiments"), list)
                 else []
             )
-            if isinstance(item, Mapping)
-            and _coerce_str(item.get("experiment_id")) is not None
+            if isinstance(item, Mapping) and _coerce_str(item.get("experiment_id")) is not None
         }
-
-        def attribution_projection(experiment: Mapping[str, Any]) -> dict[str, Any]:
-            # Runner replay references are appended after model output and therefore
-            # legitimately disappear from a same-author candidate before the verifier
-            # rematerializes them. Bind the actual observation and source assignment,
-            # not that runner-owned artifact-list suffix.
-            fields = (
-                "experiment_id",
-                "scenario_kind",
-                "addresses_atom_ids",
-                "command",
-                "result",
-                "outcome",
-                "exit_code",
-                "observable_assertion",
-                "origin_evidence_bindings",
-                "control_relationship",
-            )
-            return {
-                field: experiment.get(field)
-                for field in fields
-                if field in experiment
-            }
 
         retained_support = all(
             evidence_id not in before_experiments
             or (
                 evidence_id in after_experiments
                 and _canonical_json_sha256(
-                    attribution_projection(after_experiments[evidence_id])
+                    _experiment_attribution_projection(after_experiments[evidence_id])
                 )
                 == _canonical_json_sha256(
-                    attribution_projection(before_experiments[evidence_id])
+                    _experiment_attribution_projection(before_experiments[evidence_id])
                 )
             )
             for hypothesis in removed_alternatives
@@ -3428,8 +3645,7 @@ def _unsupported_substantive_coverage_loss(
             and set(lost).issubset(removable_roles)
             and retained_support
             and primary_unchanged
-            and before_dossier.get("research_status")
-            == after_dossier.get("research_status")
+            and before_dossier.get("research_status") == after_dossier.get("research_status")
             and before_dossier.get("actionability_assessment")
             == after_dossier.get("actionability_assessment")
             and bool(after_boundaries - before_boundaries)
@@ -3438,6 +3654,18 @@ def _unsupported_substantive_coverage_loss(
                 f"readiness_adjudicated_noncompeting_alternative_removed[{hypothesis_id}]"
                 for hypothesis_id in sorted(removed_ids)
             ]
+
+    refuted_removals, refuted_removal_basis = _evidence_preserving_refuted_hypothesis_removals(
+        before_dossier,
+        after_dossier,
+        validation_errors=validation_errors,
+        lost_roles=lost,
+    )
+    if refuted_removals:
+        remaining = [role for role in lost if role not in refuted_removals]
+        if not remaining:
+            return [], refuted_removal_basis
+        lost = remaining
 
     rejected_experiments = _verifier_rejected_direct_support_experiments(
         before_dossier,
@@ -3468,7 +3696,7 @@ def _unsupported_substantive_coverage_loss(
         and not verifier_falsification_revisions
         and not verifier_unknown_atom_revisions
     ):
-        return lost, []
+        return lost, refuted_removal_basis
     remaining = [
         role
         for role in lost
@@ -3476,29 +3704,28 @@ def _unsupported_substantive_coverage_loss(
         and role not in verifier_falsification_revisions
         and role not in verifier_unknown_atom_revisions
     ]
-    basis = [
-        f"validator_rejected_direct_support[{experiment_id}]"
-        for experiment_id in sorted(
-            {
-                experiment_id
-                for sources in verifier_direct_revisions.values()
-                for experiment_id in sources
-            }
-        )
-    ]
+    basis = list(refuted_removal_basis)
+    basis.extend(
+        [
+            f"validator_rejected_direct_support[{experiment_id}]"
+            for experiment_id in sorted(
+                {
+                    experiment_id
+                    for sources in verifier_direct_revisions.values()
+                    for experiment_id in sources
+                }
+            )
+        ]
+    )
     for role, attempt_ids in sorted(verifier_falsification_revisions.items()):
-        hypothesis_id = role.removeprefix("root_cause_hypotheses[").removesuffix(
-            "].falsification"
-        )
+        hypothesis_id = role.removeprefix("root_cause_hypotheses[").removesuffix("].falsification")
         basis.extend(
             f"validator_rejected_falsification[{hypothesis_id}][{attempt_id}]"
             for attempt_id in sorted(attempt_ids)
         )
     basis.extend(
         "validator_rejected_unknown_origin_atom["
-        + role.removeprefix("origin_atom[").removesuffix(
-            "].direct_experimental_coverage"
-        )
+        + role.removeprefix("origin_atom[").removesuffix("].direct_experimental_coverage")
         + "]"
         for role in sorted(verifier_unknown_atom_revisions)
     )
@@ -3581,9 +3808,7 @@ def _repair_contract(
             json.dumps(dict(verifier_diagnostics), ensure_ascii=False)
         )
         contract["verifier_diagnostics"] = immutable_diagnostics
-        contract["verifier_diagnostics_sha256"] = _canonical_json_sha256(
-            immutable_diagnostics
-        )
+        contract["verifier_diagnostics_sha256"] = _canonical_json_sha256(immutable_diagnostics)
     contract["repair_contract_sha256"] = _canonical_json_sha256(contract)
     return contract
 
@@ -3611,9 +3836,7 @@ def _authenticated_prior_continuation_feedback(
         reference.get("source_attempt_sha256") != feedback.get("source_attempt_sha256")
         or reference.get("source_attempted_dossier_sha256")
         != feedback.get("candidate_dossier_sha256")
-        or _dedupe_validation_errors(
-            _string_list(reference.get("source_validation_errors"))
-        )
+        or _dedupe_validation_errors(_string_list(reference.get("source_validation_errors")))
         != _dedupe_validation_errors(_string_list(feedback.get("validation_errors")))
     ):
         return None
@@ -3744,12 +3967,9 @@ def _materialize_research_attempt_validation_error_rescore(
     if (
         authenticated is None
         or authored.get("source_attempt_sha256") != source_sha256
-        or rescore.get("source_validation_errors")
-        != source.get("validation_errors_after")
-        or rescore.get("replacement_validation_errors")
-        != authored.get("validation_errors_before")
-        or rescore.get("source_validation_errors")
-        == rescore.get("replacement_validation_errors")
+        or rescore.get("source_validation_errors") != source.get("validation_errors_after")
+        or rescore.get("replacement_validation_errors") != authored.get("validation_errors_before")
+        or rescore.get("source_validation_errors") == rescore.get("replacement_validation_errors")
     ):
         raise ValueError("research_attempt_validation_error_rescore_binding_invalid")
     lineage = dict(rescore)
@@ -3850,16 +4070,12 @@ def materialize_verified_research_validation_error_rescore(
     authenticated = _authenticated_validation_error_rescore(
         {
             "validation_error_rescore": dict(validation_error_rescore),
-            "validation_error_rescore_sha256": _canonical_json_sha256(
-                validation_error_rescore
-            ),
+            "validation_error_rescore_sha256": _canonical_json_sha256(validation_error_rescore),
         },
         source_attempt=source_attempt,
         replacement_errors=[],
     )
-    if authenticated is None or validation_error_rescore.get(
-        "replacement_validation_errors"
-    ) != []:
+    if authenticated is None or validation_error_rescore.get("replacement_validation_errors") != []:
         raise ValueError("research_verified_rescore_authentication_failed")
 
     replay_path_raw = _coerce_str(validation_error_rescore.get("rescore_receipt_path"))
@@ -3885,8 +4101,7 @@ def materialize_verified_research_validation_error_rescore(
         or any(replay.get(field) != 0 for field in invocation_fields)
         or replay.get("receipt_sha256") != _canonical_json_sha256(replay_without_hash)
         or replay.get("current_attempt_sha256") != source_sha256
-        or replay.get("candidate_dossier_sha256")
-        != source_attempt.get("attempted_dossier_sha256")
+        or replay.get("candidate_dossier_sha256") != source_attempt.get("attempted_dossier_sha256")
     ):
         raise ValueError("research_verified_rescore_replay_custody_invalid")
 
@@ -3934,15 +4149,18 @@ def materialize_verified_research_validation_error_rescore(
 
     report_path = copied_run / "report.json"
     session_id = _coerce_str(source_attempt.get("agent_session_id"))
-    attempt_number = max(
-        [
-            int(attempt.get("attempt_number"))
-            for attempt in attempts
-            if isinstance(attempt.get("attempt_number"), int)
-            and not isinstance(attempt.get("attempt_number"), bool)
-        ],
-        default=0,
-    ) + 1
+    attempt_number = (
+        max(
+            [
+                int(attempt.get("attempt_number"))
+                for attempt in attempts
+                if isinstance(attempt.get("attempt_number"), int)
+                and not isinstance(attempt.get("attempt_number"), bool)
+            ],
+            default=0,
+        )
+        + 1
+    )
     terminal = _research_attempt_record(
         attempt_number=attempt_number,
         outcome="evidence_verification_rescore_valid",
@@ -4024,9 +4242,7 @@ def materialize_verified_research_persistence_replay(
         else []
     )
     normalized_reason = _coerce_str(reason)
-    normalized_defect_ids = _dedupe_validation_errors(
-        _string_list(list(persistence_defect_ids))
-    )
+    normalized_defect_ids = _dedupe_validation_errors(_string_list(list(persistence_defect_ids)))
     replay_path = Path(replay_receipt_path).resolve()
     try:
         replay = _load_json_object(replay_path)
@@ -4047,12 +4263,9 @@ def materialize_verified_research_persistence_replay(
         raise ValueError("research_persistence_replay_source_not_exact")
     source_attempt = source_matches[0][1]
     failed_receipt_raw = retained.get("evidence_verification")
-    failed_receipt = (
-        failed_receipt_raw if isinstance(failed_receipt_raw, Mapping) else {}
-    )
+    failed_receipt = failed_receipt_raw if isinstance(failed_receipt_raw, Mapping) else {}
     if (
-        source_attempt.get("attempt_sha256")
-        != research_attempt_sha256(source_attempt)
+        source_attempt.get("attempt_sha256") != research_attempt_sha256(source_attempt)
         or source_attempt.get("validation_errors_after") != []
         or not isinstance(source_attempt.get("attempted_dossier"), Mapping)
         or failed_receipt.get("status") != "failed"
@@ -4075,8 +4288,7 @@ def materialize_verified_research_persistence_replay(
         or _string_list(replay.get("errors"))
         or any(replay.get(field) != 0 for field in invocation_fields)
         or replay.get("receipt_sha256") != _canonical_json_sha256(replay_without_hash)
-        or replay.get("candidate_dossier_sha256")
-        != source_attempt.get("attempted_dossier_sha256")
+        or replay.get("candidate_dossier_sha256") != source_attempt.get("attempted_dossier_sha256")
     ):
         raise ValueError("research_persistence_replay_custody_invalid")
 
@@ -4110,8 +4322,7 @@ def materialize_verified_research_persistence_replay(
     if (
         verification.get("status") != "verified"
         or _string_list(verification.get("errors"))
-        or verification.get("receipt_sha256")
-        != evidence_verification_sha256(verification)
+        or verification.get("receipt_sha256") != evidence_verification_sha256(verification)
         or verification.get("claims_sha256") != research_claims_sha256(prepared)
         or copied_run is None
         or not copied_run.is_dir()
@@ -4130,15 +4341,18 @@ def materialize_verified_research_persistence_replay(
 
     session_id = _coerce_str(source_attempt.get("agent_session_id"))
     observed_session_id = _coerce_str(source_attempt.get("observed_agent_session_id"))
-    attempt_number = max(
-        [
-            int(attempt.get("attempt_number"))
-            for attempt in attempts
-            if isinstance(attempt.get("attempt_number"), int)
-            and not isinstance(attempt.get("attempt_number"), bool)
-        ],
-        default=0,
-    ) + 1
+    attempt_number = (
+        max(
+            [
+                int(attempt.get("attempt_number"))
+                for attempt in attempts
+                if isinstance(attempt.get("attempt_number"), int)
+                and not isinstance(attempt.get("attempt_number"), bool)
+            ],
+            default=0,
+        )
+        + 1
+    )
     terminal = _research_attempt_record(
         attempt_number=attempt_number,
         outcome="evidence_verification_persistence_replay_valid",
@@ -4251,8 +4465,7 @@ def materialize_verified_research_authored_resolution(
     baseline = source_attempt.get("attempted_dossier")
     if (
         not isinstance(baseline, Mapping)
-        or authored.get("baseline_dossier_sha256")
-        != source_attempt.get("attempted_dossier_sha256")
+        or authored.get("baseline_dossier_sha256") != source_attempt.get("attempted_dossier_sha256")
         or authored.get("agent_session_id") != source_attempt.get("agent_session_id")
         or authored.get("resumed_from_session_id") != source_attempt.get("agent_session_id")
     ):
@@ -4273,9 +4486,7 @@ def materialize_verified_research_authored_resolution(
     raw_document_path_raw = _coerce_str(replay.get("raw_attempt_document_path"))
     raw_document_sha256 = _coerce_str(replay.get("raw_attempt_document_sha256"))
     raw_document_path = (
-        Path(raw_document_path_raw).resolve()
-        if raw_document_path_raw is not None
-        else None
+        Path(raw_document_path_raw).resolve() if raw_document_path_raw is not None else None
     )
     if (
         not str(replay.get("kind") or "").endswith("_model_free_evidence_replay")
@@ -4481,8 +4692,7 @@ def materialize_verified_research_attempt_promotion(
     if selected_index >= len(attempts) - 1:
         raise ValueError("research_verified_promotion_requires_later_attempt")
     if (
-        selected_attempt.get("attempt_sha256")
-        != research_attempt_sha256(selected_attempt)
+        selected_attempt.get("attempt_sha256") != research_attempt_sha256(selected_attempt)
         or selected_attempt.get("validation_errors_after") != []
         or not isinstance(selected_attempt.get("attempted_dossier"), Mapping)
     ):
@@ -4568,8 +4778,7 @@ def materialize_verified_research_attempt_promotion(
         raise ValueError("research_verified_promotion_assignment_changed")
 
     superseded_hashes = [
-        str(attempt["attempt_sha256"])
-        for attempt in attempts[selected_index + 1 :]
+        str(attempt["attempt_sha256"]) for attempt in attempts[selected_index + 1 :]
     ]
     report_path = copied_run / "report.json"
     session_id = _coerce_str(selected_attempt.get("agent_session_id"))
@@ -4596,9 +4805,7 @@ def materialize_verified_research_attempt_promotion(
             "reason": normalized_reason,
             "model_invocation_count": 0,
             "selected_attempt_sha256": selected_attempt_sha256,
-            "selected_attempted_dossier_sha256": selected_attempt.get(
-                "attempted_dossier_sha256"
-            ),
+            "selected_attempted_dossier_sha256": selected_attempt.get("attempted_dossier_sha256"),
             "superseded_attempt_sha256s": superseded_hashes,
             "progression_defect_ids": normalized_defect_ids,
             "replay_receipt_path": str(replay_path),
@@ -5000,13 +5207,10 @@ def _run_targeted_dossier_repairs(
     Unsupported loss of established causal/outcome coverage is quarantined; repeated equal-count
     identity replacement is retained briefly but pauses when it remains objectively lateral.
     """
-    if (
-        max_repair_turns is not None
-        and (
-            isinstance(max_repair_turns, bool)
-            or not isinstance(max_repair_turns, int)
-            or max_repair_turns < 1
-        )
+    if max_repair_turns is not None and (
+        isinstance(max_repair_turns, bool)
+        or not isinstance(max_repair_turns, int)
+        or max_repair_turns < 1
     ):
         raise ValueError("max_repair_turns_must_be_positive")
 
@@ -5160,11 +5364,9 @@ def _run_targeted_dossier_repairs(
         attempt_history=(evidence_attempt_history or ()),
     )
     consecutive_substantive_regressions = 0
-    consecutive_ordinary_nonadvancing_corrections = (
-        _source_ordinary_nonadvancing_correction_count(
-            source_attempt,
-            current_errors=current_errors,
-        )
+    consecutive_ordinary_nonadvancing_corrections = _source_ordinary_nonadvancing_correction_count(
+        source_attempt,
+        current_errors=current_errors,
     )
     repair_index = 0
 
@@ -5175,11 +5377,10 @@ def _run_targeted_dossier_repairs(
     ) -> dict[str, Any]:
         if not isinstance(validation_error_rescore, Mapping):
             return attempt
-        if (
-            attempt.get("source_attempt_sha256")
-            != validation_error_rescore.get("source_attempt_sha256")
-            or attempt.get("validation_errors_before")
-            != validation_error_rescore.get("replacement_validation_errors")
+        if attempt.get("source_attempt_sha256") != validation_error_rescore.get(
+            "source_attempt_sha256"
+        ) or attempt.get("validation_errors_before") != validation_error_rescore.get(
+            "replacement_validation_errors"
         ):
             return attempt
         return _materialize_research_attempt_validation_error_rescore(
@@ -5206,12 +5407,8 @@ def _run_targeted_dossier_repairs(
                 "continuation_failure": None,
                 "authored_work_disposition": "retained",
                 "retained_frontier": {
-                    "latest_safe_dossier_sha256": _canonical_json_sha256(
-                        forward_dossier
-                    ),
-                    "objective_best_dossier_sha256": _canonical_json_sha256(
-                        best_dossier
-                    ),
+                    "latest_safe_dossier_sha256": _canonical_json_sha256(forward_dossier),
+                    "objective_best_dossier_sha256": _canonical_json_sha256(best_dossier),
                     "completed_repair_turns": repair_index,
                     "max_repair_turns": max_repair_turns,
                     "consecutive_ordinary_nonadvancing_correction_count": (
@@ -5284,8 +5481,7 @@ def _run_targeted_dossier_repairs(
             failure_repeated = invocation_failure_counts[failure]
             failure_pause = bool(
                 failure_repeated >= 2
-                or consecutive_invocation_failures
-                >= _CONSECUTIVE_ORDINARY_NONADVANCING_PAUSE_COUNT
+                or consecutive_invocation_failures >= _CONSECUTIVE_ORDINARY_NONADVANCING_PAUSE_COUNT
             )
             failure_reason = (
                 "same_session_invocation_failed_repeatedly"
@@ -5319,20 +5515,20 @@ def _run_targeted_dossier_repairs(
                 },
             }
             failure_attempt = _research_invocation_failure_record(
-                    attempt_number=attempt_number,
-                    validation_errors=[failure],
-                    attempt_kind=attempt_kind,
-                    source_attempt_sha256=accepted_source["attempt_sha256"],
-                    authorized_paths=authorized_paths,
-                    baseline_dossier_sha256=_canonical_json_sha256(baseline),
-                    baseline_projection_sha256=contract["baseline_projection_sha256"],
-                    repair_contract_sha256=contract["repair_contract_sha256"],
-                    validation_errors_before=current_errors,
-                    agent_session_id=session_id,
-                    resumed_from_session_id=session_id,
-                    attempt_wall_seconds=failure_seconds,
-                    repair_progress=failure_progress,
-                )
+                attempt_number=attempt_number,
+                validation_errors=[failure],
+                attempt_kind=attempt_kind,
+                source_attempt_sha256=accepted_source["attempt_sha256"],
+                authorized_paths=authorized_paths,
+                baseline_dossier_sha256=_canonical_json_sha256(baseline),
+                baseline_projection_sha256=contract["baseline_projection_sha256"],
+                repair_contract_sha256=contract["repair_contract_sha256"],
+                validation_errors_before=current_errors,
+                agent_session_id=session_id,
+                resumed_from_session_id=session_id,
+                attempt_wall_seconds=failure_seconds,
+                repair_progress=failure_progress,
+            )
             failure_attempt = bind_validation_error_rescore(
                 failure_attempt,
                 direct_source=accepted_source,
@@ -5444,12 +5640,10 @@ def _run_targeted_dossier_repairs(
         )
         authored_dossier_resolution: dict[str, Any] | None = None
         if candidate and not candidate_errors:
-            candidate, authored_dossier_resolution = (
-                _preserve_omitted_unchanged_origin_bindings(
-                    baseline_dossier=baseline,
-                    authored_dossier=candidate,
-                    authorized_paths=authorized_paths,
-                )
+            candidate, authored_dossier_resolution = _preserve_omitted_unchanged_origin_bindings(
+                baseline_dossier=baseline,
+                authored_dossier=candidate,
+                authorized_paths=authorized_paths,
             )
         candidate_validation_frontier = _MODEL_OUTPUT_VALIDATION_FRONTIER
         if candidate and not candidate_errors and candidate_validator is not None:
@@ -5539,9 +5733,7 @@ def _run_targeted_dossier_repairs(
         immediate_prior_error_ids = {
             _validation_error_identity(error) for error in immediate_prior_feedback_errors
         }
-        candidate_error_ids = {
-            _validation_error_identity(error) for error in candidate_errors
-        }
+        candidate_error_ids = {_validation_error_identity(error) for error in candidate_errors}
         status_downgrade = bool(
             candidate_validator is not None
             and best_dossier.get("research_status") == "evidence_sufficient"
@@ -5550,18 +5742,14 @@ def _run_targeted_dossier_repairs(
         epistemic_downgrade_basis = (
             _epistemic_downgrade_basis(best_dossier, candidate) if status_downgrade else []
         )
-        candidate_advancement_regression = bool(
-            status_downgrade and not epistemic_downgrade_basis
-        )
+        candidate_advancement_regression = bool(status_downgrade and not epistemic_downgrade_basis)
         candidate_substantive_regression = bool(
             substantive_coverage_regressions and not candidate_advancement_regression
         )
         candidate_validation_depth_advanced = bool(
             candidate_frontier_rank > immediate_prior_frontier_rank
         )
-        evidence_backed_revision = sorted(
-            {*substantive_revision_basis, *epistemic_downgrade_basis}
-        )
+        evidence_backed_revision = sorted({*substantive_revision_basis, *epistemic_downgrade_basis})
         candidate_substantive_advancement = bool(
             not candidate_substantive_regression
             and (substantive_coverage_added_since_feedback or evidence_backed_revision)
@@ -5596,10 +5784,7 @@ def _run_targeted_dossier_repairs(
         )
         candidate_genuine_advancement = bool(
             not fundamental_changes
-            and (
-                not candidate_advancement_regression
-                or candidate_advancement_error_progress
-            )
+            and (not candidate_advancement_regression or candidate_advancement_error_progress)
             and not candidate_substantive_regression
             and not candidate_integrity_or_session_failure
             and (
@@ -5638,9 +5823,7 @@ def _run_targeted_dossier_repairs(
             consecutive_advancement_regressions += 1
         else:
             consecutive_advancement_regressions = 0
-        progress["consecutive_advancement_regression_count"] = (
-            consecutive_advancement_regressions
-        )
+        progress["consecutive_advancement_regression_count"] = consecutive_advancement_regressions
         if candidate_substantive_regression:
             consecutive_substantive_regressions += 1
         else:
@@ -5820,21 +6003,15 @@ def _run_targeted_dossier_repairs(
             # Retain the old field as a compatibility alias for persisted attempt readers.  New
             # artifacts state the actual comparison explicitly: regressions are measured against
             # the current forward correction frontier, not merely against the objective best.
-            progress["candidate_regressed_from_forward_frontier"] = (
-                candidate_regressed_from_forward
-            )
-            progress["candidate_regressed_from_objective_best"] = (
-                candidate_regressed_from_forward
-            )
+            progress["candidate_regressed_from_forward_frontier"] = candidate_regressed_from_forward
+            progress["candidate_regressed_from_objective_best"] = candidate_regressed_from_forward
             progress["candidate_disposition"] = (
                 "retained_as_nonbaseline_attempt"
                 if candidate_regressed_from_forward
                 else "retained_as_progressing_correction_baseline"
             )
             progress["next_baseline"] = (
-                "forward_frontier"
-                if candidate_regressed_from_forward
-                else "latest_safe_candidate"
+                "forward_frontier" if candidate_regressed_from_forward else "latest_safe_candidate"
             )
         if result.agent_session_id != session_id:
             progress["decision"] = "restart"
@@ -6005,9 +6182,7 @@ def _run_targeted_dossier_repairs(
             "fundamental_change_paths": list(fundamental_changes),
             "substantive_coverage_regressions": list(substantive_coverage_regressions),
             "lateral_correction_churn": progress.get("lateral_correction_churn"),
-            "ordinary_nonadvancing_correction": progress.get(
-                "ordinary_nonadvancing_correction"
-            ),
+            "ordinary_nonadvancing_correction": progress.get("ordinary_nonadvancing_correction"),
             "instruction": correction_instruction,
         }
         if decision == "paused":
@@ -6317,18 +6492,14 @@ def continue_research_dossier_from_independent_feedback(
         carried_progress: dict[str, Any] = {}
         if carried_nonadvancing_count > 0:
             carried_progress.update(
-                consecutive_ordinary_nonadvancing_correction_count=(
-                    carried_nonadvancing_count
-                ),
+                consecutive_ordinary_nonadvancing_correction_count=(carried_nonadvancing_count),
                 ordinary_nonadvancing_streak_carried_from_source_attempt_sha256=(
                     source_attempt_sha256
                 ),
             )
         if carried_advancement_regression_count > 0:
             carried_progress.update(
-                consecutive_advancement_regression_count=(
-                    carried_advancement_regression_count
-                ),
+                consecutive_advancement_regression_count=(carried_advancement_regression_count),
                 advancement_regression_streak_carried_from_source_attempt_sha256=(
                     source_attempt_sha256
                 ),
@@ -6517,9 +6688,7 @@ def continue_research_dossier_from_independent_feedback(
             _fail_evidence_verification(receipt, errors=terminal_errors)
             _set_research_attempts(prepared, completed_attempts)
             return {
-                "status": (
-                    "repairable_paused:research_persisted_evidence_verification_failed"
-                ),
+                "status": ("repairable_paused:research_persisted_evidence_verification_failed"),
                 "dossier": prepared,
                 "validation_errors": terminal_errors,
                 "source_attempt_sha256": (
@@ -6531,9 +6700,7 @@ def continue_research_dossier_from_independent_feedback(
                 "observed_session_id": repair.get("observed_session_id"),
                 "objective_best_frontier": repair.get("objective_best_frontier"),
                 "validation_error_rescore": (
-                    dict(validation_error_rescore)
-                    if validation_error_rescore is not None
-                    else None
+                    dict(validation_error_rescore) if validation_error_rescore is not None else None
                 ),
                 "authored_work_disposition": "retained",
             }
@@ -6547,9 +6714,7 @@ def continue_research_dossier_from_independent_feedback(
             "observed_session_id": repair.get("observed_session_id"),
             "objective_best_frontier": repair.get("objective_best_frontier"),
             "validation_error_rescore": (
-                dict(validation_error_rescore)
-                if validation_error_rescore is not None
-                else None
+                dict(validation_error_rescore) if validation_error_rescore is not None else None
             ),
             "authored_work_disposition": "retained",
         }
@@ -6584,9 +6749,7 @@ def continue_research_dossier_from_independent_feedback(
         "best_source_attempt_sha256": repair.get("best_source_attempt_sha256"),
         "objective_best_frontier": repair.get("objective_best_frontier"),
         "validation_error_rescore": (
-            dict(validation_error_rescore)
-            if validation_error_rescore is not None
-            else None
+            dict(validation_error_rescore) if validation_error_rescore is not None else None
         ),
         "attempts": [*feedback_attempts, *new_attempts],
         "repair_run_dirs": list(repair.get("repair_run_dirs") or []),
@@ -7212,9 +7375,7 @@ def _append_prompt_for_problem(
     assigned = dict(assigned_raw) if isinstance(assigned_raw, Mapping) else {}
     if assigned:
         atom_entries_raw = assigned.get("atoms")
-        atom_entries = [
-            dict(item) for item in atom_entries_raw or [] if isinstance(item, Mapping)
-        ]
+        atom_entries = [dict(item) for item in atom_entries_raw or [] if isinstance(item, Mapping)]
         entries_by_id = {
             str(item.get("atom_id")): item
             for item in atom_entries
@@ -7349,9 +7510,7 @@ def _append_prompt_for_problem(
                     if isinstance(assignment.get("atom_receipts"), list)
                     else []
                 ),
-                "materialized_source_assignment_sha256": assigned.get(
-                    "assignment_sha256"
-                ),
+                "materialized_source_assignment_sha256": assigned.get("assignment_sha256"),
                 "origin_attachment_evidence": compact_origin,
             }
         )
@@ -7570,9 +7729,7 @@ def run_repro_research_stage(
             current_atoms = [
                 atom
                 for field in ("evidence_atoms", "derived_evidence_atoms")
-                for atom in (
-                    problem.get(field) if isinstance(problem.get(field), list) else []
-                )
+                for atom in (problem.get(field) if isinstance(problem.get(field), list) else [])
                 if isinstance(atom, Mapping)
             ]
             current_assignment = _authenticate_assignment_source_classifications(
@@ -7695,9 +7852,7 @@ def run_repro_research_stage(
         evidence_atoms = evidence_atoms_raw if isinstance(evidence_atoms_raw, list) else []
         derived_evidence_atoms_raw = problem.get("derived_evidence_atoms")
         derived_evidence_atoms = (
-            derived_evidence_atoms_raw
-            if isinstance(derived_evidence_atoms_raw, list)
-            else []
+            derived_evidence_atoms_raw if isinstance(derived_evidence_atoms_raw, list) else []
         )
         evidence_assignment = _authenticate_assignment_source_classifications(
             evidence_assignment,
@@ -7960,9 +8115,7 @@ def run_repro_research_stage(
             assert repo_input is not None
             assert resolved_repo_ref is not None
             preferred_workspace = (
-                cfg.runs_dir
-                / "_research_workspaces"
-                / f"{idx:03d}_{seed}_{uuid4().hex[:12]}"
+                cfg.runs_dir / "_research_workspaces" / f"{idx:03d}_{seed}_{uuid4().hex[:12]}"
             )
             prepared_workspace, origin_attachment_evidence = _prepare_origin_evidence_workspace(
                 repo_input=str(repo_input),
@@ -8709,9 +8862,7 @@ def run_repro_research_stage(
                     if correction_block_reason == "research_external_wait_parked"
                     else "The retained author correction reached a recorded supervision boundary"
                     if correction_block_reason is not None
-                    and correction_block_reason.startswith(
-                        "research_dossier_repairable_paused:"
-                    )
+                    and correction_block_reason.startswith("research_dossier_repairable_paused:")
                     else "The author session or retained workspace required for correction was "
                     "unavailable"
                     if correction_block_reason is not None
@@ -8723,9 +8874,7 @@ def run_repro_research_stage(
                     else "Resume the same retained author frontier with authenticated supervisor "
                     "feedback"
                     if correction_block_reason is not None
-                    and correction_block_reason.startswith(
-                        "research_dossier_repairable_paused:"
-                    )
+                    and correction_block_reason.startswith("research_dossier_repairable_paused:")
                     else "Inspect the retained validation errors and raw attempted dossier"
                 ),
             )
@@ -8805,11 +8954,11 @@ def run_repro_research_stage(
         if origin_attachment_evidence and prepared_workspace is not None:
             attachment_reads, attachment_scope, attachment_errors = (
                 _origin_attachment_read_evidence(
-                run_dir=run_dir,
-                workspace_dir=prepared_workspace,
-                manifest=origin_attachment_evidence,
-                dossier=dossier,
-                verification=evidence_verification,
+                    run_dir=run_dir,
+                    workspace_dir=prepared_workspace,
+                    manifest=origin_attachment_evidence,
+                    dossier=dossier,
+                    verification=evidence_verification,
                 )
             )
             evidence_verification["origin_attachment_evidence"] = origin_attachment_evidence
@@ -9032,14 +9181,10 @@ def run_repro_research_stage(
                 evidence_assignment=evidence_assignment,
                 source_attempt=verifier_source,
                 validation_errors=verification_errors,
-                first_attempt_number=_next_research_attempt_number(
-                    research_attempt_history
-                ),
+                first_attempt_number=_next_research_attempt_number(research_attempt_history),
                 candidate_validator=validate_verifier_candidate,
                 research_capabilities=research_capabilities,
-                verifier_diagnostics=_verifier_diagnostic_feedback(
-                    evidence_verification
-                ),
+                verifier_diagnostics=_verifier_diagnostic_feedback(evidence_verification),
                 attempt_kind=(
                     "evidence_verification_research_continuation"
                     if research_capabilities
@@ -9296,8 +9441,7 @@ def run_repro_research_stage(
                 1
                 for dossier in dossiers
                 if isinstance(dossier.get("actionability_assessment"), Mapping)
-                and dossier["actionability_assessment"].get("disposition")
-                == "already_addressed"
+                and dossier["actionability_assessment"].get("disposition") == "already_addressed"
             ),
             "non_actionable_count": sum(
                 1

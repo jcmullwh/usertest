@@ -466,7 +466,7 @@ def _verify_ticket_ref(
                         "outcome_ticket_ref_implementation_provenance_git_head_mismatch"
                     )
                 if implementation_schema == 2 and (
-                    git_ref.get("commit_attempted") is not False
+                    not isinstance(git_ref.get("commit_attempted"), bool)
                     or git_ref.get("commit_performed") is not False
                     or git_ref.get("commit_observed") is not True
                     or str(git_ref.get("base_commit") or "").casefold()
@@ -476,10 +476,15 @@ def _verify_ticket_ref(
                         "outcome_ticket_ref_implementation_provenance_existing_head_invalid"
                     )
             if implementation_schema == 2 and workspace_ref is not None:
+                workspace_strategy = workspace_ref.get("workspace_strategy")
                 if (
                     workspace_ref.get("schema_version") != 1
-                    or workspace_ref.get("workspace_strategy")
-                    != implementation.get("provenance_mode")
+                    or not isinstance(workspace_ref.get("workspace_dir"), str)
+                    or not str(workspace_ref.get("workspace_dir") or "").strip()
+                    or (
+                        workspace_strategy is not None
+                        and workspace_strategy != implementation.get("provenance_mode")
+                    )
                 ):
                     errors.append(
                         "outcome_ticket_ref_implementation_provenance_workspace_invalid"

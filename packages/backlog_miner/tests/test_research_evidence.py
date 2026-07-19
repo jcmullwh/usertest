@@ -3300,7 +3300,9 @@ def test_clean_replay_detects_persisted_tracked_file_mutation(tmp_path: Path) ->
     )
 
     assert receipts["mutating-replay"]["post_replay_mutations"] is True
-    assert "experiment_replay_workspace_mutated:mutating-replay" in errors
+    assert (
+        "experiment_replay_workspace_mutated:mutating-replay:src/core.py" in errors
+    )
 
 
 def test_partial_read_cannot_attest_unobserved_symbol(tmp_path: Path) -> None:

@@ -101,6 +101,7 @@ from backlog_core.ticket_readiness import (
     research_limitation_references,
     verified_mechanism_evidence,
     verified_outcome_oracles,
+    verified_research_overlay_command_asset_paths,
     verified_staged_replay_command_asset_paths,
 )
 
@@ -174,6 +175,7 @@ __all__ = [
     "research_evidence_references",
     "verified_mechanism_evidence",
     "verified_outcome_oracles",
+    "verified_research_overlay_command_asset_paths",
     "verified_staged_replay_command_asset_paths",
     "research_claims_sha256",
     "research_dossier_output_contract_errors",

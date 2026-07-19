@@ -283,6 +283,206 @@ def evidence_verification_sha256(receipt: dict[str, Any]) -> str:
     )
 
 
+_PROMPT_ATOM_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "atom_id",
+    "source",
+    "status",
+    "evidence_class",
+    "severity_hint",
+    "severity_score_hint",
+    "text",
+    "failure_kind",
+    "report_validation_errors",
+    "path_anchors",
+    "origin_run_id",
+    "linked_atom_ids",
+    "operational_failure_class",
+    "operational_failure_phase",
+    "operational_candidate_prompt_projection",
+)
+
+_PROMPT_VERIFIED_EXPERIMENT_FIELDS: tuple[str, ...] = (
+    "experiment_id",
+    "scenario_kind",
+    "addresses_atom_ids",
+    "command",
+    "executed_argv",
+    "declared_result",
+    "declared_state_transitions",
+    "outcome",
+    "exit_code",
+    "observable_assertion",
+    "assertion_passed",
+    "command_authorization",
+    "replay_inputs",
+    "verification_boundary",
+    "stdout_sha256",
+    "stderr_sha256",
+    "workspace_head",
+)
+
+_PROMPT_VERIFICATION_FIELDS: tuple[str, ...] = (
+    "status",
+    "verification_method",
+    "case_id",
+    "problem_id",
+    "repo_revision",
+    "requested_repo_ref",
+    "resolved_repo_ref",
+    "assignment_sha256",
+    "claims_sha256",
+    "receipt_sha256",
+    "run_report_sha256",
+    "normalized_events_sha256",
+    "workspace_head",
+    "planning_workspace_head",
+    "planning_workspace_clean",
+    "evidence_agent_session_id",
+    "origin_atom_ids",
+    "atom_bindings",
+    "hypothesis_refs",
+    "verified_mechanism",
+    "verified_mechanism_sha256",
+    "verified_mechanism_provenance",
+    "verified_mechanism_provenance_sha256",
+    "mechanism_evidence",
+    "proof_adapter_receipts",
+    "proof_adapter_diagnostics",
+    "causal_links",
+    "control_verifications",
+    "deterministic_mechanism_closures",
+    "failure_paths",
+    "outcome_oracles",
+    "test_selections",
+    "falsification_interventions",
+    "verification_boundaries",
+    "errors",
+)
+
+
+def _mapping_projection(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {field: value[field] for field in fields if field in value}
+
+
+def _research_assignment_prompt_projection(value: Any) -> dict[str, Any]:
+    """Keep authenticated atom meaning while omitting bulky custody payloads.
+
+    Stage readiness validates the complete assignment before this projection is built.
+    Downstream authors need the atom identities, concise observed signals, and binding
+    digests; they do not need embedded attachment bodies or full operational receipts.
+    """
+
+    if not isinstance(value, Mapping):
+        return {}
+    atom_receipts_raw = value.get("atom_receipts")
+    atom_receipts = (
+        [receipt for receipt in atom_receipts_raw if isinstance(receipt, Mapping)]
+        if isinstance(atom_receipts_raw, list)
+        else []
+    )
+    projected_receipts: list[dict[str, Any]] = []
+    for receipt in atom_receipts:
+        snapshot = receipt.get("atom_snapshot")
+        artifact_receipts = receipt.get("artifact_receipts")
+        projected_receipts.append(
+            {
+                "atom_id": receipt.get("atom_id"),
+                "atom_sha256": receipt.get("atom_sha256"),
+                "origin_evidence_mode": receipt.get("origin_evidence_mode"),
+                "snapshot": _mapping_projection(snapshot, _PROMPT_ATOM_SNAPSHOT_FIELDS),
+                "artifact_receipt_count": (
+                    len(artifact_receipts) if isinstance(artifact_receipts, list) else 0
+                ),
+            }
+        )
+    attachment = value.get("origin_attachment_evidence")
+    attachment_summary = _mapping_projection(
+        attachment,
+        (
+            "schema_version",
+            "workspace_root",
+            "source_run_count",
+            "source_artifact_count",
+            "manifest_sha256",
+            "receipt_sha256",
+        ),
+    )
+    return {
+        "projection_schema_version": 1,
+        "projection_kind": "authenticated_assignment_summary",
+        **_mapping_projection(
+            value,
+            (
+                "status",
+                "errors",
+                "case_id",
+                "problem_id",
+                "expected_atom_ids",
+                "case_evidence_atom_ids",
+                "occurrence_evidence_atom_ids",
+                "provisional_same_cause_member_evidence_atom_ids",
+                "operational_candidate_currentness_aliases",
+                "assignment_sha256",
+            ),
+        ),
+        "atom_receipts": projected_receipts,
+        "origin_attachment_evidence_summary": attachment_summary,
+        "omitted_detail": {
+            "full_atom_receipt_count": len(atom_receipts),
+            "full_origin_attachment_evidence_present": isinstance(attachment, Mapping),
+            "reason": "Full custody payloads were verified before prompt projection.",
+        },
+    }
+
+
+def _research_verification_prompt_projection(value: Any) -> dict[str, Any]:
+    """Project verified causal receipts without replay logs and environment inventories."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    experiments_raw = value.get("experiments")
+    experiments = (
+        [experiment for experiment in experiments_raw if isinstance(experiment, Mapping)]
+        if isinstance(experiments_raw, list)
+        else []
+    )
+    source_attempts = value.get("evidence_source_attempts")
+    event_sources = value.get("evidence_event_sources")
+    projection = {
+        "projection_schema_version": 1,
+        "projection_kind": "verified_causal_evidence_summary",
+        **_mapping_projection(value, _PROMPT_VERIFICATION_FIELDS),
+        "experiments": [
+            _mapping_projection(experiment, _PROMPT_VERIFIED_EXPERIMENT_FIELDS)
+            for experiment in experiments
+        ],
+        "source_custody_summary": {
+            "evidence_source_attempt_count": (
+                len(source_attempts) if isinstance(source_attempts, list) else 0
+            ),
+            "evidence_source_attempts_sha256": value.get(
+                "evidence_source_attempts_sha256"
+            ),
+            "evidence_event_source_count": (
+                len(event_sources) if isinstance(event_sources, list) else 0
+            ),
+            "evidence_event_sources_sha256": value.get(
+                "evidence_event_sources_sha256"
+            ),
+        },
+        "omitted_detail": {
+            "full_experiment_receipt_count": len(experiments),
+            "reason": (
+                "Full replay logs, environment inventories, workspace overlays, attachment "
+                "bodies, and custody records were verified before prompt projection."
+            ),
+        },
+    }
+    return projection
+
+
 def research_prompt_projection(item: dict[str, Any]) -> dict[str, Any]:
     """Return only claims and runner receipts covered by stage-3 hashes.
 
@@ -294,10 +494,13 @@ def research_prompt_projection(item: dict[str, Any]) -> dict[str, Any]:
     errors = _validate_research_dossier(item)
     if errors:
         raise ValueError("research_prompt_projection_invalid: " + "; ".join(errors))
-    projection = {
-        **{field: item[field] for field in _RESEARCH_CLAIM_FIELDS},
-        "evidence_verification": item["evidence_verification"],
-    }
+    projection = {field: item[field] for field in _RESEARCH_CLAIM_FIELDS}
+    projection["evidence_assignment"] = _research_assignment_prompt_projection(
+        item["evidence_assignment"]
+    )
+    projection["evidence_verification"] = _research_verification_prompt_projection(
+        item["evidence_verification"]
+    )
     projection.update(
         {field: item[field] for field in _RESEARCH_DOSSIER_OPTIONAL_CLAIM_FIELDS if field in item}
     )

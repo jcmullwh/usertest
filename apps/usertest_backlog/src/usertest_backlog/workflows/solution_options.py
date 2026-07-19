@@ -20,6 +20,7 @@ from usertest_backlog.workflows.depth_contracts import (
     parse_optioning_response,
     read_only_stage_tools,
     read_repo_revision,
+    research_contract_view,
     stage_include_directories,
 )
 
@@ -733,11 +734,7 @@ def _run_solution_optioning_stage(
         # model dossier has been verified. Downstream evidence checks must revalidate
         # the authored contract, not misclassify that trusted envelope as model output.
         # Preserve every other field so genuinely unknown authored content still fails.
-        dossier = {
-            key: value
-            for key, value in persisted_dossier.items()
-            if key not in {"canonical_problem_id", "case_member_problem_ids"}
-        }
+        dossier = research_contract_view(persisted_dossier)
         rec = records_by_id.get(pid) or {}
         dec = priority_by_id.get(pid) or {}
         priority_blockers = _priority_progression_blockers(

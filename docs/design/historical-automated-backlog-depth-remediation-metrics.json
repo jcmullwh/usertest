@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-18T08:52:14.999433Z",
-    "current_run_id": "qualification-cycle-338a373f-20260717",
+    "as_of": "2026-07-19T05:30:53Z",
+    "current_run_id": "report-schema-case-4f134107-20260718",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Third current case terminal; next P0 case ready",
-        "detail": "Three current cases have evidence-sufficient terminal dispositions without false tickets. The Docker-shell case independently established a historical parser defect already fixed at the pinned target and stopped at Stage 4 with no option.",
+        "value": "First current actionable case delivered; outcome is mitigated",
+        "detail": "The report-schema case traversed evidence-sufficient research, optioning, adversarial selection, code-grounded planning, system implementation, system review, green exact-head CI, merge to dev, and terminal outcome verification. The evidence supports mitigation, not root-cause resolution.",
         "tone": "good"
       },
       {
         "label": "Current bounded throughput",
-        "value": "Stage 3: 3/3 correct; Stage 4 terminal: 2/2; Stage 2 schedule replay: 1/1; delivered: 0",
-        "detail": "The Docker-shell author self-corrected two output-contract findings to zero and 19 evidence findings to zero in one session. Stage 4 emitted not_required with zero options or model calls. These are useful qualification outcomes, not delivered fixes.",
+        "value": "Actionable case 1/1 delivered; mitigated 1; resolved 0",
+        "detail": "For this one case, Stages 3-6, implementation, review, merge, original-scenario replay, and mitigation-effect replay completed. This is one successful delivery sample, not a general throughput rate.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "No standard export-disabled full shadow cycle has completed. No current actionable case has yet completed optioning, planning, implementation, and outcome proof.",
+        "detail": "No standard export-disabled full shadow cycle has completed on stable final controller bytes. One delivered case proves a baseline path but not autonomous continuous operation or recurrence stability.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Research the next retained distinct case",
-        "detail": "Start P0 `problem:task-run-report-schema-validation-blocker` from the corrected retained Stage 2 output. Do not rerun Stage 1 or any completed Stage 3/4 case.",
+        "value": "Checkpoint PR #217, then process the next distinct case with Sol/high",
+        "detail": "Preserve the delivery fixes in the controller PR, verify its complete affected surface without shortening tests, and regenerate from current evidence without rerunning completed case stages. Use signed-in gpt-5.6-sol with high reasoning for every substantive call.",
         "tone": "warn"
       }
     ],
@@ -2662,11 +2662,11 @@
         "scope": "Reconciled non-IDEA evidence custody, completed three current Stage 3 dispositions, carried the Windows-sandbox and Docker-shell cases through production Stage 4 no-change transitions under signed-in Terra, and corrected duplicate provisional scheduling in exact retained Stage 2 replay; no removal, ticket export, implementation, or Docker object mutation was authorized",
         "timing": {
           "start_at": "2026-07-17T03:10:20Z",
-          "end_at": null,
-          "elapsed_seconds": 106914.999433,
-          "coverage": "active",
-          "display": "29 h 41 m 55 s as of 08:52:15Z",
-          "note": "Complete lifecycle wall time from retained-cycle creation. The fresh Docker-shell Stage 3 receipt records 1,337.672022 seconds and Stage 4 records 7.844663 seconds. The fresh Windows Stage 3/4 and exact BDS-130 Stage 2 replay remain included. The wall clock also includes retained diagnostics, exact replays, tests, code correction, and supervision gaps; those are not misreported as model time."
+          "end_at": "2026-07-18T09:02:29Z",
+          "elapsed_seconds": 107529.0,
+          "coverage": "artifact_window",
+          "display": "29 h 52 m 9 s",
+          "note": "Checkpoint window from retained-cycle creation through creation of the next distinct P0 case input. The fresh Docker-shell Stage 3 receipt records 1,337.672022 seconds and Stage 4 records 7.844663 seconds. The fresh Windows Stage 3/4 and exact BDS-130 Stage 2 replay remain included. The report-schema case continues in its own current case-lifecycle row so its rework and throughput are not hidden inside cumulative cycle totals."
         },
         "furthest_stage": "Stage 4 complete for third current case; corrected Stage 2 schedule ready for next distinct case",
         "current_state": "Three real current cases have completed Stage 3 with evidence-sufficient, already-addressed dispositions and no false ticket. The fresh Docker-shell case used one signed-in Terra session across five model calls; its output-contract frontier improved 2 -> 0 and its evidence frontier 19 -> 0 through four same-author corrections without human dossier edits or stage restart. The final proof binds the operational aggregate and both source occurrences, shows both source revisions lacked `aggregated_output` parsing, identifies fix `b6191857` on pinned `e0527e23`, and retains the no-current-live-Docker boundary. Stage 4 emitted not_required with zero options and zero model calls. The next retained distinct decision is P0 `problem:task-run-report-schema-validation-blocker` (`research_new`).",
@@ -2881,6 +2881,97 @@
           "stage3_docker_shell_fresh_f0c83c71_dossier_20260718",
           "stage4_docker_shell_fresh_no_change_f0c83c71_receipt_20260718",
           "stage4_docker_shell_fresh_no_change_f0c83c71_options_20260718"
+        ]
+      },
+      {
+        "run_id": "report-schema-case-4f134107-20260718",
+        "entry_kind": "lifecycle_run",
+        "lifecycle_id": "case:4f13410712b8654b0e93:20260718",
+        "lifecycle_kind": "case",
+        "rework": {
+          "author_invocations": 47,
+          "continuation_launches": 37,
+          "stage_reruns": null,
+          "full_restarts": 0,
+          "summary": "The planning checkpoint retained 42 unique model invocations and 36 same-author continuations. Delivery added two implementation-author calls, three review calls including one context-exhausted call, and one same-author implementation continuation. Adoption, eligibility checks, CI polling/rerun, proof replay, and terminal verification were model-free. The many historical component roots still prevent a comparable stage-rerun count; no full case restart occurred."
+        },
+        "label": "Task-run report-schema validation blocker case",
+        "scope": "One real non-IDEA actionable case carried from retained Stage-2 evidence through research, planning, signed-in Sol/high implementation and review, PR #218 merge to dev, and bounded terminal outcome; completed stages were reused, no Docker object or filesystem removal action occurred, and no live-runtime proof was required by the selected plan",
+        "timing": {
+          "start_at": "2026-07-18T09:02:29Z",
+          "end_at": "2026-07-19T05:30:53Z",
+          "elapsed_seconds": 73704,
+          "coverage": "complete",
+          "display": "20 h 28 m 24 s",
+          "note": "Complete case-lifecycle wall time from retained distinct-case input creation through the terminal mitigated OutcomeRecord. It includes model execution, same-author correction, deterministic replay, unshortened tests, CI wait/rerun, controller repair, and supervision gaps; it is not presented as model time."
+        },
+        "furthest_stage": "PR merged to dev; mitigated outcome and terminal provenance verified",
+        "current_state": "Stage 3 established a reproduced, requires-change mechanism at the pinned revision; Stages 4-6 selected and planned one bounded mitigation. PR #218 implemented the exact plan, same-author correction resolved the reviewer's one substantive finding, the corrected exact head passed the full runner_core suite and GitHub CI, and merge commit 8fff1c16 passed the original-scenario and mitigation-effect roles. Terminal provenance verifies with no errors. Live evidence is empty by contract, recurrence is not run, and the remaining risk explicitly says the underlying mechanism is not claimed resolved.",
+        "outcome": "Merged and mitigated; one actionable case delivered, zero cases resolved",
+        "errors": {
+          "count": 14,
+          "count_kind": "deduplicated_clusters",
+          "summary": "Seven research/planning clusters were retained at the prior checkpoint. Delivery added one substantive implementation-author defect, five reusable controller clusters covering handoff lifecycle, review context, proof execution/retry, outcome provenance alignment, and ticket byte stability, plus one unchanged-head CI anomaly. Validator messages and repeated symptoms are not counted separately.",
+          "cluster_ids": [
+            "AUTHOR-STAGE3-REPORT-SCHEMA-01",
+            "AUTHOR-STAGE5-REPORT-SCHEMA-01",
+            "AUTHOR-STAGE6-REPORT-SCHEMA-01",
+            "BDS-138",
+            "BDS-139",
+            "BDS-140",
+            "BDS-141",
+            "AUTHOR-IMPLEMENTATION-REPORT-SCHEMA-01",
+            "BDS-142",
+            "BDS-143",
+            "BDS-144",
+            "BDS-145",
+            "BDS-146",
+            "AN-37"
+          ]
+        },
+        "automatic_self_corrections": {
+          "count": 4,
+          "count_kind": "deduplicated_clusters",
+          "summary": "The retained Stage-3, Stage-5, and Stage-6 authors each corrected their own nondeterministic quality frontier. During delivery, the system reviewer returned one substantive test/contract inconsistency to the exact implementation author/session; that author corrected it, ran the full unshortened suite, and produced the approved head without supervisor-authored implementation guidance.",
+          "cluster_ids": [
+            "AUTHOR-STAGE3-REPORT-SCHEMA-01",
+            "AUTHOR-STAGE5-REPORT-SCHEMA-01",
+            "AUTHOR-STAGE6-REPORT-SCHEMA-01",
+            "AUTHOR-IMPLEMENTATION-REPORT-SCHEMA-01"
+          ]
+        },
+        "supervisor_interventions": {
+          "count": 11,
+          "count_kind": "deduplicated_clusters",
+          "summary": "Five research/planning interventions were retained. Delivery added six bounded mechanics interventions: normalize adopted-handoff lifecycle/provenance, compress review context, bind proof execution and retry to the exact checkout, align outcome recorder/verifier contracts, repair only provable newline multiplication and switch to byte-stable writes, and rerun one transient CI job on the unchanged head. The supervisor supplied zero implementation-content instructions.",
+          "cluster_ids": [
+            "report_schema_stage3_evidence_contract_repair",
+            "report_schema_stage4_binding_repair",
+            "report_schema_stage4_git_grounding_repair",
+            "report_schema_stage6_replay_contract_repair",
+            "report_schema_stage6_same_author_intent_feedback",
+            "report_schema_implementation_adoption_lifecycle_repair",
+            "report_schema_review_context_repair",
+            "report_schema_outcome_replay_environment_and_retry_repair",
+            "report_schema_outcome_contract_alignment",
+            "report_schema_ticket_newline_provenance_repair",
+            "report_schema_ci_transient_rerun"
+          ]
+        },
+        "next_action": "Commit and push the controller/delivery corrections to PR #217 after the full affected verification remains green, then regenerate the non-IDEA backlog and start the next distinct current case with explicit gpt-5.6-sol/high. Reuse completed stages and retain this case as mitigated unless new same-class evidence updates it.",
+        "tone": "warn",
+        "data_quality": "Outcome ledger SHA-256 8789AC4B... records PR #218, implementation head a91d7d9d, merge 8fff1c16, terminal state mitigated, and no terminal verification errors. Original-scenario role SHA-256 7BA5A645... passes 11/11 predicates; mitigation role SHA-256 17EBF316... passes 4/4; implementation verification SHA-256 F8A15294... passes; final review summary SHA-256 17FA025F... approves exact head. The completed ticket restores immutable body/plan hashes cdfad2f2... and d45faf18.... This evidence proves the bounded mitigation only; live recurrence and root-mechanism resolution remain unproven.",
+        "source_ids": [
+          "report_schema_stage3_canonical_v6_20260718",
+          "report_schema_stage4_sol_high_20260718",
+          "report_schema_stage5_sol_high_20260718",
+          "report_schema_stage6_corrected_receipt_20260718",
+          "report_schema_stage6_corrected_plan_20260718",
+          "report_schema_delivery_outcome_20260719",
+          "report_schema_original_scenario_outcome_20260719",
+          "report_schema_mitigation_effect_outcome_20260719",
+          "report_schema_complete_ticket_20260719",
+          "backlog_depth_supervision_issue_ledger"
         ]
       }
     ]
@@ -5159,9 +5250,9 @@
       "id": "backlog_depth_supervision_issue_ledger",
       "path": "docs/design/backlog-depth-supervision-issue-ledger.md",
       "kind": "supervision_issue_and_test_evidence_ledger",
-      "file_sha256_at_dashboard_snapshot": "8A40FE75378D36336B52127CC7C57C8D00365CA001675C2F3046820E4BD7ACB1",
-      "as_of": "2026-07-18T08:52:15Z",
-      "limitations": "Records supervisor-discovered defects and correction evidence through BDS-137 and AN-35, including the fresh Windows-sandbox and Docker-shell Stage 3/4 qualifications and exact BDS-130 Stage 2 schedule replay. It is a supervision record, not a substitute for exact run, outcome-role, ticket, verifier, or replay artifacts."
+      "file_sha256_at_dashboard_snapshot": "3046676062EF468C04BDC4C68744B4C0107C6C48E005D0D56DD1E61A194A6C08",
+      "as_of": "2026-07-19T06:22:10Z",
+      "limitations": "Records supervisor-discovered defects and correction evidence through the report-schema implementation, PR review, merge, mitigated terminal outcome, and the full affected-project controller checkpoint including BDS-147 and AN-38. It groups related symptoms by causal workflow cluster; it is not a substitute for exact run, outcome-role, ticket, verifier, or GitHub artifacts."
     },
     {
       "id": "stage3_windows_sandbox_fresh_2d430151_receipt_20260718",
@@ -8662,6 +8753,142 @@
       "affected_test_count": 441,
       "affected_test_failures": 0,
       "limitations": "The exact replay proves the deterministic correction against retained inputs and response. Production persistence and Stage 2 continuation under the corrected sealed revision remain pending."
+    },
+    {
+      "id": "report_schema_stage3_canonical_v6_20260718",
+      "path": "U:/s3_report_schema_e7dc83c1_stage3_canonical_v6_sol_high_20260718T205100/usertest.research.json",
+      "kind": "single_actionable_case_verified_research",
+      "file_sha256": "452402C4B9AA6FA5E109C59A4D0D35C59B0093CA50E25C57771FAF2604D160F8",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "research_attempt_record_count": 35,
+      "unique_model_run_dir_count": 31,
+      "author_session_count": 1,
+      "experiment_count": 15,
+      "final_verifier_finding_count": 0,
+      "research_status": "evidence_sufficient",
+      "reproduction_status": "reproduced",
+      "actionability_disposition": "requires_change",
+      "limitations": "The 35 retained attempt records include four duplicate run-directory projections; 31 unique model run directories are the supported call count. This establishes the pre-change mechanism, not post-change resolution."
+    },
+    {
+      "id": "report_schema_stage4_sol_high_20260718",
+      "path": "U:/s4_report_schema_e7dc83c1_baseline_sol_high_r2_20260718T205500/stage4_single_case_receipt.json",
+      "kind": "single_actionable_case_solution_optioning",
+      "file_sha256": "14D595C3AD50B0D0569A95A61749F4F62C955D6618632FC8DCD91DC9807B0505",
+      "duration_seconds": 314.963207,
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "author_attempt_count": 1,
+      "option_count": 1,
+      "rejected_option_count": 0,
+      "limitations": "One narrow single-path option was accepted. No ticket, implementation, Docker, or outcome action occurred."
+    },
+    {
+      "id": "report_schema_stage5_sol_high_20260718",
+      "path": "U:/s5_report_schema_e7dc83c1_baseline_sol_high_20260718T211000/stage5_single_case_receipt.json",
+      "kind": "single_actionable_case_adversarial_selection",
+      "file_sha256": "F50752C5E11D504DD81CED2A19E34D179EAA163D875C1B5059F2C21F5721817F",
+      "duration_seconds": 389.02138,
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "selector_attempt_count": 1,
+      "falsifier_attempt_count": 3,
+      "labeler_attempt_count": 1,
+      "selection_count": 1,
+      "falsification_verdict": "accept",
+      "maximum_outcome_claim": "mitigated",
+      "limitations": "The selected option is approved for planning with bounded residual risks. Post-change evidence remains unverified."
+    },
+    {
+      "id": "report_schema_stage6_initial_sol_high_20260718",
+      "path": "U:/s6_report_schema_e7dc83c1_baseline_sol_high_20260718T212000/usertest.change_plans.json",
+      "kind": "stage6_structurally_accepted_semantically_rejected_plan",
+      "file_sha256": "E847952F40DD236056FAB309853F452C6B7016115169AB15825B68E8F8CA72C7",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "planner_attempt_count": 4,
+      "initial_finding_count": 6,
+      "final_structural_finding_count": 0,
+      "independent_intent_finding_count": 2,
+      "limitations": "The initial Stage 6 plan passed the old structural contract by treating a retained .usertest_research harness as a product target. It is retained as rejected evidence and must not be implemented."
+    },
+    {
+      "id": "report_schema_stage6_corrected_receipt_20260718",
+      "path": "U:/s6_report_schema_e7dc83c1_same_author_intent_correction_sol_high_20260718T224500/stage6_single_case_receipt.json",
+      "kind": "same_author_stage6_intent_correction",
+      "file_sha256": "E4D94CBB62E947B4C2F2047C8108C117BF1E109482C5A3E7FAC649FD46AADBEB",
+      "duration_seconds": 152.432091,
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "planner_attempt_count": 1,
+      "same_author_session_continuity": true,
+      "plan_count": 1,
+      "warning_count": 0,
+      "subscription_status": "Logged in using ChatGPT",
+      "source_files_unchanged": true,
+      "target_workspace_unchanged": true,
+      "limitations": "This closes planning only. Export, implementation, original-scenario execution, outcome proof, recurrence, and resolution remain pending."
+    },
+    {
+      "id": "report_schema_stage6_corrected_plan_20260718",
+      "path": "U:/s6_report_schema_e7dc83c1_same_author_intent_correction_sol_high_20260718T224500/usertest.change_plans.json",
+      "kind": "decision_complete_single_actionable_case_plan",
+      "file_sha256": "D2E2F6A9FC911990B86B648AA6E2EEBC31B7BC92CF057752471ABFA3FB7E8479",
+      "plan_revision_id": "planrev:sha256:5317ef7b2e6173b29e190166165482b7531caee4c0a4782003ed3038a10ad05d",
+      "target_count": 6,
+      "production_target_count": 2,
+      "test_target_count": 4,
+      "research_overlay_target_count": 0,
+      "after_assertion_count": 10,
+      "expected_outcome_state": "mitigated",
+      "limitations": "This remains the immutable research-, option-, selection-, and code-grounded plan. PR #218 subsequently implemented and executed its bounded outcome contract; consult the delivery and outcome sources rather than treating the plan itself as proof."
+    },
+    {
+      "id": "report_schema_delivery_outcome_20260719",
+      "path": ".agents/state/backlog_implement_actions.yaml",
+      "kind": "implementation_delivery_and_outcome_ledger",
+      "file_sha256": "8789AC4BC87C94F3ADC29E4C8E1B15FEDCA0EE1DF597474F0CE5B9DC845E79F7",
+      "case_id": "case:4f13410712b8654b0e93",
+      "plan_revision_id": "planrev:sha256:5317ef7b2e6173b29e190166165482b7531caee4c0a4782003ed3038a10ad05d",
+      "implementation_head": "a91d7d9d3297601b9be09b1d31bc7f29fcf0c2c5",
+      "merged_commit": "8fff1c16dfaedf317e2ef25924773fa5efe90f08",
+      "target_branch": "dev",
+      "pr_url": "https://github.com/jcmullwh/usertest/pull/218",
+      "outcome_state": "mitigated",
+      "recorded_at": "2026-07-19T05:30:53Z",
+      "limitations": "The outcome proves the planned code/test, original-scenario, and mitigation-effect contracts on the merged bytes. It contains no live-runtime evidence because the plan did not require it, no recurrence result, and no claim that the underlying failure mechanism is resolved."
+    },
+    {
+      "id": "report_schema_original_scenario_outcome_20260719",
+      "path": "runs/usertest_implement/_outcome_roles/98bf1a4afbdd9048/20260719T053022178477Z/original_scenario/outcome_role.json",
+      "kind": "merged_original_scenario_outcome_role",
+      "file_sha256": "7BA5A645BE1AC82F899BF044032FFB5EE5438D6DDE58EA843DB7727375F28B5F",
+      "case_id": "case:4f13410712b8654b0e93",
+      "merged_commit": "8fff1c16dfaedf317e2ef25924773fa5efe90f08",
+      "predicate_count": 11,
+      "passed": true,
+      "limitations": "This is an exact merged-checkout replay of the selected planned post-change scenario. It establishes the bounded mitigation behavior, not live recurrence absence or root-mechanism removal."
+    },
+    {
+      "id": "report_schema_mitigation_effect_outcome_20260719",
+      "path": "runs/usertest_implement/_outcome_roles/98bf1a4afbdd9048/20260719T053049498166Z/mitigation_effect/outcome_role.json",
+      "kind": "merged_mitigation_effect_outcome_role",
+      "file_sha256": "17EBF3169394AFB1F6CA585F35F5B99639425456A0953375E0FA9202B8493885",
+      "case_id": "case:4f13410712b8654b0e93",
+      "merged_commit": "8fff1c16dfaedf317e2ef25924773fa5efe90f08",
+      "predicate_count": 4,
+      "passed": true,
+      "limitations": "This proves public run, matrix, and batch surfaces remain non-successful when the typed verification failure is returned. It does not elevate the case beyond mitigated."
+    },
+    {
+      "id": "report_schema_complete_ticket_20260719",
+      "path": ".agents/plans/5 - complete/20260719_98bf1a4afbdd9048_Route-failed-verification-through-typed-run-error-artifacts.md",
+      "kind": "completed_implementation_ticket_with_outcome",
+      "file_sha256": "D216F80C9422213ED9B63E88AD154C225F63DB98312E59EB4EED2BD962BF326E",
+      "canonical_ticket_body_sha256": "cdfad2f267fbf875ca4bd99be2672e76eebd2d6659c7dbdd8eb76d9d2a63fad8",
+      "canonical_local_plan_sha256": "d45faf189f067f73960b90d436bfcce380307765603bbd637a680daf0f1f16c6",
+      "limitations": "The raw file includes a large retained historical evidence section plus mutable lifecycle/outcome state. Canonical hashes bind the immutable ticket and plan; the raw-file hash binds this exact completed snapshot."
     },
     {
       "id": "executive_summary",

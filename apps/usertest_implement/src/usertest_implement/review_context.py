@@ -4,6 +4,7 @@ from __future__ import annotations
 from backlog_repo.plan_scope import assess_pr_plan_scope
 
 from usertest_implement.shared import *
+from usertest_implement.ticket_prompt import project_ticket_prompt_context
 
 
 def _run_gh(*, cwd: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -192,6 +193,7 @@ def _build_review_append_prompt(
     ci_gate: dict[str, Any] | None,
     pr_context: dict[str, Any],
 ) -> str:
+    ticket_prompt_context = project_ticket_prompt_context(selected)
     pr_json = json.dumps(pr_context.get("pr", {}), indent=2, ensure_ascii=False)
     checks_json = json.dumps(pr_context.get("checks", []), indent=2, ensure_ascii=False)
     handoff_json = json.dumps(handoff_summary or {}, indent=2, ensure_ascii=False)
@@ -236,7 +238,7 @@ def _build_review_append_prompt(
         "runner computes merge readiness separately. Do not modify repository source files. "
         "Do not merge the PR.\n\n"
         "# Ticket markdown\n\n"
-        f"{selected.ticket_markdown.rstrip()}\n\n"
+        f"{ticket_prompt_context.rstrip()}\n\n"
         "# Handoff summary\n\n"
         f"```json\n{handoff_json}\n```\n\n"
         "# PR reference\n\n"

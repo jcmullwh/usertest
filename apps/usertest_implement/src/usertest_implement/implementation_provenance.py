@@ -155,8 +155,8 @@ def record_existing_verified_implementation_head(*, run_dir: Path) -> dict[str, 
     workspace_ref = _read_json(workspace_ref_path)
     if verification.get("passed") is not True:
         raise ValueError("implementation_provenance_verification_not_passed")
-    if git_ref.get("commit_attempted") is not False:
-        raise ValueError("implementation_provenance_existing_head_commit_attempted")
+    if not isinstance(git_ref.get("commit_attempted"), bool):
+        raise ValueError("implementation_provenance_existing_head_commit_attempt_invalid")
     if git_ref.get("commit_performed") is not False:
         raise ValueError("implementation_provenance_existing_head_commit_performed")
     if git_ref.get("commit_observed") is not True:
@@ -283,8 +283,8 @@ def validate_verified_implementation_head(*, run_dir: Path) -> dict[str, Any]:
     ).casefold():
         raise ValueError("implementation_provenance_git_head_mismatch")
     if raw.get("schema_version") == 2:
-        if git_ref.get("commit_attempted") is not False:
-            raise ValueError("implementation_provenance_existing_head_commit_attempted")
+        if not isinstance(git_ref.get("commit_attempted"), bool):
+            raise ValueError("implementation_provenance_existing_head_commit_attempt_invalid")
         if git_ref.get("commit_performed") is not False:
             raise ValueError("implementation_provenance_existing_head_commit_performed")
         if git_ref.get("commit_observed") is not True:

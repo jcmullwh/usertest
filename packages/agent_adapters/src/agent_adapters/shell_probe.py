@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import shutil
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from agent_adapters.gemini_cli import run_gemini
 
 _SHELL_PROBE_MARKER = "shell_probe=ok"
 _TAIL_BYTES = 24_000
+_CODEX_CONTEXT_EXHAUSTED_FRAGMENT = "ran out of room in the model's context window"
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,8 @@ class AgentShellProbeResult:
     required_commands_seen: tuple[str, ...] = ()
     required_command_outputs: tuple[tuple[str, str], ...] = ()
     error: str | None = None
+    attempt_count: int = 1
+    attempt_history: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         stderr_tail = _read_tail(self.stderr_path)
@@ -62,6 +66,9 @@ class AgentShellProbeResult:
             "raw_events_path": str(self.raw_events_path),
             "last_message_path": str(self.last_message_path),
             "stderr_path": str(self.stderr_path),
+            "attempt_count": self.attempt_count,
+            "retry_count": max(0, self.attempt_count - 1),
+            "attempt_history": [dict(item) for item in self.attempt_history],
         }
 
 
@@ -91,6 +98,7 @@ def probe_agent_shell_launch(
     gemini_approval_mode: str = "default",
     gemini_allowed_tools: list[str] | tuple[str, ...] = (),
     gemini_include_directories: list[str] | tuple[str, ...] = (),
+    codex_context_exhaustion_retries: int = 2,
 ) -> AgentShellProbeResult:
     """
     Probe shell launchability through the selected agent adapter.
@@ -120,34 +128,52 @@ def probe_agent_shell_launch(
 
     try:
         if agent_norm == "codex":
-            result = run_codex_exec(
-                workspace_dir=workspace_dir,
-                prompt=prompt,
-                raw_events_path=raw_events_path,
-                last_message_path=last_message_path,
-                stderr_path=stderr_path,
-                sandbox=str(codex_sandbox or "read-only"),
-                ask_for_approval=str(codex_ask_for_approval or "never"),
-                binary=binary,
-                subcommand=codex_subcommand,
-                model=model,
-                config_overrides=codex_config_overrides,
-                ignore_user_config=codex_ignore_user_config,
-                ignore_rules=codex_ignore_rules,
-                command_prefix=prefix,
-                env_overrides=env_overrides,
-                agent_last_message_path=codex_agent_last_message_path,
-            )
-            return _result_from_paths(
-                agent=agent_norm,
-                argv=result.argv,
-                exit_code=result.exit_code,
-                raw_events_path=raw_events_path,
-                last_message_path=last_message_path,
-                stderr_path=stderr_path,
-                required_commands=required_commands,
-                required_command_outputs=required_command_outputs,
-            )
+            attempt_history: list[dict[str, Any]] = []
+            max_attempts = 1 + max(0, int(codex_context_exhaustion_retries))
+            for attempt_number in range(1, max_attempts + 1):
+                result = run_codex_exec(
+                    workspace_dir=workspace_dir,
+                    prompt=prompt,
+                    raw_events_path=raw_events_path,
+                    last_message_path=last_message_path,
+                    stderr_path=stderr_path,
+                    sandbox=str(codex_sandbox or "read-only"),
+                    ask_for_approval=str(codex_ask_for_approval or "never"),
+                    binary=binary,
+                    subcommand=codex_subcommand,
+                    model=model,
+                    config_overrides=codex_config_overrides,
+                    ignore_user_config=codex_ignore_user_config,
+                    ignore_rules=codex_ignore_rules,
+                    command_prefix=prefix,
+                    env_overrides=env_overrides,
+                    agent_last_message_path=codex_agent_last_message_path,
+                )
+                probe_result = _result_from_paths(
+                    agent=agent_norm,
+                    argv=result.argv,
+                    exit_code=result.exit_code,
+                    raw_events_path=raw_events_path,
+                    last_message_path=last_message_path,
+                    stderr_path=stderr_path,
+                    required_commands=required_commands,
+                    required_command_outputs=required_command_outputs,
+                )
+                retryable = _codex_probe_context_exhausted(probe_result)
+                attempt_history.append(
+                    _preserve_probe_attempt(
+                        artifacts_dir=artifacts_dir,
+                        attempt_number=attempt_number,
+                        result=probe_result,
+                        retryable_context_exhaustion=retryable,
+                    )
+                )
+                if not retryable or attempt_number >= max_attempts:
+                    return replace(
+                        probe_result,
+                        attempt_count=attempt_number,
+                        attempt_history=tuple(attempt_history),
+                    )
 
         if agent_norm == "claude":
             result = run_claude_print(
@@ -216,6 +242,50 @@ def probe_agent_shell_launch(
         )
 
     raise ValueError(f"Unsupported agent for shell launch probe: {agent!r}")
+
+
+def _codex_probe_context_exhausted(result: AgentShellProbeResult) -> bool:
+    if result.exit_code == 0:
+        return False
+    evidence = "\n".join(
+        (
+            _read_tail(result.raw_events_path),
+            _read_text(result.last_message_path),
+            _read_tail(result.stderr_path),
+            result.error or "",
+        )
+    ).lower()
+    return _CODEX_CONTEXT_EXHAUSTED_FRAGMENT in evidence
+
+
+def _preserve_probe_attempt(
+    *,
+    artifacts_dir: Path,
+    attempt_number: int,
+    result: AgentShellProbeResult,
+    retryable_context_exhaustion: bool,
+) -> dict[str, Any]:
+    attempt_dir = artifacts_dir / "attempts" / f"attempt_{attempt_number:03d}"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    copied_paths: dict[str, str | None] = {}
+    for label, source in (
+        ("raw_events_path", result.raw_events_path),
+        ("last_message_path", result.last_message_path),
+        ("stderr_path", result.stderr_path),
+    ):
+        destination = attempt_dir / source.name
+        if source.is_file():
+            shutil.copy2(source, destination)
+            copied_paths[label] = str(destination)
+        else:
+            copied_paths[label] = None
+    return {
+        "attempt_number": attempt_number,
+        "exit_code": result.exit_code,
+        "marker_seen": result.marker_seen,
+        "retryable_context_exhaustion": retryable_context_exhaustion,
+        **copied_paths,
+    }
 
 
 def _probe_prompt(agent: str, *, required_commands: tuple[str, ...] = ()) -> str:

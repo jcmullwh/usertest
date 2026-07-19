@@ -63,6 +63,10 @@ _EVIDENCE_ATOM_IDS_LABEL_RE = re.compile(
     r"\s*:\s*$",
     flags=re.IGNORECASE | re.MULTILINE,
 )
+_LEGACY_INLINE_EVIDENCE_ATOM_ID_RE = re.compile(
+    r"^(?:-\s*)?Evidence\s*:\s*`([^`\r\n]+)`\s*$",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
 _MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s+", flags=re.MULTILINE)
 DEQUEUED_PLAN_DIRNAMES: tuple[str, ...] = ("_dequeued",)
 REMOVED_PLAN_DIRNAMES: tuple[str, ...] = (*DISCARDED_PLAN_BUCKETS, *DEQUEUED_PLAN_DIRNAMES)
@@ -656,6 +660,10 @@ def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
             cleaned = candidate.strip()
             if _valid_plan_atom_id(cleaned):
                 atom_ids.add(cleaned)
+    for match in _LEGACY_INLINE_EVIDENCE_ATOM_ID_RE.finditer(markdown):
+        cleaned = match.group(1).strip()
+        if _valid_plan_atom_id(cleaned):
+            atom_ids.add(cleaned)
     return sorted(atom_ids)
 
 

@@ -120,8 +120,9 @@ def test_initial_implementation_receipt_requires_exact_researched_base(
         record_verified_implementation_head(run_dir=run_dir, require_exact_base=True)
 
 
+@pytest.mark.parametrize("commit_attempted", [False, True])
 def test_existing_head_receipt_is_explicitly_noncommitting_and_revalidated(
-    tmp_path: Path,
+    tmp_path: Path, commit_attempted: bool
 ) -> None:
     run_dir, repo, revision, head = _fixture(tmp_path)
     branch = _git(repo, "branch", "--show-current")
@@ -129,7 +130,7 @@ def test_existing_head_receipt_is_explicitly_noncommitting_and_revalidated(
         run_dir / "git_ref.json",
         {
             "branch": branch,
-            "commit_attempted": False,
+            "commit_attempted": commit_attempted,
             "commit_performed": False,
             "commit_observed": True,
             "base_commit": head,

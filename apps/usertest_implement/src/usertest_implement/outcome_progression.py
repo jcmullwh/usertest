@@ -415,6 +415,19 @@ def _require_terminal_outcome_provenance(
     repo_root: Path,
     owner_root: Path,
 ) -> None:
+    target_branch = str(current.get("target_branch") or "").strip()
+    if target_branch:
+        # A GitHub merge updates the remote before this long-lived supervisor's
+        # tracking ref. Refresh only the recorded target branch so ancestry checks
+        # evaluate the actual merged state rather than a stale local snapshot.
+        _git(
+            owner_root,
+            "fetch",
+            "--no-tags",
+            "origin",
+            f"{target_branch}:refs/remotes/origin/{target_branch}",
+            check=False,
+        )
     trusted_runs_roots: list[Path] = []
     for candidate in (
         (repo_root / "runs").resolve(),

@@ -1,6 +1,6 @@
 # Backlog-depth supervision issue ledger
 
-Updated: 2026-07-17 19:31 America/New_York
+Updated: 2026-07-18 22:10 America/New_York
 
 This is the supervisor-owned ledger for defects and unresolved findings discovered while bringing the automated backlog pipeline to a working baseline. Generated atoms, dossiers, options, plans, and tickets remain system-owned evidence; this ledger records work that the supervising Codex process must ensure is addressed rather than silently losing it between reruns.
 
@@ -15,7 +15,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 ## Required invariants
 
 - Use the signed-in host Codex route and subscription provenance; do not fall back to per-token API billing.
-- Use `gpt-5.6-terra` while baseline mechanics are being established.
+- Use `gpt-5.6-sol` with `model_reasoning_effort=high` for current pipeline work unless the user changes the model again.
 - Use narrow stage-local reruns until each stage works, then perform a minimal full end-to-end proof.
 - Do not substitute supervisor-authored research, options, plans, or implementation for system-authored work.
 - Do not impose short test timeouts merely because a valid suite is slow.
@@ -1056,6 +1056,108 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Objective impact: after the mission was deliberately rewritten to distinguish terminal research from change planning, one core test still required the deleted literal `stage guidance` in the mission file. The production runner continued to load `repro_research.md`, label it `Stage guidance (repo-owned)`, and append it to every case; the stale assertion nevertheless stopped the complete suite after 509 passing tests.
 - Correction: the assertion now requires the mission's current semantic handoff, `system prompt's adapter and output contracts`, instead of the obsolete phrase. Dedicated assembled-prompt tests continue to verify that the repo-owned guidance contents are actually present, so this does not weaken live prompt coverage.
 - Closure proof: the exact stopped test and all five dedicated live research-prompt tests pass; the complete 512-test core suite and complete application suite are green.
+
+### BDS-138 - Targeted research correction could not remove a verifier-rejected optional claim safely
+
+- Status: `closed_live_stage3_green`
+- Priority: Stage 3 self-healing and causal accuracy
+- Objective impact: the same author could establish the primary mechanism but remain blocked because removing an optional refuted hypothesis or adapter claim also discarded unchanged valid evidence, while overly broad finding binding authorized unrelated projection changes. Continuing demanded false or irrelevant claims; restarting would waste the established investigation.
+- Correction: targeted repair now preserves unchanged verified evidence while allowing only the exact verifier-rejected optional hypothesis/adapter projection to disappear. Finding identity, command authorization, and experiment/atom coverage remain exact; a removal cannot weaken primary-mechanism or origin-evidence coverage.
+- Closure proof: all 181 `backlog_miner` research-runner tests pass in 86.79 seconds and Ruff is clean. The live report-schema author remained in session `019f7477-b5ec-7f72-b507-a53db0269820`, retained 15 experiments and the primary `runner_core.runner.run_once` mechanism, removed the unsupported optional competitor, and finished `evidence_sufficient` / `reproduced` / `requires_change` with zero verifier findings. Canonical research hash: `452402C4B9AA6FA5E109C59A4D0D35C59B0093CA50E25C57771FAF2604D160F8`.
+
+### BDS-139 - Stage 4 treated open evidence labels and generic causal locators as product identities
+
+- Status: `closed_live_stage4_green`
+- Priority: good-throughput blocking, evidence semantics
+- Objective impact: runner-verified origin-bound evidence was rejected because its scenario label was not in a small hand-authored vocabulary, and generic adapter locator `argv:3` was required to equal a repository mechanism symbol. A real actionable case therefore appeared to have insufficient evidence despite exact runner receipts.
+- Correction: Stage 4 eligibility is determined by verified execution, direct origin-symptom binding, unchanged revision, and mutation/authorization receipts rather than a closed scenario-label enum. A generic causal locator remains evidence identity; its runner-attested implementation touchpoint resolves the repository path and production symbol separately.
+- Closure proof: option/readiness regressions pass inside the complete 90/90 ticket-readiness suite. Production Stage 4 at `U:\s4_report_schema_e7dc83c1_baseline_sol_high_r2_20260718T205500` used signed-in Sol/high, completed in 314.963207 seconds on its first author attempt, and emitted one narrow `single_path` option with zero rejections and no Stage 3 rerun, export, implementation, ticket, or Docker action.
+
+### BDS-140 - Read-only planning failed on retained cross-volume Git worktrees
+
+- Status: `closed_live_stage4_grounding_green`
+- Priority: planning availability without host mutation
+- Objective impact: Git's dubious-ownership check rejected read-only `rev-parse`, `cat-file`, and `status` against the clean retained U: planning worktree. The first Stage 4 launch stopped in 20 seconds with zero model calls and mislabeled valid evidence as unavailable.
+- Correction: planning Git inspection uses `git -c safe.directory=<exact-resolved-worktree> -C <worktree> ...` for each read-only command. No global Git configuration is written and no broader path is trusted.
+- Closure proof: the focused safe-directory tests and complete 72/72 planning-depth suite pass. Direct grounding of `U:\s4_report_schema_e0527_workspace_20260718T143000` returns exact head `e0527e23c50c801488bf2b43892baca36de7a2a4`, clean status, and zero reasons. The immediate Stage 4 rerun then produced the accepted option above.
+
+### BDS-141 - Stage 6 forced a planned future proof to reuse and rewrite a research-only harness
+
+- Status: `closed_same_author_stage6_plan_green`
+- Priority: objective-critical plan depth and evidence custody
+- Objective impact: Stage 5 selected `post_change_replay_mode=stage6_planned_unverified`, but ticket readiness still required after-change command equality with the exact Stage 3 command. Command-path validation then treated the absent `.usertest_research` path as missing product source. The planner satisfied both rules by proposing to commit the research harness, producing a structurally green but semantically overfit plan that did not define the real future solution proof.
+- Correction: verified fail-first mode still requires the exact unchanged runner-retained command. Planned-unverified mode keeps the exact research command only as authenticated historical before evidence and requires a distinct committed solution-specific after command with positive symptom-reversal assertions. Every path in a verified Stage 3 workspace-overlay manifest is immutable to Stage 6; only the exact bound before command may reference such an intentionally absent path.
+- Verification: complete affected suites pass: 90/90 ticket-readiness, 72/72 planning-depth, and 17/17 Stage 6 self-healing tests, plus Ruff. The old accepted plan now deterministically reports exactly `change_plan_target_rewrites_retained_outcome_asset:6` and `change_plan_after_command_reuses_historical_baseline`.
+- Live closure proof: those two independent findings went back to original planner session `019f77ea-4bd5-7d11-9336-bf8231243959` under signed-in Sol/high. The author corrected the plan in one 135.679206-second resumed turn. Receipt `U:\s6_report_schema_e7dc83c1_same_author_intent_correction_sol_high_20260718T224500\stage6_single_case_receipt.json` records one plan, zero warnings, unchanged inputs/workspace, and no upstream, export, ticket, implementation, Docker, or filesystem-removal action. Plan revision `planrev:sha256:5317ef7b2e6173b29e190166165482b7531caee4c0a4782003ed3038a10ad05d` has six exact targets, no research-overlay target, a distinct after command, ten behavioral assertions, and an honest `mitigated` claim.
+
+### AN-36 - Focused test launch initially used the wrong project environment
+
+- Status: `closed_immediate_environment_correction`
+- Classification: one supervisor test-launch cluster, not a model, pipeline-stage, or product failure
+- Exact evidence: the first parallel command used unsupported global `pdm -p` syntax, and the next package-local invocation imported a stale installed `run_artifacts` because it omitted the monorepo source path. Both stopped during command parsing or test collection; neither executed a test body, model stage, export, implementation, Docker, or filesystem removal.
+- Containment and result: subsequent commands dot-sourced the repository-owned `scripts/set_pythonpath.ps1` and used the correct project virtualenvs. The focused tests passed, followed by the complete 90/90, 72/72, and 17/17 affected suites and Ruff. This is excluded from pipeline error and automatic-repair counts; it is retained as one minor supervisor launch error.
+
+### BDS-142 - Adopted implementation handoffs could not traverse the normal review lifecycle
+
+- Status: `closed_exact_case_lifecycle_green`
+- Objective impact: the system produced and adopted a real implementation PR, but review eligibility, ticket-bucket movement, and verified-head provenance disagreed about the lifecycle. Without correction, correct authored work either stopped before a model review or required manual state editing, preventing baseline end-to-end throughput.
+- Exact evidence: adoption is durably retained under `U:\usertest_implement_report_schema_sol_high_20260718\_handoff_adoptions\98bf1a4afbdd9048\20260719T034508532950Z`. The first review stopped model-free in about 4.8 seconds because an authenticated adopted handoff still had an `in_progress` lifecycle. After the first same-author implementation correction, the first review-resume attempt stopped model-free again because the observed author commit had not been projected into implementation provenance and the ticket had not moved to `for_review`.
+- Root cause: adoption, resume, selection, and review independently encoded bucket and state assumptions. They did not share a transition that recognizes a cryptographically bound adopted PR, records an observed exact author head, creates the destination bucket, and moves the same ticket to review.
+- Closure proof: review now accepts a bound adopted handoff from the supported pre-review states, resume records the verified observed head and moves the ticket to `for_review`, recognized bucket moves preserve canonical hashes, and completed-ticket binding accepts the same filename across recognized lifecycle buckets. The report-schema lifecycle then reached two real reviews, merge, terminal outcome, and the complete bucket. The latest review module passes 48 tests; the combined ticket, ledger, resume, and review surface passes 69 tests; Ruff is clean.
+
+### BDS-143 - Full mutable ticket history exhausted the implementation-review context
+
+- Status: `closed_live_review_green`
+- Objective impact: the first real review built a 6,432,882-character prompt from the implementation ticket and spent a model call on context exhaustion instead of assessing whether the change solved the researched problem. This directly reduced good throughput without improving quality.
+- Exact evidence: `runs/usertest_implement/usertest/20260719T035111Z/codex/0` completed its shell wrapper in about 42.7 seconds, but the Sol/high model ran only about 3.58 seconds before the oversized prompt failed. The exact staged prompt is retained under `runs/_tmp_review_prompt_staging/98bf1a4afbdd9048_1784433071913_review_prompt.md`.
+- Root cause: review passed the entire mutable ticket, including accumulated historical evidence, instead of the immutable causal contract plus the current implementation and outcome boundaries needed for review.
+- Closure proof: review now uses a bounded causal projection. On the retained case it reduces 6,236,034 ticket characters to 256,704 review-context characters, a 95.9% reduction, without dropping the case, plan revision, target contract, verification contract, implementation diff, or original-scenario/outcome requirements. The subsequent real Sol/high reviews completed in 450.9 and 416.7 seconds and returned one actionable correction followed by exact-head approval.
+
+### BDS-144 - Outcome replay inherited the supervisor checkout instead of the clean proof checkout
+
+- Status: `closed_clean_checkout_replay_and_bounded_retry_green`
+- Objective impact: a correct implementation failed its first premerge original-scenario proof because inherited `PYTHONPATH` imported stale pipeline-worktree code into the clean PR checkout. The controller also lacked a bounded same-head replay path and could route a deterministic harness error back to the author as if the implementation were wrong.
+- Exact evidence: `runs/usertest_implement/_premerge_outcome_roles/98bf1a4afbdd9048/20260719T045632505076Z/original_scenario/outcome_role.json` failed while its test file imported `runner_core` from the supervising worktree. The same command passed immediately with workspace-local source binding. The retained bounded retry at `runs/usertest_implement/_premerge_outcome_roles/98bf1a4afbdd9048/20260719T050606782310Z/original_scenario/outcome_role.json` passed against the exact implementation head without another author change.
+- Root cause: outcome-role command environments sanitized neither inherited first-party import roots nor their ordering, and lifecycle recovery treated any failed proof as author-correctable on the first occurrence.
+- Closure proof: outcome-role execution now builds a workspace-bound first-party source environment for both shell and argv commands. Review permits one same-head premerge replay before same-author correction, retains both attempts, and blocks/routes to the author only after the bounded retry also fails. The outcome-role suite passes 18 tests with one expected skip; the report-schema premerge and postmerge original-scenario roles pass on the exact PR/merge bytes.
+
+### BDS-145 - Outcome recording and terminal verification encoded different provenance contracts
+
+- Status: `closed_terminal_provenance_green`
+- Objective impact: after PR #218 merged and its causal roles passed, outcome progression repeatedly moved between `tests_verified`, `unverified`, and `original_scenario_verified` because the recorder and verifier disagreed about planned post-change proof scope, observed commits, optional workspace fields, and target-branch ancestry. This made a valid bounded mitigation appear incomplete and could have encouraged unnecessary proof reruns.
+- Exact evidence: the first postmerge record rejected `planned_post_change_verification`; later terminal verification rejected a valid observed, non-performed implementation commit and absent optional workspace strategy; a stale local `origin/dev` then failed ancestry even though GitHub had already merged `8fff1c16dfaedf317e2ef25924773fa5efe90f08`.
+- Root cause: closely related provenance rules were duplicated across outcome recording, terminal verification, and progression rather than evaluated from one compatible contract. Progression also assumed the local target ref was current.
+- Closure proof: the outcome recorder accepts the Stage-5/6 planned-post-change proof scope, the terminal verifier accepts valid observed-head provenance and version-appropriate optional fields, and progression fetches the exact recorded target branch before ancestry verification. The combined outcome recorder/verifier surface passes 32 tests, progression passes 34 tests, Ruff is clean, and terminal verification now returns true with no errors. The final state remains honestly `mitigated`, not `resolved`, because the plan did not claim the underlying failure mechanism was removed.
+
+### BDS-146 - Windows ticket rewrites multiplied newlines and broke immutable provenance
+
+- Status: `closed_conservative_repair_and_byte_stable_writes_green`
+- Objective impact: repeated lifecycle writes expanded the implementation ticket from its immutable logical representation to more than 6.6 MB and changed canonical hashes even though the causal ticket body and plan had not changed. That both caused the review-context failure and blocked postmerge provenance, risking discard of otherwise valid system work.
+- Exact evidence: the retained historical prompt contains the exact pre-lifecycle ticket with canonical body SHA-256 `cdfad2f267fbf875ca4bd99be2672e76eebd2d6659c7dbdd8eb76d9d2a63fad8` and plan SHA-256 `d45faf189f067f73960b90d436bfcce380307765603bbd637a680daf0f1f16c6`. The damaged ticket had approximately twice the immutable logical line count and 421,743 carriage returns for 211,161 line feeds. The repaired complete ticket restores those exact canonical hashes while preserving the parsed mutable outcome block.
+- Root cause: text-mode Windows writes translated already-normalized line endings during repeated ticket lifecycle updates. The pipeline lacked a narrowly provable repair for historical newline multiplication.
+- Closure proof: staged outcome ticket writes now use UTF-8 bytes, and the ticket repair only halves even newline runs when the immutable historical hashes and parsed outcome are unchanged. It refuses unknown buckets or unproven content. Ticket, ledger, and review regressions pass in the 69-test combined surface, and the final complete ticket binds the exact case, plan revision, verified implementation head, merge, and outcome receipts.
+
+### BDS-147 - A report-schema-specific replay constraint was generalized into a universal planning gate
+
+- Status: `closed_full_affected_projects_green`
+- Objective impact: the first correction for BDS-141 rejected every `stage6_planned_unverified` plan whose before- and after-change commands were identical. That blocked valid paired causal tests where one stable repository command is deliberately run before and after the implementation, reducing good throughput without improving proof quality.
+- Exact evidence: the complete `usertest_backlog` suite exposed three failures. Two positive depth cases used the same repository-owned command with different before/after assertions and were rejected only by `change_plan_after_command_reuses_historical_baseline`; the qualification transaction consequently emitted no accepted ticket. These are legitimate general cases, not stale fixtures: rerunning the same controlled scenario is often the strongest evidence that the implementation changed the causal behavior.
+- Root cause: the real report-schema failure involved a historical command that referenced an attested `.usertest_research` overlay absent from a clean implementation checkout. The gate encoded command equality as a proxy for that transport boundary instead of checking the verified overlay evidence directly.
+- Closure proof: equality is rejected only when the selected historical experiment's runner-attested argv references a path in its content-addressed research overlay. Repository-owned paired before/after commands remain valid. A focused negative proves the overlay command cannot be reused; the two general positive cases and qualification transaction pass. The complete `backlog_core` suite passes 518/518, the complete `usertest_backlog` suite passes 813 tests with two expected skips, and the seven-project affected checkpoint totals 2,877 passed with six expected skips. All seven configured lint tasks pass.
+
+### AN-38 - First focused rerun used a stale package-local dependency copy
+
+- Status: `closed_canonical_source_graph_rerun_green`
+- Classification: one supervisor test-environment invocation error, not a product or pipeline failure
+- Exact evidence: after the full-suite failures were diagnosed, the first focused `backlog_core` rerun used its package-local environment without the canonical monorepo `PYTHONPATH` and stopped during collection because installed `run_artifacts` lacked a current repository symbol. No test body, model, pipeline stage, export, implementation, Docker, or removal action ran.
+- Containment and result: the exact focused nodes reran with `scripts/set_pythonpath.ps1`; all seven passed. The subsequent complete `backlog_repo`, `backlog_core`, and `usertest_backlog` suites passed, followed by all affected lint tasks. This invocation correction is excluded from product-error and automatic-self-correction counts.
+
+### AN-37 - One Windows PR job failed transiently on an empty `git init` error
+
+- Status: `closed_unchanged_head_rerun_green`
+- Classification: one external CI anomaly, not an implementation, pipeline-model, or test-contract defect
+- Exact evidence: pull-request run `29673422323`, job `88156385293`, initially failed 12 tests after `git init` returned nonzero with empty stdout and stderr midway through the Windows runner. The same-head push counterpart and the complete `runner_core` jobs passed.
+- Containment and result: GitHub rerun attempt 2, job `88157759991`, passed in 109 seconds on unchanged implementation head `a91d7d9d3297601b9be09b1d31bc7f29fcf0c2c5`. No code or test expectation changed, so this is counted once as an encountered environment cluster and one bounded rerun, not as an author defect.
 
 ### AN-22 - Retained-frontier launcher preflight omitted required invocation context
 

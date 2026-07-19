@@ -50,6 +50,7 @@ from usertest_implement.selection import (
     _selected_ticket_provenance,
 )
 from usertest_implement.shared import *
+from usertest_implement.tickets import _PLAN_BUCKETS, repair_ticket_newline_expansion
 
 _LEGACY_READ_ONLY_EXEC_POLICY_CASCADE = frozenset(
     {
@@ -372,7 +373,13 @@ def _require_review_artifact_bindings(
     review_ticket_path = review_ref.get("ticket_path")
     if selected.idea_path is None or not isinstance(review_ticket_path, str):
         raise ValueError("Review reference is missing the selected ticket path")
-    if Path(review_ticket_path).resolve() != selected.idea_path.resolve():
+    recorded_ticket_path = Path(review_ticket_path).resolve()
+    selected_ticket_path = selected.idea_path.resolve()
+    if recorded_ticket_path != selected_ticket_path and not _is_same_queue_ticket_move(
+        owner_root=selected.owner_root,
+        recorded_path=recorded_ticket_path,
+        selected_path=selected_ticket_path,
+    ):
         raise ValueError("review_ref.json ticket path does not match the selected ticket")
 
     run_dir_raw = review_ref.get("implementation_run_dir")
@@ -421,6 +428,33 @@ def _require_review_artifact_bindings(
     return implementation_run_dir
 
 
+def _is_same_queue_ticket_move(
+    *,
+    owner_root: Path | None,
+    recorded_path: Path,
+    selected_path: Path,
+) -> bool:
+    """Accept only a bucket-only move of the same immutable ticket identity."""
+
+    if owner_root is None:
+        return False
+    plans_root = (owner_root / ".agents" / "plans").resolve()
+    try:
+        recorded_relative = recorded_path.resolve().relative_to(plans_root)
+        selected_relative = selected_path.resolve().relative_to(plans_root)
+    except (OSError, ValueError):
+        return False
+    if len(recorded_relative.parts) != 2 or len(selected_relative.parts) != 2:
+        return False
+    recorded_bucket, recorded_name = recorded_relative.parts
+    selected_bucket, selected_name = selected_relative.parts
+    return (
+        recorded_bucket in _PLAN_BUCKETS
+        and selected_bucket in _PLAN_BUCKETS
+        and recorded_name.casefold() == selected_name.casefold()
+    )
+
+
 def _require_unchanged_reviewed_head(
     *,
     fingerprint: str,
@@ -451,11 +485,14 @@ def _review_adoption_eligibility_errors(
     ledger_path: Path,
     allowed_lifecycles: frozenset[str],
 ) -> list[str]:
-    """Explain why a ready ticket is not backed by an adopted review handoff."""
+    """Explain why a pre-review ticket is not backed by an adopted handoff."""
 
     errors: list[str] = []
-    if selected.idea_path is None or "2 - ready" not in selected.idea_path.parts:
-        errors.append("ticket is not in 2 - ready")
+    if selected.idea_path is None or not any(
+        bucket in selected.idea_path.parts
+        for bucket in ("2 - ready", "3 - in_progress")
+    ):
+        errors.append("ticket is not in 2 - ready or 3 - in_progress")
         return errors
 
     run_dir = implementation_run_dir.resolve()
@@ -1773,12 +1810,14 @@ def _recover_noncausal_premerge_rejection(
     failure = _read_json(failure_path)
     if not isinstance(failure, dict):
         return review_summary
-    if failure.get("role_artifact_path") not in {None, ""}:
+    role_artifact_path = failure.get("role_artifact_path")
+    role_failure = isinstance(role_artifact_path, str) and bool(role_artifact_path.strip())
+    prior_attempt_count = failure.get("attempt_count")
+    if not isinstance(prior_attempt_count, int) or prior_attempt_count < 1:
+        prior_attempt_count = 1
+    if role_failure and prior_attempt_count >= 2:
         return review_summary
-    if (
-        review_summary.get("review_decision") != "changes_requested"
-        or review_summary.get("causal_acceptance") is not True
-    ):
+    if review_summary.get("review_decision") != "changes_requested":
         return review_summary
     report = _read_json(review_run_dir / "report.json")
     if not isinstance(report, dict):
@@ -1865,21 +1904,42 @@ def _recover_noncausal_premerge_rejection(
         },
     }
     detail = str(failure.get("detail") or "").strip()
-    reclassification = {
-        "schema_version": 1,
-        "status": "blocked",
-        "classification": "premerge_infrastructure",
-        "causal_result": "not_run",
-        "ticket_fingerprint": selected.fingerprint,
-        "detail": detail,
-        "source_failure_path": str(failure_path),
-        "review_preserved": True,
-        "reclassified_at_utc": _utc_now_z(),
-    }
-    reclassification_path = (
-        review_run_dir / "premerge_original_scenario_infrastructure_reclassification.json"
-    )
-    _write_json(reclassification_path, reclassification)
+    if role_failure:
+        recovery_status = "retry_pending"
+        recovery_path = review_run_dir / "premerge_original_scenario_retry_pending.json"
+        recovery = {
+            "schema_version": 1,
+            "status": recovery_status,
+            "classification": "bounded_same_head_retry",
+            "causal_result": "pending_retry",
+            "ticket_fingerprint": selected.fingerprint,
+            "reviewed_head_oid": str(review_summary.get("reviewed_head_oid") or ""),
+            "detail": detail,
+            "source_failure_path": str(failure_path),
+            "source_role_artifact_path": role_artifact_path,
+            "prior_attempt_count": prior_attempt_count,
+            "maximum_attempt_count": 2,
+            "review_preserved": True,
+            "recorded_at_utc": _utc_now_z(),
+        }
+    else:
+        recovery_status = "blocked_infrastructure"
+        recovery_path = (
+            review_run_dir
+            / "premerge_original_scenario_infrastructure_reclassification.json"
+        )
+        recovery = {
+            "schema_version": 1,
+            "status": "blocked",
+            "classification": "premerge_infrastructure",
+            "causal_result": "not_run",
+            "ticket_fingerprint": selected.fingerprint,
+            "detail": detail,
+            "source_failure_path": str(failure_path),
+            "review_preserved": True,
+            "reclassified_at_utc": _utc_now_z(),
+        }
+    _write_json(recovery_path, recovery)
     _write_json(review_run_dir / "review_summary.json", restored)
     resume_state = write_ticket_resume_state(
         selected=selected,
@@ -1898,8 +1958,12 @@ def _recover_noncausal_premerge_rejection(
                 restored.get("causal_acceptance") is True
             ),
             "last_review_merge_ready": bool(restored["merge_ready"]),
-            "last_premerge_original_scenario_status": "blocked_infrastructure",
-            "last_premerge_original_scenario_block": str(reclassification_path),
+            "last_premerge_original_scenario_status": recovery_status,
+            (
+                "last_premerge_original_scenario_retry"
+                if role_failure
+                else "last_premerge_original_scenario_block"
+            ): str(recovery_path),
             "last_resume_state_path": str(
                 implementation_run_dir / RESUME_STATE_ARTIFACT_NAME
             ),
@@ -1924,6 +1988,26 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
         raise SystemExit(f"No review run recorded in ledger for ticket {selected.fingerprint!r}.")
     review_run_dir = Path(review_run_dir_raw)
     review_summary = _read_review_summary(review_run_dir=review_run_dir)
+    reviewed_ticket_provenance = review_summary.get("ticket_provenance")
+    if selected.idea_path is not None and isinstance(reviewed_ticket_provenance, dict):
+        expected_body_hash = reviewed_ticket_provenance.get("ticket_body_sha256")
+        expected_plan_hash = reviewed_ticket_provenance.get("local_plan_sha256")
+        if isinstance(expected_body_hash, str) and isinstance(expected_plan_hash, str):
+            repair_receipt = repair_ticket_newline_expansion(
+                path=selected.idea_path,
+                expected_ticket_body_sha256=expected_body_hash,
+                expected_local_plan_sha256=expected_plan_hash,
+            )
+            if repair_receipt is not None:
+                _write_json(
+                    review_run_dir / "ticket_newline_repair.json",
+                    {**repair_receipt, "recorded_at_utc": _utc_now_z()},
+                )
+                selected = _select_review_ticket(
+                    owner_root=owner_root,
+                    ticket_path=None,
+                    fingerprint=selected.fingerprint,
+                )
     pr_url = review_summary.get("pr_url")
     if not isinstance(pr_url, str) or not pr_url.strip():
         raise SystemExit(f"Review summary for {selected.fingerprint!r} is missing pr_url.")
@@ -2032,15 +2116,41 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
         proposed=preflight_outcome,
     )
     if selected_provenance.get("generated_ticket") is True and not already_merged:
+        retry_pending_path = review_run_dir / "premerge_original_scenario_retry_pending.json"
+        retry_pending = _read_json(retry_pending_path)
+        prior_role_attempt_count = 0
+        prior_role_artifact_paths: list[str] = []
+        if (
+            isinstance(retry_pending, dict)
+            and retry_pending.get("status") == "retry_pending"
+            and str(retry_pending.get("reviewed_head_oid") or "").strip().lower()
+            == reviewed_head_oid.lower()
+        ):
+            raw_prior_count = retry_pending.get("prior_attempt_count")
+            if isinstance(raw_prior_count, int) and raw_prior_count > 0:
+                prior_role_attempt_count = raw_prior_count
+            prior_path = retry_pending.get("source_role_artifact_path")
+            if isinstance(prior_path, str) and prior_path.strip():
+                prior_role_artifact_paths.append(prior_path)
+        remaining_role_attempts = max(1, 2 - prior_role_attempt_count)
+        role_failures: list[OutcomeRoleDidNotPass] = []
         try:
-            premerge_original_scenario = verify_premerge_original_scenario(
-                repo_root=repo_root,
-                owner_root=owner_root,
-                fingerprint=selected.fingerprint,
-                ticket_markdown=selected.ticket_markdown,
-                current=preflight_outcome,
-                selected_provenance=selected_provenance,
-            )
+            for attempt_number in range(1, remaining_role_attempts + 1):
+                try:
+                    premerge_original_scenario = verify_premerge_original_scenario(
+                        repo_root=repo_root,
+                        owner_root=owner_root,
+                        fingerprint=selected.fingerprint,
+                        ticket_markdown=selected.ticket_markdown,
+                        current=preflight_outcome,
+                        selected_provenance=selected_provenance,
+                    )
+                except OutcomeRoleDidNotPass as attempt_exc:
+                    role_failures.append(attempt_exc)
+                    if attempt_number < remaining_role_attempts:
+                        continue
+                    raise
+                break
         except OutcomeContractNotExecutable as exc:
             detail = str(exc)
             correction_path = (
@@ -2148,6 +2258,16 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
                 "role_artifact_path": (
                     str(artifact_path) if isinstance(artifact_path, Path) else None
                 ),
+                "role_artifact_paths": [
+                    *prior_role_artifact_paths,
+                    *[
+                        str(item.artifact_path)
+                        for item in role_failures
+                        if isinstance(item.artifact_path, Path)
+                    ],
+                ],
+                "attempt_count": prior_role_attempt_count + len(role_failures),
+                "maximum_attempt_count": 2,
                 "recorded_at_utc": _utc_now_z(),
             }
             _write_json(
@@ -2258,6 +2378,29 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
             )
             print(detail, file=sys.stderr)
             return 3
+        if prior_role_attempt_count or role_failures:
+            _write_json(
+                review_run_dir / "premerge_original_scenario_retry.json",
+                {
+                    "schema_version": 1,
+                    "status": "passed_after_retry",
+                    "classification": "self_healed_nondeterministic_or_infrastructure_failure",
+                    "causal_result": "passed",
+                    "ticket_fingerprint": selected.fingerprint,
+                    "reviewed_head_oid": reviewed_head_oid,
+                    "attempt_count": prior_role_attempt_count + len(role_failures) + 1,
+                    "prior_role_artifact_paths": [
+                        *prior_role_artifact_paths,
+                        *[
+                            str(item.artifact_path)
+                            for item in role_failures
+                            if isinstance(item.artifact_path, Path)
+                        ],
+                    ],
+                    "review_preserved": True,
+                    "recorded_at_utc": _utc_now_z(),
+                },
+            )
         _write_json(
             review_run_dir / "premerge_original_scenario.json",
             premerge_original_scenario,

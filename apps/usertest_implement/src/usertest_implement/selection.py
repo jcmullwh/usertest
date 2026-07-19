@@ -11,6 +11,7 @@ from backlog_repo.ticket_provenance import (
 )
 
 from usertest_implement.shared import *
+from usertest_implement.ticket_prompt import project_ticket_prompt_context
 
 
 def _fingerprint_from_text(text: str) -> str:
@@ -463,7 +464,7 @@ def _compose_ticket_blob(selected: SelectedTicket) -> str:
         lines.append(f"- export_index: {selected.export_index}")
     lines.append("")
     lines.append("# Ticket markdown")
-    lines.append(selected.ticket_markdown.rstrip())
+    lines.append(project_ticket_prompt_context(selected).rstrip())
     lines.append("")
     return "\n".join(lines)
 

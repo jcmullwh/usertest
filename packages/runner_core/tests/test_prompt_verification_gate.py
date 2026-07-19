@@ -274,10 +274,17 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert set(compact_timing_profile) == {"run_count", "command_count", "recommendations"}
     assert compact_timing_profile["run_count"] == 9
     assert compact_timing_profile["command_count"] == 27
-    assert "Codex workspace sandbox is enabled" in prompt_text
-    assert "Do not treat a blocked shell command as proof" in prompt_text
-    assert "allow_edits=true" in prompt_text
-    assert "--exec-backend docker" in prompt_text
+    if os.name == "nt":
+        assert "Codex unrestricted local sandbox mode is enabled" in prompt_text
+        assert (
+            "native Windows workspace-write cannot perform write missions reliably" in prompt_text
+        )
+        assert "runner-owned branch, diff, verification, review, and PR gates" in prompt_text
+    else:
+        assert "Codex workspace sandbox is enabled" in prompt_text
+        assert "Do not treat a blocked shell command as proof" in prompt_text
+        assert "allow_edits=true" in prompt_text
+        assert "--exec-backend docker" in prompt_text
 
 
 def test_codex_uses_model_instructions_file_for_large_append_prompt(

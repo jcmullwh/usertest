@@ -235,24 +235,24 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     )
 
     lifecycle_runs = mod._lifecycle_runs(dashboard)
-    assert len(lifecycle_runs) == 12
-    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 12
+    assert len(lifecycle_runs) == 13
+    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 13
     assert mod._entry_count(dashboard, "supporting_activity") >= 1
     assert mod._entry_count(dashboard, "baseline") == 1
     assert dashboard["current_run_id"] == lifecycle_runs[-1]["run_id"]
     current = lifecycle_runs[-1]
-    assert current["lifecycle_id"] == "pipeline-cycle:338a373f:20260717"
-    assert current["timing"]["start_at"] == "2026-07-17T03:10:20Z"
-    assert current["rework"]["author_invocations"] == 152
-    assert current["rework"]["continuation_launches"] == 84
-    assert current["rework"]["stage_reruns"] == 27
+    assert current["lifecycle_id"] == "case:4f13410712b8654b0e93:20260718"
+    assert current["timing"]["start_at"] == "2026-07-18T09:02:29Z"
+    assert current["timing"]["end_at"] == "2026-07-19T05:30:53Z"
+    assert current["rework"]["author_invocations"] == 47
+    assert current["rework"]["continuation_launches"] == 37
+    assert current["rework"]["stage_reruns"] is None
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 73
-    assert current["automatic_self_corrections"]["count"] == 21
-    assert current["supervisor_interventions"]["count"] == 91
+    assert current["errors"]["count"] == 14
+    assert current["automatic_self_corrections"]["count"] == 4
+    assert current["supervisor_interventions"]["count"] == 11
     assert current["furthest_stage"] == (
-        "Stage 4 complete for third current case; corrected Stage 2 schedule ready for "
-        "next distinct case"
+        "PR merged to dev; mitigated outcome and terminal provenance verified"
     )
 
     rendered = mod._render_dashboard(dashboard)

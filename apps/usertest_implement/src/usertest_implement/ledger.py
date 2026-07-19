@@ -270,7 +270,7 @@ def transition_outcome_files(
             },
         )
 
-        staged_ticket.write_text(updated_markdown, encoding="utf-8")
+        staged_ticket.write_bytes(updated_markdown.encode("utf-8"))
         staged_ledger.parent.mkdir(parents=True, exist_ok=True)
         staged_ledger.write_text(
             yaml.safe_dump(updated_ledger, sort_keys=True, allow_unicode=True),
@@ -408,7 +408,7 @@ def bind_outcome_verification_amendment_files(
             "actions": updated_actions,
         }
 
-        staged_ticket.write_text(updated_markdown, encoding="utf-8")
+        staged_ticket.write_bytes(updated_markdown.encode("utf-8"))
         staged_ledger.parent.mkdir(parents=True, exist_ok=True)
         staged_ledger.write_text(
             yaml.safe_dump(updated_ledger, sort_keys=True, allow_unicode=True),

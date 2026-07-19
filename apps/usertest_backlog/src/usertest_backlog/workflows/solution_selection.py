@@ -16,6 +16,7 @@ from usertest_backlog.workflows.depth_contracts import (
     falsification_review_errors,
     read_only_stage_tools,
     read_repo_revision,
+    research_contract_view,
     selection_quality_errors,
     stage_include_directories,
 )
@@ -231,7 +232,7 @@ def _run_solution_selection_stage(
 
     for idx, pid in enumerate(focus_ids, start=1):
         rec = records_by_id.get(pid) or {}
-        dossier = dossiers_by_id.get(pid) or {}
+        dossier = research_contract_view(dossiers_by_id.get(pid))
         opts = options_by_problem.get(pid) or []
         research_ready, research_blockers = assess_research_readiness(dossier)
         if research_ready:

@@ -86,7 +86,10 @@ architecture, interface, target, or verification decision to the implementer.
   for operational proof, and a timeout remains blocked.
 - Honor the Stage-5 `post_change_replay_mode`. For `verified_fail_first`, execute the exact
   unchanged runner-retained command and asset; do not create, modify, rename, move, or delete
-  any path in its retained `.usertest_research` manifest. For
+  any path in its retained `.usertest_research` manifest. The runner materializes this
+  content-addressed staged input for outcome execution, so it may intentionally be absent from
+  the clean Git revision. Do not plan it as a repository change or return to research solely
+  because that runner-owned path is absent from the planning checkout. For
   `stage6_planned_unverified`, define a distinct solution-specific command and predicates from
   the selected outcome strategy and inspected source. Do not relabel an exit-zero old-behavior
   assertion as exact post-change proof.

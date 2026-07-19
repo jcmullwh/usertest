@@ -1249,9 +1249,7 @@ def test_change_plan_keeps_bespoke_recurrence_probe_under_command_validation() -
     roles["recurrence"] = {
         "description": "Run the verified problem-specific recurrence probe.",
         "commands": ["pytest tests/test_recurrence.py || echo ok"],
-        "predicates": [
-            {"type": "command_exit_code", "command_index": 0, "equals": 0}
-        ],
+        "predicates": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
     }
     plan = assign_plan_revision_id(plan)
 
@@ -1326,12 +1324,15 @@ def test_pytest_plugin_option_is_not_misread_as_project_path(tmp_path: Path) -> 
     test_path.parent.mkdir(parents=True)
     test_path.write_text("def test_core(): pass\n", encoding="utf-8")
 
-    assert _command_quality_errors(
-        "python -B -m pytest -p no:cacheprovider -q tests/test_core.py::test_core",
-        plan_id="plan:pytest-plugin",
-        repo_root=tmp_path,
-        label="verification_command",
-    ) == []
+    assert (
+        _command_quality_errors(
+            "python -B -m pytest -p no:cacheprovider -q tests/test_core.py::test_core",
+            plan_id="plan:pytest-plugin",
+            repo_root=tmp_path,
+            label="verification_command",
+        )
+        == []
+    )
 
 
 def test_wrapper_project_option_before_pytest_remains_project_bound(tmp_path: Path) -> None:
@@ -1340,12 +1341,15 @@ def test_wrapper_project_option_before_pytest_remains_project_bound(tmp_path: Pa
     test_path.parent.mkdir(parents=True)
     test_path.write_text("def test_core(): pass\n", encoding="utf-8")
 
-    assert _command_quality_errors(
-        "pdm -p packages/core run pytest -p no:cacheprovider -q tests/test_core.py",
-        plan_id="plan:wrapped-pytest",
-        repo_root=tmp_path,
-        label="verification_command",
-    ) == []
+    assert (
+        _command_quality_errors(
+            "pdm -p packages/core run pytest -p no:cacheprovider -q tests/test_core.py",
+            plan_id="plan:wrapped-pytest",
+            repo_root=tmp_path,
+            label="verification_command",
+        )
+        == []
+    )
     assert any(
         "project_path_missing" in error
         for error in _command_quality_errors(
@@ -1363,13 +1367,16 @@ def test_verification_command_can_bind_an_unlisted_runner_to_a_planned_create_ta
     (tmp_path / "tests").mkdir()
     command = "dotnet test tests/New.Tests.csproj"
 
-    assert _command_quality_errors(
-        command,
-        plan_id="plan:planned-test-project",
-        repo_root=tmp_path,
-        label="verification_command",
-        planned_create_paths={"tests/New.Tests.csproj"},
-    ) == []
+    assert (
+        _command_quality_errors(
+            command,
+            plan_id="plan:planned-test-project",
+            repo_root=tmp_path,
+            label="verification_command",
+            planned_create_paths={"tests/New.Tests.csproj"},
+        )
+        == []
+    )
     assert any(
         "command_path_missing" in error
         for error in _command_quality_errors(
@@ -1390,13 +1397,16 @@ def test_retained_replay_path_requires_exact_bound_command_and_asset_path(
     )
     retained_path = ".usertest_research/test_retained_replay.py"
 
-    assert _command_quality_errors(
-        command,
-        plan_id="plan:retained-replay",
-        repo_root=tmp_path,
-        label="verification_command",
-        bound_asset_paths={retained_path},
-    ) == []
+    assert (
+        _command_quality_errors(
+            command,
+            plan_id="plan:retained-replay",
+            repo_root=tmp_path,
+            label="verification_command",
+            bound_asset_paths={retained_path},
+        )
+        == []
+    )
     assert any(
         "command_path_missing" in error
         for error in _command_quality_errors(
@@ -1448,9 +1458,7 @@ def test_change_plan_path_resolution_is_scoped_to_bound_replay_command(
         expected_case_id="case:case",
         repo_root=tmp_path,
     )
-    assert not any(
-        "path_missing" in error and ".usertest_research" in error for error in errors
-    )
+    assert not any("path_missing" in error and ".usertest_research" in error for error in errors)
 
     sibling_command = command.replace("test_retained_replay.py", "forged_replay.py")
     reproduction["after_change"]["command"] = sibling_command
@@ -1462,9 +1470,59 @@ def test_change_plan_path_resolution_is_scoped_to_bound_replay_command(
         repo_root=tmp_path,
     )
     assert any(
-        "change_plan_after_command_path_missing" in error
-        and "forged_replay.py" in error
+        "change_plan_after_command_path_missing" in error and "forged_replay.py" in error
         for error in sibling_errors
+    )
+
+
+def test_historical_overlay_path_is_allowed_only_in_before_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = "python -B .usertest_research/historical_probe.py"
+    normalized_command = " ".join(command.split())
+    retained_path = ".usertest_research/historical_probe.py"
+    monkeypatch.setattr(
+        depth_contracts,
+        "verified_research_overlay_command_asset_paths",
+        lambda _research, *, experiment_id: (
+            {normalized_command: {retained_path}}
+            if experiment_id == "experiment:original"
+            else {}
+        ),
+    )
+    plan = _valid_change_plan()
+    reproduction = plan["before_after_reproduction"]
+    assert isinstance(reproduction, dict)
+    reproduction["research_experiment_id"] = "experiment:original"
+    reproduction["before_change"]["command"] = command
+    plan = assign_plan_revision_id(plan)
+
+    before_errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+        repo_root=tmp_path,
+    )
+
+    assert not any(
+        "change_plan_before_command_path_missing" in error
+        and retained_path in error
+        for error in before_errors
+    )
+
+    reproduction["after_change"]["command"] = command
+    plan["verification_commands"] = [command]
+    plan = assign_plan_revision_id(plan)
+    after_errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+        repo_root=tmp_path,
+    )
+
+    assert any(
+        "path_missing" in error and retained_path in error for error in after_errors
     )
 
 
@@ -1742,6 +1800,32 @@ def test_repo_grounding_requires_exact_clean_head(tmp_path: Path) -> None:
     ready, reasons, _ = assess_repo_grounding(tmp_path, "0" * 40)
     assert ready is False
     assert any(reason.startswith("workspace_head_mismatch") for reason in reasons)
+
+
+def test_repo_grounding_uses_command_scoped_safe_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "retained-worktree"
+    revision = "a" * 40
+    calls: list[list[str]] = []
+
+    def _fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        stdout = f"{revision}\n" if command[-2:] == ["rev-parse", "HEAD"] else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(depth_contracts.subprocess, "run", _fake_run)
+
+    assert depth_contracts.read_repo_revision(repo_root) == revision
+    assert depth_contracts.repo_contains_revision(repo_root, revision) is True
+    ready, reasons, context = assess_repo_grounding(repo_root, revision)
+
+    assert ready is True
+    assert reasons == []
+    assert context["clean"] is True
+    safe_argument = f"safe.directory={repo_root.resolve()}"
+    assert len(calls) == 4
+    assert all(command[:3] == ["git", "-c", safe_argument] for command in calls)
 
 
 def test_optioning_uses_orchestrator_prompts_but_inspects_exact_target_workspace(
@@ -2047,3 +2131,23 @@ def test_selection_and_planning_revalidate_persisted_research_receipts(
     assert planning_doc["items"] == []
     rejected = planning_doc["input_meta"]["rejected_plans"][0]
     assert any("persisted_research_evidence_invalid" in reason for reason in rejected["reasons"])
+
+
+def test_research_contract_view_removes_only_server_owned_lineage_annotations() -> None:
+    from usertest_backlog.workflows.depth_contracts import research_contract_view
+
+    persisted = {
+        "problem_id": "problem:case",
+        "canonical_problem_id": "problem:case",
+        "case_member_problem_ids": ["problem:case", "problem:symptom"],
+        "repo_revision": "a" * 40,
+        "unknown_authored_field": "must remain visible to strict validation",
+    }
+
+    contract = research_contract_view(persisted)
+
+    assert "canonical_problem_id" not in contract
+    assert "case_member_problem_ids" not in contract
+    assert contract["problem_id"] == "problem:case"
+    assert contract["unknown_authored_field"] == "must remain visible to strict validation"
+    assert persisted["canonical_problem_id"] == "problem:case"

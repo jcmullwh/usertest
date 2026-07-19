@@ -36,6 +36,13 @@ def _run(argv: list[str], *, cwd: Path, check: bool) -> CommandResult:
 DEFAULT_GIT_USER_NAME = "usertest-implement"
 DEFAULT_GIT_USER_EMAIL = "usertest-implement@local"
 
+# These paths are created by the implementation runner itself inside retained local
+# workspaces.  They are evidence/cache transport, never part of the ticket patch.
+_RUNNER_OWNED_GIT_EXCLUDES: tuple[str, ...] = (
+    ":(exclude).usertest_run_dir/**",
+    ":(exclude)pip/cache/**",
+)
+
 
 def ensure_git_identity(
     workspace_dir: Path,
@@ -84,8 +91,18 @@ def head_sha(workspace_dir: Path) -> str:
     return result.stdout.strip()
 
 
-def commit_all(workspace_dir: Path, *, message: str) -> str:
-    _run(["git", "add", "-A"], cwd=workspace_dir, check=True)
+def commit_all(workspace_dir: Path, *, message: str) -> str | None:
+    _run(
+        ["git", "add", "-A", "--", ".", *_RUNNER_OWNED_GIT_EXCLUDES],
+        cwd=workspace_dir,
+        check=True,
+    )
+    staged = _run(["git", "diff", "--cached", "--quiet"], cwd=workspace_dir, check=False)
+    if staged.returncode == 0:
+        return None
+    if staged.returncode != 1:
+        msg = staged.stderr.strip() or staged.stdout.strip() or "command failed"
+        raise RuntimeError(f"git diff --cached --quiet: {msg}")
     _run(["git", "commit", "--no-gpg-sign", "-m", message], cwd=workspace_dir, check=True)
     return head_sha(workspace_dir)
 

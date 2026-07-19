@@ -370,8 +370,14 @@ def test_review_provenance_allows_head_enrichment_but_binds_reviewed_head() -> N
     assert "outcome_review_ref_ticket_provenance_mismatch" in errors
 
 
+@pytest.mark.parametrize(
+    ("commit_attempted", "include_workspace_strategy"),
+    [(False, True), (True, False)],
+)
 def test_schema2_implementation_provenance_validates_receipt_and_artifacts(
     tmp_path: Path,
+    commit_attempted: bool,
+    include_workspace_strategy: bool,
 ) -> None:
     run_dir = tmp_path / "retained-run"
     run_dir.mkdir()
@@ -387,7 +393,7 @@ def test_schema2_implementation_provenance_validates_receipt_and_artifacts(
         "git_ref.json": {
             "schema_version": 1,
             "branch": "backlog/example",
-            "commit_attempted": False,
+            "commit_attempted": commit_attempted,
             "commit_performed": False,
             "commit_observed": True,
             "base_commit": head,
@@ -396,10 +402,11 @@ def test_schema2_implementation_provenance_validates_receipt_and_artifacts(
         "workspace_ref.json": {
             "schema_version": 1,
             "workspace_dir": str(tmp_path / "historical-workspace"),
-            "workspace_strategy": "existing_clean_head",
             "will_cleanup_workspace": False,
         },
     }
+    if include_workspace_strategy:
+        artifacts["workspace_ref.json"]["workspace_strategy"] = "existing_clean_head"
     for filename, payload in artifacts.items():
         (run_dir / filename).write_text(
             json.dumps(payload, sort_keys=True) + "\n",

@@ -18,6 +18,7 @@ from usertest_backlog.workflows.depth_contracts import (
     change_plan_quality_errors,
     read_only_stage_tools,
     read_repo_revision,
+    research_contract_view,
     stage_include_directories,
 )
 from usertest_backlog.workflows.planning_healing import run_stage6_live_case
@@ -220,7 +221,7 @@ def _run_implementation_planning_stage(
             warnings_list.append(f"implementation_planning_missing_selected_option: {pid}")
 
         rec = records_by_id.get(pid) or {}
-        dossier = dossiers_by_id.get(pid) or {}
+        dossier = research_contract_view(dossiers_by_id.get(pid))
         target_repo_root = (
             target_repo_roots_by_problem.get(pid)
             if target_repo_roots_by_problem is not None

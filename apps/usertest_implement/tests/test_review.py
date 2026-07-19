@@ -16,6 +16,7 @@ from usertest_implement.commands.review import (
     _build_review_correction_prompt,
     _cmd_review_merge,
     _cmd_review_run,
+    _is_same_queue_ticket_move,
     _parse_retained_review_correction_prompt,
     _recover_noncausal_premerge_rejection,
     _report_without_runner_added_extensions,
@@ -59,6 +60,28 @@ def _approved_causal_fields() -> dict[str, object]:
         "causal_path_assessment": "closed",
         "remaining_causal_paths": [],
     }
+
+
+def test_review_binding_accepts_only_bucket_move_of_same_ticket(tmp_path: Path) -> None:
+    plans_root = tmp_path / ".agents" / "plans"
+    recorded = plans_root / "4 - for_review" / "20260719_abc_ticket.md"
+    completed = plans_root / "5 - complete" / recorded.name
+
+    assert _is_same_queue_ticket_move(
+        owner_root=tmp_path,
+        recorded_path=recorded,
+        selected_path=completed,
+    )
+    assert not _is_same_queue_ticket_move(
+        owner_root=tmp_path,
+        recorded_path=recorded,
+        selected_path=completed.with_name("different.md"),
+    )
+    assert not _is_same_queue_ticket_move(
+        owner_root=tmp_path,
+        recorded_path=recorded,
+        selected_path=tmp_path / "outside" / recorded.name,
+    )
 
 
 def test_merge_outcome_does_not_convert_skipped_check_to_pass(tmp_path: Path) -> None:
@@ -624,7 +647,10 @@ def _prepare_premerge_failure_case(
         lambda **kwargs: kwargs["proposed"],
     )
 
+    premerge_calls: list[None] = []
+
     def _raise_premerge(**_kwargs):
+        premerge_calls.append(None)
         raise raised
 
     monkeypatch.setattr(
@@ -649,6 +675,7 @@ def _prepare_premerge_failure_case(
         "review_run_dir": review_run_dir,
         "ledger_path": ledger_path,
         "review_summary": review_summary,
+        "premerge_calls": premerge_calls,
     }
 
 
@@ -807,6 +834,9 @@ def test_review_merge_classifies_failed_outcome_role_as_causal_rejection(
     assert isinstance(failure, dict)
     assert failure["status"] == "changes_requested"
     assert failure["role_artifact_path"] == str(role_artifact)
+    assert failure["attempt_count"] == 2
+    assert failure["role_artifact_paths"] == [str(role_artifact), str(role_artifact)]
+    assert len(case["premerge_calls"]) == 2
     assert not (review_run_dir / "premerge_original_scenario_blocked.json").exists()
     summary = _read_json(review_run_dir / "review_summary.json")
     assert isinstance(summary, dict)
@@ -988,7 +1018,7 @@ def test_legacy_enospc_recovery_restores_approved_review_and_is_idempotent(
     assert {path: path.read_bytes() for path in stable_paths} == stable_bytes
 
 
-def test_legacy_premerge_recovery_does_not_reclassify_a_role_failure(
+def test_legacy_premerge_recovery_allows_one_bounded_same_head_role_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -998,9 +1028,10 @@ def test_legacy_premerge_recovery_does_not_reclassify_a_role_failure(
     assert isinstance(failure, dict)
     failure["role_artifact_path"] = str(tmp_path / "outcome_role.json")
     _write_json(failure_path, failure)
-    summary_path = case["review_run_dir"] / "review_summary.json"
-    summary_before = summary_path.read_bytes()
-    ledger_before = case["ledger_path"].read_bytes()
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.write_ticket_resume_state",
+        lambda **_: {"lifecycle_state": "awaiting_merge"},
+    )
 
     observed = _recover_noncausal_premerge_rejection(
         selected=case["selected"],
@@ -1012,13 +1043,24 @@ def test_legacy_premerge_recovery_does_not_reclassify_a_role_failure(
         implementation_run_dir=case["implementation_run_dir"],
     )
 
-    assert observed == case["overwritten_summary"]
-    assert summary_path.read_bytes() == summary_before
-    assert case["ledger_path"].read_bytes() == ledger_before
+    assert observed["review_decision"] == "approved"
+    assert observed["causal_acceptance"] is True
     assert not (
         case["review_run_dir"]
         / "premerge_original_scenario_infrastructure_reclassification.json"
     ).exists()
+    retry = _read_json(
+        case["review_run_dir"] / "premerge_original_scenario_retry_pending.json"
+    )
+    assert isinstance(retry, dict)
+    assert retry["status"] == "retry_pending"
+    assert retry["classification"] == "bounded_same_head_retry"
+    assert retry["causal_result"] == "pending_retry"
+    assert retry["prior_attempt_count"] == 1
+    assert retry["maximum_attempt_count"] == 2
+    ledger_text = case["ledger_path"].read_text(encoding="utf-8")
+    assert "last_premerge_original_scenario_status: retry_pending" in ledger_text
+    assert "last_review_causal_acceptance: true" in ledger_text
 
 
 @pytest.mark.parametrize(
@@ -1386,6 +1428,74 @@ def test_review_prompt_centers_causal_acceptance_before_scope() -> None:
     assert "which causal paths, if any, can still reproduce the problem" in prompt
     assert "Scope is secondary to causal correctness" in prompt
     assert "hard-blocks only a missing planned production target" in prompt
+
+
+def test_review_prompt_projects_large_research_history_without_losing_causal_evidence(
+    tmp_path: Path,
+) -> None:
+    proof = {
+        "case_id": "case:root-cause",
+        "experiments": [{"result": "causal intervention reproduced the symptom"}],
+        "root_cause_hypotheses": [
+            {"mechanism": "verification errors entered the report-schema channel"}
+        ],
+        "inspected_files": ["packages/runner_core/src/runner_core/runner.py"],
+        "evidence_assignment": {
+            "expected_atom_ids": ["atom:one"],
+            "atom_receipts": [
+                {
+                    "atom_id": "atom:one",
+                    "atom_sha256": "a" * 64,
+                    "atom_snapshot": {"raw": "z" * 120_000},
+                }
+            ],
+            "origin_attachment_evidence": {
+                "manifest_file": "origin_evidence/manifest.json",
+                "run_context": {"raw": "q" * 120_000},
+            },
+        },
+        "research_attempts": [{"transcript": "x" * 120_000}],
+        "evidence_verification": {"raw": "y" * 120_000},
+    }
+    ticket_markdown = (
+        "# Ticket\n\n"
+        "### Full verified research proof\n\n"
+        f"```json\n{json.dumps(proof, indent=2)}\n```\n\n"
+        "## Implementation plan\n\nChange the verified root mechanism.\n"
+    )
+    ticket_path = tmp_path / "ticket.md"
+    ticket_path.write_text(ticket_markdown, encoding="utf-8")
+
+    prompt = _build_review_append_prompt(
+        selected=SimpleNamespace(
+            ticket_markdown=ticket_markdown,
+            idea_path=ticket_path,
+        ),
+        handoff_summary=None,
+        pr_ref=None,
+        ci_gate=None,
+        pr_context={
+            "pr": {},
+            "checks": [],
+            "changed_files": ["packages/runner_core/src/runner_core/runner.py"],
+            "diff_excerpt": "diff --git a/runner.py b/runner.py",
+            "implementation_scope": {"status": "verified"},
+        },
+    )
+
+    assert len(prompt) < 25_000
+    assert "causal intervention reproduced the symptom" in prompt
+    assert "verification errors entered the report-schema channel" in prompt
+    assert "packages/runner_core/src/runner_core/runner.py" in prompt
+    assert "atom:one" in prompt
+    assert "origin_evidence/manifest.json" in prompt
+    assert "atom_snapshot_receipt" in prompt
+    assert "run_context_receipt" in prompt
+    assert "x" * 1000 not in prompt
+    assert "z" * 1000 not in prompt
+    assert "q" * 1000 not in prompt
+    assert "full_proof_sha256" in prompt
+    assert ticket_path.read_text(encoding="utf-8") == ticket_markdown
 
 
 def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) -> None:
@@ -2425,10 +2535,12 @@ def test_review_run_refuses_when_ticket_not_in_for_review(monkeypatch, tmp_path:
         raise AssertionError("Expected review run to refuse non-for_review tickets")
 
 
+@pytest.mark.parametrize("ticket_bucket", ["2 - ready", "3 - in_progress"])
 def test_review_run_accepts_bound_adopted_awaiting_review_ticket(
     monkeypatch,
     tmp_path: Path,
     capsys,
+    ticket_bucket: str,
 ) -> None:
     repo_root = tmp_path / "repo_root"
     owner_root = repo_root
@@ -2436,7 +2548,7 @@ def test_review_run_accepts_bound_adopted_awaiting_review_ticket(
     fingerprint = "ad0ptedad0pted00"
     ticket_path = _make_ticket(
         owner_root,
-        bucket="2 - ready",
+        bucket=ticket_bucket,
         fingerprint=fingerprint,
     )
     original_ticket_bytes = ticket_path.read_bytes()

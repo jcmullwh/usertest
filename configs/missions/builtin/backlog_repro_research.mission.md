@@ -36,7 +36,10 @@ constraints and verification forward. Do not implement; research harnesses belon
    origin/repository meaning. A `positive_outcome` with role `causal_contrast` is mechanism evidence,
    not a future success contract. Carry desired behavior and constraints forward without inventing
    an algorithm, interface, safety matrix, or command.
-8. Report material unknowns honestly. Confidence is telemetry, never a substitute for evidence.
+8. For a wrong value with exit zero, an optional research harness may bind a fail-first semantic assertion
+   to the established hypothesis with `positive_outcome_contract`; the runner retains and stages it. Do not
+   require this when causal proof is otherwise sufficient or confuse it with a causal contrast.
+9. Report material unknowns honestly. Confidence is telemetry, never a substitute for evidence.
 
 For non-code mechanisms, `inspected_symbols` may be empty only when a symbol-less
 `implementation_touchpoints` entry connects the locator to a runner-observed repository file.

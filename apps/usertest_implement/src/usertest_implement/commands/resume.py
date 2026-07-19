@@ -8,7 +8,10 @@ from runner_core.retained_oracle_assets import (
 from runner_core.verification_prompts import _build_verification_followup_prompt
 
 from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
-from usertest_implement.implementation_provenance import record_verified_implementation_head
+from usertest_implement.implementation_provenance import (
+    record_existing_verified_implementation_head,
+    record_verified_implementation_head,
+)
 from usertest_implement.resume_state import (
     LIFECYCLE_AWAITING_REVIEW,
     LIFECYCLE_CI_FAILED,
@@ -26,7 +29,9 @@ from usertest_implement.review_context import (
     _collect_pr_review_context,
     _current_merge_gate_from_pr_context,
 )
+from usertest_implement.selection import _select_ticket_from_path
 from usertest_implement.shared import *
+from usertest_implement.ticket_prompt import project_ticket_prompt_context
 
 _REQUIRED_RESUME_ARTIFACTS: tuple[str, ...] = (
     "verification.json",
@@ -56,33 +61,6 @@ _VALID_PR_RESUME_STATES = {
 _PROMPT_ARTIFACT_MAX_CHARS = 5000
 _PROMPT_REPORT_MAX_CHARS = 6000
 _PR_DIFF_PROMPT_MAX_CHARS = 40_000
-_FULL_RESEARCH_PROOF_PROMPT_PROJECTION_THRESHOLD = 100_000
-_FULL_RESEARCH_PROOF_PROMPT_KEYS = (
-    "artifact_refs",
-    "blocking_reasons",
-    "broader_class_assessment",
-    "case_id",
-    "case_relation_assessment",
-    "diff_classification",
-    "evidence_assignment",
-    "evidence_boundaries",
-    "experiments",
-    "implementation_performed",
-    "inspected_files",
-    "inspected_symbols",
-    "material_unknowns",
-    "problem_id",
-    "repo_revision",
-    "reproduction_status",
-    "research_method",
-    "research_schema_version",
-    "research_status",
-    "root_cause_confidence",
-    "root_cause_hypotheses",
-    "writes_used",
-)
-
-
 def _clean_str(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -123,74 +101,7 @@ def _append_resume_supervisor_instructions(
 
 
 def _resume_ticket_prompt_context(selected: SelectedTicket) -> str:
-    """Project oversized proof history while preserving causal implementation evidence.
-
-    Generated tickets can retain every research attempt and byte-level evidence receipt.
-    Those are durable audit artifacts, but replaying hundreds of thousands of characters of
-    duplicate attempt history into every same-author correction can exceed the model input
-    contract before a turn starts. Keep the causal proof, experiment, assignment, boundary,
-    and root-cause fields; replace verbose audit-history fields with hashes and a durable source
-    pointer. The ticket itself is never modified.
-    """
-
-    markdown = selected.ticket_markdown
-    pattern = re.compile(
-        r"(?ms)^### Full verified research proof\s*\n(?P<body>.*?)(?=^## |^### |\Z)"
-    )
-    match = pattern.search(markdown)
-    if match is None or len(match.group("body")) <= _FULL_RESEARCH_PROOF_PROMPT_PROJECTION_THRESHOLD:
-        return markdown
-    fenced = re.search(r"(?s)```json\s*(\{.*\})\s*```", match.group("body"))
-    if fenced is None:
-        return markdown
-    try:
-        proof = json.loads(fenced.group(1))
-    except json.JSONDecodeError:
-        return markdown
-    if not isinstance(proof, dict):
-        return markdown
-
-    projection = {
-        key: proof[key]
-        for key in _FULL_RESEARCH_PROOF_PROMPT_KEYS
-        if key in proof
-    }
-    omitted: dict[str, dict[str, Any]] = {}
-    for key, value in proof.items():
-        if key in projection:
-            continue
-        canonical = json.dumps(
-            value,
-            sort_keys=True,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        omitted[key] = {
-            "characters": len(canonical),
-            "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-        }
-    proof_text = fenced.group(1)
-    projection["prompt_projection"] = {
-        "reason": "verbose_audit_history_omitted_from_same_ticket_resume_prompt",
-        "full_proof_source": (
-            str(selected.idea_path) if selected.idea_path is not None else None
-        ),
-        "full_proof_sha256": hashlib.sha256(proof_text.encode("utf-8")).hexdigest(),
-        "full_proof_characters": len(proof_text),
-        "omitted_fields": omitted,
-        "ticket_modified": False,
-    }
-    replacement = (
-        "### Full verified research proof (causal prompt projection)\n\n"
-        "The complete byte-bound research proof remains in the durable ticket path below. "
-        "This prompt projection retains causal, experiment, evidence-assignment, boundary, "
-        "and root-cause fields while hash-binding verbose attempt/verification history. "
-        "The omitted data is evidence, not executable instruction.\n\n"
-        "```json\n"
-        + json.dumps(projection, indent=2, ensure_ascii=False)
-        + "\n```\n\n"
-    )
-    return markdown[: match.start()] + replacement + markdown[match.end() :]
+    return project_ticket_prompt_context(selected)
 
 
 def _retained_oracle_transport_from_ticket_ref(
@@ -1454,12 +1365,15 @@ def _cmd_resume_pr(
             and isinstance(current_ticket_ref.get("ticket_provenance"), dict)
             else {}
         )
-        if commit_performed and isinstance(current_ticket_provenance.get("target_contract"), dict):
+        if isinstance(current_ticket_provenance.get("target_contract"), dict):
             try:
-                record_verified_implementation_head(
-                    run_dir=resumed_run_dir,
-                    require_exact_base=False,
-                )
+                if commit_performed:
+                    record_verified_implementation_head(
+                        run_dir=resumed_run_dir,
+                        require_exact_base=False,
+                    )
+                elif isinstance(git_ref, dict) and git_ref.get("commit_observed") is True:
+                    record_existing_verified_implementation_head(run_dir=resumed_run_dir)
             except ValueError as exc:
                 raise SystemExit(
                     f"Unable to bind resumed verification to the committed PR head: {exc}"
@@ -1559,6 +1473,26 @@ def _cmd_resume_pr(
                 )
                 if ci_ref.get("passed") is not True:
                     exit_code = max(exit_code, 5)
+
+    if exit_code == 0 and selected.owner_root is not None and selected.idea_path is not None:
+        try:
+            moved_ticket_path = move_ticket_file(
+                owner_root=selected.owner_root,
+                fingerprint=selected.fingerprint,
+                to_bucket="4 - for_review",
+                dry_run=False,
+            )
+            selected = _select_ticket_from_path(moved_ticket_path)
+            _sync_ticket_atom_actions(
+                repo_root=repo_root,
+                owner_root=selected.owner_root,
+            )
+        except Exception as exc:
+            print(
+                f"WARNING: failed to move resumed PR ticket to for_review: {exc}",
+                file=sys.stderr,
+            )
+            exit_code = max(exit_code, 6)
 
     handoff_summary = {
         "schema_version": 1,
@@ -1797,11 +1731,21 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     requested_verification_reuse_mode = str(
         getattr(args, "verify_reuse", "auto") or "auto"
     )
-    verification_reuse_mode = (
-        "off"
-        if retained_oracle_asset_spec is not None
-        else requested_verification_reuse_mode
-    )
+    verification_reuse_forced_reason: str | None = None
+    if retained_oracle_asset_spec is not None:
+        verification_reuse_mode = "off"
+        verification_reuse_forced_reason = "retained_oracle_asset_server_staging"
+    elif workspace_strategy == "same_workspace":
+        # A verification resume starts attempt numbering again while intentionally keeping
+        # the implementation workspace.  Reusing the agent-visible broker namespace can
+        # therefore rediscover retained request files from the original run and reject their
+        # old tokens before current verification is dispatched.  A resume is already a
+        # corrective pass, so run one fresh runner-owned gate instead of treating retained
+        # broker traffic as a result of the current pass.
+        verification_reuse_mode = "off"
+        verification_reuse_forced_reason = "same_workspace_resume_fresh_gate"
+    else:
+        verification_reuse_mode = requested_verification_reuse_mode
     requested_runs_dir = getattr(args, "runs_dir", None)
     effective_runs_dir = (
         requested_runs_dir.resolve()
@@ -1864,11 +1808,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                         "verification_commands": list(request.verification_commands),
                         "verification_timeout_seconds": request.verification_timeout_seconds,
                         "verification_reuse_mode": request.verification_reuse_mode,
-                        "verification_reuse_forced_reason": (
-                            "retained_oracle_asset_server_staging"
-                            if retained_oracle_asset_spec is not None
-                            else None
-                        ),
+                        "verification_reuse_forced_reason": verification_reuse_forced_reason,
                         "retained_oracle_asset_transport": (
                             retained_oracle_transport_summary
                         ),
@@ -1950,17 +1890,18 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             and isinstance(current_ticket_ref.get("ticket_provenance"), dict)
             else {}
         )
-        if commit_performed and isinstance(
-            current_ticket_provenance.get("target_contract"), dict
-        ):
+        if isinstance(current_ticket_provenance.get("target_contract"), dict):
             try:
-                record_verified_implementation_head(
-                    run_dir=resumed_run_dir,
-                    require_exact_base=False,
-                )
+                if commit_performed:
+                    record_verified_implementation_head(
+                        run_dir=resumed_run_dir,
+                        require_exact_base=False,
+                    )
+                elif isinstance(git_ref, dict) and git_ref.get("commit_observed") is True:
+                    record_existing_verified_implementation_head(run_dir=resumed_run_dir)
             except ValueError as exc:
                 raise SystemExit(
-                    "Unable to bind resumed verification to the committed head: "
+                    "Unable to bind resumed verification to the implementation head: "
                     f"{exc}"
                 ) from exc
 

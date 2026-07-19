@@ -2282,8 +2282,25 @@ def _clean_replay_receipts(
                 "git_index_flags_sha256",
             )
         )
-        if undeclared_mutations or index_or_head_changed:
-            errors.append(f"experiment_replay_workspace_mutated:{experiment_id}")
+        if undeclared_mutations:
+            # A generic mutation identity gives the author no actionable feedback and makes
+            # one repaired path followed by a different path look like zero progress. Keep
+            # findings bounded for pathological commands, but identify ordinary mutations
+            # exactly so same-session repair can converge.
+            mutation_limit = 20
+            errors.extend(
+                f"experiment_replay_workspace_mutated:{experiment_id}:{path}"
+                for path in undeclared_mutations[:mutation_limit]
+            )
+            if len(undeclared_mutations) > mutation_limit:
+                errors.append(
+                    f"experiment_replay_workspace_mutated:{experiment_id}:"
+                    f"additional_paths_omitted={len(undeclared_mutations) - mutation_limit}"
+                )
+        if index_or_head_changed:
+            errors.append(
+                f"experiment_replay_workspace_mutated:{experiment_id}:git_index_or_head_changed"
+            )
         metadata_errors = _execution_metadata_errors(
             completed.execution_metadata,
             isolation=isolation,
