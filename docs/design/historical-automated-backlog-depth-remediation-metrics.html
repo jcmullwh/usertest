@@ -512,25 +512,25 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat warn">
+            <div class="stat good">
               <span class="label">Current pipeline state</span>
-              <span class="value">Delivered case retained; regeneration lineage fix green</span>
-              <span class="detail">A pre-model regeneration gate found that canonical operational-failure atom IDs were not projected from completed tickets. BDS-148 is committed at 2b0e7048; the exact retained outcome now verifies and changes the case from active to mitigated.</span>
+              <span class="value">Stage 3 complete for 2 / 2 selected cases</span>
+              <span class="detail">Stage 1 mined 2,854 non-IDEA atoms, relation review reduced four provisional records to two canonical cases, Stage 2 selected both, and both reached verified evidence-sufficient/already-addressed dispositions.</span>
             </div>
             <div class="stat good">
               <span class="label">Current bounded throughput</span>
-              <span class="value">Actionable case 1/1 delivered; mitigated 1; resolved 0</span>
-              <span class="detail">No new model-backed case disposition has completed in the current cycle. The prior report-schema delivery remains the only delivered sample and is still bounded honestly to mitigation.</span>
+              <span class="value">2 correct-negative; 0 bad-ready</span>
+              <span class="detail">Both cases were real historical signals but already corrected at the pinned revision. No option, plan, ticket, or implementation was emitted. Code/test evidence is verified; live recurrence remains unproven.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">The current cycle has not entered Stage 1. A previously prepared bundle was invalidated by the controller correction and receives no qualification credit.</span>
+              <span class="detail">This component lifecycle is not a full shadow cycle: controller corrections landed during it and the final no-change handoff plus fresh export-disabled regeneration have not run yet.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Reseal 2b0e7048, then run Stage 1/2 with Sol/high</span>
-              <span class="detail">Regenerate the model-free bundle from the exact clean controller revision, prove the mitigated case is not re-mined, and preserve the resulting frontier before any Stage 3 replay executor is engaged.</span>
+              <span class="value">Persist no-change, then shadow-regenerate</span>
+              <span class="detail">Materialize Stage 4 not-required records for both terminal cases, verify no downstream model work occurs, then regenerate once from the clean combined controller revision with Sol/high reserved for substantive calls.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -681,20 +681,20 @@
                 <td>Regenerate the non-IDEA backlog from exact clean controller revision 99ce948f with export disabled, then start the next distinct current case with explicit gpt-5.6-sol/high.…</td>
               </tr>
               <tr class="ops-current">
-                <td><strong>Current backlog regeneration and lifecycle reconciliation</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>35 m 53 s active</strong><span class="ops-kind">active</span></td>
-                <td><span class="tag warn">Pre-Stage-1 lifecycle reconciliation corrected and verified</span><span class="ops-detail">The first sealed bundle contained 2,854 atoms but correctly received no model calls because exact retained reconciliation left the delivered report-schema case active. BDS-148…</span></td>
-                <td><strong>No new disposition throughput yet; one material duplicate-mining defect corrected before model work</strong></td>
-                <td><strong>4</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">One pipeline defect (BDS-148) and three supervisor invocation/test-construction clusters (AN-39 through AN-41). Repeated symptoms, individual validator messages, and focused…</span></td>
-                <td><strong>0</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">No model author existed in this cycle, so no model self-correction is claimed.</span></td>
-                <td><strong>4</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision corrected the operational atom lineage parser, supplied the required exact research revision, replaced one redundant timed diagnostic with a direct sealed read, and…</span></td>
-                <td><strong>0</strong> author calls; 0 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">No model author or pipeline stage ran. Preparation was retried once for an exact-ref launcher correction; the first Stage 1/2 component launch stopped at its pre-model lifecycle…</span></td>
-                <td>Commit the dashboard checkpoint, reseal the same evidence against exact controller head 2b0e7048 plus the docs-only checkpoint, then run canonical Stage 1/2 with gpt-5.6-sol/high…</td>
+                <td><strong>Current backlog regeneration through two terminal research dispositions</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>5 h 11 m 19 s active</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Stage 3 complete for both selected canonical cases; Stage 4 model work not required</span><span class="ops-detail">Stage 1 processed 2,854 non-IDEA atoms and emitted four provisional problem records. Exact relation review and materialization produced two canonical cases. Stage 2 selected the…</span></td>
+                <td><strong>Two correct-negative case dispositions, zero bad-ready escapes, zero unnecessary downstream plans, and no implementation work</strong></td>
+                <td><strong>14</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Five expected nondeterministic author-quality clusters self-corrected. Five reusable controller defects (BDS-148 through BDS-152) and four supervisor invocation/test clusters…</span></td>
+                <td><strong>5</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">One Stage-1 output cluster and two output/evidence clusters in each Stage-3 case corrected in the original Sol/high author sessions. Report evidence moved 48 -&gt; 3 -&gt; 4 -&gt; 0;…</span></td>
+                <td><strong>9</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision corrected outcome lineage, historical-case candidate recall, signed-aggregate repair accounting, large-context transport, and wasteful evidence-rerun guidance; it…</span></td>
+                <td><strong>33</strong> author calls; 11 continuations; 1 stage reruns; 0 full restarts<span class="ops-detail">Twenty Stage-1 miner/reviewer calls, one relation-review call, one Stage-2 call, six report-case Stage-3 calls, and five maintenance-case Stage-3 calls used Sol/high. Eleven…</span></td>
+                <td>Materialize production Stage-4 not-required receipts for the report and maintenance cases without model calls, prove Stage 5/6/export remain absent, then run one fresh…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-19T07:21:32Z. Showing 14 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-19T11:56:58Z. Showing 14 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

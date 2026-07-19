@@ -244,15 +244,16 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["lifecycle_id"] == "pipeline-cycle:2b0e7048:20260719"
     assert current["timing"]["start_at"] == "2026-07-19T06:45:39Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 0
-    assert current["rework"]["continuation_launches"] == 0
-    assert current["rework"]["stage_reruns"] == 0
+    assert current["rework"]["author_invocations"] == 33
+    assert current["rework"]["continuation_launches"] == 11
+    assert current["rework"]["stage_reruns"] == 1
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 4
-    assert current["automatic_self_corrections"]["count"] == 0
-    assert current["supervisor_interventions"]["count"] == 4
+    assert current["errors"]["count"] == 14
+    assert current["automatic_self_corrections"]["count"] == 5
+    assert current["supervisor_interventions"]["count"] == 9
     assert current["furthest_stage"] == (
-        "Pre-Stage-1 lifecycle reconciliation corrected and verified"
+        "Stage 3 complete for both selected canonical cases; "
+        "Stage 4 model work not required"
     )
 
     rendered = mod._render_dashboard(dashboard)

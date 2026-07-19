@@ -1,6 +1,6 @@
 # Backlog-depth supervision issue ledger
 
-Updated: 2026-07-18 22:10 America/New_York
+Updated: 2026-07-19 07:57 America/New_York
 
 This is the supervisor-owned ledger for defects and unresolved findings discovered while bringing the automated backlog pipeline to a working baseline. Generated atoms, dossiers, options, plans, and tickets remain system-owned evidence; this ledger records work that the supervising Codex process must ensure is addressed rather than silently losing it between reruns.
 
@@ -1153,6 +1153,57 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: the completed generated ticket `20260719_98bf1a4afbdd9048_Route-failed-verification-through-typed-run-error-artifacts.md` contains one explicit evidence atom, `operational_failure:ed1fb042...:0574a5ad...`. The plan index parsed the complete `mitigated` outcome, but plan-folder sync reported the ticket among 24 records without evidence and created no atom-action entry for its case. The atom-ID validator required the last component to be a one-based integer; all five current `operational_failure:<64-hex-signature>:<64-hex-occurrence-set>` atoms therefore failed even though this is the canonical runner-generated identity contract.
 - Correction: plan provenance accepts the exact content-addressed operational-failure shape in addition to run-namespaced atom IDs. It does not accept arbitrary colon-delimited strings, malformed digests, unrelated backticks, or prose.
 - Closure proof: five focused parser/outcome tests pass, the full `backlog_repo` suite passes, seven backlog integration outcome/plan-folder tests pass, and Ruff/diff checks pass. Exact retained rescore reduced tickets-without-evidence from 24 to 23, attached the full outcome to the historical operational atom, changed `case:4f13410712b8654b0e93` from `active` to `mitigated`, and returned `invalid_outcome_records=0` and `provenance_failed_outcome_records=0`. A fresh sealed bundle and Sol/high Stage 1/2 run must still prove the case is not re-mined.
+
+### BDS-149 - Historical-case recall depended on wording or regenerated atom-ID overlap
+
+- Status: `closed_current_sol_high_relation_replay_green`
+- Priority: duplicate-mining prevention, evidence lineage, objective-blocking
+- Objective impact: a later observation from the same exact evidence channel could miss a historical mitigated case when generated wording and content-derived atom IDs changed. The relation reviewer then could not decide whether the evidence was a recurrence, a pre-fix observation, or a distinct case; downstream research could begin from a falsely novel identity.
+- Exact evidence: the regenerated maintenance observations had new atom IDs and different wording from the historical bounded-image case, but the same `source`, `origin_stage`, target surface, and mission channel. Their latest observation also predated the historical case's verified mitigation. The former neighborhoods carried semantic, atom-overlap, metadata, and path signals but no exact evidence-provenance or lifecycle-time context.
+- Correction: relation candidate discovery now adds exact evidence-routing keys and observation bounds, and the reviewer receives the candidate lifecycle state, verified outcome time, and plan revision. Routing overlap only recalls a comparison; it is explicitly not causal proof and cannot itself merge cases.
+- Closure proof: focused tests prove changed IDs and wording still recall the identity-only historical case without auto-merging it. The retained Sol/high relation pass received that context, considered the historical maintenance case, and made an explicit `keep_separate` decision because the evidence predates mitigation and does not itself prove physical growth or post-fix recurrence. Its authored response was materialized without reinvoking the model; Stage 3 subsequently reached the bounded `already_addressed` disposition instead of producing a new implementation plan.
+
+### BDS-150 - Research repair treated signed aggregate occurrences as mandatory independent experiments
+
+- Status: `closed_current_report_case_verified`
+- Priority: research throughput and causal-evidence integrity
+- Objective impact: when one signed operational aggregate already authenticated several occurrences, correcting its binding could be rejected as lost substantive coverage unless every occurrence remained redundantly represented as a separate experimental unit. That made the report-contract author do unnecessary work and rejected a substantively adequate correction.
+- Exact evidence: the current report-contract dossier's one operational aggregate authenticated seven source occurrences. Its first same-session correction removed redundant occurrence-level coverage and reached zero raw output errors, but the repair controller rejected it as `repair_scope_rejected`. The retained attempt history then expanded into 48 evidence findings before converging.
+- Correction: substantive-coverage comparison now uses the dossier's evidence assignment and the same required-coverage projection as final verification. A signed `keep_separate` aggregate protects the aggregate evidence unit, while a genuine `split` still requires occurrence-level coverage. Feedback tells the same author to correct an aggregate binding in place rather than manufacture redundant experiments.
+- Closure proof: positive aggregate and split-negative contract tests pass. The same report author/session completed the current Sol/high dossier with zero evidence errors, all assigned evidence accounted for, `evidence_sufficient`, and `already_addressed`; no option, plan, ticket, or implementation was emitted.
+
+### BDS-151 - Large multi-run research context exceeded the mandatory compact-index ceiling
+
+- Status: `closed_current_50_run_case_verified`
+- Priority: Stage-3 throughput, evidence availability
+- Objective impact: the maintenance case was ready for research but Stage 3 made no model call because 50 source runs and 389 artifacts could not fit the 256-KiB mandatory run-context index. This was a mechanical transport failure, not an evidence insufficiency or a reason to drop the case.
+- Exact evidence: `U:\q\s3_maintenance_sol_high_20260719T1045Z\research.json` stopped with `run_context_compact_index_exceeds_max_bytes`. It retained 50 assigned observations but could not materialize the model workspace within the contract.
+- Correction: a second-level deterministic `run_inventory_v1` projection retains every atom ID and context ID, per-run artifact counts and roles, and a content hash for each full source set. The hash-bound raw and detailed evidence remains in the manifest; small cases keep the richer projection unchanged.
+- Closure proof: the real 50-run projection is 30,348 bytes and accounts for all 50 runs and 389 artifacts with zero projection errors. Twelve focused origin-evidence tests, the complete miner suite, and the complete app suite pass with only their expected skips. The subsequent signed-in Sol/high Stage 3 ran to completion and verified all 50 assigned atoms.
+
+### BDS-152 - Every research correction was told to rerun all previously attested experiments
+
+- Status: `local_full_suites_green_live_efficiency_measurement_pending`
+- Priority: correction efficiency, good-throughput preservation
+- Objective impact: a one-field binding repair could rerun every expensive test and harness even when their commands, outputs, hashes, and claims were unchanged. This consumed most correction time without increasing research depth and worked against same-author self-healing.
+- Exact evidence: the research-capable repair contract unconditionally said `Rerun every claimed experiment needed by the complete dossier`. The maintenance correction loop repeatedly executed already-attested focused tests while repairing provenance and binding fields; the final case took 2,802.1 seconds end to end across one original author call, four same-session model corrections, and one model-free audit record.
+- Correction: repair prompts now require reuse of unchanged runner-attested experiments, reads, and artifacts, and authorize only additional or changed evidence needed for the current verifier frontier. The final dossier must remain complete, but completeness no longer means re-execution.
+- Closure proof: a focused regression proves unchanged attested evidence is explicitly reusable. The complete miner suite passed in 204.5 seconds, the complete app suite passed in 279.3 seconds, Ruff passed, and only existing binary-default warnings remained. The next correction-bearing live case must measure whether the instruction actually reduces model/tool wall time; this is not yet claimed as live throughput improvement.
+
+### AN-42 - A combined lint/test shell invocation initially masked the lint exit code
+
+- Status: `closed_separate_commands_green`
+- Classification: one supervisor verification-invocation error, not a product, model, or pipeline-stage failure
+- Exact evidence: Ruff found one 101-character line in the new repair-guidance test, but the supervisor command ran Ruff before pytest in one PowerShell script and the later green pytest process supplied the script's final exit code. The lint text was still visible and was not represented as green evidence.
+- Containment and result: the line was corrected, Ruff and each full suite were rerun as independently evaluated commands, and all passed. Future multi-check receipts must retain each command's exit independently rather than relying on the final shell exit.
+
+### Current-cycle automatic author-correction clusters
+
+- `AUTHOR-STAGE1-MINER002-01`: one miner returned an invalid response contract twice and then corrected it in the same Sol/high session on its third call. The other six miners, all seven coverage reviews, both cross-job reviews, and the relation review needed no author correction.
+- `AUTHOR-STAGE3-REPORT-REVALIDATION-OUTPUT-01`: the report-contract researcher corrected its initial four output-contract findings without a restart. BDS-150, not model nonprogress, explains why that zero-error candidate was not accepted immediately.
+- `AUTHOR-STAGE3-REPORT-REVALIDATION-EVIDENCE-01`: deeper verification exposed 48 provenance/evidence findings; the same author improved `48 -> 3`, locally regressed `3 -> 4`, and then corrected `4 -> 0`. The final dossier is retained.
+- `AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01`: the maintenance researcher corrected its initial two output-contract findings `2 -> 0` in the same session.
+- `AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01`: the model-free evidence audit exposed 71 provenance/binding findings; the same author improved `71 -> 1`, locally regressed `1 -> 2`, and then corrected `2 -> 0`. Fewer errors counted as progress throughout; no authored work was discarded or restarted.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
