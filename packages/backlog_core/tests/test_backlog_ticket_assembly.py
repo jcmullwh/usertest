@@ -1465,6 +1465,51 @@ def test_assemble_backlog_tickets_does_not_trust_no_change_on_unready_research()
     assert tickets[0]["research_readiness"]["ready"] is False
 
 
+def test_research_required_ticket_accepts_runner_owned_research_lineage_envelope() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        reproduction_status="partial",
+        research_status="insufficient_evidence",
+        root_cause_confidence=0.4,
+        material_unknowns=[
+            {
+                "unknown": "Which producer exhausted the workspace volume",
+                "affects": ["root_cause", "actionability"],
+                "evidence_needed": "Contemporaneous capacity and ownership evidence",
+            }
+        ],
+    )
+    research["canonical_problem_id"] = problem_id
+    research["case_member_problem_ids"] = [problem_id]
+
+    tickets = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[
+            {
+                "case_id": "case:one",
+                "problem_id": problem_id,
+                "priority_bucket": "p2",
+                "selected_for_research": True,
+                "priority_rationale": "The material unknown requires research.",
+                "priority_status": "prioritized",
+            }
+        ],
+        research_dossiers=[research],
+        solution_option_sets=[],
+        selection_decisions=[],
+        change_plans=[],
+    )
+
+    assert len(tickets) == 1
+    ticket = tickets[0]
+    assert ticket["stage"] == "research_required"
+    reasons = ticket["ticket_readiness"]["reasons"]
+    assert "research_status_insufficient_evidence" in reasons
+    assert "research_proof_invalid" not in reasons
+    assert not any("research_dossier_unknown_fields" in reason for reason in reasons)
+
+
 def test_plan_cannot_abandon_verified_intervention_for_unbound_target() -> None:
     problem = _problem_record("problem:one", title="One")
     option = _option("problem:one")

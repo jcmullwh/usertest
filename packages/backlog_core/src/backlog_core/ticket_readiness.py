@@ -79,6 +79,28 @@ _EXTERNAL_PROVIDER_RUNTIME_RE = re.compile(
     r"raw_events|agent_last_message)\b)",
     re.IGNORECASE,
 )
+
+
+def _research_contract_view(
+    research: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Remove only runner-owned lineage before validating the authored proof.
+
+    Canonical lineage is attached after the Stage-3 model contract and evidence
+    receipt have been accepted.  It remains part of the persisted stage envelope,
+    but it must not be presented to the strict research-proof parser as an authored
+    field when a complete ticket chain is revalidated.
+    """
+
+    if not isinstance(research, Mapping):
+        return None
+    return {
+        key: value
+        for key, value in research.items()
+        if key not in {"canonical_problem_id", "case_member_problem_ids"}
+    }
+
+
 _RUNTIME_ARTIFACT_KINDS = frozenset(
     {
         "agent_stderr",
@@ -6261,15 +6283,16 @@ def assess_ticket_readiness(ticket: Mapping[str, Any] | None) -> tuple[bool, lis
     if research is not None and _string(research.get("_parse_warning")) is not None:
         reasons.append("research_parse_warning_present")
 
+    contract_research = _research_contract_view(research)
     research_ready, research_reasons = assess_research_readiness(
-        dict(research) if research is not None else None
+        contract_research
     )
     if not research_ready:
         reasons.extend(research_reasons)
     selection_ready, selection_reasons = assess_selection_readiness(
         selection,
         options=options,
-        research=research,
+        research=contract_research,
     )
     if not selection_ready:
         reasons.extend(selection_reasons)
@@ -6287,7 +6310,7 @@ def assess_ticket_readiness(ticket: Mapping[str, Any] | None) -> tuple[bool, lis
     plan_ready, plan_reasons = assess_change_plan_readiness(
         plan,
         problem=problem,
-        research=research,
+        research=contract_research,
         selection=selection_for_plan,
     )
     if not plan_ready:
