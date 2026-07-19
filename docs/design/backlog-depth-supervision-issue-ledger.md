@@ -1341,6 +1341,8 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-STORAGE-PROVIDER-V1-EVIDENCE-01`: evidence verification began at 24 findings. Five same-session continuations followed `24 -> 2 (substantive regression) -> 13 -> 6 -> 2 -> 0`; fewer errors counted as progress and regressed candidates did not replace the safe frontier. The request ledger has ten records—nine model calls plus one model-free evidence-feedback record—and every model call used session `019f7c25-5258-7ad0-9e2d-2321213791b5`. The final dossier is verifier-clean `blocked/partial`, and Stage 4 correctly did not run a model.
 - `AUTHOR-STAGE3-WINDOWS-SHELL-V1-OUTPUT-01`: the current-version actionability reassessment began with two output-contract findings and corrected `2 -> 0` in one 93.4-second continuation of session `019f7c4f-aaba-7041-a0d8-222d3ec7f9b6`. The accepted dossier retained the historical symptom and current dispatch-boundary proof rather than manufacturing a new root cause.
 - `AUTHOR-STAGE3-WINDOWS-SHELL-V1-EVIDENCE-01`: independent verification exposed 49 findings. The first `49 -> 1` candidate deleted substantive proof and was quarantined; the safe frontier then progressed `49 -> 47 -> 0` in the same session. Five model calls plus one model-free feedback record produced a verifier-clean and readiness-clean `evidence_sufficient/partial/already_addressed` dossier. Production Stage 4 recorded `not_required` and Stages 5-6 and ticket assembly emitted zero items.
+- `AUTHOR-STAGE3-GEMINI-SHELL-V1-OUTPUT-01`: the Gemini preflight researcher began with 11 output-contract findings. Its first correction reached zero mechanical findings but deleted substantive coverage for two alternatives, so the controller quarantined that candidate. The next same-session correction restored the retained causal/counterevidence roles and advanced to evidence verification. No research restart or supervisor-authored dossier content was used.
+- `AUTHOR-STAGE3-GEMINI-SHELL-V1-EVIDENCE-01`: independent verification exposed 25 findings. Five evidence-capable continuations in the retained session progressed `25 -> 1 -> 4 -> 2 -> 1 -> 0`; the temporary increase occurred when a mechanically cleaner candidate exposed deeper replay/falsification checks, while the safe frontier and all four accepted experiments were preserved. The request ledger has nine records—eight actual `gpt-5.6-sol`/high model turns plus one model-free evidence-feedback record—and zero fresh restarts. The final dossier is verifier- and readiness-clean `evidence_sufficient/reproduced/non_actionable`; production Stage 4 recorded `not_required`, and Stages 5-6 and ticket assembly emitted zero items and zero model manifests.
 
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
@@ -1509,6 +1511,20 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one repeated supervisor reporting-command error, not a pipeline, model, test, artifact, or product failure
 - Exact evidence: while collecting the Windows terminal hashes, the command again placed a formatting pipeline directly after a `foreach` block and PowerShell stopped at parse time with `An empty pipe element is not allowed`. This occurred after AN-64 had documented the same unsafe shape, so it is not merged into the earlier cluster.
 - Containment and result: the next read accumulated hash rows before formatting and returned both exact SHA-256 values plus disk headroom. The failed command was read-only, opened no file, and caused no model call, stage rerun, artifact change, or removal.
+
+### AN-67 - Gemini run-type inspection embedded an invalid PowerShell `if` expression
+
+- Status: `closed_immediate_read_only_correction`
+- Classification: one supervisor diagnostic-command error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: while identifying whether the `20260719T225144Z` run was model-driven or feedback-only, the read-only projection embedded `if (...)` directly inside a parenthesized hashtable value. Windows PowerShell 5.1 treated `if` as a command name and rejected the expression before returning the requested metadata.
+- Containment and result: the next read assigned the conditional value before constructing the object and returned the retained mission/files. No file was written, no process was interrupted, and no author call, stage, experiment, or verification was repeated.
+
+### AN-68 - Gemini attempt projection again piped directly from a `foreach` block
+
+- Status: `closed_immediate_read_only_recurrence`
+- Classification: one repeated supervisor reporting-command error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first exact attempt-ledger projection placed `| ConvertTo-Json` directly after a `foreach` block and Windows PowerShell stopped at parse time with `An empty pipe element is not allowed`. This repeats the already documented AN-64/AN-66 command shape and is therefore counted as a new intervention cluster rather than hidden inside either prior occurrence.
+- Containment and result: the corrected read accumulated rows in an array before conversion and established nine ledger records: eight actual model turns and one model-free evidence-feedback record. The failed read was non-mutating and caused no model call, stage rerun, dossier change, restart, export, or removal.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
