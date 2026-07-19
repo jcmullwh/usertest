@@ -422,6 +422,10 @@ _PROBLEM_MINING_JOB_MAX_CHUNKS = 3
 _PROBLEM_MINING_JOB_MAX_ATOMS = 100
 _PROBLEM_MINING_JOB_MAX_BYTES = 150_000
 _PROBLEM_RELATION_REVIEW_MAX_FOCI = 16
+# Codex currently rejects a turn above 1,048,576 input characters.  Keep a
+# substantial allowance for the runner-owned system prompt and CLI envelope;
+# this budget applies only to the rendered relation-review user prompt.
+_PROBLEM_RELATION_REVIEW_MAX_PROMPT_CHARS = 900_000
 
 
 def _format_problem_mining_atom_markdown(atom: dict[str, Any]) -> str:
@@ -5296,6 +5300,79 @@ def _relation_review_focus_batches(
     return [ordered[index : index + max_foci] for index in range(0, len(ordered), max_foci)]
 
 
+def _render_relation_review_prompt(
+    *,
+    relation_items: list[dict[str, Any]],
+    neighborhoods: list[dict[str, Any]],
+    focus_problem_ids: Sequence[str],
+    template: str,
+    allowed_actions: list[str],
+    stage_guidance_text: str,
+) -> tuple[dict[str, Any], str]:
+    """Render one relation work unit so batching measures the actual provider input."""
+
+    import json as _json
+
+    payload = _relation_review_payload(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=set(focus_problem_ids),
+    )
+    prompt = (
+        template.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+        .replace(
+            "{{ALLOWED_ACTIONS}}",
+            _json.dumps(allowed_actions, ensure_ascii=False, indent=2),
+        )
+        .replace(
+            "{{NEIGHBORHOODS_JSON}}",
+            _json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+    )
+    return payload, prompt
+
+
+def _relation_review_prompt_batches(
+    *,
+    relation_items: list[dict[str, Any]],
+    neighborhoods: list[dict[str, Any]],
+    focus_problem_ids: list[str],
+    template: str,
+    allowed_actions: list[str],
+    stage_guidance_text: str,
+    max_foci: int = _PROBLEM_RELATION_REVIEW_MAX_FOCI,
+    max_prompt_chars: int = _PROBLEM_RELATION_REVIEW_MAX_PROMPT_CHARS,
+) -> list[list[str]]:
+    """Partition every focus exactly once under count and rendered-prompt budgets."""
+
+    if max_prompt_chars <= 0:
+        raise ValueError("problem_mining_relation_review_max_prompt_chars_must_be_positive")
+    batches: list[list[str]] = []
+    for count_bounded in _relation_review_focus_batches(
+        focus_problem_ids,
+        max_foci=max_foci,
+    ):
+        current: list[str] = []
+        for focus_id in count_bounded:
+            candidate = [*current, focus_id]
+            _payload, prompt = _render_relation_review_prompt(
+                relation_items=relation_items,
+                neighborhoods=neighborhoods,
+                focus_problem_ids=candidate,
+                template=template,
+                allowed_actions=allowed_actions,
+                stage_guidance_text=stage_guidance_text,
+            )
+            if current and len(prompt) > max_prompt_chars:
+                batches.append(current)
+                current = [focus_id]
+            else:
+                current = candidate
+        if current:
+            batches.append(current)
+    return batches
+
+
 def _failed_relation_review_batch_decisions(
     focus_problem_ids: list[str],
     *,
@@ -5408,6 +5485,7 @@ def _run_relation_review_batches(
     model: str | None,
     cfg: RunnerConfig,
     max_foci: int = _PROBLEM_RELATION_REVIEW_MAX_FOCI,
+    max_prompt_chars: int = _PROBLEM_RELATION_REVIEW_MAX_PROMPT_CHARS,
     durable_collapse_problem_pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run bounded relation batches and degrade only a failed batch to provisional review."""
@@ -5417,14 +5495,26 @@ def _run_relation_review_batches(
     decisions: list[dict[str, Any]] = []
     batch_meta: list[dict[str, Any]] = []
     for batch_index, batch_focus_ids in enumerate(
-        _relation_review_focus_batches(focus_problem_ids, max_foci=max_foci),
+        _relation_review_prompt_batches(
+            relation_items=relation_items,
+            neighborhoods=neighborhoods,
+            focus_problem_ids=focus_problem_ids,
+            template=template,
+            allowed_actions=allowed_actions,
+            stage_guidance_text=stage_guidance_text,
+            max_foci=max_foci,
+            max_prompt_chars=max_prompt_chars,
+        ),
         start=1,
     ):
         batch_tag = f"{tag}_batch_{batch_index:03d}"
-        batch_payload = _relation_review_payload(
+        batch_payload, prompt = _render_relation_review_prompt(
             relation_items=relation_items,
             neighborhoods=neighborhoods,
-            focus_problem_ids=set(batch_focus_ids),
+            focus_problem_ids=batch_focus_ids,
+            template=template,
+            allowed_actions=allowed_actions,
+            stage_guidance_text=stage_guidance_text,
         )
         known_problem_ids = {
             problem_id
@@ -5459,17 +5549,6 @@ def _run_relation_review_batches(
             for problem_id in [_coerce_string(item.get("problem_id"))]
             if problem_id is not None
         }
-        prompt = (
-            template.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
-            .replace(
-                "{{ALLOWED_ACTIONS}}",
-                _json.dumps(allowed_actions, ensure_ascii=False, indent=2),
-            )
-            .replace(
-                "{{NEIGHBORHOODS_JSON}}",
-                _json.dumps(batch_payload, ensure_ascii=False, indent=2),
-            )
-        )
         prompt_path = review_dir / f"{batch_tag}.prompt.txt"
         response_path = review_dir / f"{batch_tag}.response.txt"
         provisional_path = review_dir / f"{batch_tag}.provisional.json"
@@ -5498,6 +5577,8 @@ def _run_relation_review_batches(
             "candidate_frontier_sha256": _relation_candidate_frontier_sha256(
                 batch_payload["case_index"]
             ),
+            "prompt_char_count": len(prompt),
+            "prompt_char_budget": max_prompt_chars,
             "prompt_path": str(prompt_path),
             "response_path": str(response_path),
         }
@@ -5624,6 +5705,11 @@ def _run_relation_review_batches(
 
         retained_observation: CorrectionObservation[dict[str, Any]] | None = None
         try:
+            if len(prompt) > max_prompt_chars:
+                raise ValueError(
+                    "problem_mining_relation_review_single_focus_prompt_exceeds_max_chars:"
+                    f"actual={len(prompt)}:max={max_prompt_chars}"
+                )
             initial = relation_attempt(
                 attempt_prompt=prompt,
                 attempt_tag=batch_tag,

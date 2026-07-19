@@ -53,6 +53,7 @@ from usertest_backlog.workflows.problem_mining import (
     _relation_case_preview,
     _relation_decision_item_errors,
     _relation_review_payload,
+    _relation_review_prompt_batches,
     _retained_relation_correction_candidate,
     _run_cross_job_problem_synthesis,
     _run_independently_reviewed_problem_pass,
@@ -7224,3 +7225,189 @@ def test_context_origin_attachment_requires_a_full_read(tmp_path: Path) -> None:
             workspace_dir=workspace,
             workspace_manifest=manifest,
         )
+
+
+def test_relation_review_batches_use_rendered_prompt_character_budget() -> None:
+    relation_items = [
+        {
+            "problem_id": f"problem:{index}",
+            "case_id": f"case:{index}",
+            "title": f"Problem {index}",
+            "problem": str(index) * 700,
+            "evidence_atom_ids": [f"atom:{index}"],
+        }
+        for index in range(3)
+    ]
+    neighborhoods = [
+        {
+            "focus_id": f"problem:{index}",
+            "most_related_by_semantic": [],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+        for index in range(3)
+    ]
+    template = "{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}"
+    allowed_actions = ["merge", "alias", "split", "same_cause_group", "keep_separate"]
+
+    batches = _relation_review_prompt_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:0", "problem:1", "problem:2"],
+        template=template,
+        allowed_actions=allowed_actions,
+        stage_guidance_text="Review every focus.",
+        max_foci=3,
+        max_prompt_chars=5_000,
+    )
+
+    assert len(batches) > 1
+    assert [focus_id for batch in batches for focus_id in batch] == [
+        "problem:0",
+        "problem:1",
+        "problem:2",
+    ]
+    assert all(len(batch) == len(set(batch)) for batch in batches)
+    for batch in batches:
+        payload = _relation_review_payload(
+            relation_items=relation_items,
+            neighborhoods=neighborhoods,
+            focus_problem_ids=set(batch),
+        )
+        prompt = (
+            template.replace("{{STAGE_GUIDANCE}}", "Review every focus.")
+            .replace("{{ALLOWED_ACTIONS}}", json.dumps(allowed_actions, indent=2))
+            .replace("{{NEIGHBORHOODS_JSON}}", json.dumps(payload, indent=2))
+        )
+        assert len(prompt) <= 5_000
+
+
+def test_relation_review_runner_never_dispatches_prompt_above_character_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relation_items = [
+        {
+            "problem_id": f"problem:{index}",
+            "case_id": f"case:{index}",
+            "title": f"Problem {index}",
+            "problem": str(index) * 700,
+            "evidence_atom_ids": [f"atom:{index}"],
+        }
+        for index in range(3)
+    ]
+    neighborhoods = [
+        {
+            "focus_id": f"problem:{index}",
+            "most_related_by_semantic": [],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+        for index in range(3)
+    ]
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> StagePromptRun:
+        focus_id = f"problem:{len(calls)}"
+        calls.append(dict(kwargs))
+        return _write_fake_relation_stage_run(
+            kwargs=dict(kwargs),
+            response=json.dumps(
+                [
+                    {
+                        "focus_id": focus_id,
+                        "action": "keep_separate",
+                        "rationale": "No objective identity edge exists.",
+                        "review_confidence": 0.9,
+                    }
+                ]
+            ),
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    review_dir = tmp_path / "relation_review"
+    review_dir.mkdir()
+    decisions, batches = _run_relation_review_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:0", "problem:1", "problem:2"],
+        template="{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}",
+        allowed_actions=["merge", "alias", "split", "same_cause_group", "keep_separate"],
+        stage_guidance_text="Review every focus.",
+        review_dir=review_dir,
+        tag="relation_review",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        max_foci=3,
+        max_prompt_chars=5_000,
+    )
+
+    assert [decision["focus_id"] for decision in decisions] == [
+        "problem:0",
+        "problem:1",
+        "problem:2",
+    ]
+    assert len(calls) == 3
+    assert all(len(str(call["prompt"])) <= 5_000 for call in calls)
+    assert all(batch["prompt_char_count"] <= 5_000 for batch in batches)
+    assert all(batch["prompt_char_budget"] == 5_000 for batch in batches)
+
+
+def test_relation_review_oversized_single_focus_fails_before_model_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relation_items = [
+        {
+            "problem_id": "problem:0",
+            "case_id": "case:0",
+            "title": "Problem 0",
+            "problem": "large" * 1_000,
+            "evidence_atom_ids": ["atom:0"],
+        }
+    ]
+    neighborhoods = [
+        {
+            "focus_id": "problem:0",
+            "most_related_by_semantic": [],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+    ]
+
+    def unexpected_run(**_kwargs: object) -> StagePromptRun:
+        raise AssertionError("oversized prompt must not reach the model")
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        unexpected_run,
+    )
+    review_dir = tmp_path / "relation_review"
+    review_dir.mkdir()
+    decisions, batches = _run_relation_review_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:0"],
+        template="{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}",
+        allowed_actions=["merge", "alias", "split", "same_cause_group", "keep_separate"],
+        stage_guidance_text="Review every focus.",
+        review_dir=review_dir,
+        tag="relation_review",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        max_prompt_chars=2_000,
+    )
+
+    assert decisions[0]["provisional_relation_suggestion"]["error"].startswith(
+        "ValueError: problem_mining_relation_review_single_focus_prompt_exceeds_max_chars"
+    )
+    assert batches[0]["status"] == "failed_provisional_keep_separate"
+    assert batches[0]["prompt_char_count"] > batches[0]["prompt_char_budget"]
