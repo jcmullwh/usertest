@@ -1,6 +1,6 @@
 # Backlog-depth supervision issue ledger
 
-Updated: 2026-07-19 07:57 America/New_York
+Updated: 2026-07-19 09:10 America/New_York
 
 This is the supervisor-owned ledger for defects and unresolved findings discovered while bringing the automated backlog pipeline to a working baseline. Generated atoms, dossiers, options, plans, and tickets remain system-owned evidence; this ledger records work that the supervising Codex process must ensure is addressed rather than silently losing it between reruns.
 
@@ -1190,6 +1190,15 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: repair prompts now require reuse of unchanged runner-attested experiments, reads, and artifacts, and authorize only additional or changed evidence needed for the current verifier frontier. The final dossier must remain complete, but completeness no longer means re-execution.
 - Closure proof: a focused regression proves unchanged attested evidence is explicitly reusable. The complete miner suite passed in 204.5 seconds, the complete app suite passed in 279.3 seconds, Ruff passed, and only existing binary-default warnings remained. The next correction-bearing live case must measure whether the instruction actually reduces model/tool wall time; this is not yet claimed as live throughput improvement.
 
+### BDS-153 - Stage 3 could report completion while retaining a downstream-invalid attempt ledger
+
+- Status: `closed_current_terminal_chain_green`
+- Priority: lifecycle integrity, good-throughput preservation
+- Objective impact: a substantively correct dossier could be reported as complete even though its retained correction history failed the public attempt-ledger contract. Stage 4 then could not consume the work, converting good research into a late mechanical failure and inviting an unnecessary restart.
+- Exact evidence: the report-contract case retained six same-author attempts and a correct terminal dossier, but the public parser rejected legitimate recovery transitions following `repair_scope_rejected` and continued evidence repair. The runner also returned `corrected` before strict-parsing the finalized persisted dossier, so a downstream-invalid ledger could escape a locally successful correction.
+- Correction: the public validator now accepts only runner-legitimate safe-baseline recovery, specialized scope-rejection progress, and continued evidence-repair transitions while still rejecting changed baselines, changed prior-error frontiers, and terminal uncontinued evidence transitions. The runner strict-parses the finalized dossier before returning success and emits `repairable_paused:research_persisted_contract_invalid` when persistence remains invalid. The persisted receipt reference is rebound before any later mutation.
+- Closure proof: the complete `backlog_core` stage-contract file and complete `backlog_miner` research-runner file pass, Ruff and diff checks pass, and the exact retained six-attempt report dossier now public-parses with zero warnings. Its same-author correction, trusted zero-model evidence replay, production Stage-4 lineage handoff, Stage 5, Stage 6, and ticket assembly all completed without discarding the authored research. Both canonical cases terminate `not_required/already_addressed`; zero options, plans, or tickets were emitted.
+
 ### AN-42 - A combined lint/test shell invocation initially masked the lint exit code
 
 - Status: `closed_separate_commands_green`
@@ -1204,6 +1213,64 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-REPORT-REVALIDATION-EVIDENCE-01`: deeper verification exposed 48 provenance/evidence findings; the same author improved `48 -> 3`, locally regressed `3 -> 4`, and then corrected `4 -> 0`. The final dossier is retained.
 - `AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01`: the maintenance researcher corrected its initial two output-contract findings `2 -> 0` in the same session.
 - `AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01`: the model-free evidence audit exposed 71 provenance/binding findings; the same author improved `71 -> 1`, locally regressed `1 -> 2`, and then corrected `2 -> 0`. Fewer errors counted as progress throughout; no authored work was discarded or restarted.
+- `AUTHOR-STAGE3-REPORT-READINESS-OUTPUT-01`: the report researcher first wrapped its correction in a repair envelope, then returned truncated JSON, then produced a valid dossier in the same Sol/high session. The three calls took 155.3, 505.7, and 160.0 seconds. The third result was retained; no restart occurred.
+- `AUTHOR-STAGE3-REPORT-READINESS-SEMANTIC-01`: the same researcher removed an alternative hypothesis labeled plausible even though its own statement and cited origin evidence said it did not explain the occurrence. The corrected dossier preserved the established primary mechanism, `already_addressed` disposition, and honest live-runtime boundary. Two later author calls were caused by the supervisor's omitted replay executor in AN-48, not by a new author-quality defect.
+
+### AN-43 - First Stage-4 launcher omitted one authenticated source root
+
+- Status: `closed_corrected_pre_model`
+- Classification: one supervisor launcher cluster, not a product, model, or stage-author failure
+- Exact evidence: the launcher omitted the `normalized_events` source root required by the retained report lineage. Validation stopped before Stage 4 and before any model call.
+- Containment and result: the existing authenticated source root was supplied on the next invocation. No authored result, model call, export, ticket, implementation, Docker action, or removal occurred in the failed launch.
+
+### AN-44 - Stage-4 lineage wrapper omitted its output parent
+
+- Status: `closed_corrected_pre_model`
+- Classification: one supervisor wrapper setup error, not a product, model, or stage-author failure
+- Exact evidence: the first lineage wrapper attempted to write beneath a parent directory it had not created and stopped before Stage 4 or any model call.
+- Containment and result: the wrapper now creates the exact output parent before invoking production lineage persistence. The failed setup produced no pipeline artifact used as evidence.
+
+### AN-45 - First completed Stage-4 wrapper bypassed production lineage persistence
+
+- Status: `closed_production_path_rerun_green`
+- Classification: one supervisor integration error and one bounded Stage-4 rerun
+- Exact evidence: a hand-assembled wrapper reached a completed handoff but did not use production `_persist_downstream_case_lineage`; the resulting record failed with `priority_case_id_mismatch`.
+- Containment and result: the hand-assembled output was not accepted. Production lineage persistence was invoked against the unchanged verified dossiers and produced two valid `not_required/already_addressed` records with zero options and zero model manifests.
+
+### AN-46 - First focused persistence test omitted the monorepo source graph
+
+- Status: `closed_canonical_source_rerun_green`
+- Classification: one supervisor test-invocation error, not a product or test-body failure
+- Exact evidence: the first focused pytest command stopped during collection because its ad-hoc environment did not expose the repository's canonical first-party package graph. No test body ran.
+- Containment and result: the same tests reran with `scripts/set_pythonpath.ps1`; the complete affected test files then passed. No assertion or production contract was weakened.
+
+### AN-47 - Initial persistence correction retained a pre-parse receipt reference
+
+- Status: `closed_before_publication_full_suite_green`
+- Classification: one supervisor-authored implementation defect caught by the complete affected suite
+- Exact evidence: the first local patch rebound the model dossier but left a receipt reference pointing at the pre-parse object on the subsequent persistence-failure path. The focused path did not expose it; the complete research-runner file did.
+- Containment and result: the reference is rebound immediately after strict parsing and before any later failure mutation. The complete affected files, Ruff, and diff checks pass. No pipeline result used the defective local code, and it was never pushed.
+
+### AN-48 - Readiness continuation omitted the trusted replay executor
+
+- Status: `closed_model_free_recovery_green`
+- Classification: one supervisor invocation defect that caused two avoidable Sol/high continuation turns
+- Exact evidence: after the researcher had produced a valid semantic correction, the wrapper passed `replay_executor=None`. Verification therefore emitted `replay_executor_untrusted`, `replay_isolation_unavailable:no_explicit_replay_executor`, two `experiment_clean_replay_missing` findings, and unresolved primary support. Two additional same-session author turns could not repair missing supervisor-supplied execution infrastructure.
+- Containment and result: authored work was retained. A trusted host replay ran both unchanged experiments without a model or Docker, then production model projection and runner-artifact enrichment were applied. The corrected replay verified with zero errors and readiness passed. The extra turns are counted as supervisor intervention, not author nonprogress.
+
+### AN-49 - First model-free rescore reused stale runner artifact references
+
+- Status: `closed_fresh_runner_refs_green`
+- Classification: one supervisor evidence-rescore construction error, not a model or research-mechanism failure
+- Exact evidence: both trusted experiments passed in 69.4 seconds, but the helper copied prior `runner:*` references and produced eight `artifact_unresolved` findings.
+- Containment and result: a fresh replay used production `_model_dossier_copy` and `_runner_artifact_refs`. Both experiments passed again in 72.9 seconds; the source run remained byte-identical; nine compatible attempts, claims, and receipt hashes verified; and the model-free evidence rescore appended explicit attempt 11 with readiness true and zero errors.
+
+### AN-50 - Final Stage-4 wrapper imported the manifest loader from the wrong module
+
+- Status: `closed_correct_module_rerun_green`
+- Classification: one supervisor launcher import error, not a stage, model, or product failure
+- Exact evidence: the wrapper failed during import before creating its output root, invoking Stage 4, or making a model call.
+- Containment and result: the loader was imported from its owning module. The production Stage-4 handoff then completed for both cases, followed by model-free Stage 5, Stage 6, and ticket assembly with zero downstream artifacts.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
