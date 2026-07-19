@@ -244,15 +244,15 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
     assert current["timing"]["start_at"] == "2026-07-19T13:15:00Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 36
-    assert current["rework"]["continuation_launches"] == 5
-    assert current["rework"]["stage_reruns"] == 5
+    assert current["rework"]["author_invocations"] == 43
+    assert current["rework"]["continuation_launches"] == 11
+    assert current["rework"]["stage_reruns"] == 6
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 17
-    assert current["automatic_self_corrections"]["count"] == 4
-    assert current["supervisor_interventions"]["count"] == 13
+    assert current["errors"]["count"] == 25
+    assert current["automatic_self_corrections"]["count"] == 7
+    assert current["supervisor_interventions"]["count"] == 18
     assert current["furthest_stage"] == (
-        "Corrected Stage 2 for the complete canonical frontier; two selected cases "
+        "Corrected Stage 2 for the complete canonical frontier; three selected cases "
         "have completed their correct terminal Stage-3-to-ticket path"
     )
 

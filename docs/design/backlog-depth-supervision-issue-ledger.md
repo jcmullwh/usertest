@@ -1272,6 +1272,15 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: Stage-1 relation splitting now emits its own content-addressed `problem_mining_relation_split` receipt. It binds the child and parent identities, exact evidence and source-occurrence atoms, relation-receipt bytes, immutable response snapshot, exact decision index/hash, and split-group index. Stage 3 validates this receipt independently; the stricter post-research split receipt path is unchanged.
 - Closure proof: model-free Stage-1 v4 retains 25 cases, authenticates all three Claude occurrence atoms, and reports zero relation-application errors. The bounded Sol/high Stage 3 then used one author session and three model calls over 939 seconds, persisted a verifier-clean `evidence_sufficient/partial/already_addressed` dossier, and preserved the missing-live-provider-recurrence boundary as nonmaterial to current actionability. Production Stage 4 records `not_required`; Stages 5 and 6 and ticket assembly emit zero artifacts. The complete 19-test post-research relation file, 129-test Stage-1 evidence file, 21-test reproduction workflow file, 140-test shadow-validation file, and 66-test backlog-command file pass; Ruff and `git diff --check` pass.
 
+### BDS-162 - Stage 3 completed before applying the semantic readiness contract consumed by Stage 4
+
+- Status: `closed_same_author_readiness_correction_and_terminal_disposition_verified`
+- Priority: self-healing research throughput and correct no-change disposition, objective-blocking
+- Objective impact: a verifier-clean `evidence_sufficient/already_addressed` dossier was declared complete by Stage 3, then rejected model-free by Stage 4 for `unresolved_alternative_hypothesis_not_materialized`. That late handoff emitted one incorrect `research_required` ticket even though the retained evidence established that no new product change was warranted. The original researcher could no longer receive the finding through the ordinary Stage-3 loop.
+- Exact evidence: `stage3_codex_model_messages_v1_fb7cf68` persisted seven attempts with `(True, [])` evidence verification. The first terminal run recorded Stage 4 `insufficient_evidence`, zero options/plans, but one ticket. The alternative said warning text alone was insufficient without repo-owned provenance, so its `plausible` label contradicted its role as adjacent context rather than a competing cause.
+- Correction: every advancing `evidence_sufficient` candidate now receives the same `assess_research_readiness` contract before Stage 3 completion and after every evidence-capable correction. A readiness defect returns to the retained author/session and workspace through the existing cumulative-evidence loop. Feedback allows two general outcomes: preserve a genuinely competing theory as a hypothesis-bound material unknown and downgrade honestly, or remove a non-competing theory while retaining its experiments unchanged and adding an evidence boundary. `insufficient_evidence` and `blocked` remain valid terminal Stage-3 outcomes and are not forced through an optioning gate.
+- Closure proof: attempt 8 records the model-free readiness finding and attempt 9 resumes session `019f7b8b-9fc3-7f52-8dd7-5ed6892fa980` with `gpt-5.6-sol`, high mission reasoning, host ChatGPT subscription auth, and API fallback disabled. The author removed only the non-competing hypothesis, preserved all four accepted experiments, and retained two nonmaterial unknowns and five boundaries. Persisted evidence and readiness both return true with zero errors. Production Stage 4 now records `not_required/already_addressed`; Stages 5-6, ticket assembly, and all model manifests are zero. The complete 186-test Stage-3 runner file, 205-test core stage-contract file, and 233 application research/planning/shadow tests pass; Ruff and `git diff --check` pass.
+
 ### AN-42 - A combined lint/test shell invocation initially masked the lint exit code
 
 - Status: `closed_separate_commands_green`
@@ -1292,6 +1301,9 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01`: independent evidence verification exposed 16 binding/resolution findings after output acceptance. One 181.819-second continuation in the same author session added explicit origin-atom observation predicates, removed unresolved runner-injected paths from repository-inspection claims, and reached verified evidence with zero findings. The terminal dossier is `evidence_sufficient`, `partial`, and `already_addressed`; no option or plan is warranted for this case at the pinned revision.
 - `AUTHOR-STAGE3-CLAUDE-V4-OUTPUT-01`: the Claude collision researcher produced one invalid output-contract finding: a falsification attempt lacked the shared-mechanism artifact needed to make its claim checkable. One 82.06-second correction in the same Sol/high session reduced `1 -> 0`; the dossier and session were retained rather than restarted.
 - `AUTHOR-STAGE3-CLAUDE-V4-EVIDENCE-01`: model-free evidence verification then exposed ten findings covering origin-atom binding for the current retry/fix experiments, direct symptom coverage, a replay workspace changed by generated JUnit output, and one unresolved `run_once` symbol reference. One research-capable continuation in the same author session corrected `10 -> 0` without changing the established historical mechanism or inventing live-provider proof. The terminal result is a correct negative: code/test evidence supports `already_addressed`, while live recurrence remains explicitly unverified.
+- `AUTHOR-STAGE3-CODEX-MESSAGES-V1-OUTPUT-01`: the Codex model-messages researcher began with six output-contract findings. Its first correction reached zero mechanical findings but lost substantive alternative-hypothesis support and was retained without promotion; the next correction had one falsification mismatch; the third reached zero. This was one `6 -> 0 (substantive regression) -> 1 -> 0` same-author cluster, not four discarded investigations.
+- `AUTHOR-STAGE3-CODEX-MESSAGES-V1-EVIDENCE-01`: independent evidence verification exposed 13 findings across origin binding, replay side effects, one nonportable regression command, symbol resolution, falsification binding, and alternative support. Two research-capable continuations in the retained session improved `13 -> 1 -> 0`. The final evidence receipt remained verified after persistence and no author restart occurred.
+- `AUTHOR-STAGE3-CODEX-MESSAGES-V1-READINESS-01`: downstream readiness exposed one semantic inconsistency after evidence verification: an adjacent warning-only theory was labeled `plausible` without a material unknown. One 154.0-second Sol/high continuation in the same session reduced `1 -> 0`, retained all observations, added an explicit non-attribution boundary, and preserved `already_addressed`. The complete correction and independent replay took 385.4 seconds; no fresh research or supervisor-authored dossier content was used.
 
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
@@ -1390,6 +1402,34 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor test-construction cluster, not an evidence-authentication defect
 - Exact evidence: the first negative test changed the original relation response, while the durable receipt intentionally points to its immutable response snapshot; authentication correctly remained green. The next assertion expected the generic relation parser to reject an unknown field even though the split reference's exact file hash is the enforcing boundary and correctly reported only `relation_receipt_sha256_mismatch`.
 - Containment and result: the test now mutates the receipt-bound immutable response and separately mutates the exact receipt bytes. It proves rejection of changed child occurrence binding, changed decision hash, changed immutable response, and changed receipt file. The focused test and complete 19-test relation file pass without changing production behavior.
+
+### AN-57 - Readiness-fix verification initially selected stale or incomplete Python environments
+
+- Status: `closed_current_source_graph_test_suites_green`
+- Classification: one supervisor test-environment cluster, not a product, pipeline, model, or test-body failure
+- Exact evidence: the first Stage-3 command used system Python without the monorepo packages and stopped during collection on missing `agent_adapters`. A later application command used its stale installed `backlog_core`, and one parallel core command calculated source roots from the wrong parent directory. No test body ran in those failed invocations.
+- Containment and result: the Stage-3 suite ran in its managed package environment; application and core suites then ran with the complete current worktree source graph. The final results are 186 Stage-3 runner tests, 205 core stage-contract tests, and 233 application research/planning/shadow tests, all green. No assertion, timeout, or production contract was weakened.
+
+### AN-58 - The first readiness mechanics test expected the dossier-only prompt marker
+
+- Status: `closed_focused_and_complete_stage3_suite_green`
+- Classification: one supervisor test-construction error, not a pipeline or author failure
+- Exact evidence: the new focused test correctly observed a second same-session request, but parsed it using `Dossier repair payload`. Post-verifier findings intentionally retain research tools and therefore use `Verifier feedback payload`; the test failed on its own marker assumption after the production behavior had already succeeded.
+- Containment and result: the assertion now parses the actual evidence-capable continuation contract and verifies its exact readiness error, remediation alternatives, session, workspace, final disposition, and request-ledger frontier. Both focused tests and the complete 186-test Stage-3 runner file pass.
+
+### AN-59 - The current dashboard update repeated local-time coercion in elapsed-time preparation
+
+- Status: `closed_renderer_rejected_and_utc_arithmetic_corrected`
+- Classification: one supervisor reporting-input error, not a pipeline, model, benchmark, or lifecycle failure
+- Exact evidence: PowerShell parsed the UTC-marked cycle start into a local-time `DateTime` before subtracting a UTC current value, inflating the active duration from the exact 21,347 seconds encoded by `13:15:00Z -> 19:10:47Z` to 35,747 seconds. The dashboard validator rejected the receipt before updating the metrics JSON or HTML.
+- Containment and result: the receipt now uses direct UTC timestamp arithmetic and reports 21,347 seconds / 5 h 55 m. The exact validation rule remains unchanged. This recurrence is counted separately from AN-54 because the earlier correction did not prevent the supervisor from reusing the same unsafe timestamp preparation method.
+
+### AN-60 - Dashboard verification again combined independent checks under one shell exit code
+
+- Status: `closed_checks_rerun_separately_green`
+- Classification: one supervisor verification-invocation error, not a product, model, pipeline, or dashboard-contract failure
+- Exact evidence: the combined command printed one failing dashboard assertion that still expected two terminal cases, then later Ruff and diff checks returned zero and supplied the shell's final exit code. This repeated the command-shaping mistake already identified in AN-42; the visible pytest failure was not accepted as green evidence.
+- Containment and result: the stale assertion now expects the actual three-case terminal frontier. Its first edit carried an accidental extra indentation level and failed during collection; that same test-construction cluster was corrected before any green claim. Dashboard rendering, the dashboard test file, Ruff, and `git diff --check` are rerun as separately evaluated commands below; none relies on a later command to mask its exit status.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
