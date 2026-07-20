@@ -1345,6 +1345,8 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-GEMINI-SHELL-V1-EVIDENCE-01`: independent verification exposed 25 findings. Five evidence-capable continuations in the retained session progressed `25 -> 1 -> 4 -> 2 -> 1 -> 0`; the temporary increase occurred when a mechanically cleaner candidate exposed deeper replay/falsification checks, while the safe frontier and all four accepted experiments were preserved. The request ledger has nine records—eight actual `gpt-5.6-sol`/high model turns plus one model-free evidence-feedback record—and zero fresh restarts. The final dossier is verifier- and readiness-clean `evidence_sufficient/reproduced/non_actionable`; production Stage 4 recorded `not_required`, and Stages 5-6 and ticket assembly emitted zero items and zero model manifests.
 - `AUTHOR-STAGE3-DOCKER-DAEMON-V1-OUTPUT-01`: the Docker-daemon researcher began with seven output-contract findings. Its first correction reached zero mechanical findings but removed established mechanism/support coverage for the state-independent-product-failure alternative, so the controller quarantined it. The next same-session correction restored that coverage and reached an accepted zero-error output contract without rerunning research.
 - `AUTHOR-STAGE3-DOCKER-DAEMON-V1-EVIDENCE-01`: evidence verification exposed five findings covering one source-symptom binding, two case-local replay outputs, and two unauthenticated falsification attempts. One evidence-capable continuation corrected `5 -> 0` in the retained session. The ledger contains five records—four actual `gpt-5.6-sol`/high model turns plus one model-free feedback record—and zero fresh restarts. The final proof binds the one authentic April source atom, treats 30 later implementation-derived atoms as supplemental context rather than independent problems, and reaches verifier/readiness-clean `evidence_sufficient/reproduced/non_actionable`. Production Stages 4-6 and ticket assembly emitted zero downstream items and zero model manifests.
+- `AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMAND-V1-OUTPUT-01`: the Windows-sandbox command researcher began with four output-contract findings. The first same-session correction reduced `4 -> 1`, but lost four established causal/alternative coverage roles; the controller counted the smaller error set as progress while quarantining it as a nonbaseline attempt. The next correction restored the safe coverage and reached `4 -> 0` without restarting the investigation.
+- `AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMAND-V1-EVIDENCE-01`: independent evidence verification exposed 37 findings: 25 atom bindings, one full-origin coverage gap, nine unresolved inspected files, and two causal-falsification bindings. Four evidence-capable continuations progressed `37 -> 2 -> 1 -> 1 -> 0`. The one-error identity change was retained as genuine rework progress because it removed the old binding defect and exposed a readiness-specific alternative-hypothesis finding. The attempt ledger has eight records—seven actual `gpt-5.6-sol`/high model turns plus one model-free feedback record—six same-session continuations, and zero fresh restarts. The final dossier accounts for all 25 source observations, verifies the historical pre-payload Windows sandbox-worker panic and its controlled signature contrast, audits the current unelevated guard and two focused regressions, and ends verifier/readiness-clean `evidence_sufficient/partial/already_addressed`. Production Stages 4-6 and ticket assembly emitted zero downstream items and zero model manifests.
 
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
@@ -1555,6 +1557,55 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor reporting error, not a pipeline, model, verifier, artifact, or case failure
 - Exact evidence: the first model-setting preflight searched the loaded Codex config's `args`/`extra_args` fields and printed `reasoning_configured: false`. The repo-owned setting is actually stored in `agents.codex.config_overrides`, which contains the exact value `model_reasoning_effort=high`.
 - Containment and result: direct config inspection corrected the false report before launch. The Stage-3 invocation explicitly selects `gpt-5.6-sol`, while the runner applies the repo-owned high-reasoning override and receipts the effective model/auth route. No model call was launched under the false diagnostic, and no stage or artifact was changed.
+
+### AN-73 - Single-case Stage-3 wrapper used the wrong source-package import sequence
+
+- Status: `closed_before_model_dispatch`
+- Classification: one supervisor wrapper cluster containing two pre-model launch failures; not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first inline launcher imported the venv-installed `backlog_core` before `usertest_backlog.shared` bootstrapped the source-tree package paths, causing an unavailable-symbol `ImportError`. The second launcher corrected the order but incorrectly assumed `assess_research_readiness` was re-exported from `shared`, causing a second immediate `ImportError`.
+- Containment and result: importing `shared` first and then importing `assess_research_readiness` from the source `backlog_core` package launched the unchanged one-case job. Both failed wrappers stopped before creating the Stage-3 output directory, invoking a model, acquiring a research workspace, or changing any artifact. They are counted as two failed wrapper launches but one underlying import-bootstrap error cluster.
+
+### AN-74 - Live run-receipt diagnostics were overbroad and used stale auth field paths
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting cluster, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first live receipt read printed the complete large `preflight.json` instead of a bounded field projection. A follow-up looked for auth fields beneath a stale nested `meta.codex_execpolicy` path and printed blanks even though the canonical receipt stores those fields at the top level.
+- Containment and result: the final audit read the exact `target_ref.json`, `codex_execpolicy_config_overrides.json`, and top-level `codex_execpolicy_overlay.json` fields for all seven actual author calls. Every call binds `gpt-5.6-sol`, `model_reasoning_effort=high`, target `8fff1c16`, the same resumed author session, verified shared-host ChatGPT subscription auth, API fallback disabled, API-key billing environment disabled, canonical subscription routing, and preserved host auth. No stage or model work was repeated.
+
+### AN-75 - Liveness probe returned nonzero after the author had already completed
+
+- Status: `closed_immediate_read_only_correction`
+- Classification: one supervisor diagnostic-command error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: a combined projection successfully read the last raw event as `turn.completed`, then `Get-Process -Id 50676` returned no process because the Codex child had already exited. PowerShell therefore returned exit 1 despite the useful completion evidence.
+- Containment and result: the completion event was treated correctly and the controller was left running to validate the report. No retry, restart, stage change, model call, artifact mutation, export, or removal resulted from the diagnostic exit code.
+
+### AN-76 - Independent Stage-3 audit wrapper assumed unavailable validation APIs and the wrong field type
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor audit-wrapper cluster containing two failed projections; not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first audit attempted to import a nonexistent generic `validate_stage_document` export. After the actual persisted-evidence and readiness checks passed, a compact semantic projection assumed `provisional_same_cause_member_evidence_atom_ids` was a mapping; it is a list, so `.items()` failed.
+- Containment and result: the corrected audit used the two downstream acceptance functions—`verify_persisted_research_evidence` and `assess_research_readiness`—and both returned true with zero findings. A type-safe projection then confirmed 25/25 occurrence atoms, complete assignment, the retained relation unit, exact boundaries, inspected production symbols, and zero blockers. The authored dossier was not changed.
+
+### AN-77 - Attempt-accounting diagnostic emitted the full artifact payload
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first attempt-progression projection included each complete `attempt_artifacts` array and full error identities. The output exceeded the direct tool budget and was truncated even though only counts, families, timings, decisions, and run/session identities were needed.
+- Containment and result: the retained Stage-3 document itself remained complete. The bounded accounting derived from it records output `4 -> 1 -> 0`, evidence `37 -> 2 -> 1 -> 1 -> 0`, seven actual model reports, one model-free feedback record, six continuations, one session, and zero restarts. No model or stage work was repeated.
+
+### AN-78 - Dashboard checkpoint review requested an unbounded working-tree diff
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first checkpoint-integrity command combined the needed receipt-count projection with an unrestricted `git diff`. The generated HTML/JSON and ledger changes exceeded the direct output budget, so the review output was truncated before the useful bounded summary completed.
+- Containment and result: the checkpoint was left unchanged and was rechecked with separate count, status, stat, and targeted-diff projections. No model call, stage rerun, research restart, artifact rewrite, export, removal, or implementation resulted from the truncated read.
+
+### AN-79 - Dashboard renderer was first invoked through a nonexistent worktree virtual environment
+
+- Status: `closed_before_execution`
+- Classification: one supervisor launcher-path error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first renderer command assumed `I:\code\usertest_backlog_depth\.venv\Scripts\python.exe`; that file does not exist, so PowerShell rejected the command before Python or the renderer started.
+- Containment and result: the unchanged renderer was immediately run with the installed Python launcher and completed successfully. No model call, pipeline stage, research artifact, export, removal, or implementation was started or repeated.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
