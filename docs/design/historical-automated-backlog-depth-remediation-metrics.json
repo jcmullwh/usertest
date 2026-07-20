@@ -4,26 +4,26 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-20T01:11:30Z",
+    "as_of": "2026-07-20T01:50:24Z",
     "current_run_id": "qualification-cycle-383cf41f-20260719",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "8 terminal; 2 research frontiers parked",
-        "detail": "The effective frontier has 26 canonical cases and 25 selected research units. The Docker shell-probe preflight case is now terminal already_addressed after an exact two-occurrence parser-revision replay; the two storage children remain honestly nonterminal and did not advance to optioning.",
+        "value": "9 terminal; 2 research frontiers parked",
+        "detail": "The effective frontier has 26 canonical cases and 25 selected research units. The first-run policy mismatch is now terminal already_addressed after a source-only historical mechanism and current-contract audit; the two storage children remain honestly nonterminal and did not advance to optioning.",
         "tone": "warn"
       },
       {
         "label": "Current bounded throughput",
-        "value": "27 -> 26 cases; 8 terminal, 2 nonterminal",
-        "detail": "Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Eight cases now terminate without new work; both storage children retain precise evidence-acquisition frontiers.",
+        "value": "27 -> 26 cases; 9 terminal, 2 nonterminal",
+        "detail": "Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Nine cases now terminate without new work; both storage children retain precise evidence-acquisition frontiers.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "This cycle is active: 8 of 25 effective selected research units are terminal. Two more have correct but explicitly nonterminal blocked/insufficient-evidence dispositions. No qualification cycle or export authorization is earned.",
+        "detail": "This cycle is active: 9 of 25 effective selected research units are terminal. Two more have correct but explicitly nonterminal blocked/insufficient-evidence dispositions. No qualification cycle or export authorization is earned.",
         "tone": "bad"
       },
       {
@@ -3084,29 +3084,29 @@
         "lifecycle_id": "pipeline-cycle:383cf41f:20260719",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 97,
-          "continuation_launches": 55,
+          "author_invocations": 101,
+          "continuation_launches": 58,
           "stage_reruns": 9,
           "full_restarts": 0,
-          "summary": "The prior 92 calls are retained. Docker shell-probe preflight added five actual Sol/high model calls and four continuations in one session; its model-free evidence-feedback record is excluded. Three earlier model-free stage re-executions repaired one supervisor lineage omission and the ticket-readiness handoff. Gemini, Docker-daemon, Windows-command, and Docker-shell-preflight each completed their first terminal handoff without a rerun. No miner, author, case, or full pipeline restart occurred."
+          "summary": "The prior 97 calls are retained. First-run policy mismatch added four actual Sol/high model calls and three continuations in one session; its model-free evidence-feedback record is excluded. Three earlier model-free stage re-executions repaired one supervisor lineage omission and the ticket-readiness handoff. Gemini, Docker-daemon, Windows-command, Docker-shell-preflight, and first-run-policy each completed their first terminal handoff without a rerun. No miner, author, case, or full pipeline restart occurred."
         },
-        "label": "Fresh sealed cycle through eight terminal cases and a two-child storage split",
-        "scope": "Export-disabled non-IDEA qualification cycle over 2,856 post-split atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 decisions, eight terminal negative cases, one authenticated mixed-cause split, and two verifier-clean nonterminal storage children; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
+        "label": "Fresh sealed cycle through nine terminal cases and a two-child storage split",
+        "scope": "Export-disabled non-IDEA qualification cycle over 2,856 post-split atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 decisions, nine terminal negative cases, one authenticated mixed-cause split, and two verifier-clean nonterminal storage children; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
         "timing": {
           "start_at": "2026-07-19T13:15:00Z",
           "end_at": null,
-          "elapsed_seconds": 42990,
+          "elapsed_seconds": 45324,
           "coverage": "active",
-          "display": "11 h 56 m active",
-          "note": "Active wall time through the Docker shell-probe preflight terminal case. Parent storage research took 2,586.6 seconds; checkout Stage 2/3 took 9.0/1,448.7 seconds; provider Stage 2/3 took 13.9/2,122.4 seconds. Windows-shell, Gemini, Docker-daemon, Windows-command, and Docker-shell-preflight Stage 3 took 2,247.8, 2,353.4, 1,035.0, 2,140.0, and 1,662.7 seconds. Their terminal chains took 4.3, 5.6, 7.6, 9.3, and 7.1 seconds with zero model calls. Model-free feedback records and activation delay are not represented as model reasoning."
+          "display": "12 h 35 m active",
+          "note": "Active wall time through the first-run policy terminal case. Parent storage research took 2,586.6 seconds; checkout Stage 2/3 took 9.0/1,448.7 seconds; provider Stage 2/3 took 13.9/2,122.4 seconds. Windows-shell, Gemini, Docker-daemon, Windows-command, Docker-shell-preflight, and first-run-policy Stage 3 took 2,247.8, 2,353.4, 1,035.0, 2,140.0, 1,662.7, and 1,634.4 seconds. Their terminal chains took 4.3, 5.6, 7.6, 9.3, 7.1, and 5.9 seconds with zero model calls. Model-free feedback records and activation delay are not represented as model reasoning."
         },
-        "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; eight cases are terminal and both authenticated storage children retain their correct nonterminal Stage-3-to-ticket frontier",
-        "current_state": "The effective post-split corpus contains 26 canonical cases and 25 effective selected research units. Eight cases are terminal. The Docker shell-probe preflight dossier binds the current operational aggregate and both exact July 6 occurrences, replays their retained command-execution events through each historical parser revision and the pinned parser/resolver, proves the blocked-to-available contrast with only the parser implementation changed, passes the exact regression, and verifies fix b619185 is an ancestor of the pinned revision. It remains partial because no fresh packaged Docker mission was launched, but that boundary affects deployment freshness rather than pinned-source actionability. The dossier is evidence_sufficient/partial/already_addressed with zero persisted-verifier/readiness findings. Stage 4 records not_required, and Stages 5-6 and ticket assembly emit no option, plan, ticket, or model manifest. The checkout and provider storage children remain verifier-clean nonterminal frontiers with precise evidence needs.",
-        "outcome": "Eight terminal negative dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
+        "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; nine cases are terminal and both authenticated storage children retain their correct nonterminal Stage-3-to-ticket frontier",
+        "current_state": "The effective post-split corpus contains 26 canonical cases and 25 effective selected research units. Nine cases are terminal. The first-run-policy dossier assigns and directly covers all seven independent April source atoms while treating 40 implementation-derived atoms only as context. It establishes the historical tutorial/mission/policy mismatch, verifies ancestor fix b380e50, resolves the current default mission and policy compatibility through production catalog code, passes two focused preflight regressions, and deliberately does not rely on the derived implementation report for actionability. It remains partial because the historical April checkout was not rerun, but authenticated source bindings plus the deterministic Git diff establish historical reality and current non-recurrence. The dossier is evidence_sufficient/partial/already_addressed with zero persisted-verifier/readiness findings. Stage 4 records not_required, and Stages 5-6 and ticket assembly emit no option, plan, ticket, or model manifest. The checkout and provider storage children remain verifier-clean nonterminal frontiers with precise evidence needs.",
+        "outcome": "Nine terminal negative dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
         "errors": {
-          "count": 71,
+          "count": 75,
           "count_kind": "deduplicated_clusters",
-          "summary": "Twelve controller/integration clusters are retained: nine corrected or previously closed and three open/contained observations. Twenty-three nondeterministic author clusters self-corrected in their original sessions. Thirty-six supervisor diagnostic/wrapper/reporting/test-construction clusters were corrected without restarting research. The unresolved Windows relation disagreement remains a nonblocking recall measurement and is not counted as an execution error.",
+          "summary": "Twelve controller/integration clusters are retained: nine corrected or previously closed and three open/contained observations. Twenty-five nondeterministic author clusters self-corrected in their original sessions. Thirty-eight supervisor diagnostic/wrapper/reporting/test-construction clusters were corrected without restarting research. The unresolved Windows relation disagreement remains a nonblocking recall measurement and is not counted as an execution error.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
@@ -3178,13 +3178,17 @@
             "AN-83",
             "AN-84",
             "AN-85",
-            "AN-86"
+            "AN-86",
+            "AUTHOR-STAGE3-FIRST-RUN-POLICY-V1-OUTPUT-01",
+            "AUTHOR-STAGE3-FIRST-RUN-POLICY-V1-EVIDENCE-01",
+            "AN-87",
+            "AN-88"
           ]
         },
         "automatic_self_corrections": {
-          "count": 23,
+          "count": 25,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior twenty-one clusters remain. Docker shell-probe preflight added two and used five research model calls. Every correction stayed in its original Sol/high session. Regressed low-error candidates were quarantined, smaller or reworked error sets counted as progress, and safe frontiers were preserved. Model-free feedback records are excluded from invocation counts. No author restart or supervisor-authored dossier content was used.",
+          "summary": "The prior twenty-three clusters remain. First-run policy mismatch added two and used four research model calls. Every correction stayed in its original Sol/high session. Regressed low-error candidates were quarantined, smaller or reworked error sets counted as progress, and safe frontiers were preserved. Model-free feedback records are excluded from invocation counts. No author restart or supervisor-authored dossier content was used.",
           "cluster_ids": [
             "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
             "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01",
@@ -3208,13 +3212,15 @@
             "AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMAND-V1-OUTPUT-01",
             "AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMAND-V1-EVIDENCE-01",
             "AUTHOR-STAGE3-DOCKER-SHELL-PREFLIGHT-V1-OUTPUT-01",
-            "AUTHOR-STAGE3-DOCKER-SHELL-PREFLIGHT-V1-EVIDENCE-01"
+            "AUTHOR-STAGE3-DOCKER-SHELL-PREFLIGHT-V1-EVIDENCE-01",
+            "AUTHOR-STAGE3-FIRST-RUN-POLICY-V1-OUTPUT-01",
+            "AUTHOR-STAGE3-FIRST-RUN-POLICY-V1-EVIDENCE-01"
           ]
         },
         "supervisor_interventions": {
-          "count": 45,
+          "count": 47,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior thirty-eight intervention clusters remain. Seven Docker-shell-preflight supervision clusters covered one wrong Stage-2 projection key, one wrong verifier import surface, two overbroad audit reads, one malformed ripgrep expression, one unverified dashboard hash, and one UTC/local elapsed-time error. All were corrected without rerunning research or changing authored evidence. The three open nonblocking controller observations did not trigger speculative hardening. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
+          "summary": "The prior forty-five intervention clusters remain. Two first-run-policy supervision clusters were overbroad read-only projections: one complete PR CI rollup and one full prior-research/47-atom dump. Both were corrected without rerunning research or changing authored evidence. The three open nonblocking controller observations did not trigger speculative hardening. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
@@ -3260,12 +3266,14 @@
             "AN-83",
             "AN-84",
             "AN-85",
-            "AN-86"
+            "AN-86",
+            "AN-87",
+            "AN-88"
           ]
         },
-        "next_action": "Preserve both storage children and do not rerun them without the named new evidence. Choose the next of 15 unworked source-backed selections and run only that case through production Stage 3 and its correct downstream disposition. Reuse the current frontier; do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation yet.",
+        "next_action": "Preserve both storage children and do not rerun them without the named new evidence. Choose the next of 14 unworked source-backed selections and run only that case through production Stage 3 and its correct downstream disposition. Reuse the current frontier; do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation yet.",
         "tone": "warn",
-        "data_quality": "The authenticated post-split problem corpus is e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Parent storage research is 3d43eaa54eb28a4d3e225a1c96971c95f9c40fe4ac9193881138fd332232d080. Checkout research/terminal hashes are 11b8761384fcb7e9899078ade7463a4bdee8e8bfb30b61b08bfc67d5f1a8cc75 and a449486d46f8d1bb23653bd2157a8042f203a922d4b826b2f30399d79b2ad438; provider hashes are c80352eb70cea78baa7f507da8cbb4b569e5d9900fd78d24767e08eb13053ac1 and 3227c07f088ce93a70e3bf42c28ba96a39342d44a6c203a140f204ea102513cb. Windows-shell research/terminal hashes are 4e3959d62dba422ed7c98d101291b40021da2f81ba4a5e21f30ee1e8ec6690dd and fb1558c7fceae53c1091a0994926be5750d07004796e08e964db307cdbb91046. Gemini research/terminal hashes are 27ed20d962de86fe35429272d970e5906304a2ef2fd7fddb867ac9fcb99e6f0f and e82fd135cd616c322ec3f684321c13c9eb9de67eff6e3932c4e0778ee69e86e8. Docker-daemon research/terminal hashes are 68748892e4a8701813e6e1eb02e522f7a32e7c35fc23aa69f1bfbcf6669a5f18 and b0bebaab9f84ed13e589dfd93a660f6a3c9e9ab01a231932ad1765b2b52da4b3. Windows-command research/terminal hashes are 7e038cd5254d4240508ae1117aab4822f0f661c42ea76acf18a1a52ccc07216f and fd1b28c0b49306e67979a4c6e96caf63f468f566006fb3c92ea68b8d16738118. Docker-shell-preflight research/terminal hashes are 82729cf2938c5faf4ce14f3aa1796db662c38de69e6bff5b379855e76f0a4bda and 1159b783077a4ca1b52509b7e4e445c41d5e6a1e7d38f3eca9e664f84b0bbf98. Every terminal path records zero Stage-4-to-6 manifests. Operational error counts cover controller-observed clusters and validator-visible author defects; transient within-turn exploration that never escapes the author boundary is not independently enumerated. At this snapshot C: had 26.01 GiB free, I: 273.85 GiB, and U: 6,376.31 GiB; no image, container, workspace, artifact, or VHDX content was removed. Full cycle completion remains unmeasured.",
+        "data_quality": "The authenticated post-split problem corpus is e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Parent storage research is 3d43eaa54eb28a4d3e225a1c96971c95f9c40fe4ac9193881138fd332232d080. Checkout research/terminal hashes are 11b8761384fcb7e9899078ade7463a4bdee8e8bfb30b61b08bfc67d5f1a8cc75 and a449486d46f8d1bb23653bd2157a8042f203a922d4b826b2f30399d79b2ad438; provider hashes are c80352eb70cea78baa7f507da8cbb4b569e5d9900fd78d24767e08eb13053ac1 and 3227c07f088ce93a70e3bf42c28ba96a39342d44a6c203a140f204ea102513cb. Windows-shell research/terminal hashes are 4e3959d62dba422ed7c98d101291b40021da2f81ba4a5e21f30ee1e8ec6690dd and fb1558c7fceae53c1091a0994926be5750d07004796e08e964db307cdbb91046. Gemini research/terminal hashes are 27ed20d962de86fe35429272d970e5906304a2ef2fd7fddb867ac9fcb99e6f0f and e82fd135cd616c322ec3f684321c13c9eb9de67eff6e3932c4e0778ee69e86e8. Docker-daemon research/terminal hashes are 68748892e4a8701813e6e1eb02e522f7a32e7c35fc23aa69f1bfbcf6669a5f18 and b0bebaab9f84ed13e589dfd93a660f6a3c9e9ab01a231932ad1765b2b52da4b3. Windows-command research/terminal hashes are 7e038cd5254d4240508ae1117aab4822f0f661c42ea76acf18a1a52ccc07216f and fd1b28c0b49306e67979a4c6e96caf63f468f566006fb3c92ea68b8d16738118. Docker-shell-preflight research/terminal hashes are 82729cf2938c5faf4ce14f3aa1796db662c38de69e6bff5b379855e76f0a4bda and 1159b783077a4ca1b52509b7e4e445c41d5e6a1e7d38f3eca9e664f84b0bbf98. First-run-policy research/terminal hashes are afe92e0a3298c5325d324a52273a0241d97d7104295d29f4f6dafb37510c8ef0 and 4260c010b49c6974b4b37fa84341a3d3b7c4a884a3ecb4b3fbaa45ce3e7f1cce. Every terminal path records zero Stage-4-to-6 manifests. Operational error counts cover controller-observed clusters and validator-visible author defects; transient within-turn exploration that never escapes the author boundary is not independently enumerated. At this snapshot C: had 23.10 GiB free, I: 273.45 GiB, and U: 6,376.31 GiB; no image, container, workspace, artifact, or VHDX content was removed. Full cycle completion remains unmeasured.",
         "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]

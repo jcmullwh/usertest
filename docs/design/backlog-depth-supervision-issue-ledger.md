@@ -1352,6 +1352,10 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 - `AUTHOR-STAGE3-DOCKER-SHELL-PREFLIGHT-V1-EVIDENCE-01`: independent evidence verification exposed 15 findings: two atom/experiment bindings, one untracked `.pdm-python` marker, eleven unresolved inspected research artifacts, and one unbound causal falsification. The same author corrected `15 -> 1 -> 0`; the changed one-error frontier counted as progress because it resolved all prior bindings and exposed a readiness-specific alternative-hypothesis finding. The request ledger has six records—five actual `gpt-5.6-sol`/high model turns plus one model-free feedback record—four continuations in one session, and zero fresh restarts. The final verifier/readiness-clean dossier replays both exact historical Docker events through their historical parser revisions and the pinned parser/resolver, proves the blocked-to-available contrast with only the parser revision changed, passes the exact regression, and shows fix `b619185` is an ancestor of the pinned revision. It ends `evidence_sufficient/partial/already_addressed`; production Stage 4 records `not_required`, and Stages 5-6 and ticket assembly emit zero items and zero model manifests.
 
+- `AUTHOR-STAGE3-FIRST-RUN-POLICY-V1-OUTPUT-01`: the initial dossier had two output-contract findings: its current-contract falsification lacked a shared-mechanism artifact and the primary hypothesis did not link support to inspected production code. One same-author continuation corrected `2 -> 0` without losing substantive coverage. This is one self-corrected author cluster.
+
+- `AUTHOR-STAGE3-FIRST-RUN-POLICY-V1-EVIDENCE-01`: independent evidence verification exposed 31 findings: 21 missing direct experiment/atom bindings across three experiments and seven source atoms, two aggregate origin-coverage findings, three replay-output workspace mutations, and five unresolved config/docs symbol locators. The first evidence continuation reduced `31 -> 1` but lost direct coverage for six source atoms, so the controller retained it as a nonbaseline improvement rather than accepting or discarding it. The next same-author continuation restored full source coverage and reached zero. The request ledger has five records—four actual `gpt-5.6-sol`/high model turns plus one model-free feedback record—three continuations in one session, and zero fresh restarts. The final verifier/readiness-clean dossier distinguishes seven source atoms from 40 derived implementation-context atoms, establishes the historical docs/mission/policy mismatch, verifies ancestor fix `b380e50`, resolves the current contract through production catalog code, passes two focused preflight regressions, and ends `evidence_sufficient/partial/already_addressed`. Production Stage 4 records `not_required`, and Stages 5-6 and ticket assembly emit zero items and zero model manifests.
+
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
 - Status: `closed_corrected_pre_model`
@@ -1659,6 +1663,20 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor metrics-calculation error, not a pipeline, model, verifier, artifact, or case failure
 - Exact evidence: the snapshot timestamp `2026-07-20T01:11:30Z` is 42,990 seconds after `2026-07-19T13:15:00Z`, but the first PowerShell calculation parsed the start as a local `DateTime` and reported 57,390 seconds. The dashboard contract rejected `active timing.elapsed_seconds must equal as_of minus start_at`, and the checked-in dashboard remained at the prior snapshot.
 - Containment and result: the receipt now records the direct UTC difference, 42,990 seconds or 11 h 56 m. The renderer and complete dashboard test file must pass before commit. No model call, pipeline stage, research artifact, export, removal, or implementation was changed or repeated.
+
+### AN-87 - PR checkpoint query requested the complete CI check rollup
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the post-push `gh pr view` requested the full `statusCheckRollup`, which contained two large queued/in-progress workflow matrices and exceeded the direct output budget. The useful facts—successful push, draft/open state, branch, head SHA, and CI running—were still present, but the output was truncated.
+- Containment and result: future checkpoint queries will project aggregate CI state rather than every job. Commit `cc2f6bf` was already pushed successfully, and no model call, stage, research artifact, export, removal, or implementation was repeated.
+
+### AN-88 - Next-case source preflight printed full prior research and atom text
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first first-run-policy preflight included the full prior research snapshot plus the text of all 47 assigned records. The large source-run report and implementation-derived artifacts exceeded the direct output budget, although the needed facts were only seven source atoms, 40 derived context atoms, the original mismatch summary, and the prior malformed-research state.
+- Containment and result: Stage 3 received the canonical complete assignment directly, while supervision used bounded gate, experiment, frontier, and provenance projections. No atom was dropped; no model call, stage, export, removal, or implementation was repeated because of the overbroad read.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
