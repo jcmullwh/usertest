@@ -2515,13 +2515,98 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-177 - External implementation run roots are not propagated to terminal outcome trust
 
-- Status: `current_case_closed_configuration_propagation_open`
+- Status: `closed`
 - Priority: post-merge lifecycle, provenance continuity
 - Objective impact: all required post-merge roles passed and the PR merged, but the terminal outcome was reported blocked because review/outcome processes trusted only the controller's default `runs` directory and rejected the explicitly selected `U:` implementation run root.
 - Exact evidence: the first merge run produced merge commit `bc70b15bf1f6709a589d308f0739c2b865a65e77` and passed original, live, and mitigation roles, then failed terminal provenance with four `outside_trusted_roots` errors for `U:\usertest_implement_depth\runs\...` receipts.
 - Current correction: the existing explicit `USERTEST_IMPLEMENT_OUTCOME_TRUSTED_RUNS_ROOT=U:\usertest_implement_depth\runs` boundary was supplied and `review merge` resumed the already-merged PR. It ran zero roles, revalidated the retained receipts, and completed the expected `mitigated` outcome in 27.3 seconds.
-- Required action: carry the explicitly configured implementation `--runs-dir` into later review/outcome trust configuration, or persist an authenticated trusted-root receipt that those phases can consume. Do not infer arbitrary trusted roots from mutable ticket text.
-- Closure proof: a subsequent cross-volume implementation proceeds through terminal outcome provenance in one pass without a supervisor-supplied environment variable.
+- Correction: qualification preparation now seals each explicit additional semantic evidence root and propagates those sealed roots into outcome synchronization. Trust still comes only from explicit configuration plus the immutable qualification manifest; mutable ticket text cannot add roots.
+- Verification: the focused outcome-aggregation suite passes. Fresh preparation `bc70b15b_20260720T175050Z` sealed three additional roots, and its prepared case registry retained `case:adc507afeea214f0d1e4` as provenance-verified `mitigated` using the cross-volume implementation outcome without a supervisor-supplied outcome-trust variable.
+- Closure proof: the fresh qualification preparation preserved the exact completed-case outcome and plan revision instead of downgrading or reopening it.
+
+### BDS-178 - Qualification rejected an explicit evidence root whose sole target slug differed from the primary target
+
+- Status: `closed`
+- Priority: regeneration-blocking, provenance correctness
+- Objective impact: a legitimate controller implementation run could not enter the sealed corpus because its canonical target slug was `usertest_backlog_depth` while the primary observation corpus target was `usertest`. Omitting the root would silently drop outcome evidence; pretending it belonged to the primary target would falsify lineage.
+- Exact evidence: qualification preparation rejected `U:\usertest_implement_depth\runs` after it was explicitly added to cover the completed controller implementation outcome. The root contained one canonical target and five outcome paths, all under `usertest_backlog_depth`.
+- Correction: explicit additional evidence roots prefer the primary target when present; otherwise they may bind to a different target only when that target is the sole canonical target in the root. The actual target slug is signed into the manifest. Ambiguous multi-target roots still fail.
+- Verification: focused transaction tests cover cross-target acceptance, inventory binding, and ambiguous-root rejection. Fresh preparation sealed the root as target `usertest_backlog_depth`, one run, five outcome paths.
+
+### BDS-179 - Qualification preparation required a manually pre-copied atom-action ledger
+
+- Status: `closed`
+- Priority: regeneration-blocking, transaction usability
+- Objective impact: a fresh sealed run stopped after several minutes because the transaction expected a copied atom-action ledger that the preparation command itself did not create. Manual copying would be an unnecessary intervention and could break source/seed identity.
+- Exact evidence: the first corrected `bc70b15b` preparation stopped with `qualification_input_requires_copied_atom_actions` after source inventory work completed.
+- Correction: `qualification-prepare` now snapshots the live ledger into its work directory as write-once `backlog_atom_actions.seed.yaml`, verifies source stability, and rejects conflicting existing bytes.
+- Verification: focused tests prove the copy, write-once conflict, and source-change rejection. Fresh preparation completed with 2,854 sealed eligible atoms, zero model calls, and zero ticket mutations.
+
+### BDS-180 - Initial Stage-1 disagreement remained unresolved instead of using the retained same-author repair path
+
+- Status: `contained_baseline_supervision_required`
+- Priority: correct-disposition throughput, self-healing
+- Objective impact: when the primary miner promoted a shallow claim and the independent reviewer rejected it, conservative reconciliation preserved safety but left three atoms `unresolved`. Without a focused continuation, the next cycle would repeat the same evidence instead of reaching an evidence-bounded disposition.
+- Exact evidence: Sol/high slice `stage12_slice_mixed_sol_high_20260720T181500Z` processed eight eligible atoms. The primary proposed `problem:maintenance-cleanup-zero-deletions` from three zero-deletion observations while explicitly lacking deletion eligibility and physical-retention evidence. The independent reviewer produced zero problems and deferred those same atoms. Reconciliation emitted zero problems but left exactly those three atoms unresolved; the other five decisions agreed.
+- Current containment: machine-produced reviewer decisions were returned to the exact primary session, then the revised result was automatically returned to the exact reviewer session. Both sessions converged on three `deferred` decisions, zero problems, and zero remaining unresolved targets in 118.2 seconds. No work was restarted or discarded.
+- Required action: after baseline end-to-end throughput is established, make primary/reviewer disagreement automatically invoke this retained same-author correction path within the owning Stage 1 boundary. Bound attempts and preserve a repairable frontier if disagreement remains; do not turn disagreement into a global hard failure.
+- Closure proof: a later unsupervised Stage 1 disagreement converges through the same two retained sessions, or exits with a durable repairable frontier, without supervisor-authored conclusions.
+
+### BDS-181 - The first disagreement-correction wrapper read the wrong persisted reviewer field
+
+- Status: `closed_throwaway_wrapper`
+- Priority: supervisor-efficiency
+- Objective impact: the first correction launch stopped before a model call and added a needless diagnostic iteration.
+- Exact evidence: the wrapper read `review_atom_decisions`; the persisted composite contract uses `coverage_depth_review_atom_decisions`. The source frontier remained byte-identical and the failed output was retained.
+- Correction: the throw-away wrapper now reads the canonical coverage/depth-review decision and problem-record fields.
+- Verification: the next launch resumed both exact sessions, completed the correction, and left the source frontier unchanged.
+
+### BDS-182 - Narrow supervisor launches were not reproducible from a clean shell
+
+- Status: `contained_supervisor_process`
+- Priority: supervisor-efficiency, non-product
+- Objective impact: three premodel diagnostics consumed avoidable iterations even though no pipeline or author work had failed.
+- Exact evidence: the host PowerShell did not support `ConvertFrom-Json -Depth`; the first Stage-4 preflight omitted the monorepo package `src` paths and failed importing `backlog_core`; the second manually typed Stage-4 command used `U:\usert_backlog_qualification` instead of `U:\usertest_backlog_qualification`. A later focused pytest launch repeated the missing-package-path mistake and failed during collection before any test ran.
+- Current containment: JSON inspection uses Python on this host; narrow Python launches construct `PYTHONPATH` from every `packages/*/src` plus the owning app; stage paths are derived from one cycle-root variable instead of repeated literals. Every failed root was retained and no model call, ticket mutation, Docker action, or source-artifact change occurred.
+- Required action: keep these environment and path derivations in reusable throw-away launchers during baseline qualification. Promote them only if the public component-run interface is intentionally productized.
+- Closure proof: the subsequent Stage-4 preflight, live Stage 4, focused 29-test run, and exact retained-disposition replay all completed from the derived launch environment.
+
+### BDS-183 - Stage-3 preflight did not exercise cross-volume Git ownership validation
+
+- Status: `open_nonblocking`
+- Priority: launch-efficiency, premodel correctness
+- Objective impact: a live research launch failed before the model because Git rejected the clean `U:` worktree as dubious ownership, although the immediately preceding preflight had passed.
+- Exact evidence: `stage3_case_131290_sol_high_20260720T183200Z` stopped before dispatch in repository-ref resolution. Preflight `stage3_case_131290_preflight_20260720T183100Z` had not executed that same resolution boundary.
+- Current containment: the successful launch supplied only a process-local `safe.directory=U:/usertest_backlog_qualification/execution_roots/bc70b15b`; no global Git configuration changed. The successful research receipt binds exact revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`.
+- Required action: Stage-3 preflight should exercise the exact repository-ref/Git ownership path used by live execution and report a premodel launch error there.
+- Closure proof: an induced cross-volume qualification preflight either succeeds under an explicit scoped trust receipt or fails before the live launch with the same typed reason.
+
+### BDS-184 - Stage 2 can rank a carried case whose source atom is absent from the sealed corpus
+
+- Status: `open_nonblocking`
+- Priority: prioritization quality, throughput
+- Objective impact: a case with no current source observation can consume ranking attention or be selected ahead of evidence-backed work, even though research cannot authenticate its current frontier from the sealed atom set.
+- Exact evidence: the three-case Stage-2 slice ranked the storage-exhaustion case P2 and selected it for `research_new`, while its deterministic score recorded zero current observations and its source atom was absent from the 2,854-atom bundle. The evidenced model-message aggregate case was correctly ranked P0 and selected first, so this did not block the current case.
+- Required action: make missing current source evidence an explicit prioritization signal and prevent it from outranking evidence-backed cases unless the route is specifically an evidence-recovery mission. Do not silently delete the carried case.
+- Closure proof: a narrow mixed slice keeps the carried identity traceable but does not select it as ordinary problem research until its source frontier is present or an explicit recovery route is chosen.
+
+### BDS-185 - Aggregate-backed research could never hydrate for a later cycle
+
+- Status: `closed`
+- Priority: lifecycle correctness, repeated-work prevention
+- Objective impact: correct Stage-3 research over one canonical aggregate atom plus supporting occurrences was treated as stale on the next cycle, forcing the same expensive research to repeat.
+- Exact evidence: completed case `case:131290268e2889891e0c` had one canonical `source_evidence_atom_id`, while its authenticated assignment contained that atom plus 14 occurrence atoms. Retained hydration compared the canonical case frontier to all 15 assigned IDs and returned `retained_research_source_evidence_frontier_mismatch`.
+- Correction: hydration compares the case frontier and current hashes to the assignment's explicit `case_evidence_atom_ids`; it still validates every assigned receipt, and legacy assignments without the role field retain the previous all-IDs behavior. The aggregate hash remains the currentness authority and binds its occurrence set.
+- Verification: a new aggregate-plus-occurrence regression and the full focused hydration/downstream suite pass. The exact retained dossier now hydrates with zero errors.
+
+### BDS-186 - Retained hydration rejected runner-enriched Stage-3 dossiers
+
+- Status: `closed`
+- Priority: lifecycle correctness, contract consistency
+- Objective impact: a persisted dossier accepted by Stage 3 and Stage 4 could not be reused because runner-owned lineage fields were passed into the strict authored-dossier schema as unknown fields.
+- Exact evidence: after BDS-185 was corrected, the exact case advanced to readiness validation and failed with `research_dossier_unknown_fields` for `canonical_problem_id` and `case_member_problem_ids`, routing the case back to `research_update`.
+- Correction: retained hydration keeps the full enriched dossier hash and identity checks, then applies the same authored `research_contract_view` used by Stages 4-6 for readiness and persisted-evidence validation.
+- Verification: a new lineage-enriched regression and the focused hydration/downstream suite pass. Exact replay now authenticates `runner_retained_no_change_v1`, routes the case to `await_evidence`, selects neither research nor downstream work, and assembles zero tickets.
 
 ## Verification-pending fixes
 

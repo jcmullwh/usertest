@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-20T16:38:01Z",
-    "current_run_id": "qualification-cycle-383cf41f-20260719",
+    "as_of": "2026-07-20T19:39:45Z",
+    "current_run_id": "qualification-cycle-bc70b15b-20260720",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "15 terminal; 2 parked; 8 unworked",
-        "detail": "The offline-first case completed the whole system path: causal research, code-grounded plan, implementation, pipeline PR #219, green CI, same-author review correction, merge, and an evidence-bounded mitigated outcome. The two storage children remain honestly nonterminal.",
+        "value": "3 mitigated; 1 parked; 23 other active",
+        "detail": "Fresh preparation at merged dev retained 28 cases: 24 active, one alias, and three mitigated. One active P0 case now has authenticated already-addressed research plus a zero-option Stage-4 disposition and is parked until its evidence frontier changes.",
         "tone": "good"
       },
       {
         "label": "Current bounded throughput",
-        "value": "27 -> 26 cases; 15 terminal, 2 nonterminal",
-        "detail": "Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Fifteen cases now have correct terminal dispositions, including one merged mitigation; both storage children retain precise evidence-acquisition frontiers. Eight selected units remain unworked.",
+        "value": "12 calls; 8 continuations; 0 restarts",
+        "detail": "Preparation used zero model calls. A mixed Stage-1 slice reached eight correct dispositions after same-author correction; Stage 2 ranked three active cases; one P0 case completed causal Stage 3 and deterministic Stage 4. No ticket or bad-ready output was produced for the already-addressed case.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "This cycle is still active: 15 of 25 effective selected research units are terminal, two have correct nonterminal evidence frontiers, and eight remain unworked. One successful PR is meaningful delivery evidence, but it does not qualify a full cycle or automated export.",
+        "detail": "This is still a narrow baseline cycle, not a full end-to-end qualification. The exercised case reached its correct final no-change disposition, but the remaining active corpus has not been processed and automated export remains disabled.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Regenerate at merged dev and select the next case",
-        "detail": "Refresh the non-IDEA backlog against merge commit bc70b15b, preserve the completed case and recurrence lineage, then process the next eligible unit through the same supervised system path.",
+        "value": "Land lifecycle fix; process next evidenced case",
+        "detail": "The retained-research lifecycle defects discovered by exact next-cycle replay are fixed and the full backlog suite is green. Commit them to PR #217, then select the next evidence-backed active case without restarting completed stages.",
         "tone": "warn"
       }
     ],
@@ -3094,11 +3094,11 @@
         "scope": "Non-IDEA qualification cycle originally pinned to 8fff1c16. It reused retained Stage-1 miners and exact Stage-2 decisions, then processed one real case through signed-in gpt-5.6-sol/high research, optioning, planning, implementation, review, PR #219, CI, merge, and bounded outcome verification. No API fallback and no removal occurred.",
         "timing": {
           "start_at": "2026-07-19T13:15:00Z",
-          "end_at": null,
-          "elapsed_seconds": 98581,
-          "coverage": "active",
-          "display": "27 h 23 m active",
-          "note": "Active wall time through terminal outcome completion for the offline-first case. The cycle remains open because eight selected units are unworked. The post-checkpoint work used 61 model calls and 45 continuations; the 29-call Stage-3 recovery is the largest efficiency failure and is reported explicitly rather than amortized away."
+          "end_at": "2026-07-20T17:50:50Z",
+          "elapsed_seconds": 102950,
+          "coverage": "complete",
+          "display": "28 h 36 m complete",
+          "note": "Complete wall time through terminal outcome completion for the offline-first case and the fresh merged-dev regeneration boundary. The cycle closed when preparation at bc70b15b began; its eight remaining units carried into the next lifecycle rather than being counted as completed. The 29-call Stage-3 recovery remains the largest efficiency failure and is reported explicitly rather than amortized away."
         },
         "furthest_stage": "Pipeline-produced PR #219 merged with complete terminal outcome provenance",
         "current_state": "`case:adc507afeea214f0d1e4` / `problem:relative-powershell-script-invocation-retry` is terminal. Ticket `65683d49a62c3b59` produced implementation commit `edad1e4d`, PR #219, and merge commit `bc70b15b`. The same reviewer corrected its initial evidence miss after receiving exact retained evidence, CI and all three outcome roles passed, and lifecycle/outcome progression are complete at the deliberately bounded `mitigated` state. Eight selected units remain unworked; the next operation is regeneration from merged `dev`, not more hardening of this case.",
@@ -3354,6 +3354,80 @@
         "next_action": "Regenerate the non-IDEA backlog against merged `origin/dev` commit `bc70b15bf1f6709a589d308f0739c2b865a65e77`, verify that the completed case updates existing lineage instead of recurring as novel work, and process the next eligible unit. Use narrow owning-stage reruns and same-author feedback; do not remove artifacts or restart the full pipeline without demonstrated need.",
         "tone": "warn",
         "data_quality": "The case chain remains bound to the authenticated 2,854-atom source corpus and exact target revision `8fff1c16dfaedf317e2ef25924773fa5efe90f08`. Final plan revision is `planrev:sha256:448331253755408e0aa21d9018f24654fcd9350a039fd654a2a2421aafabd7a1`; ticket is `65683d49a62c3b59`; implementation commit is `edad1e4d740258c1df2aaa4dc7bbd51df8837d60`; merge commit is `bc70b15bf1f6709a589d308f0739c2b865a65e77`. Runner verification passed all three bound commands; initial and corrected review runs are retained at `20260720T161555Z` and `20260720T162747Z`; push and PR CI passed; original-scenario, live, and mitigation roles passed; final lifecycle and outcome progression are complete at `mitigated`. The 61-call/45-continuation increment is reconstructed from retained model-invocation files and canonical Stage-3 run metadata. A portable official pwsh 7.6.3 executable was staged on U: for missing-host-capability verification. No source input, image, container, workspace, artifact, VHDX content, or ticket was deleted; the prior shallow ticket was archived with traceability.",
+        "source_ids": [
+          "backlog_depth_supervision_issue_ledger"
+        ]
+      },
+      {
+        "run_id": "qualification-cycle-bc70b15b-20260720",
+        "entry_kind": "lifecycle_run",
+        "lifecycle_id": "pipeline-cycle:bc70b15b:20260720",
+        "lifecycle_kind": "pipeline_cycle",
+        "rework": {
+          "author_invocations": 12,
+          "continuation_launches": 8,
+          "stage_reruns": 4,
+          "full_restarts": 0,
+          "summary": "The 12 signed-in Sol/high calls were two initial Stage-1 authors, two retained-session Stage-1 corrections, one Stage-2 prioritizer, and seven Stage-3 calls in one retained research session. Eight calls resumed an existing author session. Four bounded wrapper/stage relaunches followed premodel launch defects; no completed stage or full pipeline was restarted."
+        },
+        "label": "Fresh merged-dev cycle through one stable already-addressed disposition",
+        "scope": "Non-IDEA qualification cycle prepared from merged origin/dev commit bc70b15b with 2,854 sealed atoms and explicit cross-volume evidence roots. Work stayed narrow: one mixed Stage-1/2 mechanics slice, one three-case Stage-2 slice, one P0 Stage-3 case, and its deterministic no-change Stage 4. Signed-in host Codex subscription was required; API fallback, Docker, export, ticket mutation, implementation, and removal were disabled.",
+        "timing": {
+          "start_at": "2026-07-20T17:50:50Z",
+          "end_at": null,
+          "elapsed_seconds": 6535,
+          "coverage": "active",
+          "display": "1 h 49 m active",
+          "note": "Wall time from fresh qualification preparation through exact retained-disposition replay and the full usertest_backlog suite. Stage 3 consumed 3,254.36 seconds; Stage 4 consumed 8.1 seconds; the full app suite consumed 265.6 seconds. Long-running work was polled on a multi-minute cadence."
+        },
+        "furthest_stage": "Authenticated Stage-4 no-change disposition with stable next-cycle routing",
+        "current_state": "`case:131290268e2889891e0c` / `problem:codex-model-messages-config-invalid` established the historical provenance-classification mechanism at pinned revision `bc70b15b`, verified both current end-to-end branches, and proved the corrective commit is an ancestor. Stage 4 emitted `not_required`, zero options, zero model calls, and no Stage 5/6. Exact replay now authenticates `runner_retained_no_change_v1`, routes `await_evidence`, selects no research/downstream work, and assembles zero tickets.",
+        "outcome": "One P0 case correctly parked as already addressed; eight mixed atoms dispositioned; zero bad-ready escapes; zero tickets; full-cycle qualification still 0/2",
+        "errors": {
+          "count": 9,
+          "count_kind": "deduplicated_clusters",
+          "summary": "Nine new clusters were observed in this fresh cycle. Five are closed in product or preparation code, two are contained supervisor-wrapper issues, and two remain nonblocking follow-up: cross-volume Git preflight parity and missing-source prioritization. The count does not treat each model validation message as a separate system defect.",
+          "cluster_ids": [
+            "BDS-178",
+            "BDS-179",
+            "BDS-180",
+            "BDS-181",
+            "BDS-182",
+            "BDS-183",
+            "BDS-184",
+            "BDS-185",
+            "BDS-186"
+          ]
+        },
+        "automatic_self_corrections": {
+          "count": 3,
+          "count_kind": "deduplicated_clusters",
+          "summary": "Stage 1 returned independent-review feedback to the exact primary session and the revision to the exact reviewer session. Stage 3 corrected its initial authored output contract in the retained session, then consumed independent evidence-verifier feedback through a monotonic 8-to-2-to-2-to-1-to-0 frontier without a restart or discarded dossier.",
+          "cluster_ids": [
+            "AUTHOR-STAGE1-MAINTENANCE-DISAGREEMENT-01",
+            "AUTHOR-STAGE3-CODEX-MESSAGES-OUTPUT-01",
+            "AUTHOR-STAGE3-CODEX-MESSAGES-EVIDENCE-01"
+          ]
+        },
+        "supervisor_interventions": {
+          "count": 9,
+          "count_kind": "deduplicated_clusters",
+          "summary": "The supervisor selected narrow slices, triggered retained-session feedback, corrected launch wrappers, supplied process-local Git trust for the clean U: worktree, diagnosed two retained-lifecycle defects from exact replay, implemented those contract fixes, and ran verification. The system authored the mining, prioritization, research conclusion, experiments, and final no-change disposition.",
+          "cluster_ids": [
+            "BDS-178",
+            "BDS-179",
+            "BDS-180",
+            "BDS-181",
+            "BDS-182",
+            "BDS-183",
+            "BDS-184",
+            "BDS-185",
+            "BDS-186"
+          ]
+        },
+        "next_action": "Commit and push the aggregate/occurrence and enriched-dossier hydration fixes to draft PR #217, verify its exact-head checks, then continue the fresh cycle with the next evidence-backed active case. Preserve the completed Stage-3/4 frontier; do not rerun it unless new evidence changes the authenticated case revision.",
+        "tone": "warn",
+        "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. Stage-1 initial and correction receipts are retained at `stage12_slice_mixed_sol_high_20260720T181500Z` and `stage12_slice_mixed_sol_high_correction_20260720T182100Z`; Stage 2 at `stage2_active_slice_sol_high_20260720T182500Z`; completed research at `stage3_case_131290_sol_high_20260720T183300Z`; and Stage 4 at `stage4_case_131290_sol_high_20260720T193300Z`. Stage 3 used seven verified ChatGPT-subscription Sol/high calls in session `019f80c6-52e0-7d81-9d04-bdccfadf1ff5`; the eighth retained attempt record is independent verifier feedback, not a model call. Focused hydration/downstream tests passed 29/29 and the full app suite passed with two expected skips. No source input, ticket, workspace, image, container, or evidence artifact was removed.",
         "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]

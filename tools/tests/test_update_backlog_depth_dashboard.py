@@ -235,24 +235,28 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     )
 
     lifecycle_runs = mod._lifecycle_runs(dashboard)
-    assert len(lifecycle_runs) == 15
-    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 15
+    assert len(lifecycle_runs) == 16
+    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 16
     assert mod._entry_count(dashboard, "supporting_activity") >= 1
     assert mod._entry_count(dashboard, "baseline") == 1
     assert dashboard["current_run_id"] == lifecycle_runs[-1]["run_id"]
+    previous = lifecycle_runs[-2]
+    assert previous["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
+    assert previous["timing"]["coverage"] == "complete"
+    assert previous["timing"]["end_at"] == "2026-07-20T17:50:50Z"
     current = lifecycle_runs[-1]
-    assert current["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
-    assert current["timing"]["start_at"] == "2026-07-19T13:15:00Z"
+    assert current["lifecycle_id"] == "pipeline-cycle:bc70b15b:20260720"
+    assert current["timing"]["start_at"] == "2026-07-20T17:50:50Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 215
-    assert current["rework"]["continuation_launches"] == 146
-    assert current["rework"]["stage_reruns"] == 22
+    assert current["rework"]["author_invocations"] == 12
+    assert current["rework"]["continuation_launches"] == 8
+    assert current["rework"]["stage_reruns"] == 4
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 115
-    assert current["automatic_self_corrections"]["count"] == 38
-    assert current["supervisor_interventions"]["count"] == 74
+    assert current["errors"]["count"] == 9
+    assert current["automatic_self_corrections"]["count"] == 3
+    assert current["supervisor_interventions"]["count"] == 9
     assert current["furthest_stage"] == (
-        "Pipeline-produced PR #219 merged with complete terminal outcome provenance"
+        "Authenticated Stage-4 no-change disposition with stable next-cycle routing"
     )
 
     rendered = mod._render_dashboard(dashboard)

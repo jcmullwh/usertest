@@ -13,6 +13,8 @@ from backlog_core import (
 )
 from backlog_miner.research_evidence import verify_persisted_research_evidence
 
+from .depth_contracts import research_contract_view
+
 
 def _text(value: Any) -> str | None:
     if not isinstance(value, str):
@@ -186,7 +188,19 @@ def hydrate_retained_research_proof(
             if isinstance(value, str) and value.strip()
         }
     )
-    if current_source_atom_ids != researched_source_atom_ids:
+    case_evidence_atom_ids_raw = assignment.get("case_evidence_atom_ids")
+    researched_case_source_atom_ids = (
+        sorted(
+            {
+                value.strip()
+                for value in case_evidence_atom_ids_raw
+                if isinstance(value, str) and value.strip()
+            }
+        )
+        if isinstance(case_evidence_atom_ids_raw, list)
+        else researched_source_atom_ids
+    )
+    if current_source_atom_ids != researched_case_source_atom_ids:
         return None, ["retained_research_source_evidence_frontier_mismatch"]
     receipts_raw = assignment.get("atom_receipts")
     receipts = receipts_raw if isinstance(receipts_raw, list) else []
@@ -205,7 +219,12 @@ def hydrate_retained_research_proof(
         ):
             return None, ["retained_research_source_evidence_receipts_invalid"]
         researched_hashes[atom_id] = atom_sha256.casefold()
-    if researched_hashes != current_hashes:
+    researched_case_hashes = {
+        atom_id: researched_hashes[atom_id]
+        for atom_id in researched_case_source_atom_ids
+        if atom_id in researched_hashes
+    }
+    if researched_case_hashes != current_hashes:
         return None, ["retained_research_source_evidence_content_mismatch"]
 
     summary_fields = (
@@ -218,13 +237,14 @@ def hydrate_retained_research_proof(
     if any(summary.get(field) != dossier.get(field) for field in summary_fields):
         return None, ["retained_research_summary_content_mismatch"]
 
-    ready, readiness_errors = assess_research_readiness(dossier)
+    contract_dossier = research_contract_view(dossier)
+    ready, readiness_errors = assess_research_readiness(contract_dossier)
     if not ready:
         return None, [
             "retained_research_proof_not_ready",
             *(f"retained_research_readiness:{error}" for error in readiness_errors),
         ]
-    persisted_ready, persisted_errors = verify_persisted_research_evidence(dossier)
+    persisted_ready, persisted_errors = verify_persisted_research_evidence(contract_dossier)
     if not persisted_ready:
         return None, [
             "retained_research_evidence_not_persisted",
