@@ -516,7 +516,15 @@ def build_parser() -> argparse.ArgumentParser:
             "must exist directly beneath the root. Broad archive discovery is not performed."
         ),
     )
-    reports_qualification_prepare_p.add_argument("--atom-actions-yaml", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument(
+        "--atom-actions-yaml",
+        type=Path,
+        required=True,
+        help=(
+            "Source lifecycle ledger. Preparation writes an immutable work-directory copy "
+            "before extraction and seals that copy into the qualification bundle."
+        ),
+    )
     reports_qualification_prepare_p.add_argument(
         "--case-registry-seed",
         type=Path,

@@ -71,6 +71,46 @@ def _git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def test_qualification_prepare_copies_live_atom_actions_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_ledger = tmp_path / "repo" / "configs" / "backlog_atom_actions.yaml"
+    live_ledger.parent.mkdir(parents=True)
+    live_ledger.write_text("version: 1\natoms: []\n", encoding="utf-8")
+    observed: list[object] = []
+
+    def fake_backlog(namespace: object) -> int:
+        observed.append(namespace)
+        return 0
+
+    monkeypatch.setattr(staged_module, "_cmd_reports_backlog", fake_backlog)
+    args = SimpleNamespace(
+        target="fixture",
+        repo_input=tmp_path / "target",
+        research_ref="a" * 40,
+        source_runs_dir=tmp_path / "runs" / "usertest",
+        work_dir=tmp_path / "qualification" / "work",
+        out_root=tmp_path / "qualification" / "bundles",
+        repo_root=tmp_path / "repo",
+        breadth_profile="internal_maintenance",
+        case_registry_seed=tmp_path / "case_registry_seed.json",
+        protected_path=[],
+        additional_evidence_runs_dir=[],
+        atom_actions_yaml=live_ledger,
+    )
+
+    assert transaction_module._cmd_reports_qualification_prepare(args) == 0
+    copied = args.work_dir / "backlog_atom_actions.seed.yaml"
+    assert copied.read_bytes() == live_ledger.read_bytes()
+    assert len(observed) == 1
+    assert observed[0].atom_actions_yaml == copied.resolve()
+
+    live_ledger.write_text("version: 1\natoms:\n- atom_id: changed\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="qualification_atom_actions_copy_conflict"):
+        transaction_module._cmd_reports_qualification_prepare(args)
+
+
 def test_qualification_git_uses_exact_command_local_safe_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

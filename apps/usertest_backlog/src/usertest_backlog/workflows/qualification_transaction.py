@@ -1622,11 +1622,36 @@ def _write_json_once(path: Path, value: Mapping[str, Any]) -> Path:
     return resolved
 
 
+def _copy_file_once(source: Path, destination: Path, *, label: str) -> Path:
+    source_resolved = source.expanduser().resolve()
+    destination_resolved = destination.expanduser().resolve()
+    try:
+        source_bytes = source_resolved.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"qualification_{label}_source_unreadable:{source_resolved}") from exc
+    destination_resolved.parent.mkdir(parents=True, exist_ok=True)
+    if destination_resolved.exists():
+        if destination_resolved.read_bytes() != source_bytes:
+            raise ValueError(
+                f"qualification_{label}_copy_conflict:{destination_resolved}"
+            )
+    else:
+        destination_resolved.write_bytes(source_bytes)
+    if source_resolved.read_bytes() != source_bytes:
+        raise ValueError(f"qualification_{label}_source_changed_during_copy")
+    return destination_resolved
+
+
 def _cmd_reports_qualification_prepare(args: argparse.Namespace) -> int:
     """Delegate deterministic atom preparation to the canonical backlog extractor."""
 
     from usertest_backlog.workflows.staged import _cmd_reports_backlog
 
+    copied_atom_actions = _copy_file_once(
+        args.atom_actions_yaml,
+        args.work_dir / "backlog_atom_actions.seed.yaml",
+        label="atom_actions",
+    )
     namespace = argparse.Namespace(
         target=args.target,
         repo_input=str(args.repo_input),
@@ -1673,7 +1698,7 @@ def _cmd_reports_qualification_prepare(args: argparse.Namespace) -> int:
         labelers=3,
         policy_config=None,
         no_policy=False,
-        atom_actions_yaml=args.atom_actions_yaml,
+        atom_actions_yaml=copied_atom_actions,
         carryover_actioned_only=False,
         exclude_atom_status=None,
         skip_plan_folder_sync=True,
