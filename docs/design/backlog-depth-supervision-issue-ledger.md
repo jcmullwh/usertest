@@ -1348,6 +1348,10 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - `AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMAND-V1-OUTPUT-01`: the Windows-sandbox command researcher began with four output-contract findings. The first same-session correction reduced `4 -> 1`, but lost four established causal/alternative coverage roles; the controller counted the smaller error set as progress while quarantining it as a nonbaseline attempt. The next correction restored the safe coverage and reached `4 -> 0` without restarting the investigation.
 - `AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMAND-V1-EVIDENCE-01`: independent evidence verification exposed 37 findings: 25 atom bindings, one full-origin coverage gap, nine unresolved inspected files, and two causal-falsification bindings. Four evidence-capable continuations progressed `37 -> 2 -> 1 -> 1 -> 0`. The one-error identity change was retained as genuine rework progress because it removed the old binding defect and exposed a readiness-specific alternative-hypothesis finding. The attempt ledger has eight records—seven actual `gpt-5.6-sol`/high model turns plus one model-free feedback record—six same-session continuations, and zero fresh restarts. The final dossier accounts for all 25 source observations, verifies the historical pre-payload Windows sandbox-worker panic and its controlled signature contrast, audits the current unelevated guard and two focused regressions, and ends verifier/readiness-clean `evidence_sufficient/partial/already_addressed`. Production Stages 4-6 and ticket assembly emitted zero downstream items and zero model manifests.
 
+- `AUTHOR-STAGE3-DOCKER-SHELL-PREFLIGHT-V1-OUTPUT-01`: the initial dossier had four output-contract findings: one malformed proof-adapter semantic basis, one empty supporting-evidence list, and two missing refuted-hypothesis falsification fields. The first same-author correction reached zero mechanical findings but dropped two substantive policy-hypothesis coverage roles, so the controller retained it only as a nonbaseline attempt. The next continuation restored that coverage and produced a contract-valid frontier. This is one self-corrected author cluster, not three discarded investigations.
+
+- `AUTHOR-STAGE3-DOCKER-SHELL-PREFLIGHT-V1-EVIDENCE-01`: independent evidence verification exposed 15 findings: two atom/experiment bindings, one untracked `.pdm-python` marker, eleven unresolved inspected research artifacts, and one unbound causal falsification. The same author corrected `15 -> 1 -> 0`; the changed one-error frontier counted as progress because it resolved all prior bindings and exposed a readiness-specific alternative-hypothesis finding. The request ledger has six records—five actual `gpt-5.6-sol`/high model turns plus one model-free feedback record—four continuations in one session, and zero fresh restarts. The final verifier/readiness-clean dossier replays both exact historical Docker events through their historical parser revisions and the pinned parser/resolver, proves the blocked-to-available contrast with only the parser revision changed, passes the exact regression, and shows fix `b619185` is an ancestor of the pinned revision. It ends `evidence_sufficient/partial/already_addressed`; production Stage 4 records `not_required`, and Stages 5-6 and ticket assembly emit zero items and zero model manifests.
+
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
 - Status: `closed_corrected_pre_model`
@@ -1606,6 +1610,55 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor launcher-path error, not a pipeline, model, verifier, artifact, or case failure
 - Exact evidence: the first renderer command assumed `I:\code\usertest_backlog_depth\.venv\Scripts\python.exe`; that file does not exist, so PowerShell rejected the command before Python or the renderer started.
 - Containment and result: the unchanged renderer was immediately run with the installed Python launcher and completed successfully. No model call, pipeline stage, research artifact, export, removal, or implementation was started or repeated.
+
+### AN-80 - Next-case priority projection selected the wrong document fallback key
+
+- Status: `closed_immediate_read_only_correction`
+- Classification: one supervisor data-projection error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first compact reader checked nonexistent `prioritized_problems` and `problems` keys before falling back to the whole Stage-2 document, then attempted to slice that mapping. The actual decisions are the list under `items`, so the projection raised `KeyError: slice(None, 3, None)`.
+- Containment and result: the corrected reader used `document["items"]`, identified all 25 decisions, and selected the unchanged highest-priority unworked case. No artifact, model call, stage, export, removal, or implementation was changed or repeated.
+
+### AN-81 - Independent verifier audit imported the function from the wrong package surface
+
+- Status: `closed_before_validation`
+- Classification: one supervisor import-path error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first read-only audit attempted `from backlog_core import verify_persisted_research_evidence`; that verifier is defined and exported by `backlog_miner.research_evidence`, while readiness is defined by `backlog_core.stage_contracts`. Python raised `ImportError` before reading the dossier.
+- Containment and result: the corrected imports ran both canonical downstream gates against the immutable Stage-3 item; persisted evidence and readiness each returned `true` with zero findings. No model call, stage, dossier, export, removal, or implementation was changed or repeated.
+
+### AN-82 - Semantic audit projected full evidence-assignment and verification receipts
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: a semantic audit requested the complete `evidence_assignment` and `evidence_verification` objects, including embedded atom snapshots, replay manifests, and environment metadata, when only assignment status, causal fields, inspected targets, and boundary summaries were needed. The direct output was needlessly large and did not improve the acceptance decision.
+- Containment and result: subsequent checks used bounded experiment, correction-frontier, and provenance projections. The dossier remained immutable, and no model call, stage, research restart, export, removal, or implementation resulted from the overbroad read.
+
+### AN-83 - Subscription audit first printed complete execution-policy receipts
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first provenance check printed the complete `target_ref.json`, configuration-override contract, and execution-policy overlay for one attempt. Those receipts include large command allowlists and environment manifests that were unnecessary to establish model, reasoning, target revision, auth route, or billing controls.
+- Containment and result: the corrected projection checked only the contract fields across all five actual model calls. Every call used `gpt-5.6-sol`, high mission reasoning, exact target `8fff1c16`, one resumed session, shared-host ChatGPT-subscription auth, API fallback disabled, billing-key environment disabled, canonical subscription routing, unchanged global config, and preserved host auth. No model or stage work was repeated.
+
+### AN-84 - Dashboard patch preflight used an invalid ripgrep regular expression
+
+- Status: `closed_before_mutation`
+- Classification: one supervisor diagnostic-command error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: a combined test-context and ledger lookup embedded a quoted JSON fragment in one alternation without shell-safe escaping. Ripgrep rejected the expression as an unclosed group after the bounded test context had already printed; the subsequent patch also failed its expected-line check and applied no changes.
+- Containment and result: the dashboard edits were split into smaller exact patches and verified from bounded projections. No model call, pipeline stage, research artifact, export, removal, or implementation was started or repeated.
+
+### AN-85 - Dashboard draft used an unverified terminal-summary hash
+
+- Status: `closed_before_render_or_commit`
+- Classification: one supervisor evidence-transcription error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first receipt patch inserted `933ac770...` as the Docker-shell-preflight terminal-summary SHA-256 without deriving it from the file. A direct `Get-FileHash` check returned `1159b783077a4ca1b52509b7e4e445c41d5e6a1e7d38f3eca9e664f84b0bbf98`.
+- Containment and result: the receipt was corrected to the computed hash before rendering, testing, committing, or using the value as evidence. No model call, pipeline stage, research artifact, export, removal, or implementation was changed or repeated.
+
+### AN-86 - Dashboard elapsed-time projection mixed local and UTC datetime kinds
+
+- Status: `closed_by_dashboard_contract_test`
+- Classification: one supervisor metrics-calculation error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the snapshot timestamp `2026-07-20T01:11:30Z` is 42,990 seconds after `2026-07-19T13:15:00Z`, but the first PowerShell calculation parsed the start as a local `DateTime` and reported 57,390 seconds. The dashboard contract rejected `active timing.elapsed_seconds must equal as_of minus start_at`, and the checked-in dashboard remained at the prior snapshot.
+- Containment and result: the receipt now records the direct UTC difference, 42,990 seconds or 11 h 56 m. The renderer and complete dashboard test file must pass before commit. No model call, pipeline stage, research artifact, export, removal, or implementation was changed or repeated.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
