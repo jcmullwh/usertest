@@ -1360,6 +1360,10 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 - `AUTHOR-STAGE3-WINDOWS-SANDBOX-SHELL-EXECUTION-V1-EVIDENCE-01`: independent verification exposed 12 missing direct experiment-to-origin-atom bindings across the two source atoms and retained experiments. One 119.7-second evidence-capable continuation of the same session corrected `12 -> 0`. The request ledger has four records—three actual `gpt-5.6-sol`/high model calls plus one model-free evidence-feedback record—two continuations in one session and zero fresh restarts. The final verifier/readiness-clean dossier establishes the historical pre-payload `windows-sandbox-rs` worker panic, binds the direct unreadable-README impact, verifies the current unelevated Windows guard and focused regressions, and ends `evidence_sufficient/partial/already_addressed`. Production Stage 4 records `not_required`; Stages 5-6 and ticket assembly emit zero items and zero model manifests.
 
+- `AUTHOR-STAGE3-QUICKSTART-PATHS-V1-OUTPUT-01`: the initial dossier had nine output-contract findings across empty support, two unresolved inspected symbols, inconsistent falsification evidence, unlinked code support, and an inadequately refuted path-count alternative. The first same-session continuation reached zero mechanical findings but removed the alternative's mechanism and support roles; the controller retained that smaller error set as progress without promoting it. The next continuation restored the roles and produced a contract-valid frontier. This is one self-corrected author cluster, not a restarted investigation.
+
+- `AUTHOR-STAGE3-QUICKSTART-PATHS-V1-EVIDENCE-01`: independent evidence verification exposed 27 findings: 16 experiment/atom bindings, two aggregate origin-coverage findings, three replay-output workspace mutations, and six unresolved inspected symbols. Five same-session continuations progressed `27 -> 1 -> 1 -> 1 -> 1 -> 0`. The one-error identities moved from experiment coverage, to a README locator, to an unmaterialized residual path-count alternative; the final dossier retained that residual condition as an explicit evidence boundary requiring new live comprehension evidence rather than claiming it was disproved. The request ledger has nine records—eight actual `gpt-5.6-sol`/high model calls plus one model-free evidence-feedback record—seven continuations in one session and zero fresh restarts. The final verifier/readiness-clean dossier binds all six source atoms, reproduces the historical default/scope mismatch, verifies current representative defaults and explicit scope labels, verifies fix `b380e50` is ancestral, and ends `evidence_sufficient/reproduced/already_addressed`. Production Stage 4 records `not_required`; Stages 5-6 and ticket assembly emit zero items and zero model manifests.
+
 ### BDS-166 - Negative research dossiers cannot currently earn post-research same-cause identity
 
 - Status: `open_contained_nonblocking`
@@ -1705,6 +1709,20 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor helper-integration cluster and one bounded Stage-4 rerun, not an author, research, product, or verifier failure
 - Exact evidence: initial helper setup used several incorrect package import surfaces and one imprecise artifact-directory name; those attempts stopped before producing stage output. The first completed Stage-4 invocation then supplied the legacy priority record without production `propagate_case_lineage`, so it deterministically returned `insufficient_evidence` with `priority_case_id_mismatch`, zero options, and zero model calls in `stage456_windows_sandbox_blocks_shell_execution_v1_terminal`.
 - Containment and result: that handoff was not accepted or deleted. The unchanged verified dossier and canonical problem record were passed through production lineage propagation in `_v2`; Stage 4 returned `not_required/already_addressed`, Stages 5-6 and ticket assembly produced zero items, all downstream manifests remained empty, and every terminal hash was independently checked. Stage 3 was not rerun.
+
+### AN-91 - Independent readiness audit included the trusted lineage envelope
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic error, not a pipeline, author, verifier, research, or product failure
+- Exact evidence: the first independent quickstart readiness check passed the persisted dossier directly to `assess_research_readiness`, which correctly rejected runner-added `canonical_problem_id` and `case_member_problem_ids` as unknown authored fields. Production Stage 4 already calls `research_contract_view()` first, stripping only that trusted lineage envelope while preserving and revalidating every authored field. A follow-up import also looked for that helper on the wrong package surface before locating its production module.
+- Containment and result: the corrected production-boundary audit returned persisted verification `(True, [])` and readiness `(True, [])`. No contract was relaxed, no code changed, and no model call, Stage 3 run, artifact, export, removal, or implementation was repeated.
+
+### AN-92 - Dashboard timestamp and elapsed value differed by one rounded second
+
+- Status: `closed_by_dashboard_contract_before_render`
+- Classification: one supervisor metrics-calculation error, not a pipeline, model, verifier, research, artifact, or case failure
+- Exact evidence: the receipt stored `as_of=2026-07-20T03:28:40Z` but rounded a fractional live interval to 51,221 seconds. The exact whole-second difference from `2026-07-19T13:15:00Z` is 51,220 seconds, so the dashboard contract rejected the receipt before updating JSON or HTML.
+- Containment and result: the receipt now uses the exact timestamp-derived value. No model call, stage, research result, terminal artifact, export, removal, or implementation was changed or repeated.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
