@@ -244,17 +244,17 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
     assert current["timing"]["start_at"] == "2026-07-19T13:15:00Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 120
-    assert current["rework"]["continuation_launches"] == 73
-    assert current["rework"]["stage_reruns"] == 14
+    assert current["rework"]["author_invocations"] == 144
+    assert current["rework"]["continuation_launches"] == 96
+    assert current["rework"]["stage_reruns"] == 16
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 95
-    assert current["automatic_self_corrections"]["count"] == 33
-    assert current["supervisor_interventions"]["count"] == 58
+    assert current["errors"]["count"] == 102
+    assert current["automatic_self_corrections"]["count"] == 34
+    assert current["supervisor_interventions"]["count"] == 63
     assert current["furthest_stage"] == (
-        "Corrected Stage 2 for the effective canonical frontier; thirteen cases are "
-        "terminal and both authenticated storage children retain their correct "
-        "nonterminal Stage-3-to-ticket frontier"
+        "Production ticket assembly for the fourteenth terminal case; Windows-sandbox "
+        "research is verifier/readiness-clean and its earned downstream chain emitted "
+        "no option, selection, plan, or ticket"
     )
 
     rendered = mod._render_dashboard(dashboard)

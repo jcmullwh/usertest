@@ -328,6 +328,19 @@ def test_command_observation_normalizes_doubled_windows_path_separators() -> Non
     assert mod._normalize_command(declared) == mod._normalize_command(observed)
 
 
+def test_command_observation_normalizes_doubled_windows_executable_separators() -> None:
+    declared = (
+        r"C:\Users\jason\AppData\Local\Python\python.exe "
+        r".usertest_research\probe.py source_failure"
+    )
+    observed = (
+        r"C:\\Users\\jason\\AppData\\Local\\Python\\python.exe "
+        r".usertest_research\probe.py source_failure"
+    )
+
+    assert mod._normalize_command(declared) == mod._normalize_command(observed)
+
+
 def test_repository_python_import_environment_uses_only_pinned_src_projects(
     tmp_path: Path,
 ) -> None:
@@ -3027,6 +3040,51 @@ def test_one_agent_event_cannot_attest_two_experiments() -> None:
 
     assert [receipt["experiment_id"] for receipt in receipts] == ["support"]
     assert "experiment_command_not_observed:control" in errors
+
+
+def test_experiment_receipt_matches_doubled_windows_executable_separators() -> None:
+    declared_command = (
+        r"C:\Users\jason\AppData\Local\Python\python.exe "
+        r".usertest_research\probe.py source_failure"
+    )
+    observed_command = (
+        r"C:\\Users\\jason\\AppData\\Local\\Python\\python.exe "
+        r".usertest_research\probe.py source_failure"
+    )
+    dossier = {
+        "experiments": [
+            {
+                "experiment_id": "source-signature",
+                "command": declared_command,
+                "exit_code": 0,
+                "outcome": "supports",
+                "artifact_refs": ["artifact:result"],
+            }
+        ]
+    }
+    event = {
+        "type": "run_command",
+        "data": {"command": observed_command, "exit_code": 0},
+    }
+    clean_replay = {
+        "experiment_id": "source-signature",
+        "command": declared_command,
+        "exit_code": 0,
+        "artifact_refs": ["artifact:result"],
+    }
+    errors: list[str] = []
+
+    receipts, outcomes = mod._experiment_receipts(
+        dossier,
+        events=[event],
+        artifact_keys={"artifact:result"},
+        clean_replays={"source-signature": clean_replay},
+        errors=errors,
+    )
+
+    assert errors == []
+    assert [receipt["experiment_id"] for receipt in receipts] == ["source-signature"]
+    assert outcomes == {"source-signature": "supports"}
 
 
 def test_clean_replay_rejects_agent_claim_that_baseline_does_not_reproduce(

@@ -821,6 +821,22 @@ def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
     """Normalize repository-local paths without changing selectors or non-path options."""
 
     portable = list(argv)
+
+    # Codex command_execution events on Windows can retain the JSON/PowerShell spelling of
+    # an absolute path, so an executable that ran as ``C:\\Users\\...`` is observed with two
+    # literal separators while the report quite reasonably declares ``C:\Users\...``.  Windows
+    # resolves both spellings to the same path.  Canonicalize only tokens that are unambiguously
+    # drive-absolute paths; applying separator folding to arbitrary arguments could change a
+    # regex, selector, or domain-specific value.
+    for index, token in enumerate(portable):
+        option, separator, value = token.partition("=")
+        candidate = value if separator else token
+        if re.match(r"^[A-Za-z]:[\\/]+", candidate):
+            normalized_candidate = re.sub(r"[\\/]+", "/", candidate)
+            portable[index] = (
+                option + separator + normalized_candidate if separator else normalized_candidate
+            )
+
     normalized = tuple(token.casefold() for token in portable)
     path_indexes: list[int] = []
     pytest_paths = False

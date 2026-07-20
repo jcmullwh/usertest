@@ -1783,6 +1783,57 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: the first terminal helper ran production Stages 5 and 6 successfully with zero items and zero model manifests, but wrote their lineage into the same `usertest.case_registry.json` path it had hashed as the immutable Stage-4 input. Its final custody check correctly detected `83aac40d... -> 81887039...` and stopped before ticket assembly, leaving a `running` helper receipt. That directory is retained as failed supervision output and is not used as terminal evidence.
 - Containment and result: a pre-write guard now rejects registry input/output collisions. Stage 4 reran model-free from the pristine Stage-3 registry into a fresh directory, and Stages 5-6 plus ticket assembly ran in a nested fresh output directory. The final chain has zero options, selections, plans, tickets, or model manifests; one `ticket_stage=not_emitted` lineage record; 29 registry cases before and after; unchanged source hashes; and no model, Docker, export, implementation, deletion, or removal action.
 
+### BDS-168 - Doubled Windows executable separators made executed experiments appear unobserved
+
+- Status: `closed_in_pr_complete_evidence_and_runner_suites_green_live_rescore_proved`
+- Classification: one pipeline evidence-normalization defect that caused repeated author work and a false blocked result; not an author research-quality, repository-scope, or historical-case failure
+- Exact evidence: the initial Windows-sandbox Stage 3 ran for 7,271.6 seconds and made 22 signed-in Sol/high author calls in one session. Its strongest retained frontier, attempt 20, contained one successful direct static-trace experiment, but production verification reported `experiment_command_not_observed:experiment:source-signature-classification` and two dependent unresolved-support findings. The normalized Codex event recorded the drive-absolute executable with doubled literal separators (`C:\\Users\\...`), while the dossier declared the same executable with normal Windows separators (`C:\Users\...`). The command had actually executed with exit zero, and the runner-owned clean replay also passed. `_normalize_command` normalized doubled repository-local separators but did not canonicalize the absolute executable token, so valid evidence could not mint a receipt. Later zero-error candidates achieved that score only by deleting the experiment and its direct origin binding; accepting them would have reduced research depth.
+- Correction: `_portable_replay_path_argv` now folds repeated slash/backslash separators only in unambiguous drive-absolute tokens, including option values. It does not rewrite arbitrary selectors, regular expressions, or domain-specific arguments. Unit coverage proves the two executable spellings normalize identically; integration coverage proves `_experiment_receipts` matches the observed event, clean replay, and dossier and emits the expected receipt.
+- Live correction proof: a model-free rescore of immutable attempt 20 changed `3 -> 1`: the three false observation/dependent findings disappeared and exposed one legitimate semantic error, `research_evidence_verification_mechanism_source_unbound`. Focused feedback went to the same author/session, which corrected that remaining problem in two calls (`1 -> 1 -> 0`) without restarting Stage 3. The final dossier narrows the supported mechanism to the exact inspected classifier/resolution symbols, preserves the unavailable vendor-internal cause and version-matrix boundary as nonmaterial unknowns, and passes both readiness and persisted-evidence verification. The complete `test_research_evidence.py` file passed twice, the complete `test_research_runner.py` file passed in 126 seconds, Ruff passed, and no test timeout was shortened.
+- Objective effect: the fix increases valid research throughput without weakening causal evidence. It prevents a real Windows experiment from being discarded, preserves the direct origin-to-mechanism binding, and lets the author repair the genuinely remaining semantic gap instead of oscillating against impossible feedback.
+
+### AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMANDS-OUTPUT-01 - Windows-sandbox authored output required same-session contract correction
+
+- Status: `closed_same_author_session`
+- Classification: one nondeterministic author-output cluster; counted once despite multiple validator messages
+- Exact progression: the original author output began with 13 structural/semantic contract findings and reduced them to zero in the same session. One zero-error candidate removed causal coverage and therefore was not selected as the objective-best frontier; later same-session work restored the evidence. No fresh author, supervisor-authored dossier, upstream stage restart, or discarded valid frontier was used.
+- Guidance: feedback contained the exact current contract findings and retained-frontier comparison, not a rewritten conclusion or case-specific answer. The author remained free to revise its hypothesis structure and evidence representation.
+
+### AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMANDS-EVIDENCE-01 - Windows-sandbox evidence correction was intervention-assisted, not autonomous
+
+- Status: `closed_after_evaluator_repair_and_same_author_continuation`
+- Classification: one nondeterministic evidence-author cluster, deliberately excluded from the automatic-self-correction count because BDS-168 made the original feedback impossible to satisfy correctly
+- Exact progression: the initial run made 22 model calls and 21 continuations in one session, retained 23 attempt records including one model-free feedback record, and ended `blocked/partial/already_addressed`. Attempt 20 was the strongest honest frontier at three verifier findings. After BDS-168, model-free rescore reduced those findings `3 -> 1`. The same author then received only the legitimate residual finding and used two more continuations to progress `1 -> 1 -> 0`; the first changed the error to an unresolved-alternative-hypothesis finding and the second resolved it while preserving the underlying boundaries. Total case author cost was therefore 24 calls and 23 continuations, with zero full author restart.
+- Guidance: the original controller supplied exact verifier deltas on every continuation but could not disclose a valid correction while its own command-identity judgment was false. After repair, supervisor guidance was limited to the one authenticated mechanism/source-binding finding plus immutable source/rescore hashes. It did not dictate the root cause, actionability disposition, or final wording.
+
+### AN-99 - Windows-sandbox audit used avoidably broad and malformed read-only diagnostics
+
+- Status: `closed_bounded_projections_used`
+- Classification: one deduplicated supervisor diagnostic cluster containing eight command-shape, environment, or projection mistakes; not a pipeline, author, verifier, case, or test failure
+- Exact evidence: the audit used unsupported `ConvertFrom-Json -Depth`, produced three PowerShell `empty pipe element` parser errors by piping after `foreach` blocks, printed an unnecessarily large evidence-verification structure instead of a compact projection, launched two recursive `.tmp` searches that ran about 24 and 19 seconds, first invoked a focused test with `run_artifacts/src` absent from `PYTHONPATH`, and initially computed dashboard elapsed time with a local-kind `DateTime` against UTC `as_of`, inflating it by four hours. Each failed before or during read-only diagnosis; none altered an artifact or model frontier. The dashboard contract rejected the bad elapsed projection before writing it.
+- Containment and result: direct retained paths, compact selected-property projections, and the complete monorepo source graph produced the needed evidence. No model call, stage result, dossier claim, option, plan, ticket, Docker object, export, implementation, deletion, or removal was caused by these errors.
+
+### AN-100 - First model-free rescore reused a globally colliding revision-view basename
+
+- Status: `closed_unique_revision_view_and_rescore_green`
+- Classification: one supervisor replay-setup cluster; no model or pipeline-stage work
+- Exact evidence: the first model-free replay used the generic basename `revision_view`, which collided with a retained relocated temporary view at stale revision `e0527e2`. Exact-revision validation correctly stopped the replay after 10.1 seconds. The failed output remains retained and was not used as evidence.
+- Containment and result: the helper now derives a unique revision-view basename from its output root. The fresh 34.7-second replay authenticated attempt 20 and the pinned revision, made zero model/upstream/downstream/Docker calls, kept source bytes unchanged, and produced the decisive `3 -> 1` rescore.
+
+### AN-101 - First terminal Stage-3 materialization assumed a bare atom list
+
+- Status: `closed_fresh_model_free_materialization_green`
+- Classification: one supervisor helper input-envelope error causing one bounded model-free Stage-3 materialization rerun
+- Exact evidence: production atoms are persisted as an `{"atoms": [...]}` envelope, while the first reuse helper assumed a bare list. It stopped before research/model work and retained its failed output directory.
+- Containment and result: the helper accepts the production envelope and a dossier wrapper without relaxing their hashes. The fresh materialization completed in 0.409 seconds, reused exactly one verified dossier, retained all 25 canonical attempts, made zero model/upstream/Docker calls, and left every source input hash unchanged.
+
+### AN-102 - First terminal Stage-4 invocation omitted the required full-day timeout contract
+
+- Status: `closed_fresh_model_free_terminal_chain_green`
+- Classification: one supervisor invocation-contract error causing one bounded model-free Stage-4 rerun; not a pipeline stage, model, optioning, or case failure
+- Exact evidence: the first terminal Stage-4 helper invocation omitted the required full-day timeout environment and stopped in preflight before a stage or model call. Its output is retained and is not terminal evidence.
+- Containment and result: the corrected invocation retained the 86,400-second ceilings and completed Stage 4 in 9.0 seconds as `not_required/already_addressed`, with zero options or model calls. The model-free Stage-5/6/ticket chain then completed in 0.413 seconds with zero selections, plans, tickets, model calls, Docker calls, exports, filesystem ticket writes, implementation actions, deletions, or removals.
+
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
 - Status: `closed_immediate_unbounded_read`

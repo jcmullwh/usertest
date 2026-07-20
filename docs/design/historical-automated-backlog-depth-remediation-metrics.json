@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-20T05:13:12Z",
+    "as_of": "2026-07-20T08:05:25Z",
     "current_run_id": "qualification-cycle-383cf41f-20260719",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "13 terminal; 2 research frontiers parked",
-        "detail": "Maintenance-image retention is terminal already_addressed/mitigated after authenticated historical-mechanism and current-code replay. The effective frontier has 26 canonical cases and 25 selected research units; the two storage children remain honestly nonterminal.",
+        "value": "14 terminal; 2 parked; 9 unworked",
+        "detail": "The Windows-sandbox source unit is terminal already_addressed after verifier-clean research and a zero-item downstream chain. The two storage children remain honestly nonterminal; nine selected research units remain unworked.",
         "tone": "warn"
       },
       {
         "label": "Current bounded throughput",
-        "value": "27 -> 26 cases; 13 terminal, 2 nonterminal",
-        "detail": "Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Thirteen cases now terminate without new work; both storage children retain precise evidence-acquisition frontiers. The measured negative-dossier same-cause miss remains contained as duplicate-work cost.",
+        "value": "27 -> 26 cases; 14 terminal, 2 nonterminal",
+        "detail": "Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Fourteen cases now terminate without new work; both storage children retain precise evidence-acquisition frontiers. The measured negative-dossier same-cause miss remains contained as duplicate-work cost.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "This cycle is active: 13 of 25 effective selected research units are terminal and two have correct nonterminal evidence frontiers. Ten selected units remain unworked. No qualification cycle or export authorization is earned.",
+        "detail": "This cycle is active: 14 of 25 effective selected research units are terminal, two have correct nonterminal evidence frontiers, and nine remain unworked. No qualification cycle or export authorization is earned.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Next source-backed case",
-        "detail": "Preserve the two storage frontiers until their named evidence becomes available, then process the next of ten unworked selected cases at one-case volume. Export, implementation, and removal remain disabled.",
+        "value": "Next unworked P2 Stage 3 unit",
+        "detail": "Checkpoint the Windows-sandbox result and BDS-168 correction, then select exactly one next eligible source-backed unit. Export, implementation, and removal remain disabled until a case earns those transitions.",
         "tone": "warn"
       }
     ],
@@ -3084,29 +3084,29 @@
         "lifecycle_id": "pipeline-cycle:383cf41f:20260719",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 120,
-          "continuation_launches": 73,
-          "stage_reruns": 14,
+          "author_invocations": 144,
+          "continuation_launches": 96,
+          "stage_reruns": 16,
           "full_restarts": 0,
-          "summary": "The prior 115 calls are retained. Maintenance added five Sol/high model calls, four same-session continuations, one model-free verifier-feedback record, and zero fresh author restarts. Stage 3 reran once after its pre-dispatch evidence block. A supervisor registry collision then required model-free reruns of Stages 4, 5, and 6. No miner, relation, priority, case, or full pipeline restart occurred."
+          "summary": "The prior 120 calls are retained. Windows-sandbox research added 24 signed-in Sol/high calls and 23 same-session continuations with zero fresh author restart. Its original 22-call run retained one model-free feedback record in addition to the paid calls. After BDS-168, a model-free rescore preserved attempt 20 and two further same-author continuations corrected the one legitimate residual finding. One Stage-3 materialization and one Stage-4 terminal helper reran model-free after supervisor preflight/setup errors; no miner, relation, priority, case, or full pipeline restart occurred."
         },
-        "label": "Fresh sealed cycle through thirteen terminal cases and two parked evidence frontiers",
-        "scope": "Export-disabled non-IDEA qualification cycle at target revision 8fff1c16, reusing retained Stage-1 miners, bounded relation requalification, and exact Stage-2 decisions. Maintenance used 2,855 atoms: the unchanged 2,854-atom materialization plus one hash-authenticated operator observation restored from cold storage; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
+        "label": "Fresh sealed cycle through fourteen terminal cases and two parked evidence frontiers",
+        "scope": "Export-disabled non-IDEA qualification cycle at target revision 8fff1c16, reusing retained Stage-1 miners, bounded relation requalification, and exact Stage-2 decisions. Windows-sandbox research used the unchanged authenticated 2,854-atom source corpus and one source-backed April 3 atom; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
         "timing": {
           "start_at": "2026-07-19T13:15:00Z",
           "end_at": null,
-          "elapsed_seconds": 57492,
+          "elapsed_seconds": 67825,
           "coverage": "active",
-          "display": "15 h 58 m active",
-          "note": "Active wall time through the maintenance terminal chain. Maintenance Stage 3 took 1,953.5 seconds. Its five actual author calls consumed 1,630.0 seconds; one model-free verifier-feedback record is excluded. The first pre-dispatch evidence block took 1.8 seconds. The final model-free Stage 4 and Stage-5/6/ticket chains took 21.4 and 2.5 seconds. Prior per-case timings remain retained in earlier snapshots."
+          "display": "18 h 50 m active",
+          "note": "Active wall time through the terminal Windows-sandbox audit. Its initial Stage 3 took 7,271.6 seconds and 22 actual author calls; model-free rescore took 34.7 seconds; two same-author correction calls completed in a 308.2-second continuation; canonical Stage-3 materialization took 0.409 seconds; Stage 4 took 9.0 seconds; and the Stage-5/6/ticket terminal chain took 0.413 seconds. Failed supervisor setups are retained separately and did not invoke the model."
         },
-        "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; thirteen cases are terminal and both authenticated storage children retain their correct nonterminal Stage-3-to-ticket frontier",
-        "current_state": "Maintenance research is verifier/readiness-clean `evidence_sufficient/reproduced/already_addressed`. It binds all three origin observations, identifies the historical fresh age-or-count retention mechanism, proves fix 57afd2d is ancestral to pinned origin/dev, replays the 49-identity burst and a below-budget control through current production code, and passes the 11-test cleanup module plus resolver and batch ordering checks. Live physical reclamation and exact historical disk-share attribution remain explicit non-material boundaries, so the registry remains mitigated rather than claiming live-verified resolution. Stage 4 records not_required; Stages 5-6 emit zero items/manifests; ticket assembly records not_emitted and zero tickets.",
-        "outcome": "Thirteen terminal negative/already-addressed dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
+        "furthest_stage": "Production ticket assembly for the fourteenth terminal case; Windows-sandbox research is verifier/readiness-clean and its earned downstream chain emitted no option, selection, plan, or ticket",
+        "current_state": "`problem:windows-sandbox-blocks-shell-commands` is terminal `evidence_sufficient/partial/already_addressed`. Research established the historical pre-execution Windows sandbox-panic signature and the current exact-signature classifier/resolution path, but honestly leaves the unavailable vendor-internal cause and cross-version absence unproved. BDS-168 repaired the evaluator that had mistaken a doubled Windows executable spelling for an unobserved command. Model-free rescore reduced the retained frontier from three false/dependent findings to one legitimate source-binding gap; the same author corrected that gap in two calls. Persisted evidence and readiness pass, Stage 4 is `not_required`, and Stages 5-6 plus ticket assembly produced zero work items.",
+        "outcome": "Fourteen terminal negative/already-addressed dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
         "errors": {
-          "count": 95,
+          "count": 102,
           "count_kind": "deduplicated_clusters",
-          "summary": "Fourteen controller/integration clusters are retained. Thirty-three nondeterministic author clusters self-corrected in their original sessions after maintenance added one output and one evidence cluster. Forty-eight supervisor clusters are retained after one attempt-accounting defect and one terminal registry-collision defect. None authored or changed the maintenance conclusion.",
+          "summary": "Fifteen controller/integration clusters are retained after BDS-168. Thirty-five nondeterministic author clusters are retained; thirty-four self-corrected automatically, while the Windows-sandbox evidence cluster required the evaluator repair before two same-author correction calls could finish it. Fifty-two supervisor clusters are retained after four bounded Windows-sandbox audit/setup errors. None authored or changed the case conclusion.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
@@ -3202,13 +3202,20 @@
             "AUTHOR-STAGE3-MAINTENANCE-IMAGE-RETENTION-V2-OUTPUT-01",
             "AUTHOR-STAGE3-MAINTENANCE-IMAGE-RETENTION-V2-EVIDENCE-01",
             "AN-97",
-            "AN-98"
+            "AN-98",
+            "BDS-168",
+            "AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMANDS-OUTPUT-01",
+            "AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMANDS-EVIDENCE-01",
+            "AN-99",
+            "AN-100",
+            "AN-101",
+            "AN-102"
           ]
         },
         "automatic_self_corrections": {
-          "count": 33,
+          "count": 34,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior thirty-one clusters remain. Maintenance added two: output correction progressed from four findings to zero, with one zero-error but causally regressed candidate retained and repaired; evidence correction progressed 15 -> 1 -> 0. Five model calls and four continuations stayed in one session. Model-free feedback is excluded, and no author restart or supervisor-authored dossier content was used.",
+          "summary": "The prior thirty-three clusters remain. The Windows-sandbox output-contract cluster self-corrected from 13 findings to zero in the original session. Its evidence cluster is intentionally excluded here: it could not self-correct against BDS-168's false command-observation result and needed evaluator repair before the same author finished the honest `1 -> 1 -> 0` residual correction. No author restart or supervisor-authored dossier content was used.",
           "cluster_ids": [
             "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-OUTPUT-01",
             "AUTHOR-STAGE3-REPORT-REVALIDATION-V2-EVIDENCE-01",
@@ -3242,13 +3249,14 @@
             "AUTHOR-STAGE3-LOCAL-ARTIFACT-SANITIZATION-V1-OUTPUT-01",
             "AUTHOR-STAGE3-LOCAL-ARTIFACT-SANITIZATION-V1-EVIDENCE-01",
             "AUTHOR-STAGE3-MAINTENANCE-IMAGE-RETENTION-V2-OUTPUT-01",
-            "AUTHOR-STAGE3-MAINTENANCE-IMAGE-RETENTION-V2-EVIDENCE-01"
+            "AUTHOR-STAGE3-MAINTENANCE-IMAGE-RETENTION-V2-EVIDENCE-01",
+            "AUTHOR-STAGE3-WINDOWS-SANDBOX-COMMANDS-OUTPUT-01"
           ]
         },
         "supervisor_interventions": {
-          "count": 58,
+          "count": 63,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior fifty-six intervention clusters remain. Maintenance added one receipt-count correction and one terminal registry-collision correction. The latter required model-free Stage-4-to-6 reruns in a fresh path; the failed path is retained. No author output was discarded, no upstream stage restarted, and the supervisor did not author a problem conclusion, solution, plan, or implementation.",
+          "summary": "The prior fifty-eight intervention clusters remain. Windows-sandbox added BDS-168 plus four supervisor audit/setup clusters. The evaluator repair rescored immutable author work model-free and returned only the legitimate residual finding to the same session. The two failed terminal helpers stopped before model work and reran only their owning bounded sections. No valid author output was discarded, no upstream stage restarted, and the supervisor did not author a problem conclusion, solution, plan, or implementation.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
@@ -3307,12 +3315,17 @@
             "AN-95",
             "AN-96",
             "AN-97",
-            "AN-98"
+            "AN-98",
+            "BDS-168",
+            "AN-99",
+            "AN-100",
+            "AN-101",
+            "AN-102"
           ]
         },
-        "next_action": "Preserve both storage children and do not rerun them without the named new evidence. Select the next of ten unworked source-backed units and run only that case through production Stage 3 and its correct downstream disposition. Do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation before evidence earns those transitions.",
+        "next_action": "Commit and push the Windows-sandbox evaluator correction and audit checkpoint, then select exactly one next eligible unworked source-backed case and run only its required stage frontier. Continue to preserve valid authored work and rerun only the owning section. Do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation before evidence earns those transitions.",
         "tone": "warn",
-        "data_quality": "The authenticated post-split problem corpus is e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Maintenance source repair binds unchanged source atoms bbefb02fbe5144eb90067ad744874f7f122b327f62a33920c727a5cd00e622f3, retained assignment f757bd3763ed2d7bbbcc191921a6622e956918ecd4946171b2c451322c5ad3f4, restored atom f9b3dd2eae013325d4252161ee1ebec4248abc5da317be7b62e32602451292be, attachment 43836965073cf9f1983711c13c9c5a718516fe69e20ce494f96b9bb11f4af7e1, and repaired corpus 008923db488fb188a604197406d02e575de02cadad9df25222ca5e9af99fdb99. Final research is ff2bbd0883b60bd63be96a01792820f50370cb2df5b43aad5a20f8e80a7a12e9 with verification receipt 844c50499a63997d0c9c4fd8058d17c9e3f78a7243b478b2d3accd2c0a39d758. Stage-4/5/6 hashes are fbf4632744536c4b0c03443c6ec00dbc590e7abf251a551ba8e9cf2809aa77cb, ca1eeed5b2060e00df2135890cc41b0cfaa316cce3d0f77565a66e72bb988ebf, and 36ddfb4379853276c1632eaeb09f76ae576a68efa7dab2ae2010800f7096dd92; ticket lineage is 796f8cf7859ac9adad418ee2c2b50ec4f542ed21c6b67b96843d4beec2711054. Alias code is commit adce70b on draft PR #217. The invalid v1 terminal directory is retained and excluded. No source input, image, container, workspace, artifact, or VHDX content was removed. Full cycle completion remains unmeasured.",
+        "data_quality": "The authenticated post-split problem corpus is e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574 and the unchanged 2,854-atom source corpus is bbefb02fbe5144eb90067ad744874f7f122b327f62a33920c727a5cd00e622f3. The canonical terminal Windows-sandbox research JSON is 641f2c2ad0bb1cd2138b92c169b83408da79f7880e807f7e3d5bc45a067924af; Stage-4 options are 5b2e9f0b6ad9269b0dd91946225e0a43fe714410fb10946627a18e1fbb716878; terminal selections are e25021459a49785509469a1c84e7be20d8cc2b4b051423ef38db3a47e80a2bd6; plans are 6e0bdc433513e6e56076d5a7a460dafc183cd807953c6ddb599e8695b71bb1f3; ticket assembly is c1cca3a957cc730459094c65d21ca0cf14fa70cb01777abdcdc59934150a7dc1. The final case registry has 29 cases, records `not_required/already_addressed`, and emits no ticket fingerprint. The complete evidence and runner test files pass. No source input, image, container, workspace, artifact, VHDX content, or ticket was removed.",
         "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]
