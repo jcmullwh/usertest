@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-20T20:24:33Z",
+    "as_of": "2026-07-20T20:56:52Z",
     "current_run_id": "qualification-cycle-bc70b15b-20260720",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "3 mitigated; 2 parked; 22 other active",
-        "detail": "Fresh preparation at merged dev retained 28 cases: 24 active, one alias, and three mitigated. Two selected active cases now have authenticated already-addressed research plus zero-option Stage-4 dispositions and are parked until their evidence frontiers change.",
+        "value": "3 mitigated; 3 parked; 21 other active",
+        "detail": "Fresh preparation at merged dev retained 28 cases: 24 active, one alias, and three mitigated. Three selected active cases now have authenticated already-addressed research plus zero-option Stage-4 dispositions and are parked until their evidence frontiers change.",
         "tone": "good"
       },
       {
         "label": "Current bounded throughput",
-        "value": "16 calls; 11 continuations; 0 restarts",
-        "detail": "Preparation used zero model calls. A mixed Stage-1 slice reached eight correct dispositions after same-author correction; Stage 2 ranked three active cases; two evidence-backed cases completed causal Stage 3 and deterministic Stage 4. Neither already-addressed case produced a ticket or bad-ready output.",
+        "value": "20 calls; 13 continuations; 0 restarts",
+        "detail": "Preparation used zero model calls. A mixed Stage-1 slice reached eight correct dispositions after same-author correction; Stage 2 has selected three evidence-backed cases; all three completed causal Stage 3 and deterministic Stage 4. None of the already-addressed cases produced a ticket or bad-ready output.",
         "tone": "good"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "This is still a narrow baseline cycle, not a full end-to-end qualification. Two exercised cases reached their correct final no-change dispositions, but the remaining active corpus has not been processed and automated export remains disabled.",
+        "detail": "This is still a narrow baseline cycle, not a full end-to-end qualification. Three exercised cases reached their correct final no-change dispositions, but the remaining active corpus has not been processed and automated export remains disabled.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Push lifecycle fix; process next evidenced case",
-        "detail": "The occurrence-only retained-evidence defect discovered by the second exact next-cycle replay is fixed and the full backlog suite is green. Commit and push it to PR #217, then select the next evidence-backed active case without restarting completed stages.",
+        "value": "Process the next evidenced case",
+        "detail": "PR #217 is green at exact head `c3954a4`. The maintenance-image case reached a stable already-addressed disposition on those controller bytes. Continue from the current registry without restarting completed stages.",
         "tone": "warn"
       }
     ],
@@ -3364,25 +3364,25 @@
         "lifecycle_id": "pipeline-cycle:bc70b15b:20260720",
         "lifecycle_kind": "pipeline_cycle",
         "rework": {
-          "author_invocations": 16,
-          "continuation_launches": 11,
+          "author_invocations": 20,
+          "continuation_launches": 13,
           "stage_reruns": 4,
           "full_restarts": 0,
-          "summary": "The 16 signed-in Sol/high calls were two initial Stage-1 authors, two retained-session Stage-1 corrections, one Stage-2 prioritizer, seven calls for the first Stage-3 case, and four calls for the second Stage-3 case. Eleven calls resumed an existing author session. Four bounded wrapper/stage relaunches followed premodel launch defects; no completed stage or full pipeline was restarted."
+          "summary": "The 20 signed-in Sol/high calls were two initial Stage-1 authors, two retained-session Stage-1 corrections, two Stage-2 prioritizers, seven calls for the first Stage-3 case, four for the second, and three for the maintenance-image case. Thirteen calls resumed an existing author session. Four bounded wrapper/stage relaunches followed premodel launch defects; no completed stage or full pipeline was restarted."
         },
-        "label": "Fresh merged-dev cycle through two stable already-addressed dispositions",
-        "scope": "Non-IDEA qualification cycle prepared from merged origin/dev commit bc70b15b with 2,854 sealed atoms and explicit cross-volume evidence roots. Work stayed narrow: one mixed Stage-1/2 mechanics slice, one three-case Stage-2 slice, two evidence-backed Stage-3 cases, and their deterministic no-change Stage 4 dispositions. Signed-in host Codex subscription was required; API fallback, Docker, export, ticket mutation, implementation, and removal were disabled.",
+        "label": "Fresh merged-dev cycle through three stable already-addressed dispositions",
+        "scope": "Non-IDEA qualification cycle prepared from merged origin/dev commit bc70b15b with 2,854 sealed atoms and explicit cross-volume evidence roots. Work stayed narrow: one mixed Stage-1/2 mechanics slice, bounded Stage-2 selections, three evidence-backed Stage-3 cases, and their deterministic no-change Stage 4 dispositions. Signed-in host Codex subscription was required; API fallback, Docker, export, ticket mutation, implementation, and removal were disabled.",
         "timing": {
           "start_at": "2026-07-20T17:50:50Z",
           "end_at": null,
-          "elapsed_seconds": 9223,
+          "elapsed_seconds": 11162,
           "coverage": "active",
-          "display": "2 h 34 m active",
-          "note": "Wall time from fresh qualification preparation through two exact retained-disposition replays and the latest full usertest_backlog suite. The first Stage 3 consumed 3,254.36 seconds and the second 1,216.86 seconds; both Stage-4 no-change dispositions completed without a model call. The latest full app suite consumed 300.6 seconds. Long-running work was polled on a multi-minute cadence."
+          "display": "3 h 6 m active",
+          "note": "Wall time from fresh qualification preparation through three exact retained-disposition replays. The first Stage 3 consumed 3,254.36 seconds, the second 1,216.86 seconds, and maintenance 1,283.0 seconds; all three Stage-4 no-change dispositions completed without a model call. The latest full app suite consumed 300.6 seconds. Long-running work was polled on a multi-minute cadence."
         },
         "furthest_stage": "Authenticated Stage-4 no-change disposition with stable next-cycle routing",
-        "current_state": "`case:131290268e2889891e0c` established that the historical Codex model-message failure is already addressed; `case:01fc33f2c4cf70160dfb` established that the historical Claude duplicate-tool-use-ID failure is already addressed by the retained collision retry. Both dossiers bind exact source evidence, current mechanism tests, and corrective-commit ancestry at `bc70b15b`. Each Stage 4 emitted `not_required`, zero options, zero model calls, and no Stage 5/6. Exact replays route both cases to `await_evidence` with no repeated research or downstream work.",
-        "outcome": "Two evidence-backed cases correctly parked as already addressed; eight mixed atoms dispositioned; zero bad-ready escapes; zero tickets; full-cycle qualification still 0/2",
+        "current_state": "`case:131290268e2889891e0c` established that the historical Codex model-message failure is already addressed; `case:01fc33f2c4cf70160dfb` did the same for Claude duplicate-tool-use-ID retry; `case:4fb8e280d15b4c0b0fc2` established that the historical count-or-age maintenance-image retention mechanism was removed and its corrective commits/tests are present at `bc70b15b`. Each dossier binds exact source evidence and current mechanism proof. Each Stage 4 emitted `not_required`, zero options, zero model calls, and no Stage 5/6. Exact replays route all three cases to `await_evidence` with no repeated research or downstream work.",
+        "outcome": "Three evidence-backed cases correctly parked as already addressed; eight mixed atoms dispositioned; zero bad-ready escapes; zero tickets; full-cycle qualification still 0/2",
         "errors": {
           "count": 10,
           "count_kind": "deduplicated_clusters",
@@ -3401,21 +3401,23 @@
           ]
         },
         "automatic_self_corrections": {
-          "count": 5,
+          "count": 7,
           "count_kind": "deduplicated_clusters",
-          "summary": "Stage 1 returned independent-review feedback to the exact primary session and the revision to the exact reviewer session. The first Stage-3 case corrected its authored contract and consumed independent verifier feedback through an 8-to-2-to-2-to-1-to-0 frontier. The second corrected one authored contract error, then consumed independent feedback through a 25-to-1-to-0 frontier. Neither dossier was restarted or discarded.",
+          "summary": "Stage 1 returned independent-review feedback to the exact primary session and the revision to the exact reviewer session. The first Stage-3 case corrected its authored contract and verifier frontier to zero; the second corrected one authored error and improved independent feedback from 25 to one to zero. Maintenance corrected two authored falsification errors to zero, then replaced a fragmented evidence shape to clear 24 independent findings in one continuation. No dossier was restarted or discarded.",
           "cluster_ids": [
             "AUTHOR-STAGE1-MAINTENANCE-DISAGREEMENT-01",
             "AUTHOR-STAGE3-CODEX-MESSAGES-OUTPUT-01",
             "AUTHOR-STAGE3-CODEX-MESSAGES-EVIDENCE-01",
             "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-OUTPUT-01",
-            "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-EVIDENCE-01"
+            "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-EVIDENCE-01",
+            "AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01",
+            "AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01"
           ]
         },
         "supervisor_interventions": {
-          "count": 10,
+          "count": 11,
           "count_kind": "deduplicated_clusters",
-          "summary": "The supervisor selected narrow slices, triggered retained-session feedback, corrected launch wrappers, supplied process-local Git trust for the clean U: worktree, diagnosed three retained-lifecycle defects from exact replays, implemented those contract fixes, and ran verification. The system authored the mining, prioritization, research conclusions, experiments, and final no-change dispositions.",
+          "summary": "The supervisor selected narrow slices, triggered retained-session feedback, corrected launch wrappers, supplied process-local Git trust for the clean U: worktree, diagnosed three retained-lifecycle defects from exact replays, implemented those contract fixes, and ran verification. One additional bounded supervision cluster selected and advanced maintenance through Stages 2-4 and audited its retained proof. The system authored every prioritization, research conclusion, experiment, and final no-change disposition.",
           "cluster_ids": [
             "BDS-178",
             "BDS-179",
@@ -3426,12 +3428,13 @@
             "BDS-184",
             "BDS-185",
             "BDS-186",
-            "BDS-187"
+            "BDS-187",
+            "SUPERVISOR-STAGE2-4-MAINTENANCE-01"
           ]
         },
-        "next_action": "Commit and push the occurrence-only retained-frontier fix to draft PR #217, verify its exact-head checks, then continue the fresh cycle with the next evidence-backed active case. Preserve both completed Stage-3/4 frontiers; do not rerun either unless new evidence changes the authenticated case revision.",
+        "next_action": "Continue the fresh cycle with the next evidence-backed active case from the current registry. Preserve all three completed Stage-3/4 frontiers; do not rerun them unless new evidence changes an authenticated case revision.",
         "tone": "warn",
-        "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. Stage-1 initial and correction receipts are retained at `stage12_slice_mixed_sol_high_20260720T181500Z` and `stage12_slice_mixed_sol_high_correction_20260720T182100Z`; Stage 2 at `stage2_active_slice_sol_high_20260720T182500Z`. The first completed research/Stage-4 pair is retained at `stage3_case_131290_sol_high_20260720T183300Z` and `stage4_case_131290_sol_high_20260720T193300Z`; the second at `stage3_case_01fc33_sol_high_20260720T195200Z` and `stage4_case_01fc33_sol_high_20260720T201400Z`. The second Stage 3 used four verified ChatGPT-subscription Sol/high calls and five retained records; its same-author correction reduced one output-contract error to zero and independent evidence feedback from 25 findings to one to zero. The exact second-case replay hydrates three signed occurrence atoms with zero errors and routes `await_evidence`. Adjacent lifecycle tests passed 50/50 and the full app suite passed with two expected skips in 300.6 seconds. No source input, ticket, workspace, image, container, or evidence artifact was removed.",
+        "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. The first two completed research/Stage-4 pairs are retained at `stage3_case_131290_sol_high_20260720T183300Z` / `stage4_case_131290_sol_high_20260720T193300Z` and `stage3_case_01fc33_sol_high_20260720T195200Z` / `stage4_case_01fc33_sol_high_20260720T201400Z`. Maintenance selection is retained at `stage2_case_4fb8_sol_high_20260720T203200Z`, research at `stage3_case_4fb8_sol_high_20260720T203500Z`, and Stage 4 at `stage4_case_4fb8_sol_high_20260720T205700Z`. Maintenance used one Stage-2 and three Stage-3 verified ChatGPT-subscription Sol/high calls; same-author correction reduced two output errors to zero and 24 independent findings to zero. Its exact replay hydrates eight signed occurrence atoms with zero errors and routes `await_evidence`. PR #217 exact head `c3954a4` completed 80 checks with zero failures. Adjacent lifecycle tests passed 50/50 and the full app suite passed with two expected skips in 300.6 seconds. No source input, ticket, workspace, image, container, or evidence artifact was removed.",
         "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]
