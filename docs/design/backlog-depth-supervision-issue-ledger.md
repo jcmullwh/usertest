@@ -1356,6 +1356,20 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 - `AUTHOR-STAGE3-FIRST-RUN-POLICY-V1-EVIDENCE-01`: independent evidence verification exposed 31 findings: 21 missing direct experiment/atom bindings across three experiments and seven source atoms, two aggregate origin-coverage findings, three replay-output workspace mutations, and five unresolved config/docs symbol locators. The first evidence continuation reduced `31 -> 1` but lost direct coverage for six source atoms, so the controller retained it as a nonbaseline improvement rather than accepting or discarding it. The next same-author continuation restored full source coverage and reached zero. The request ledger has five records—four actual `gpt-5.6-sol`/high model turns plus one model-free feedback record—three continuations in one session, and zero fresh restarts. The final verifier/readiness-clean dossier distinguishes seven source atoms from 40 derived implementation-context atoms, establishes the historical docs/mission/policy mismatch, verifies ancestor fix `b380e50`, resolves the current contract through production catalog code, passes two focused preflight regressions, and ends `evidence_sufficient/partial/already_addressed`. Production Stage 4 records `not_required`, and Stages 5-6 and ticket assembly emit zero items and zero model manifests.
 
+- `AUTHOR-STAGE3-WINDOWS-SANDBOX-SHELL-EXECUTION-V1-OUTPUT-01`: the initial dossier had four output-contract findings: an uninspected primary symbol, two incomplete falsification links for the plugin-warning alternative, and primary support not linked to inspected production code. One 125.5-second continuation of the original author/session corrected `4 -> 0` without dropping the retained primary or alternative mechanism roles. This is one self-corrected author cluster.
+
+- `AUTHOR-STAGE3-WINDOWS-SANDBOX-SHELL-EXECUTION-V1-EVIDENCE-01`: independent verification exposed 12 missing direct experiment-to-origin-atom bindings across the two source atoms and retained experiments. One 119.7-second evidence-capable continuation of the same session corrected `12 -> 0`. The request ledger has four records—three actual `gpt-5.6-sol`/high model calls plus one model-free evidence-feedback record—two continuations in one session and zero fresh restarts. The final verifier/readiness-clean dossier establishes the historical pre-payload `windows-sandbox-rs` worker panic, binds the direct unreadable-README impact, verifies the current unelevated Windows guard and focused regressions, and ends `evidence_sufficient/partial/already_addressed`. Production Stage 4 records `not_required`; Stages 5-6 and ticket assembly emit zero items and zero model manifests.
+
+### BDS-166 - Negative research dossiers cannot currently earn post-research same-cause identity
+
+- Status: `open_contained_nonblocking`
+- Priority: throughput and duplicate-research recall; not current-case blocking
+- Objective impact: independently researched manifestations of an already-addressed mechanism can terminate safely but remain separate canonical cases, causing duplicate research work and inflated case counts.
+- Exact evidence: `case:fe517dafc2a12d5779ab` and `case:709a878d94ef698d9e5b` use the same pinned revision and independently establish the same historical pre-payload Windows sandbox-worker panic and current classifier/guard boundary. A production `collapse_post_research_verified_mechanisms` diagnostic returned zero groups. Both persisted verification receipts have `status=verified` and zero errors but `verified_mechanism_sha256=null`; the latter case also has no registry mechanism identity, so `_verified_causal_signature` cannot make it eligible. Stage 2's earlier nonreciprocal relation proposal therefore remains unresolved even after research supplied the missing causal evidence.
+- Containment and result: both cases are `already_addressed`, so neither advanced to an option, plan, ticket, export, or implementation. The latest case completed its correct terminal disposition; the missed collapse is recorded as duplicate-work cost rather than used to block throughput or trigger a fresh research run.
+- Required action: allow authenticated negative/actionability research to produce a stable causal identity, or add an equivalently evidence-bound post-research relation path, without weakening the verifier or grouping cases merely by wording. Prove the change on multiple mechanisms rather than special-casing Windows sandbox text.
+- Closure proof: a production replay over these two independently researched dossiers creates one canonical case plus a traceable alias while dissimilar already-addressed dossiers remain separate.
+
 ### AN-43 - First Stage-4 launcher omitted one authenticated source root
 
 - Status: `closed_corrected_pre_model`
@@ -1677,6 +1691,20 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
 - Exact evidence: the first first-run-policy preflight included the full prior research snapshot plus the text of all 47 assigned records. The large source-run report and implementation-derived artifacts exceeded the direct output budget, although the needed facts were only seven source atoms, 40 derived context atoms, the original mismatch summary, and the prior malformed-research state.
 - Containment and result: Stage 3 received the canonical complete assignment directly, while supervision used bounded gate, experiment, frontier, and provenance projections. No atom was dropped; no model call, stage, export, removal, or implementation was repeated because of the overbroad read.
+
+### AN-89 - Post-research relation inspection requested excessive source context
+
+- Status: `closed_read_only_projection_correction`
+- Classification: one supervisor diagnostic/reporting error, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: the first relation audit requested two broad implementation slices from `post_research_relations.py`; the resulting source projection was larger than needed and forced conversation-context compaction. The required facts were only the two function signatures, eligibility predicate, and grouping key.
+- Containment and result: the audit resumed from bounded source slices and compact JSON projections. No model call, research attempt, stage, artifact, export, removal, or implementation was repeated or changed.
+
+### AN-90 - First Windows-sandbox terminal handoff omitted priority lineage
+
+- Status: `closed_bounded_stage4_rerun_green`
+- Classification: one supervisor helper-integration cluster and one bounded Stage-4 rerun, not an author, research, product, or verifier failure
+- Exact evidence: initial helper setup used several incorrect package import surfaces and one imprecise artifact-directory name; those attempts stopped before producing stage output. The first completed Stage-4 invocation then supplied the legacy priority record without production `propagate_case_lineage`, so it deterministically returned `insufficient_evidence` with `priority_case_id_mismatch`, zero options, and zero model calls in `stage456_windows_sandbox_blocks_shell_execution_v1_terminal`.
+- Containment and result: that handoff was not accepted or deleted. The unchanged verified dossier and canonical problem record were passed through production lineage propagation in `_v2`; Stage 4 returned `not_required/already_addressed`, Stages 5-6 and ticket assembly produced zero items, all downstream manifests remained empty, and every terminal hash was independently checked. Stage 3 was not rerun.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 

@@ -244,15 +244,15 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
     assert current["timing"]["start_at"] == "2026-07-19T13:15:00Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 101
-    assert current["rework"]["continuation_launches"] == 58
-    assert current["rework"]["stage_reruns"] == 9
+    assert current["rework"]["author_invocations"] == 104
+    assert current["rework"]["continuation_launches"] == 60
+    assert current["rework"]["stage_reruns"] == 10
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 75
-    assert current["automatic_self_corrections"]["count"] == 25
-    assert current["supervisor_interventions"]["count"] == 47
+    assert current["errors"]["count"] == 80
+    assert current["automatic_self_corrections"]["count"] == 27
+    assert current["supervisor_interventions"]["count"] == 49
     assert current["furthest_stage"] == (
-        "Corrected Stage 2 for the effective canonical frontier; nine cases are "
+        "Corrected Stage 2 for the effective canonical frontier; ten cases are "
         "terminal and both authenticated storage children retain their correct "
         "nonterminal Stage-3-to-ticket frontier"
     )
