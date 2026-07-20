@@ -287,6 +287,30 @@ def _retained_implemented_outcome(
     return owner_root, outcome
 
 
+def test_outcome_trust_boundary_includes_explicit_qualification_roots(
+    tmp_path: Path,
+) -> None:
+    primary_runs_root = tmp_path / "source" / "runs" / "usertest"
+    implementation_runs_root = inferred_implementation_runs_root(primary_runs_root)
+    controller_runs_root = tmp_path / "controller" / "runs" / "usertest_implement"
+    external_runs_root = tmp_path / "external" / "runs"
+
+    trusted_roots = _outcome_trusted_runs_roots(
+        primary_runs_dir=primary_runs_root,
+        configured_runs_dir=tmp_path / "cycle" / "stage_runs",
+        implementation_runs_root=implementation_runs_root,
+        additional_runs_roots=(controller_runs_root, external_runs_root),
+    )
+
+    assert set(trusted_roots) == {
+        primary_runs_root.resolve(),
+        (tmp_path / "cycle" / "stage_runs").resolve(),
+        implementation_runs_root.resolve(),
+        controller_runs_root.resolve(),
+        external_runs_root.resolve(),
+    }
+
+
 def test_sibling_implementation_outcome_uses_same_trust_boundary_for_sync_and_shadow(
     tmp_path: Path,
 ) -> None:

@@ -1928,6 +1928,7 @@ def _outcome_trusted_runs_roots(
     primary_runs_dir: Path,
     configured_runs_dir: Path,
     implementation_runs_root: Path,
+    additional_runs_roots: Sequence[Path] = (),
 ) -> tuple[Path, ...]:
     """Return the complete retained-evidence boundary for outcome verification."""
 
@@ -1937,6 +1938,7 @@ def _outcome_trusted_runs_roots(
                 primary_runs_dir.resolve(),
                 configured_runs_dir.resolve(),
                 implementation_runs_root.resolve(),
+                *(path.resolve() for path in additional_runs_roots),
             },
             key=lambda path: str(path),
         )
@@ -6347,6 +6349,22 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                     qualification_additional_evidence_runs_dirs
                 ),
                 protected_paths=protected_paths,
+            )
+            qualification_snapshot_sources_raw = qualification_source_snapshot.get(
+                "source_inputs"
+            )
+            qualification_snapshot_sources = (
+                qualification_snapshot_sources_raw
+                if isinstance(qualification_snapshot_sources_raw, Mapping)
+                else {}
+            )
+            outcome_trusted_runs_roots = _outcome_trusted_runs_roots(
+                primary_runs_dir=runs_dir,
+                configured_runs_dir=cfg.runs_dir,
+                implementation_runs_root=implementation_runs_root,
+                additional_runs_roots=_qualification_additional_source_roots(
+                    qualification_snapshot_sources
+                ),
             )
         except (OSError, ValueError) as exc:
             print(
