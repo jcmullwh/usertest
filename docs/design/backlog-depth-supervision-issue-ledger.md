@@ -2608,6 +2608,15 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: retained hydration keeps the full enriched dossier hash and identity checks, then applies the same authored `research_contract_view` used by Stages 4-6 for readiness and persisted-evidence validation.
 - Verification: a new lineage-enriched regression and the focused hydration/downstream suite pass. Exact replay now authenticates `runner_retained_no_change_v1`, routes the case to `await_evidence`, selects neither research nor downstream work, and assembles zero tickets.
 
+### BDS-187 - Occurrence-only research was mistaken for an empty retained evidence frontier
+
+- Status: `closed`
+- Priority: lifecycle correctness, repeated-work prevention
+- Objective impact: ordinary cases with direct source observations could complete sound research and a zero-option disposition, then be forced back into Stage 3 on the next cycle because their intentionally empty aggregate-evidence list was interpreted as an empty case frontier. That wastes a correct dossier and defeats stable throughput.
+- Exact evidence: completed Claude case `case:01fc33f2c4cf70160dfb` has three current source atoms. Its authenticated assignment partitions those same three atoms into `occurrence_evidence_atom_ids` and correctly leaves `case_evidence_atom_ids` empty. The first exact replay returned `retained_research_source_evidence_frontier_mismatch` and routed `research_update` despite unchanged evidence, an evidence-sufficient dossier, and an authenticated `already_addressed` disposition.
+- Correction: retained hydration now uses signed case-level IDs when an operational aggregate exists, otherwise the signed occurrence IDs are the durable case frontier. Legacy dossiers without an available signed partition still use the complete authenticated assignment. This applies the existing general evidence-role contract; it does not special-case Claude or weaken currentness checks.
+- Verification: a new two-occurrence regression passes alongside the aggregate-with-supporting-occurrences regression; 50 adjacent hydration/downstream/historical lifecycle tests pass; the full `apps/usertest_backlog` suite passes with two expected skips in 300.6 seconds. Exact replay of the retained Claude dossier hydrates all three current atoms with zero errors and routes `await_evidence`, with Stage 3 deselected, downstream disabled, and no model, ticket, export, implementation, Docker, or removal action.
+
 ## Verification-pending fixes
 
 ### BDS-001 — Stage 3 treated future design choices as material research unknowns

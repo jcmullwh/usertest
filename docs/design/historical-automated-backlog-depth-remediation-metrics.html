@@ -514,23 +514,23 @@
           <div class="status-grid ops-summary">
             <div class="stat good">
               <span class="label">Current pipeline state</span>
-              <span class="value">3 mitigated; 1 parked; 23 other active</span>
-              <span class="detail">Fresh preparation at merged dev retained 28 cases: 24 active, one alias, and three mitigated. One active P0 case now has authenticated already-addressed research plus a zero-option Stage-4 disposition and is parked until its evidence frontier changes.</span>
+              <span class="value">3 mitigated; 2 parked; 22 other active</span>
+              <span class="detail">Fresh preparation at merged dev retained 28 cases: 24 active, one alias, and three mitigated. Two selected active cases now have authenticated already-addressed research plus zero-option Stage-4 dispositions and are parked until their evidence frontiers change.</span>
             </div>
             <div class="stat good">
               <span class="label">Current bounded throughput</span>
-              <span class="value">12 calls; 8 continuations; 0 restarts</span>
-              <span class="detail">Preparation used zero model calls. A mixed Stage-1 slice reached eight correct dispositions after same-author correction; Stage 2 ranked three active cases; one P0 case completed causal Stage 3 and deterministic Stage 4. No ticket or bad-ready output was produced for the already-addressed case.</span>
+              <span class="value">16 calls; 11 continuations; 0 restarts</span>
+              <span class="detail">Preparation used zero model calls. A mixed Stage-1 slice reached eight correct dispositions after same-author correction; Stage 2 ranked three active cases; two evidence-backed cases completed causal Stage 3 and deterministic Stage 4. Neither already-addressed case produced a ticket or bad-ready output.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">This is still a narrow baseline cycle, not a full end-to-end qualification. The exercised case reached its correct final no-change disposition, but the remaining active corpus has not been processed and automated export remains disabled.</span>
+              <span class="detail">This is still a narrow baseline cycle, not a full end-to-end qualification. Two exercised cases reached their correct final no-change dispositions, but the remaining active corpus has not been processed and automated export remains disabled.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Land lifecycle fix; process next evidenced case</span>
-              <span class="detail">The retained-research lifecycle defects discovered by exact next-cycle replay are fixed and the full backlog suite is green. Commit them to PR #217, then select the next evidence-backed active case without restarting completed stages.</span>
+              <span class="value">Push lifecycle fix; process next evidenced case</span>
+              <span class="detail">The occurrence-only retained-evidence defect discovered by the second exact next-cycle replay is fixed and the full backlog suite is green. Commit and push it to PR #217, then select the next evidence-backed active case without restarting completed stages.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -703,20 +703,20 @@
                 <td>Regenerate the non-IDEA backlog against merged `origin/dev` commit `bc70b15bf1f6709a589d308f0739c2b865a65e77`, verify that the completed case updates existing lineage instead of…</td>
               </tr>
               <tr class="ops-current">
-                <td><strong>Fresh merged-dev cycle through one stable already-addressed disposition</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>1 h 49 m active</strong><span class="ops-kind">active</span></td>
-                <td><span class="tag warn">Authenticated Stage-4 no-change disposition with stable next-cycle routing</span><span class="ops-detail">`case:131290268e2889891e0c` / `problem:codex-model-messages-config-invalid` established the historical provenance-classification mechanism at pinned revision `bc70b15b`, verified…</span></td>
-                <td><strong>One P0 case correctly parked as already addressed; eight mixed atoms dispositioned; zero bad-ready escapes; zero tickets; full-cycle qualification still 0/2</strong></td>
-                <td><strong>9</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Nine new clusters were observed in this fresh cycle. Five are closed in product or preparation code, two are contained supervisor-wrapper issues, and two remain nonblocking…</span></td>
-                <td><strong>3</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Stage 1 returned independent-review feedback to the exact primary session and the revision to the exact reviewer session. Stage 3 corrected its initial authored output contract…</span></td>
-                <td><strong>9</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The supervisor selected narrow slices, triggered retained-session feedback, corrected launch wrappers, supplied process-local Git trust for the clean U: worktree, diagnosed two…</span></td>
-                <td><strong>12</strong> author calls; 8 continuations; 4 stage reruns; 0 full restarts<span class="ops-detail">The 12 signed-in Sol/high calls were two initial Stage-1 authors, two retained-session Stage-1 corrections, one Stage-2 prioritizer, and seven Stage-3 calls in one retained…</span></td>
-                <td>Commit and push the aggregate/occurrence and enriched-dossier hydration fixes to draft PR #217, verify its exact-head checks, then continue the fresh cycle with the next…</td>
+                <td><strong>Fresh merged-dev cycle through two stable already-addressed dispositions</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>2 h 34 m active</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Authenticated Stage-4 no-change disposition with stable next-cycle routing</span><span class="ops-detail">`case:131290268e2889891e0c` established that the historical Codex model-message failure is already addressed; `case:01fc33f2c4cf70160dfb` established that the historical Claude…</span></td>
+                <td><strong>Two evidence-backed cases correctly parked as already addressed; eight mixed atoms dispositioned; zero bad-ready escapes; zero tickets; full-cycle qualification still 0/2</strong></td>
+                <td><strong>10</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Ten new clusters were observed in this fresh cycle. Six are closed in product or preparation code, two are contained supervisor-wrapper issues, and two remain nonblocking…</span></td>
+                <td><strong>5</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Stage 1 returned independent-review feedback to the exact primary session and the revision to the exact reviewer session. The first Stage-3 case corrected its authored contract…</span></td>
+                <td><strong>10</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The supervisor selected narrow slices, triggered retained-session feedback, corrected launch wrappers, supplied process-local Git trust for the clean U: worktree, diagnosed three…</span></td>
+                <td><strong>16</strong> author calls; 11 continuations; 4 stage reruns; 0 full restarts<span class="ops-detail">The 16 signed-in Sol/high calls were two initial Stage-1 authors, two retained-session Stage-1 corrections, one Stage-2 prioritizer, seven calls for the first Stage-3 case, and…</span></td>
+                <td>Commit and push the occurrence-only retained-frontier fix to draft PR #217, verify its exact-head checks, then continue the fresh cycle with the next evidence-backed active case.…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-20T19:39:45Z. Showing 16 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-20T20:24:33Z. Showing 16 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

@@ -267,6 +267,71 @@ def test_aggregate_case_evidence_hydrates_with_supporting_occurrences(
     assert route["selected_for_research"] is False
 
 
+def test_occurrence_only_case_evidence_hydrates_from_signed_occurrence_frontier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = (tmp_path / "retained.occurrences.research.json").resolve()
+    atoms = [
+        _atom(atom_id="atom:occurrence-one", detail="first direct observation"),
+        _atom(atom_id="atom:occurrence-two", detail="second direct observation"),
+    ]
+    dossier = _dossier(atom=atoms[0])
+    dossier["evidence_assignment"] = {
+        "status": "complete",
+        "expected_atom_ids": [atom["atom_id"] for atom in atoms],
+        "case_evidence_atom_ids": [],
+        "occurrence_evidence_atom_ids": [atom["atom_id"] for atom in atoms],
+        "atom_receipts": [
+            {
+                "atom_id": atom["atom_id"],
+                "atom_sha256": source_evidence_atom_sha256(atom),
+                "atom_snapshot": source_evidence_atom_projection(atom),
+                "source_projection_version": SOURCE_EVIDENCE_PROJECTION_VERSION,
+            }
+            for atom in atoms
+        ],
+    }
+    stage_doc = build_stage_document(
+        "repro_research",
+        [dossier],
+        input_meta={},
+        artifacts={"research_json": str(artifact)},
+    )
+    registry = build_case_registry(
+        [
+            {
+                "problem_id": "problem:one",
+                "case_id": "case:one",
+                "evidence_atom_ids": [atom["atom_id"] for atom in atoms],
+            }
+        ],
+        supporting_atoms=atoms,
+    )
+    registry = update_case_registry_stage_lineage(registry, stage_doc=stage_doc)
+    artifact.write_text(
+        json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    record = problem_case_records_from_registry(registry)[0]
+    monkeypatch.setattr(research_hydration, "assess_research_readiness", lambda _item: (True, []))
+    monkeypatch.setattr(
+        research_hydration,
+        "verify_persisted_research_evidence",
+        lambda _item: (True, []),
+    )
+
+    hydrated, errors = research_hydration.hydrate_retained_research_proof(record)
+    route = prioritization._runner_research_route(record)
+
+    assert errors == []
+    assert hydrated is not None
+    assert hydrated["evidence_assignment"]["case_evidence_atom_ids"] == []
+    assert hydrated["evidence_assignment"]["occurrence_evidence_atom_ids"] == [
+        atom["atom_id"] for atom in atoms
+    ]
+    assert route["research_route"] == "continue_downstream"
+    assert route["selected_for_research"] is False
+
+
 def test_tampered_retained_research_is_rejected_and_routed_to_fresh_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

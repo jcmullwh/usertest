@@ -11,6 +11,7 @@ from backlog_core import (
     assess_research_readiness,
     source_evidence_snapshot_sha256,
 )
+from backlog_core.stage_contracts import research_evidence_role_partition
 from backlog_miner.research_evidence import verify_persisted_research_evidence
 
 from .depth_contracts import research_contract_view
@@ -188,18 +189,20 @@ def hydrate_retained_research_proof(
             if isinstance(value, str) and value.strip()
         }
     )
-    case_evidence_atom_ids_raw = assignment.get("case_evidence_atom_ids")
-    researched_case_source_atom_ids = (
-        sorted(
-            {
-                value.strip()
-                for value in case_evidence_atom_ids_raw
-                if isinstance(value, str) and value.strip()
-            }
-        )
-        if isinstance(case_evidence_atom_ids_raw, list)
-        else researched_source_atom_ids
+    case_evidence_atom_ids, occurrence_evidence_atom_ids, partition_source = (
+        research_evidence_role_partition(assignment)
     )
+    if partition_source == "unavailable":
+        # Older retained dossiers predate explicit evidence roles. Their complete
+        # assignment remains the only authenticated frontier available.
+        researched_case_source_atom_ids = researched_source_atom_ids
+    else:
+        # Operational aggregates are the durable case frontier and their expanded
+        # occurrences are supporting evidence. Ordinary cases have no aggregate,
+        # so their signed occurrence atoms are themselves the durable frontier.
+        researched_case_source_atom_ids = sorted(
+            set(case_evidence_atom_ids or occurrence_evidence_atom_ids)
+        )
     if current_source_atom_ids != researched_case_source_atom_ids:
         return None, ["retained_research_source_evidence_frontier_mismatch"]
     receipts_raw = assignment.get("atom_receipts")
