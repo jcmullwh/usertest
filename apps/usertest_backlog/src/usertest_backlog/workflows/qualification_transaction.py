@@ -161,20 +161,21 @@ def _validated_additional_evidence_roots(
     *,
     source_runs_dir: Path,
     target: str | None,
-) -> list[Path]:
+) -> list[tuple[Path, str | None]]:
     """Return explicit canonical run roots outside the inferred source pair.
 
     Qualification preparation must not recursively discover archives or moved storage.
     Each additional root is therefore an absolute operator-selected ``runs`` root with
-    the same immediate target/timestamp/agent/seed layout consumed by
-    ``iter_report_history``.  Selecting a narrow canonical root is the performance
-    boundary; the selected tree itself remains fully content-addressed so newly added
-    evidence readers cannot silently escape the seal.
+    an immediate target/timestamp/agent/seed layout consumed by ``iter_report_history``.
+    The primary target is preferred; a different target is accepted only when it is the
+    root's sole canonical target and is recorded in that root's signed manifest. Selecting
+    a narrow canonical root is the performance boundary; the selected tree itself remains
+    fully content-addressed so newly added evidence readers cannot silently escape the seal.
     """
 
     primary = source_runs_dir.expanduser().resolve()
     inferred_implementation = primary.parent / "usertest_implement"
-    selected: set[Path] = set()
+    selected: dict[Path, str | None] = {}
     for raw_root in roots:
         expanded = raw_root.expanduser()
         if not expanded.is_absolute():
@@ -188,17 +189,37 @@ def _validated_additional_evidence_roots(
             )
         if not root.is_dir():
             raise ValueError(f"qualification_additional_evidence_root_missing:{root}")
-        pattern = (
-            f"{target}/*/*/*/target_ref.json"
-            if isinstance(target, str) and target.strip()
-            else "*/*/*/*/target_ref.json"
-        )
-        if next(root.glob(pattern), None) is None:
+        requested_target = target.strip() if isinstance(target, str) else ""
+        if requested_target and next(
+            root.glob(f"{requested_target}/*/*/*/target_ref.json"), None
+        ) is not None:
+            selected_target: str | None = requested_target
+        else:
+            target_slugs = sorted(
+                {
+                    path.relative_to(root).parts[0]
+                    for path in root.glob("*/*/*/*/target_ref.json")
+                    if len(path.relative_to(root).parts) == 5
+                }
+            )
+            if not requested_target and target_slugs:
+                selected_target = None
+            elif len(target_slugs) == 1:
+                selected_target = target_slugs[0]
+            elif len(target_slugs) > 1:
+                raise ValueError(
+                    f"qualification_additional_evidence_root_target_ambiguous:{root}"
+                )
+            else:
+                selected_target = None
+        if selected_target is None and (
+            requested_target or next(root.glob("*/*/*/*/target_ref.json"), None) is None
+        ):
             raise ValueError(
                 f"qualification_additional_evidence_root_not_canonical:{root}"
             )
-        selected.add(root)
-    return sorted(selected, key=lambda item: item.as_posix())
+        selected[root] = selected_target
+    return sorted(selected.items(), key=lambda item: item[0].as_posix())
 
 
 def capture_qualification_source_snapshot(
@@ -214,11 +235,12 @@ def capture_qualification_source_snapshot(
 
     source_runs_dir = source_runs_dir.expanduser().resolve()
     implementation_root = (source_runs_dir.parent / "usertest_implement").resolve()
-    additional_roots = _validated_additional_evidence_roots(
+    additional_root_targets = _validated_additional_evidence_roots(
         additional_evidence_runs_dirs,
         source_runs_dir=source_runs_dir,
         target=target,
     )
+    additional_roots = [root for root, _target_slug in additional_root_targets]
     roots = [source_runs_dir, implementation_root, *additional_roots]
     atom_specs = collect_atom_artifact_specs(
         atoms,
@@ -250,12 +272,14 @@ def capture_qualification_source_snapshot(
             build_semantic_run_evidence_manifest(
                 root,
                 name=f"additional_evidence_runs:{index:04d}",
-                target_slug=target,
+                target_slug=target_slug,
                 root_role="retained",
                 atom_artifact_specs=atom_specs[root],
                 outcome_artifact_paths=outcome_paths[root],
             )
-            for index, root in enumerate(additional_roots, start=1)
+            for index, (root, target_slug) in enumerate(
+                additional_root_targets, start=1
+            )
         ],
     }
 
@@ -1128,19 +1152,24 @@ def qualification_input_bundle_errors(
             for key in ("source_runs", "implementation_runs")
             if isinstance(source.get(key), Mapping)
         }
-        target = _text(scope.get("target"))
+        scope_target = _text(scope.get("target"))
         for index, manifest in enumerate(additional):
             root_raw = _text(manifest.get("root"))
+            target_slug = _text(manifest.get("target_slug"))
             expected_name = f"additional_evidence_runs:{index + 1:04d}"
-            if manifest.get("name") != expected_name or root_raw is None:
+            if (
+                manifest.get("name") != expected_name
+                or root_raw is None
+                or (target_slug is None and scope_target is not None)
+            ):
                 errors.append(
                     f"qualification_input_additional_evidence_root_receipt_invalid:{index}"
                 )
                 continue
             root = Path(root_raw)
             pattern = (
-                f"{target}/*/*/*/target_ref.json"
-                if target is not None
+                f"{target_slug}/*/*/*/target_ref.json"
+                if target_slug is not None
                 else "*/*/*/*/target_ref.json"
             )
             if (

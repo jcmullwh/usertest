@@ -427,6 +427,41 @@ def test_bundle_seals_explicit_canonical_additional_evidence_root(
     )
 
 
+def test_bundle_seals_single_different_target_additional_evidence_root(
+    tmp_path: Path,
+) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    retained_root = tmp_path / "retained-implementation" / "runs"
+    retained_run = (
+        retained_root
+        / "controller_repo"
+        / "20260103T000000Z"
+        / "codex"
+        / "0"
+    )
+    _write_json(
+        retained_run / "target_ref.json",
+        {
+            "repo_input": str(inputs["repo_input"]),
+            "mission_id": "usertest_implement",
+        },
+    )
+    _write_json(retained_run / "report.json", {"status": "success"})
+
+    bundle = _build_bundle(
+        inputs,
+        additional_evidence_runs_dirs=[retained_root.resolve()],
+    )
+
+    manifest = bundle["source_inputs"]["additional_evidence_runs"][0]
+    assert manifest["root"] == str(retained_root.resolve())
+    assert manifest["target_slug"] == "controller_repo"
+    assert [item["run_rel"] for item in manifest["inventory"]] == [
+        "controller_repo/20260103T000000Z/codex/0"
+    ]
+    assert qualification_input_bundle_errors(bundle, verify_files=True) == []
+
+
 def test_bundle_rejects_broad_or_relative_additional_evidence_root(
     tmp_path: Path,
 ) -> None:
@@ -447,6 +482,23 @@ def test_bundle_rejects_broad_or_relative_additional_evidence_root(
         _build_bundle(
             inputs,
             additional_evidence_runs_dirs=[broad_archive.resolve()],
+        )
+
+    ambiguous = tmp_path / "ambiguous-runs"
+    for target_slug in ("controller_a", "controller_b"):
+        _write_json(
+            ambiguous
+            / target_slug
+            / "20260103T000000Z"
+            / "codex"
+            / "0"
+            / "target_ref.json",
+            {"repo_input": "fixture"},
+        )
+    with pytest.raises(ValueError, match="additional_evidence_root_target_ambiguous"):
+        _build_bundle(
+            inputs,
+            additional_evidence_runs_dirs=[ambiguous.resolve()],
         )
 
     with pytest.raises(ValueError, match="additional_evidence_root_not_absolute"):
