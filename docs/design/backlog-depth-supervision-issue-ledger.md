@@ -2617,6 +2617,53 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: retained hydration now uses signed case-level IDs when an operational aggregate exists, otherwise the signed occurrence IDs are the durable case frontier. Legacy dossiers without an available signed partition still use the complete authenticated assignment. This applies the existing general evidence-role contract; it does not special-case Claude or weaken currentness checks.
 - Verification: a new two-occurrence regression passes alongside the aggregate-with-supporting-occurrences regression; 50 adjacent hydration/downstream/historical lifecycle tests pass; the full `apps/usertest_backlog` suite passes with two expected skips in 300.6 seconds. Exact replay of the retained Claude dossier hydrates all three current atoms with zero errors and routes `await_evidence`, with Stage 3 deselected, downstream disabled, and no model, ticket, export, implementation, Docker, or removal action.
 
+### BDS-188 - The bounded group materializer initially projected only the research-unit case
+
+- Status: `closed_throwaway_wrapper`
+- Priority: supervisor-efficiency, provisional-group fidelity
+- Objective impact: the first bounded Windows launch copied only the selected research-unit record and preserved stale one-member problem metadata, so live Stage 3 stopped before a model call even though the registry already described a two-case provisional group.
+- Exact evidence: `stage3_case_fe517_sol_high_20260720T210300Z` exited in 2.7 seconds with zero model calls and `provisional_same_cause_record_problem_members_mismatch`. The preceding component preflight had passed. The later relation receipt helper also initially inferred the absorbed case from member ordering instead of the returned alias mapping; that receipt-only error was caught before it was used downstream.
+- Correction: the throw-away materializer invokes the production provisional-research-unit membership synchronizer, and the relation helper derives absorbed IDs from the production `case_aliases` mapping.
+- Verification: the corrected Stage-2 packet retained both cases, dispatched one research unit, assigned all 25 source atoms, and the corrected relation receipt identifies `case:7df34a9a76b8de621aed` as the sole absorbed alias of `case:fe517dafc2a12d5779ab`.
+
+### BDS-189 - Stage-3 preflight did not validate the exact provisional-group assignment
+
+- Status: `open_nonblocking`
+- Priority: launch-efficiency, premodel correctness
+- Objective impact: a component preflight can report success while the immediately following live Stage-3 invocation rejects the provisional member/problem mapping before dispatch. This wastes a launch iteration but does not corrupt evidence or generate bad work.
+- Exact evidence: `stage3_group_windows_preflight_20260720T210700Z` completed with zero calls, while the earlier structurally equivalent one-member packet passed preflight and then failed live with `provisional_same_cause_record_problem_members_mismatch`.
+- Current containment: bounded group packets are synchronized with the production membership function before launch and their assignment errors are inspected explicitly. The corrected live launch completed in one retained author session.
+- Required action: construct and validate the exact Stage-3 research assignment during preflight, including provisional member cases, member problem IDs, facets, and source evidence, using the same function as live dispatch.
+- Closure proof: an intentionally incomplete provisional packet fails preflight with the same typed error and zero model calls; a complete packet passes both preflight and live assignment construction without supervisor repair.
+
+### BDS-190 - Post-research relation identity ignored authenticated proof-adapter causality
+
+- Status: `closed`
+- Priority: canonical-case correctness, downstream deduplication
+- Objective impact: Stage 3 could produce a runner-verified primary mechanism covering every provisional member atom, yet post-research collapse still left the same-cause group unresolved because causal identity recognized controls, falsification interventions, closures, and probe control points but not verified proof-adapter interventions and causal edges.
+- Exact evidence: the corrected Windows dossier was evidence-sufficient with one verified mechanism receipt covering 25/25 assigned source atoms, a content-bound intervention target, and a verifier-produced causal edge. `verify_persisted_research_evidence` and `assess_research_readiness` both returned true with zero errors, while `_verified_causal_signature` returned `None` and the production collapse emitted no group.
+- Correction: the causal projection now accepts a proof-adapter route only when the verified provenance contains both a selected causal-root edge and an intervention target. It normalizes stable target, caller, callee, path, symbol, and edge-kind facts while excluding case-local IDs and hashes. An incomplete adapter with a target but no verified edge still cannot collapse cases.
+- Verification: two focused regressions cover accepted and incomplete adapters; all 21 post-research relation tests pass. Exact production replay aliases `case:7df34a9a76b8de621aed` to `case:fe517dafc2a12d5779ab`, reduces two priority records to one downstream unit, and resolves the canonical identity. The full backlog application suite passed 838 tests with two expected skips in 394.8 seconds.
+
+### BDS-191 - External relation feedback was marked corrected before its predicate was reevaluated
+
+- Status: `open_nonblocking_baseline_supervised`
+- Priority: self-healing accuracy, correction efficiency
+- Objective impact: the retained same-author correction loop considered an external relation finding resolved when the authored schema and native evidence verifier returned zero fatal errors, even though the downstream relation predicate still reported zero verified origin atoms. This produced two avoidable supervisor feedback turns and misleading intermediate `corrected` receipts.
+- Exact evidence: the first retained correction added a controlled proof adapter over all 25 atoms, but its positive repository quote was unattested; the second fixed the quote but omitted the experiment-level positive-outcome contract. Both continuation receipts reported `corrected` and zero native validation errors, while rerunning the downstream predicate still returned 0/25. The third same-session correction added the exact contract and produced 25/25 verified mechanism coverage.
+- Current containment: every external correction is checked by rerunning the function that produced the finding; native zero-error status alone is not treated as proof that an external predicate changed. All three corrections retained session `019f8159-b871-7990-acbf-4d3d5a4badcd`; none restarted or discarded the dossier.
+- Required action: external feedback must carry a machine-evaluable recheck contract, and `corrected` should be emitted only when that predicate passes or the author supplies an authenticated alternative disposition. Changed error identities and reduced error counts remain progress and keep the same author frontier.
+- Closure proof: a future post-stage finding automatically reexecutes its bound verifier after each same-author correction and continues from the retained frontier until the predicate passes, becomes genuinely uncorrectable, or reaches the configured nonprogress policy.
+
+### BDS-192 - Bounded Stage-3 continuation lineage retained a stale research self-reference
+
+- Status: `closed_throwaway_wrapper`
+- Priority: supervisor-efficiency, retained-lifecycle fidelity
+- Objective impact: after a valid out-of-band same-author correction, the component handoff persisted the corrected dossier hash but retained the original pre-correction `research_json` artifact path. Exact next-cycle hydration therefore routed an already completed case back to research.
+- Exact evidence: the first Windows next-cycle replay returned `retained_research_dossier_sha256_mismatch`; its current research summary referenced the original `stage3_group_windows_sol_high_20260720T210800Z/usertest.research.json` while binding the corrected dossier hash.
+- Correction: the throw-away post-research materializer remaps the Stage-3 document's `research_json` self-reference to the corrected, persisted artifact before case-registry lineage is recorded.
+- Verification: the repeated deterministic relation and Stage-4 handoff hydrate the corrected research and zero-option disposition with no errors. The canonical route is `await_evidence`, the absorbed case is absent from projected work, and neither research nor downstream is selected.
+
 ## Verification-pending fixes
 
 ### BDS-001 — Stage 3 treated future design choices as material research unknowns

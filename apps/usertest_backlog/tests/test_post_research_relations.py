@@ -297,6 +297,92 @@ def test_verified_provisional_group_finalizes_only_after_all_member_evidence() -
     assert "provisional_same_cause_group" not in registry["cases"]["case:b"]
 
 
+def test_verified_adapter_proof_can_finalize_provisional_same_cause_group() -> None:
+    inputs = _provisional_inputs()
+    provenance = {
+        **_provenance(),
+        "causal_control_ids": [],
+        "research_probe_control_points": [],
+        "intervention_targets": [
+            {
+                "intervention_id": "case-local-id",
+                "kind": "request_change",
+                "target": "router.dispatch",
+            }
+        ],
+        "support_connectivity": [
+            {
+                "mechanism_evidence_id": "mechanism:one",
+                "connection_kind": "causal_root",
+                "verified_causal_edges": [
+                    {
+                        "edge_kind": "adapter_intervention_to_shared_production_touchpoint",
+                        "caller_path": "src/router.py",
+                        "caller_symbol": "router.dispatch",
+                        "callee_path": "src/router.py",
+                        "callee_symbol": "router.send",
+                        "causal_edge_sha256": "case-local-hash",
+                    }
+                ],
+            }
+        ],
+    }
+    for entry in inputs["case_registry"]["cases"].values():
+        entry["verified_mechanism_provenance"] = provenance
+        entry["verified_mechanism_provenance_sha256"] = _digest(provenance)
+    dossier = inputs["research_dossiers"][0]
+    dossier["evidence_verification"]["verified_mechanism_provenance"] = provenance
+    dossier["evidence_verification"]["verified_mechanism_provenance_sha256"] = _digest(
+        provenance
+    )
+    dossier["evidence_verification"]["control_verifications"] = []
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {"case:b": "case:a"}
+    assert result["groups"][0]["relation_kind"] == "verified_provisional_same_cause"
+    assert result["problem_records"][0]["case_identity_status"] == "resolved"
+
+
+def test_incomplete_adapter_proof_does_not_finalize_provisional_group() -> None:
+    inputs = _provisional_inputs()
+    provenance = {
+        **_provenance(),
+        "causal_control_ids": [],
+        "research_probe_control_points": [],
+        "intervention_targets": [
+            {
+                "intervention_id": "case-local-id",
+                "kind": "request_change",
+                "target": "router.dispatch",
+            }
+        ],
+        "support_connectivity": [],
+    }
+    for entry in inputs["case_registry"]["cases"].values():
+        entry["verified_mechanism_provenance"] = provenance
+        entry["verified_mechanism_provenance_sha256"] = _digest(provenance)
+    dossier = inputs["research_dossiers"][0]
+    dossier["evidence_verification"]["verified_mechanism_provenance"] = provenance
+    dossier["evidence_verification"]["verified_mechanism_provenance_sha256"] = _digest(
+        provenance
+    )
+    dossier["evidence_verification"]["control_verifications"] = []
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {}
+    assert result["groups"] == []
+
+
 def test_partial_provisional_group_preserves_original_ids_and_blocks_alias() -> None:
     inputs = _provisional_inputs()
     inputs["research_dossiers"][0]["evidence_assignment"]["expected_atom_ids"] = ["atom:a"]

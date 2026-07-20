@@ -235,7 +235,60 @@ def verified_causal_evidence_projection(
         for projected in [_control_point_identity(value)]
         if projected is not None
     ]
-    if not interventions and not closures and not projected_control_points:
+    selected_mechanism_evidence_ids = set(_strings(provenance.get("mechanism_evidence_ids")))
+    adapter_interventions = [
+        {
+            "kind": kind,
+            "target": target,
+        }
+        for raw in (
+            provenance.get("intervention_targets")
+            if isinstance(provenance.get("intervention_targets"), list)
+            else []
+        )
+        if isinstance(raw, dict)
+        for kind in [_text(raw.get("kind"))]
+        for target in [_text(raw.get("target"))]
+        if kind is not None and target is not None
+    ]
+    adapter_causal_edges: list[dict[str, Any]] = []
+    support_connectivity = provenance.get("support_connectivity")
+    for support in support_connectivity if isinstance(support_connectivity, list) else []:
+        if (
+            not isinstance(support, dict)
+            or support.get("connection_kind") != "causal_root"
+            or _text(support.get("mechanism_evidence_id"))
+            not in selected_mechanism_evidence_ids
+        ):
+            continue
+        edges_raw = support.get("verified_causal_edges")
+        edges = edges_raw if isinstance(edges_raw, list) else []
+        single_edge = support.get("verified_causal_edge")
+        if isinstance(single_edge, dict):
+            edges = [*edges, single_edge]
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            projection = {
+                key: edge.get(key)
+                for key in (
+                    "edge_kind",
+                    "caller_path",
+                    "caller_symbol",
+                    "callee_path",
+                    "callee_symbol",
+                )
+                if edge.get(key) is not None
+            }
+            if projection:
+                adapter_causal_edges.append(projection)
+    adapter_proof_available = bool(adapter_interventions and adapter_causal_edges)
+    if (
+        not interventions
+        and not closures
+        and not projected_control_points
+        and not adapter_proof_available
+    ):
         return None
     return {
         "schema_version": 2,
@@ -251,6 +304,14 @@ def verified_causal_evidence_projection(
         ),
         "deterministic_closures": sorted(
             _unique_sorted_records(closures),
+            key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+        ),
+        "adapter_interventions": sorted(
+            _unique_sorted_records(adapter_interventions if adapter_proof_available else []),
+            key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+        ),
+        "adapter_causal_edges": sorted(
+            _unique_sorted_records(adapter_causal_edges if adapter_proof_available else []),
             key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
         ),
     }
