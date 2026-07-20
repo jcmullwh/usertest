@@ -246,15 +246,15 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["timing"]["end_at"] is None
     assert current["rework"]["author_invocations"] == 115
     assert current["rework"]["continuation_launches"] == 69
-    assert current["rework"]["stage_reruns"] == 10
+    assert current["rework"]["stage_reruns"] == 11
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 87
+    assert current["errors"]["count"] == 91
     assert current["automatic_self_corrections"]["count"] == 31
-    assert current["supervisor_interventions"]["count"] == 52
+    assert current["supervisor_interventions"]["count"] == 56
     assert current["furthest_stage"] == (
         "Corrected Stage 2 for the effective canonical frontier; twelve cases are "
-        "terminal and both authenticated storage children retain their correct "
-        "nonterminal Stage-3-to-ticket frontier"
+        "terminal, two storage children are correctly parked, and maintenance-image "
+        "retention is in production Stage 3 with complete authenticated source evidence"
     )
 
     rendered = mod._render_dashboard(dashboard)

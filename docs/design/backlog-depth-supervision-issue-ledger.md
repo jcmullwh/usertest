@@ -1736,6 +1736,35 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Containment and result: bounded `Select-String` queries established the repository intent/security contract; the corrected import graph ran `research_contract_view`, `assess_research_readiness`, and `verify_persisted_research_evidence` successfully; corrected projections and hash commands verified the final artifacts. No model call, Stage 3 attempt, dossier claim, downstream decision, ticket, export, removal, implementation, or product code was repeated or changed by these diagnostic failures.
 - Required practice: reuse the production-boundary audit helper and compact receipt projections for subsequent cases. Prefer one coarse process wait and one post-completion audit over repeated ad hoc artifact exploration.
 
+### BDS-167 - Stage 3 treated durable derived-source aliases as missing evidence
+
+- Status: `closed_in_pr_focused_and_contract_suites_green`
+- Classification: one pipeline lineage/integration defect that prevented useful research throughput; not an author, verifier, research-quality, or PR-scope failure
+- Exact evidence: the first maintenance-image Stage 3 execution completed model-free as `blocked/blocked/undetermined`. Its assignment reported three unavailable source atoms. Two were not missing observations: the current 2,854-atom corpus contained exact content-addressed forms of the retained `usertest_implement/...:maintenance_image_cleanup:1` IDs, and `case_lineage` already reconstructed those durable aliases from runner-owned `derived_source_root_kind`, `derived_source_run_rel`, source, and ordinal fields. Stage 3 did not consume that existing identity contract, so it parked before dispatch even though both observations and their retained artifacts were present.
+- Correction and proof: commit `adce70b` exposes the existing alias derivation and makes Stage 3 replace a missing durable ID only when exactly one current content-addressed atom authenticates it. Each receipt binds the historical ID, current ID, current source-projection hash, and authority. Ambiguous aliases still block. The complete reproduction-research and case-lineage files pass 87 tests; the complete stage-contract file passes 205 tests; Ruff and diff checks pass. A current 2,855-atom pre-dispatch replay resolves both aliases, retains the independently authenticated operator observation, and produces a complete three-receipt assignment with zero missing evidence or lineage errors.
+- Objective effect: this removes a false zero-throughput gate without weakening the evidence boundary. It neither accepts missing evidence nor special-cases maintenance wording.
+
+### AN-94 - Supervisor helpers imposed irrelevant full-run requirements on bounded provenance checks
+
+- Status: `closed_bounded_helpers_corrected_before_paid_dispatch`
+- Classification: one supervisor helper-design cluster containing two overstrict assertions; not a pipeline, model, author, verifier, or research failure
+- Exact evidence: after production Stage 3 correctly emitted the first model-free blocked dossier, the single-case wrapper rejected it because it required nonempty `research_attempts` for every dossier, including a valid evidence-assignment block that occurs before model dispatch. Separately, the first source-rehydration helper required the retained July 14 dossier to satisfy the latest complete authored-dossier parser even though the operation used only its independently self-hashed runner-owned evidence assignment and atom/artifact receipts; the current parser rejected an unrelated historical proof-adapter field before writing output.
+- Containment and result: the wrapper now accepts zero attempts only for the narrow `blocked/blocked` state with a nonempty incomplete evidence assignment; dispatched research still requires the native retained-attempt contract. Rehydration verifies the stage and case identity, assignment self-hash, atom source-projection hash, and every artifact hash/size without claiming the old authored dossier meets today's semantic contract. Neither defect caused a paid model call, discarded author work, upstream restart, Docker action, export, implementation, or removal.
+
+### AN-95 - Maintenance diagnostics used three avoidably broad or guessed filesystem reads
+
+- Status: `closed_read_only_queries_bounded`
+- Classification: one supervisor diagnostic-discovery cluster, not a pipeline, model, verifier, artifact, or case failure
+- Exact evidence: one recursive cold-storage search ran for 90 seconds without output before the known direct recovery-receipt path was checked; a later recursive source/tool search descended into retained `.tmp` workspaces for 20.5 seconds before termination; and one read guessed `research.json` instead of the retained `usertest.research.json` path and returned no dossier. Direct paths and bounded source slices then provided the required facts.
+- Containment and result: no diagnostic changed an artifact or interrupted the Stage 3 process. The cold copy preserved its source, the current source inputs remained hash-identical, and no model call, stage result, export, implementation, Docker object, or removal was caused by these reads.
+
+### AN-96 - First alias test invocation used an incomplete monorepo source graph
+
+- Status: `closed_complete_affected_suites_green`
+- Classification: one supervisor test-environment invocation error, not a product-code or test-body failure
+- Exact evidence: the first focused pytest command supplied `backlog_core`, `backlog_miner`, `runner_core`, and the application source but omitted `packages/run_artifacts/src`; collection stopped in 0.9 seconds with `ModuleNotFoundError: run_artifacts`, before any test executed.
+- Containment and result: the corrected environment includes every `packages/*/src` directory. The full affected reproduction-research and case-lineage files pass 87 tests, the full stage-contract file passes 205 tests, and Ruff passes. No assertion, timeout, production behavior, model call, pipeline artifact, or evidence gate was changed to obtain green results.
+
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
 - Status: `closed_immediate_unbounded_read`

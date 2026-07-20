@@ -4,14 +4,14 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-20T04:06:52Z",
+    "as_of": "2026-07-20T04:32:25Z",
     "current_run_id": "qualification-cycle-383cf41f-20260719",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "12 terminal; 2 research frontiers parked",
-        "detail": "The effective frontier has 26 canonical cases and 25 selected research units. The local-artifact case is terminal non_actionable after reproducing the sensitive-data boundary and verifying the no-automatic-share contract; the two storage children remain honestly nonterminal and did not advance to optioning.",
+        "value": "12 terminal; 2 parked; 1 research active",
+        "detail": "The effective frontier has 26 canonical cases and 25 selected research units. Maintenance-image research is now running with a complete three-observation assignment after exact durable aliases were resolved and one authenticated cold-stored operator receipt was copied back without removal. The two storage children remain honestly nonterminal.",
         "tone": "warn"
       },
       {
@@ -23,13 +23,13 @@
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "This cycle is active: 12 of 25 effective selected research units are terminal. Two more have correct but explicitly nonterminal blocked/insufficient-evidence dispositions. No qualification cycle or export authorization is earned.",
+        "detail": "This cycle is active: 12 of 25 effective selected research units are terminal, two have correct nonterminal evidence frontiers, and one source-backed maintenance case is in Stage 3. No qualification cycle or export authorization is earned.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Next source-backed case",
-        "detail": "Preserve the two storage frontiers until their named evidence becomes available, then process the next of 11 unworked selected cases at one-case volume. Export, implementation, and removal remain disabled.",
+        "value": "Maintenance Stage 3 disposition",
+        "detail": "Wait coarsely for the active Sol/high research process, audit its authored and verified evidence once it exits, then route only this case to its correct terminal or downstream disposition. Export, implementation, and removal remain disabled.",
         "tone": "warn"
       }
     ],
@@ -3086,27 +3086,27 @@
         "rework": {
           "author_invocations": 115,
           "continuation_launches": 69,
-          "stage_reruns": 10,
+          "stage_reruns": 11,
           "full_restarts": 0,
-          "summary": "The prior 112 calls are retained. Local-artifact sanitization added three actual Sol/high model calls and two continuations in one session; its model-free evidence-feedback record is excluded. The case completed one Stage 3 invocation and its first terminal handoff without a stage rerun. No miner, author, case, or full pipeline restart occurred."
+          "summary": "The prior 115 completed calls are retained. Maintenance first completed model-free as an honest missing-evidence block, then reran only Stage 3 after the general alias fix and authenticated one-atom input repair; its active paid-call count remains pending until the process exits. No miner, relation, priority, case, or full pipeline restart occurred."
         },
-        "label": "Fresh sealed cycle through twelve terminal cases and a two-child storage split",
-        "scope": "Export-disabled non-IDEA qualification cycle over 2,856 post-split atoms at target revision 8fff1c16, with retained Stage-1 miners, bounded relation requalification, exact Stage-2 decisions, twelve terminal negative cases, one authenticated mixed-cause split, and two verifier-clean nonterminal storage children; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
+        "label": "Fresh sealed cycle through twelve terminal cases, two parked frontiers, and active maintenance research",
+        "scope": "Export-disabled non-IDEA qualification cycle at target revision 8fff1c16, reusing retained Stage-1 miners, bounded relation requalification, and exact Stage-2 decisions. The active maintenance component has 2,855 atoms: the unchanged 2,854-atom materialization plus one hash-authenticated operator observation restored from cold storage; signed-in gpt-5.6-sol/high, no API fallback, no removal, no ticket export, and no implementation",
         "timing": {
           "start_at": "2026-07-19T13:15:00Z",
           "end_at": null,
-          "elapsed_seconds": 53512,
+          "elapsed_seconds": 55045,
           "coverage": "active",
-          "display": "14 h 51 m active",
-          "note": "Active wall time through the local-artifact terminal case. Parent storage research took 2,586.6 seconds; checkout Stage 2/3 took 9.0/1,448.7 seconds; provider Stage 2/3 took 13.9/2,122.4 seconds. Windows-shell, Gemini, Docker-daemon, Windows-command, Docker-shell-preflight, first-run-policy, Windows-sandbox-shell, quickstart, and local-artifact Stage 3 took 2,247.8, 2,353.4, 1,035.0, 2,140.0, 1,662.7, 1,634.4, 1,176.3, 2,181.3, and 1,346.5 seconds. The latest terminal chain took 8.0 seconds with zero model calls. Model-free feedback records and activation delay are not represented as model reasoning."
+          "display": "15 h 17 m active",
+          "note": "Active wall time through maintenance Stage 3 launch. The first maintenance execution ended model-free in 1.8 seconds because three retained IDs appeared unavailable. Two exact current aliases and one authenticated restored atom now form a complete assignment; the actual Sol/high research process is active under the full-day ceiling. Prior per-case timings remain retained in earlier snapshots. Model-free feedback and preflight records are not counted as model reasoning."
         },
-        "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; twelve cases are terminal and both authenticated storage children retain their correct nonterminal Stage-3-to-ticket frontier",
-        "current_state": "The effective post-split corpus contains 26 canonical cases and 25 effective selected research units. Twelve research units are terminal. The latest dossier binds all five April source atoms, reproduces `.env` acquisition and raw report rendering with synthetic markers, and verifies that current command contracts mark run/export artifacts sensitive while export-tickets creates only local drafts and no tracker issue. Repository intent and security guidance make content preservation plus operator review an intentional boundary; the source observed no disclosure. It ends verifier/readiness-clean evidence_sufficient/reproduced/non_actionable. This does not claim artifacts are sanitized or safe to share. Stage 4 records not_required, and Stages 5-6 and ticket assembly emit no option, plan, ticket, or model manifest. The checkout and provider storage children remain verifier-clean nonterminal frontiers with precise evidence needs.",
-        "outcome": "Twelve terminal negative dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
+        "furthest_stage": "Corrected Stage 2 for the effective canonical frontier; twelve cases are terminal, two storage children are correctly parked, and maintenance-image retention is in production Stage 3 with complete authenticated source evidence",
+        "current_state": "Maintenance-image research initially stopped before model dispatch because Stage 3 could not resolve three historical source IDs. Two observations already existed under exact content-addressed identities, exposing a general lineage adapter defect now fixed in PR #217. The third atom was recovered byte-for-byte from a retained hash-bound assignment; its 1,307-byte attachment was copied from cold storage to the authenticated original path with SHA-256 43836965, preserving both copies. A narrow replay now yields exactly three expected receipts, two explicit alias receipts, zero missing evidence, and zero lineage errors. The first actual signed-in Sol/high Stage 3 process is active. No claim about mechanism, actionability, or solution has been made by supervision.",
+        "outcome": "Twelve terminal negative dispositions, one authenticated causal split, two honest nonterminal frontiers, one active source-complete research case, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal",
         "errors": {
-          "count": 87,
+          "count": 91,
           "count_kind": "deduplicated_clusters",
-          "summary": "Thirteen controller/integration clusters are retained: nine corrected or previously closed and four open/contained observations. Thirty-one nondeterministic author clusters self-corrected in their original sessions. Forty-three supervisor diagnostic/wrapper/reporting/test-construction clusters were corrected without restarting research. The latest supervisor cluster contains seven avoidable read-only diagnostic-command defects but caused no model or stage rerun and did not change the pipeline result.",
+          "summary": "Fourteen controller/integration clusters are retained after adding the Stage-3 durable-alias defect, now corrected generally in PR #217. Thirty-one nondeterministic author clusters self-corrected in their original sessions. Forty-six supervisor clusters are retained after one overstrict-helper cluster, one bounded diagnostic-discovery cluster, and one incomplete test-environment invocation. None authored or changed the maintenance conclusion.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
@@ -3194,7 +3194,11 @@
             "AN-92",
             "AUTHOR-STAGE3-LOCAL-ARTIFACT-SANITIZATION-V1-OUTPUT-01",
             "AUTHOR-STAGE3-LOCAL-ARTIFACT-SANITIZATION-V1-EVIDENCE-01",
-            "AN-93"
+            "AN-93",
+            "BDS-167",
+            "AN-94",
+            "AN-95",
+            "AN-96"
           ]
         },
         "automatic_self_corrections": {
@@ -3236,9 +3240,9 @@
           ]
         },
         "supervisor_interventions": {
-          "count": 52,
+          "count": 56,
           "count_kind": "deduplicated_clusters",
-          "summary": "The prior fifty-one intervention clusters remain. The local-artifact audit added one deduplicated supervisor cluster containing one overbroad read and seven failed read-only diagnostic commands. All were corrected without rerunning research or changing pipeline code. The four open nonblocking controller observations did not trigger speculative hardening. The supervisor did not author a problem conclusion, solution, plan, or implementation.",
+          "summary": "The prior fifty-two intervention clusters remain. Maintenance added one objective-relevant pipeline correction and three bounded supervisor clusters: overstrict helper assertions, broad/guessed diagnostic reads, and one incomplete test source graph. Stage 3 alone reran after evidence became complete; no author output was discarded, no upstream stage restarted, and the supervisor did not author a problem conclusion, solution, plan, or implementation.",
           "cluster_ids": [
             "BDS-154",
             "BDS-155",
@@ -3291,12 +3295,16 @@
             "AN-90",
             "AN-91",
             "AN-92",
-            "AN-93"
+            "AN-93",
+            "BDS-167",
+            "AN-94",
+            "AN-95",
+            "AN-96"
           ]
         },
-        "next_action": "Preserve both storage children and do not rerun them without the named new evidence. Choose the next of 11 unworked source-backed selections and run only that case through production Stage 3 and its correct downstream disposition. Reuse the current frontier; do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation yet.",
+        "next_action": "Wait on the active maintenance process at an interval appropriate to its 10-plus-minute expected duration, then audit the completed authored dossier and independent verifier results. Continue this same case through only the stages its evidence warrants. Do not restart mining/relation review, increase volume, export tickets, remove artifacts, or begin implementation before the case earns those transitions.",
         "tone": "warn",
-        "data_quality": "The authenticated post-split problem corpus is e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Parent storage research is 3d43eaa54eb28a4d3e225a1c96971c95f9c40fe4ac9193881138fd332232d080. Checkout research/terminal hashes are 11b8761384fcb7e9899078ade7463a4bdee8e8bfb30b61b08bfc67d5f1a8cc75 and a449486d46f8d1bb23653bd2157a8042f203a922d4b826b2f30399d79b2ad438; provider hashes are c80352eb70cea78baa7f507da8cbb4b569e5d9900fd78d24767e08eb13053ac1 and 3227c07f088ce93a70e3bf42c28ba96a39342d44a6c203a140f204ea102513cb. Windows-shell research/terminal hashes are 4e3959d62dba422ed7c98d101291b40021da2f81ba4a5e21f30ee1e8ec6690dd and fb1558c7fceae53c1091a0994926be5750d07004796e08e964db307cdbb91046. Gemini research/terminal hashes are 27ed20d962de86fe35429272d970e5906304a2ef2fd7fddb867ac9fcb99e6f0f and e82fd135cd616c322ec3f684321c13c9eb9de67eff6e3932c4e0778ee69e86e8. Docker-daemon research/terminal hashes are 68748892e4a8701813e6e1eb02e522f7a32e7c35fc23aa69f1bfbcf6669a5f18 and b0bebaab9f84ed13e589dfd93a660f6a3c9e9ab01a231932ad1765b2b52da4b3. Windows-command research/terminal hashes are 7e038cd5254d4240508ae1117aab4822f0f661c42ea76acf18a1a52ccc07216f and fd1b28c0b49306e67979a4c6e96caf63f468f566006fb3c92ea68b8d16738118. Docker-shell-preflight research/terminal hashes are 82729cf2938c5faf4ce14f3aa1796db662c38de69e6bff5b379855e76f0a4bda and 1159b783077a4ca1b52509b7e4e445c41d5e6a1e7d38f3eca9e664f84b0bbf98. First-run-policy research/terminal hashes are afe92e0a3298c5325d324a52273a0241d97d7104295d29f4f6dafb37510c8ef0 and 4260c010b49c6974b4b37fa84341a3d3b7c4a884a3ecb4b3fbaa45ce3e7f1cce. Windows-sandbox-shell research/terminal hashes are 5159e7a94ed6a069ee7b85a42ade0ba039205ca34d345e0d458399ab6ae2b4ae and 4bd866a170471e92c0387f6c24b4d147b1534fc48e20ecb5a5392932ef5ceeae. Quickstart-path research/terminal hashes are cbde98ca16ee590f7be0d21a173d5554c2a5951037fb31c0b43501d64b195cab and c7c5296e709f208415a930ae0e0cdda517f990324cd16cb83caafa89d659c3c4. Local-artifact research/terminal hashes are 12682aef6e6be933918bd053879a2b73b0425c01ae65afed6095bb69fab8b518 and c99736db5d4c5797f2fdf7c4525f883e43598474d2003e7c3393699c44b24a59. Every terminal path records zero Stage-4-to-6 manifests. Operational error counts cover controller-observed clusters and validator-visible author defects; transient within-turn exploration that never escapes the author boundary is not independently enumerated. No image, container, workspace, artifact, or VHDX content was removed. Full cycle completion remains unmeasured.",
+        "data_quality": "The authenticated post-split problem corpus is e919da9da02b8c294222cdf8db97b69b93b88c6aa7958d8984d6c67d3de92574. Historical terminal hashes remain in earlier snapshots. Maintenance source repair binds unchanged source atoms bbefb02fbe5144eb90067ad744874f7f122b327f62a33920c727a5cd00e622f3, retained research 3007fbc4cbf78bc8cf051fa6fa42d2dbee3fc20f172f906bc761de46f9ae025e, assignment f757bd3763ed2d7bbbcc191921a6622e956918ecd4946171b2c451322c5ad3f4, restored atom f9b3dd2eae013325d4252161ee1ebec4248abc5da317be7b62e32602451292be, attachment 43836965073cf9f1983711c13c9c5a718516fe69e20ce494f96b9bb11f4af7e1, and repaired corpus 008923db488fb188a604197406d02e575de02cadad9df25222ca5e9af99fdb99. The current assignment is complete with SHA-256 85f1d41662ae6b2f499f3e82d9789172d780c1fe568eb9881250260b42fccf01. Alias code is commit adce70b on draft PR #217. No source input, image, container, workspace, artifact, or VHDX content was removed. Active Stage-3 duration and result remain unmeasured until exit.",
         "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]
