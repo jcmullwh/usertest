@@ -115,7 +115,7 @@ _POWERSHELL = ShellStyle(
         r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor"
     ),
     offline_command=(
-        r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
+        "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/offline_first_success.ps1"
     ),
     set_pythonpath_script="scripts/set_pythonpath.ps1",
     activate_hint=r". .\.venv\Scripts\Activate.ps1",
