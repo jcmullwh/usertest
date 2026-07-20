@@ -541,6 +541,15 @@ def _research_extension(**overrides: object) -> dict[str, object]:
             ),
             "evidence_refs": evidence_refs if disposition != "undetermined" else [],
         }
+    if "observed_problem_refinement" not in overrides:
+        extension["observed_problem_refinement"] = {
+            "problem": "The assigned operation exhibits the retained failure.",
+            "user_impact": "The assigned operation cannot complete as intended.",
+            "evidence_summary": (
+                "The assigned source atom and retained investigation bound the observed failure."
+            ),
+            "evidence_atom_ids": ["atom:origin"],
+        }
     return extension
 
 
@@ -745,6 +754,8 @@ def test_repair_hint_preserves_code_symbol_for_field_level_causal_locator() -> N
     required_change = hint["required_change"]
     assert "field- or argument-level intervention.target" in required_change
     assert "exact inspected code symbols" in required_change
+    assert "created only by a research harness" in required_change
+    assert "Do not append a synthetic field suffix" in required_change
     assert "Multiple adapter proofs" in required_change
 
 
@@ -1988,8 +1999,11 @@ def test_evidence_repair_does_not_promote_shallow_contract_error_over_deeper_fro
     assert first_progress["candidate_disposition"] == (
         "retained_as_progressing_correction_baseline"
     )
-    assert first_progress["reason"] == "error_count_decreased_before_deeper_revalidation"
-    assert first_progress["cost_clock_reset"] is True
+    assert first_progress["reason"] == "nonadvancing_correction_retained_for_same_author"
+    assert first_progress["consecutive_ordinary_nonadvancing_correction_count"] == 1
+    assert first_progress["immediate_prior_feedback_error_count_progress"] is True
+    assert first_progress["genuine_feedback_progress"] is False
+    assert first_progress["cost_clock_reset"] is False
     assert first_progress["before_validation_frontier"] == "evidence_verification"
     assert first_progress["after_validation_frontier"] == "model_output_contract"
     second_progress = result["attempts"][1]["repair_progress"]
@@ -4157,16 +4171,59 @@ def test_same_author_can_restore_coverage_and_resume_ordinary_error_progress(
     assert restored_progress["substantive_coverage_regressions"] == []
     assert restored_progress["immediate_prior_feedback_error_count_progress"] is False
     assert restored_progress["objective_progress"] is False
-    assert restored_progress["genuine_feedback_progress"] is True
-    assert restored_progress["cost_clock_reset"] is True
-    assert restored_progress["reason"] == "prior_errors_reworked_without_new_best"
-    assert restored_progress["feedback_advancement"]["substantive_coverage_added"] == [
+    assert restored_progress["genuine_feedback_progress"] is False
+    assert restored_progress["cost_clock_reset"] is False
+    assert restored_progress["reason"] == "nonadvancing_correction_retained_for_same_author"
+    assert restored_progress["substantive_coverage_added_since_immediate_feedback"] == [
         "positive_outcome.proof_adapter"
         "[experiment:primary][hypothesis:primary].operational_contract",
         "root_cause_hypotheses[hypothesis:secondary].mechanism",
         "root_cause_hypotheses[hypothesis:secondary].supported",
     ]
+    assert restored_progress["substantive_coverage_added_since_objective_best"] == []
     assert restored_progress.get("candidate_not_promoted_to_objective_best") is not True
+
+
+def test_restoring_an_already_achieved_best_does_not_reset_global_stall_streak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    objective_errors = [f"objective:{index}" for index in range(6)]
+    worse_errors = [*objective_errors, "adapter:a", "adapter:b"]
+
+    def candidates(baseline: dict[str, Any]) -> list[tuple[dict[str, Any], list[str]]]:
+        sequence: list[tuple[dict[str, Any], list[str]]] = []
+        for phase, errors in (
+            ("worse", worse_errors),
+            ("restored-existing-best", objective_errors),
+            ("worse-again", worse_errors),
+        ):
+            candidate = json.loads(json.dumps(baseline))
+            candidate["phase"] = phase
+            sequence.append((candidate, list(errors)))
+        return sequence
+
+    result, prompts, baseline, initial_errors = _run_substantive_repair_sequence(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        name="objective-best-restoration-loop",
+        candidate_builder=candidates,
+    )
+
+    assert initial_errors == objective_errors
+    assert result["status"] == (
+        "repairable_paused:consecutive_nonadvancing_corrections_require_adjudication"
+    )
+    assert len(prompts) == 3
+    assert result["best_dossier"] == baseline
+    progress = [attempt["repair_progress"] for attempt in result["attempts"]]
+    assert [
+        item["consecutive_ordinary_nonadvancing_correction_count"] for item in progress
+    ] == [1, 2, 3]
+    assert progress[1]["immediate_prior_feedback_error_count_progress"] is True
+    assert progress[1]["objective_progress"] is False
+    assert progress[1]["genuine_feedback_progress"] is False
+    assert progress[1]["cost_clock_reset"] is False
 
 
 def test_repeated_equal_count_identity_churn_pauses_with_all_work_retained(

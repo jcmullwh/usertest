@@ -2648,6 +2648,42 @@ def test_falsifier_receipt_detects_selected_option_and_receipt_tampering() -> No
     )
 
 
+def test_falsifier_receipt_ignores_runner_owned_option_lineage_annotations() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+        first_name=str(paths[0]["path_name"]),
+        second_name=str(paths[1]["path_name"]),
+    )
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    evidence = verification["mechanism_evidence"]
+    assert isinstance(evidence, list)
+    bound = bind_falsification_review(
+        _falsification_review(
+            str(evidence[0]["mechanism_evidence_id"]),
+            research=research,
+        ),
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+    persisted_option = {
+        **option,
+        "case_id": "case:test",
+        "canonical_problem_id": "problem:test",
+        "case_member_problem_ids": ["problem:test"],
+    }
+
+    assert falsification_review_receipt_errors(
+        bound,
+        problem_id="problem:test",
+        selected_option=persisted_option,
+        research=research,
+    ) == []
+
+
 def _observable_change_plan_fixture(
     *,
     baseline_exit: int = 0,

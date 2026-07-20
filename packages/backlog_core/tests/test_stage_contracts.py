@@ -1286,6 +1286,12 @@ def _valid_dossier(**overrides: object) -> dict:
             "rationale": "The verified failure remains present at the pinned revision.",
             "evidence_refs": ["exp-support"],
         },
+        "observed_problem_refinement": {
+            "problem": "The parser rejects the retained valid input.",
+            "user_impact": "The reported operation cannot complete.",
+            "evidence_summary": "The assigned atom and controlled replay retain the failure.",
+            "evidence_atom_ids": ["atom:test"],
+        },
     }
     base.update(overrides)
     assignment = {
@@ -1695,6 +1701,41 @@ def test_fresh_research_output_requires_explicit_actionability_assessment() -> N
     assert "research_actionability_assessment_missing: problem:test-issue" in errors
 
 
+def test_fresh_research_output_requires_observed_problem_refinement() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("observed_problem_refinement")
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert "research_observed_problem_refinement_missing: problem:test-issue" in errors
+
+
+def test_observed_problem_refinement_must_cover_every_assigned_atom() -> None:
+    dossier = _valid_dossier()
+    dossier["observed_problem_refinement"]["evidence_atom_ids"] = ["atom:other"]
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert (
+        "research_observed_problem_refinement_atom_coverage_mismatch: problem:test-issue"
+        in errors
+    )
+
+
+def test_retained_v3_research_without_problem_refinement_remains_readable() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("observed_problem_refinement")
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert parsed == [dossier]
+    assert warnings == []
+
+
 def test_retained_v3_research_without_actionability_uses_legacy_change_route() -> None:
     dossier = _valid_dossier()
     dossier.pop("actionability_assessment")
@@ -1760,6 +1801,15 @@ def test_actionability_assessment_rejects_unresolved_evidence_reference() -> Non
 def test_actionability_claim_tamper_breaks_persisted_claim_hash() -> None:
     dossier = _valid_dossier()
     dossier["actionability_assessment"]["disposition"] = "already_addressed"
+
+    errors = contracts.research_evidence_verification_contract_errors(dossier)
+
+    assert "research_evidence_verification_claims_hash_mismatch: problem:test-issue" in errors
+
+
+def test_problem_refinement_tamper_breaks_persisted_claim_hash() -> None:
+    dossier = _valid_dossier()
+    dossier["observed_problem_refinement"]["user_impact"] = "The run recovered immediately."
 
     errors = contracts.research_evidence_verification_contract_errors(dossier)
 
@@ -2266,6 +2316,67 @@ def test_research_prompt_projection_bounds_large_runner_custody_payload() -> Non
     assert custody["evidence_source_attempt_count"] == 1
     assert custody["evidence_source_attempts_sha256"] == "9" * 64
     assert projection["experiments"] == dossier["experiments"]
+
+
+def test_research_prompt_projection_summarizes_large_state_transition_inventories() -> None:
+    marker = "VIRTUALENV_FILE_INVENTORY_DO_NOT_FORWARD"
+    transitions = [
+        {
+            "path": ".venv",
+            "runner_attested": True,
+            "before_entries": {},
+            "after_entries": {
+                f".venv/site-packages/package_{index}.py": {
+                    "kind": "file",
+                    "sha256": str(index).zfill(64),
+                    "size_bytes": 1,
+                    "marker": marker,
+                }
+                for index in range(2_000)
+            },
+            "changed_entries": [
+                f".venv/site-packages/package_{index}.py" for index in range(2_000)
+            ],
+            "transition_sha256": "a" * 64,
+        }
+    ]
+    projection = contracts._research_verification_prompt_projection(
+        {
+            "status": "verified",
+            "receipt_sha256": "b" * 64,
+            "experiments": [
+                {
+                    "experiment_id": "experiment:large-state-inventory",
+                    "outcome": "supports",
+                    "declared_state_transitions": transitions,
+                }
+            ],
+        }
+    )
+    encoded = json.dumps(projection, ensure_ascii=False)
+    experiment = projection["experiments"][0]
+    summary = experiment["declared_state_transition_summary"]
+
+    assert marker not in encoded
+    assert "declared_state_transitions" not in experiment
+    assert summary["transition_count"] == 1
+    assert summary["transition_roots"] == [
+        {
+            "path": ".venv",
+            "runner_attested": True,
+            "before_entry_count": 0,
+            "after_entry_count": 2_000,
+            "changed_entry_count": 2_000,
+            "changed_entries_sha256": contracts._canonical_sha256(
+                transitions[0]["changed_entries"]
+            ),
+            "transition_sha256": "a" * 64,
+        }
+    ]
+    assert summary["full_transition_receipts_sha256"] == contracts._canonical_sha256(
+        transitions
+    )
+    assert len(encoded) < 150_000
 
 
 def test_parse_research_dossier_list_accepts_valid() -> None:
@@ -3379,6 +3490,14 @@ def _historical_rich_partial_output_dossier() -> dict:
         "atom:test",
         "atom:unexamined",
     ]
+    dossier["observed_problem_refinement"]["evidence_atom_ids"] = [
+        "atom:test",
+        "atom:unexamined",
+    ]
+    dossier["observed_problem_refinement"]["evidence_summary"] = (
+        "One assigned facet is bounded; the second remains unexamined and is not claimed "
+        "as reproduced."
+    )
     experiment = dict(dossier["experiments"][0])
     experiment["outcome"] = "inconclusive"
     dossier["experiments"] = [experiment]

@@ -6512,6 +6512,18 @@ def run():
             "-s",
             f"{entrypoint}::{selector}",
         ]
+        arm_binding = repository_binding
+        if selector == "test_aged":
+            arm_projection = {
+                **binding_projection,
+                "relationship": (
+                    "The control arm reaches the same inspected production module."
+                ),
+            }
+            arm_binding = {
+                **arm_projection,
+                "repository_binding_sha256": mod._canonical_json_sha256(arm_projection),
+            }
         replays[experiment_id] = {
             "executed_argv": argv,
             "command_authorization": mod._command_authorization_receipt(
@@ -6520,7 +6532,7 @@ def run():
                     "executed_argv_sha256": mod._canonical_json_sha256(argv),
                     "shell": False,
                     "workspace_confined": True,
-                    "repository_bindings": [repository_binding],
+                    "repository_bindings": [arm_binding],
                     "artifact_id": "artifact:cleanup-harness",
                     "entrypoint_kind": "repository_argv_entrypoint",
                     "entrypoint_path": entrypoint,
@@ -6564,9 +6576,14 @@ def run():
     identity = receipt["consumer_identity"]
     assert identity["kind"] == "runner_observed_research_harness_consumer"
     assert identity["entrypoint"] == entrypoint
-    assert identity["command_authorization_identity"]["identity_kind"] == (
-        "repository_bindings"
-    )
+    assert identity["command_authorization_identity"] == {
+        "identity_kind": "research_harness_entrypoint",
+        "source_authorization_kind": "repository_bindings",
+        "research_harness_entrypoint": {
+            "entrypoint_path": entrypoint,
+            "entrypoint_sha256": entrypoint_sha256,
+        },
+    }
     assert identity["attestation_basis"] == (
         "executed_research_harness_with_authenticated_production_dependency"
     )
@@ -6785,6 +6802,15 @@ def test_challenge():
     assert [binding["root_mechanism_symbol"] for binding in receipt["causal_root_bindings"]] == [
         symbol
     ]
+    assert (
+        mod._adapter_mechanism_evidence_receipt(
+            proof,
+            hypothesis_symbols=[locator],
+            atom_bindings=atom_bindings,
+            clean_replays=replays,
+        )
+        is None
+    )
 
 
 def test_adapter_mechanism_connects_exact_intervention_to_shared_touchpoint(
@@ -6862,6 +6888,7 @@ def test_challenge():
         hypothesis_symbols=[parser_symbol, resolver_symbol],
         atom_bindings=atom_bindings,
         clean_replays=replays,
+        inspected_symbols=[parser_symbol, resolver_symbol],
     )
 
     assert receipt is not None

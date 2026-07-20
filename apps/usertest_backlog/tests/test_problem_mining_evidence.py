@@ -4533,6 +4533,8 @@ def test_coverage_review_prompt_requests_depth_refinement_without_impact_inventi
     assert "compare repeated structured observations in timestamp order" in prompt
     assert "distinguish observed behavior from measurement caveats" in prompt
     assert "do not state plausible user impact as observed fact" in prompt
+    assert "recovery bounds severity but does not erase that observed extra work" in prompt
+    assert "Keep isolated probes and designed fallbacks distinct" in prompt
     assert "reuse its problem_id and emit a refined complete record" in prompt
     assert "Reject an unsupported primary" in prompt
     assert "emit the corresponding primary problem record verbatim" not in prompt

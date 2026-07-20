@@ -10,6 +10,8 @@ from typing import Any
 
 from backlog_repo.plan_scope import validate_plan_target_contract
 
+from usertest_implement.git_ops import _RUNNER_OWNED_GIT_EXCLUDES
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
@@ -65,6 +67,20 @@ def _git_is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     )
 
 
+def _implementation_workspace_status(repo: Path) -> str:
+    """Return user/agent changes while excluding runner-owned evidence and cache paths."""
+
+    return _git(
+        repo,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        ".",
+        *_RUNNER_OWNED_GIT_EXCLUDES,
+    )
+
+
 def _contract_from_ticket_ref(ticket_ref: Mapping[str, Any]) -> dict[str, Any]:
     raw = ticket_ref.get("ticket_provenance")
     provenance = raw if isinstance(raw, Mapping) else {}
@@ -108,7 +124,7 @@ def record_verified_implementation_head(
     workspace = Path(workspace_raw).expanduser().resolve()
     if _git(workspace, "rev-parse", "HEAD").casefold() != head:
         raise ValueError("implementation_provenance_workspace_head_mismatch")
-    if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+    if _implementation_workspace_status(workspace):
         raise ValueError("implementation_provenance_workspace_dirty_after_commit")
     payload = {
         "schema_version": 1,
@@ -183,7 +199,7 @@ def record_existing_verified_implementation_head(*, run_dir: Path) -> dict[str, 
         raise ValueError("implementation_provenance_workspace_head_mismatch")
     if _git(workspace, "branch", "--show-current") != branch:
         raise ValueError("implementation_provenance_workspace_branch_mismatch")
-    if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+    if _implementation_workspace_status(workspace):
         raise ValueError("implementation_provenance_workspace_dirty_existing_head")
     if not _git_is_ancestor(workspace, planned, head):
         raise ValueError("implementation_provenance_planned_revision_not_ancestor")

@@ -121,6 +121,25 @@ def _ticket_base_from_problem_record(record: dict[str, Any]) -> dict[str, Any]:
     return ticket
 
 
+def _apply_observed_problem_refinement(
+    ticket: dict[str, Any],
+    research: dict[str, Any] | None,
+) -> None:
+    """Promote Stage 3's verified symptom/impact account without rewriting Stage 1."""
+
+    if not isinstance(research, dict):
+        return
+    raw = research.get("observed_problem_refinement")
+    if not isinstance(raw, dict):
+        return
+    refinement = dict(raw)
+    for field in ("problem", "user_impact", "evidence_summary"):
+        value = _coerce_string(refinement.get(field))
+        if value is not None:
+            ticket[field] = value
+    ticket["observed_problem_refinement"] = refinement
+
+
 def _material_unknown_investigation_steps(research: dict[str, Any] | None) -> list[str]:
     """Render unresolved research-proof decisions without discarding their evidence needs."""
     if not isinstance(research, dict):
@@ -324,6 +343,8 @@ def assemble_backlog_tickets(
                 if key in plan:
                     ticket[key] = plan.get(key)
 
+            _apply_observed_problem_refinement(ticket, research)
+
             # Carry labeler output and other stage-5 selection fields.
             for key in (
                 "selected_family_id",
@@ -404,6 +425,7 @@ def assemble_backlog_tickets(
 
         ticket: dict[str, Any] = {}
         ticket.update(_ticket_base_from_problem_record(record))
+        _apply_observed_problem_refinement(ticket, research)
 
         if isinstance(selected_solution, dict):
             for key in (

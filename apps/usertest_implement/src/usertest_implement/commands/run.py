@@ -987,6 +987,8 @@ def _run_selected_ticket(
                         pass
                     else:
                         pr_ref["body"] = pr_body
+                        pr_body_path = run_dir / "pr_body.md"
+                        pr_body_path.write_text(pr_body, encoding="utf-8")
                         try:
                             pr_url = _run_gh_text(
                                 cwd=workspace_dir,
@@ -998,8 +1000,8 @@ def _run_selected_ticket(
                                     str(args.base_branch),
                                     "--title",
                                     title,
-                                    "--body",
-                                    pr_body,
+                                    "--body-file",
+                                    str(pr_body_path),
                                     *(["--draft"] if create_draft else []),
                                 ],
                             ).strip()

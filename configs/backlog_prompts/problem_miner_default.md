@@ -30,7 +30,11 @@ Stage 1 only asks: what problem exists and what is the evidence?
 - Do not promote every nonzero command or stderr line into a problem. When same-run terminal
   context directly shows recovery and successful relevant verification with no residual impact,
   treat the failed probe or attempt as non-support. Conversely, overall success does not erase an
-  independently observed residual defect or degraded feature.
+  independently observed residual defect, degraded feature, or repeated deterministic failure
+  that requires a distinct workaround or retry before success. For that repeated pattern, record
+  the bounded retry/reliability impact and lower the severity; do not claim mission blockage.
+  Isolated exploratory probes and explicitly designed fallbacks working as intended remain
+  non-support.
 - Do not split one upstream failure into separate cases for each downstream thing that could not
   be inspected or verified unless the evidence establishes an independent mechanism or persistent
   impact after the blocker.

@@ -181,6 +181,16 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _selected_option_contract_view(selected_option: Mapping[str, Any]) -> dict[str, Any]:
+    """Exclude runner-owned lineage annotations from the authored option contract."""
+
+    return {
+        key: value
+        for key, value in selected_option.items()
+        if key not in {"case_id", "canonical_problem_id", "case_member_problem_ids"}
+    }
+
+
 def _observable_assertion_predicate(assertion: Mapping[str, Any]) -> dict[str, Any] | None:
     source = _string(assertion.get("source"))
     operator = _string(assertion.get("operator"))
@@ -3829,7 +3839,9 @@ def bind_falsification_review(
         "kind": "selected_option_outcome_strategy",
         "problem_id": problem_id,
         "selected_option_id": selected_option_id,
-        "selected_option_sha256": _canonical_sha256(selected_option),
+        "selected_option_sha256": _canonical_sha256(
+            _selected_option_contract_view(selected_option)
+        ),
         "research_receipt_sha256": research_receipt_sha256,
         "strategy": outcome_strategy,
         "review": outcome_strategy_review,
@@ -3860,7 +3872,9 @@ def bind_falsification_review(
         "binding_method": "runner_causal_falsification_binding_v1",
         "problem_id": problem_id,
         "selected_option_id": selected_option_id,
-        "selected_option_sha256": _canonical_sha256(selected_option),
+        "selected_option_sha256": _canonical_sha256(
+            _selected_option_contract_view(selected_option)
+        ),
         "research_receipt_sha256": research_receipt_sha256,
         "review_claims_sha256": _canonical_sha256(bound),
         "evidence": evidence_projection,

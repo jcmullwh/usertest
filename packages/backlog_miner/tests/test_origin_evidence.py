@@ -762,6 +762,106 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
+    normalized_events = run_dir / "normalized_events.jsonl"
+    normalized_events.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "ts": "2026-01-01T00:00:01Z",
+                        "type": "run_command",
+                        "data": {
+                            "command": "powershell -File .\\scripts\\check.ps1",
+                            "exit_code": 1,
+                            "output_excerpt": "relative path missing",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-01-01T00:00:02Z",
+                        "type": "run_command",
+                        "data": {
+                            "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                            "exit_code": 0,
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    agent_events = run_dir / "raw_events.jsonl"
+    agent_events.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "tool:read-readme",
+                                    "name": "Read",
+                                    "input": {
+                                        "file_path": str(run_dir / "README.md"),
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "content": "MUST_NOT_COPY_TOOL_RESULT_SECRET",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "tool:run-quickstart",
+                                    "name": "Bash",
+                                    "input": {
+                                        "command": (
+                                            "powershell -NoProfile -ExecutionPolicy Bypass "
+                                            "-File .\\scripts\\offline_first_success.ps1"
+                                        ),
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = run_dir / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "smoke_v1",
+                "status": "success",
+                "final_result": {
+                    "summary": "The retried workflow completed.",
+                    "evidence": "Script exited 0.",
+                },
+                "token": "MUST_NOT_LEAK",
+            }
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "prompt.txt").write_text("DO_NOT_COPY_PROMPT_SECRET", encoding="utf-8")
     atom = {"atom_id": "atom:source-context", "run_dir": str(run_dir)}
 
@@ -787,6 +887,9 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
                     artifact_receipt(preflight, "preflight"),
                     artifact_receipt(shell_probe_events, "agent_shell_probe_events"),
                     artifact_receipt(settings, "settings"),
+                    artifact_receipt(agent_events, "agent_events"),
+                    artifact_receipt(normalized_events, "normalized_events"),
+                    artifact_receipt(report, "report"),
                 ],
             }
         ]
@@ -819,7 +922,22 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
     assert '"successful_command_count": 1' in index_text
     assert '"turn_completed_count": 1' in index_text
     assert '"exec_backend": "local"' in index_text
+    assert '"source_name": "normalized_events.jsonl"' in index_text
+    assert '"failed_command_count": 1' in index_text
+    assert '"successful_command_count": 1' in index_text
+    assert '"command_ordinal": 2' in index_text
+    assert '"source_name": "raw_events.jsonl"' in index_text
+    assert '"tool_name": "Read"' in index_text
+    assert '"file_path": "<absolute>/' in index_text
+    assert '/README.md"' in index_text
+    assert '"tool_name": "Bash"' in index_text
+    assert ".\\\\scripts\\\\offline_first_success.ps1" in index_text
+    assert '"file_read_count": 1' in index_text
+    assert '"source_name": "report.json"' in index_text
+    assert '"status": "success"' in index_text
+    assert "The retried workflow completed." in index_text
     assert "MUST_NOT_LEAK" not in index_text
+    assert "MUST_NOT_COPY_TOOL_RESULT_SECRET" not in index_text
     assert "DO_NOT_COPY_PROMPT_SECRET" not in index_text
     assert str(run_dir) not in index_text
     prompt = research_runner._append_prompt_for_problem(

@@ -512,25 +512,25 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat warn">
+            <div class="stat good">
               <span class="label">Current pipeline state</span>
-              <span class="value">14 terminal; 2 parked; 9 unworked</span>
-              <span class="detail">The Windows-sandbox source unit is terminal already_addressed after verifier-clean research and a zero-item downstream chain. The two storage children remain honestly nonterminal; nine selected research units remain unworked.</span>
+              <span class="value">15 terminal; 2 parked; 8 unworked</span>
+              <span class="detail">The offline-first case completed the whole system path: causal research, code-grounded plan, implementation, pipeline PR #219, green CI, same-author review correction, merge, and an evidence-bounded mitigated outcome. The two storage children remain honestly nonterminal.</span>
             </div>
             <div class="stat good">
               <span class="label">Current bounded throughput</span>
-              <span class="value">27 -&gt; 26 cases; 14 terminal, 2 nonterminal</span>
-              <span class="detail">Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Fourteen cases now terminate without new work; both storage children retain precise evidence-acquisition frontiers. The measured negative-dossier same-cause miss remains contained as duplicate-work cost.</span>
+              <span class="value">27 -&gt; 26 cases; 15 terminal, 2 nonterminal</span>
+              <span class="detail">Relation review reduced 27 records to 25 cases, then one authenticated storage split produced 26. Fifteen cases now have correct terminal dispositions, including one merged mitigation; both storage children retain precise evidence-acquisition frontiers. Eight selected units remain unworked.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">This cycle is active: 14 of 25 effective selected research units are terminal, two have correct nonterminal evidence frontiers, and nine remain unworked. No qualification cycle or export authorization is earned.</span>
+              <span class="detail">This cycle is still active: 15 of 25 effective selected research units are terminal, two have correct nonterminal evidence frontiers, and eight remain unworked. One successful PR is meaningful delivery evidence, but it does not qualify a full cycle or automated export.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Next unworked P2 Stage 3 unit</span>
-              <span class="detail">Checkpoint the Windows-sandbox result and BDS-168 correction, then select exactly one next eligible source-backed unit. Export, implementation, and removal remain disabled until a case earns those transitions.</span>
+              <span class="value">Regenerate at merged dev and select the next case</span>
+              <span class="detail">Refresh the non-IDEA backlog against merge commit bc70b15b, preserve the completed case and recurrence lineage, then process the next eligible unit through the same supervised system path.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -692,20 +692,20 @@
                 <td>Commit the combined controller and evidence records, then run one fresh export-disabled shadow regeneration from that clean exact revision. Every substantive model call remains…</td>
               </tr>
               <tr class="ops-current">
-                <td><strong>Fresh sealed cycle through fourteen terminal cases and two parked evidence frontiers</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>18 h 50 m active</strong><span class="ops-kind">active</span></td>
-                <td><span class="tag warn">Production ticket assembly for the fourteenth terminal case; Windows-sandbox research is verifier/readiness-clean and its earned downstream chain emitted no option, selection, plan, or ticket</span><span class="ops-detail">`problem:windows-sandbox-blocks-shell-commands` is terminal `evidence_sufficient/partial/already_addressed`. Research established the historical pre-execution Windows…</span></td>
-                <td><strong>Fourteen terminal negative/already-addressed dispositions, one authenticated causal split, two honest nonterminal research frontiers, zero bad-ready escapes, and no unwarranted option, plan, implementation, export, or removal</strong></td>
-                <td><strong>102</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Fifteen controller/integration clusters are retained after BDS-168. Thirty-five nondeterministic author clusters are retained; thirty-four self-corrected automatically, while the…</span></td>
-                <td><strong>34</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The prior thirty-three clusters remain. The Windows-sandbox output-contract cluster self-corrected from 13 findings to zero in the original session. Its evidence cluster is…</span></td>
-                <td><strong>63</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The prior fifty-eight intervention clusters remain. Windows-sandbox added BDS-168 plus four supervisor audit/setup clusters. The evaluator repair rescored immutable author work…</span></td>
-                <td><strong>144</strong> author calls; 96 continuations; 16 stage reruns; 0 full restarts<span class="ops-detail">The prior 120 calls are retained. Windows-sandbox research added 24 signed-in Sol/high calls and 23 same-session continuations with zero fresh author restart. Its original…</span></td>
-                <td>Commit and push the Windows-sandbox evaluator correction and audit checkpoint, then select exactly one next eligible unworked source-backed case and run only its required stage…</td>
+                <td><strong>Fresh sealed cycle through fifteen terminal cases, two parked frontiers, and one pipeline-merged mitigation</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>27 h 23 m active</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Pipeline-produced PR #219 merged with complete terminal outcome provenance</span><span class="ops-detail">`case:adc507afeea214f0d1e4` / `problem:relative-powershell-script-invocation-retry` is terminal. Ticket `65683d49a62c3b59` produced implementation commit `edad1e4d`, PR #219, and…</span></td>
+                <td><strong>Fifteen correct terminal dispositions, including one pipeline-produced merged mitigation; one authenticated causal split; two honest nonterminal research frontiers; eight unworked units; zero bad-ready escapes observed in the processed set; full-cycle qualification still 0/2</strong></td>
+                <td><strong>115</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The prior 106 deduplicated clusters are retained. Nine newly observed controller/integration or evidence-transport clusters (BDS-169 through BDS-177) are added. Six are closed…</span></td>
+                <td><strong>38</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The prior thirty-six clusters remain. Two further same-author repairs are counted: the Stage-6 planner corrected the export-role contract in its retained session, and the…</span></td>
+                <td><strong>74</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The prior sixty-five intervention clusters remain. Nine observed pipeline defects or transport gaps were diagnosed and either corrected or precisely contained while the system…</span></td>
+                <td><strong>215</strong> author calls; 146 continuations; 22 stage reruns; 0 full restarts<span class="ops-detail">The prior 154 calls are retained. The completed case added 61 signed-in Sol/high calls: 29 Stage-3 calls in one retained research session, 29 Stage-4/5/6 calls, one…</span></td>
+                <td>Regenerate the non-IDEA backlog against merged `origin/dev` commit `bc70b15bf1f6709a589d308f0739c2b865a65e77`, verify that the completed case updates existing lineage instead of…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-20T08:05:25Z. Showing 15 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-20T16:38:01Z. Showing 15 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

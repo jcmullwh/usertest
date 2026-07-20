@@ -1380,6 +1380,44 @@ def test_assemble_backlog_tickets_splits_by_change_plan() -> None:
     assert triage[0]["stage"] == "triage"
 
 
+def test_ticket_promotes_research_problem_refinement_over_stale_stage1_and_plan() -> None:
+    problem_id = "problem:one"
+    refinement = {
+        "problem": "The first command attempt fails before the same run recovers.",
+        "user_impact": "The failure adds retry cost but does not block the mission.",
+        "evidence_summary": "Two assigned failures are followed by successful same-run retries.",
+        "evidence_atom_ids": ["a1", "a2"],
+    }
+    research = _research_proof(
+        problem_id,
+        observed_problem_refinement=refinement,
+    )
+
+    [ticket] = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[
+            {
+                "case_id": "case:one",
+                "problem_id": problem_id,
+                "priority_bucket": "p2",
+                "selected_for_research": True,
+                "priority_rationale": "Research the repeated friction.",
+                "priority_status": "prioritized",
+            }
+        ],
+        research_dossiers=[research],
+        solution_option_sets=[_option(problem_id)],
+        selection_decisions=[_selection(problem_id)],
+        change_plans=[_plan(problem_id, 1)],
+    )
+
+    assert ticket["problem"] == refinement["problem"]
+    assert ticket["user_impact"] == refinement["user_impact"]
+    assert ticket["evidence_summary"] == refinement["evidence_summary"]
+    assert ticket["observed_problem_refinement"] == refinement
+    assert ticket["problem_record"]["problem"] == "P"
+
+
 @pytest.mark.parametrize("disposition", ["already_addressed", "non_actionable"])
 def test_assemble_backlog_tickets_does_not_reopen_terminal_no_change_research(
     disposition: str,

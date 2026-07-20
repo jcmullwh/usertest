@@ -1544,6 +1544,14 @@ def _run_production_research_acceptance(
             "rationale": "The original replay proves the failure remains at the pinned revision.",
             "evidence_refs": ["experiment:original"],
         },
+        "observed_problem_refinement": {
+            "problem": "The default core.run path raises instead of returning its contract value.",
+            "user_impact": "Callers cannot complete the default-path operation.",
+            "evidence_summary": (
+                "The assigned atom and original replay fail while the controlled path succeeds."
+            ),
+            "evidence_atom_ids": ["atom:origin"],
+        },
         "material_unknowns": list(material_unknowns or []),
         "blocking_reasons": [],
         "evidence_boundaries": [],
@@ -1803,7 +1811,11 @@ def test_production_research_material_unknown_blocks_specific_progression_gate(
     ready, reasons = assess_research_readiness(persisted)
     assert ready is False
     assert "research_proof_invalid" not in reasons
-    assert reasons == ["material_unknown_blocks_implementation_decision"]
+    assert reasons == [
+        "research_status_blocked",
+        "research_blocking_reasons_present",
+        "material_unknown_blocks_implementation_decision",
+    ]
 
 
 def test_production_research_without_positive_contract_can_advance_to_optioning(

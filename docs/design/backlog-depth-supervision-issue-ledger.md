@@ -1809,8 +1809,8 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 ### AN-99 - Windows-sandbox audit used avoidably broad and malformed read-only diagnostics
 
 - Status: `closed_bounded_projections_used`
-- Classification: one deduplicated supervisor diagnostic cluster containing eight command-shape, environment, or projection mistakes; not a pipeline, author, verifier, case, or test failure
-- Exact evidence: the audit used unsupported `ConvertFrom-Json -Depth`, produced three PowerShell `empty pipe element` parser errors by piping after `foreach` blocks, printed an unnecessarily large evidence-verification structure instead of a compact projection, launched two recursive `.tmp` searches that ran about 24 and 19 seconds, first invoked a focused test with `run_artifacts/src` absent from `PYTHONPATH`, and initially computed dashboard elapsed time with a local-kind `DateTime` against UTC `as_of`, inflating it by four hours. Each failed before or during read-only diagnosis; none altered an artifact or model frontier. The dashboard contract rejected the bad elapsed projection before writing it.
+- Classification: one deduplicated supervisor diagnostic cluster containing repeated command-shape, environment, and projection mistakes; not a pipeline, author, verifier, case, or test failure
+- Exact evidence: the audit used unsupported `ConvertFrom-Json -Depth`; produced four PowerShell `empty pipe element` parser errors by piping after `foreach` blocks; twice printed unnecessarily large nested evidence/run structures instead of compact projections; launched two recursive `.tmp` searches that ran about 24 and 19 seconds; later used a bounded two-run `rg` query whose inclusion of prompt content still produced an avoidably large result; first invoked a focused test with `run_artifacts/src` absent from `PYTHONPATH`; initially computed dashboard elapsed time with a local-kind `DateTime` against UTC `as_of`, inflating it by four hours; later rounded a fractional UTC span up by one second instead of deriving elapsed time from the serialized second-resolution timestamps; and used PowerShell's read-only automatic `$PID` variable for a problem-ID projection. Each failed before or during read-only diagnosis; none altered an artifact or model frontier. The dashboard contract rejected both bad elapsed projections before writing them, and corrected compact/direct queries supplied every fact used downstream.
 - Containment and result: direct retained paths, compact selected-property projections, and the complete monorepo source graph produced the needed evidence. No model call, stage result, dossier claim, option, plan, ticket, Docker object, export, implementation, deletion, or removal was caused by these errors.
 
 ### AN-100 - First model-free rescore reused a globally colliding revision-view basename
@@ -1833,6 +1833,34 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Classification: one supervisor invocation-contract error causing one bounded model-free Stage-4 rerun; not a pipeline stage, model, optioning, or case failure
 - Exact evidence: the first terminal Stage-4 helper invocation omitted the required full-day timeout environment and stopped in preflight before a stage or model call. Its output is retained and is not terminal evidence.
 - Containment and result: the corrected invocation retained the 86,400-second ceilings and completed Stage 4 in 9.0 seconds as `not_required/already_addressed`, with zero options or model calls. The model-free Stage-5/6/ticket chain then completed in 0.413 seconds with zero selections, plans, tickets, model calls, Docker calls, exports, filesystem ticket writes, implementation actions, deletions, or removals.
+
+### AUTHOR-STAGE3-OFFLINE-FIRST-SCRIPT-OUTPUT-01 - Offline-first authored output self-corrected without losing causal coverage
+
+- Status: `closed_same_author_session`
+- Classification: one nondeterministic author-output cluster; counted once despite six initial contract findings
+- Exact progression: attempt 1 produced six model-output findings. Attempt 2 reduced the mechanical count to zero but removed the supported script-presence alternative and was retained as a nonbaseline attempt rather than promoted. Attempt 3 restored that substantive coverage and remained zero-error. Progress was therefore `6 -> 0 with regression -> 0 without regression`, all in author session `019f7e95-9277-7fe1-812e-e722d29a6422`.
+- Guidance: the controller supplied the exact current findings and objective-best coverage comparison. It did not prescribe the root cause, actionability, or final hypothesis structure; no fresh author or supervisor-authored dossier content was used.
+
+### AUTHOR-STAGE3-OFFLINE-FIRST-SCRIPT-EVIDENCE-01 - Offline-first evidence self-healed from sixteen findings to verified
+
+- Status: `closed_same_author_session`
+- Classification: one nondeterministic author-evidence cluster and one successful automatic self-correction
+- Exact progression: the first evidence pass reported 16 findings across atom binding, replay custody, mechanism call binding, falsification, and proof-adapter authentication. Same-author continuations progressed `16 -> 8 -> 1 -> 0`. The last remaining finding required adjudicating the script-missing/broken alternative as noncompeting after the forward-slash control actually ran the tracked script successfully. Total Stage-3 cost was six model calls, five continuations, one model-free feedback record, 2,273 seconds, and zero restart.
+- Result: the accepted dossier binds both source atoms to the exact collapsed-path symptom, directly calls `runner_core.runner._execution_shell_family` and the shell-guidance renderer in a controlled Bash replay, reproduces the failure with the backslash form, passes the same script with the forward-slash control, records current/history evidence separately as inconclusive, and retains live Claude tool selection as a post-change verification boundary.
+
+### AN-103 - First exact-revision Stage-4 workspace setup omitted Windows checkout/trust controls
+
+- Status: `closed_fresh_short_workspace_exact_revision_clean`
+- Classification: one supervisor workspace-setup cluster before Stage-4/model dispatch; not a pipeline, author, optioning, or repository failure
+- Exact evidence: the first long `U:` destination could not check out nested cookiecutter template paths because `core.longpaths` was not enabled. Git created no destination or registered worktree. A short fresh destination with command-local `core.longpaths=true` checked out the pinned commit, but the first read-only verification command omitted the already-known command-local `safe.directory` override and Git rejected that check on the ownership-less volume.
+- Containment and result: no directory was deleted or normalized. The fresh short worktree remains registered at `U:\ubq\ws_of_8fff_fc4e100`; command-local trust verifies exact head `8fff1c16dfaedf317e2ef25924773fa5efe90f08`, detached state, and an empty status. Stage 4's own Git calls already bind `safe.directory` to this exact workspace. No model call, stage result, source artifact, Docker object, ticket, export, implementation, deletion, or removal was caused by the setup errors.
+
+### AN-104 - Stage-5 wrapper rejected the production atom envelope
+
+- Status: `closed_fresh_stage5_section_running`
+- Classification: one supervisor helper input-contract cluster causing one bounded Stage-5 rerun before model dispatch; not a pipeline, selection-author, option, research, or source-artifact failure
+- Exact evidence: the wrapper read the authenticated Stage-1 artifact but required a bare JSON array. Production persists the same atoms as `{"atoms": [...]}`. It wrote a running wrapper receipt and stopped at `atoms_not_object_list` before selection or model work. The failed output is retained.
+- Containment and correction: the wrapper now accepts either the production envelope or the legacy bare list, then applies the same all-object validation and copies each atom into the stage input. The authenticated source file is unchanged and hash-bound. Stage 5 reruns only in a fresh output directory with the same research, option, exact-revision workspace, signed-in Sol/high route, blank API-billing variables, and full-day ceilings. No upstream stage, model output, option, source file, Docker object, ticket, export, implementation, deletion, or removal was repeated or changed by the failed setup.
 
 ### AN-39 - Corpus-family diagnostic was launched with an unnecessary 120-second ceiling
 
@@ -2410,6 +2438,90 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Approval boundary: the user explicitly requires approval before removal. No prune, move, compaction, or deletion may occur until an exact proposed action and preservation boundary are approved.
 - Required action: measure VHDX host allocation, VM-side used space, Docker object inventory, and C: free space at bounded run checkpoints; retain Docker compaction events; and supervise the next pipeline sections at small scale. Any future removal or deliberate compaction remains separately approval-gated. The operational control should detect the live-use/host-allocation divergence without blocking useful throughput merely because cumulative I/O is high.
 - Closure proof: two consecutive supervised pipeline cycles retain bounded live Docker objects, do not approach unsafe C: headroom, and either keep host allocation bounded or demonstrably reclaim internally free blocks through the normal Docker compaction lifecycle. This remains an operational qualification item, not a reason to halt unrelated analysis.
+
+### BDS-169 - Stage 6 could accept an outcome-role ordering that ticket export rejects
+
+- Status: `closed`
+- Priority: delivery-blocking, contract parity
+- Objective impact: a substantively valid, decision-complete plan passed Stage 6 but could not become a ticket because the singular original-scenario experiment was not first in the plural experiment list. Without an export-parity check, valid planning work reaches a deterministic dead end after the model has finished.
+- Exact evidence: the first offline-first plan failed dry ticket assembly with `outcome_role_research_experiment_ids_invalid`; the plan used the README baseline as `research_experiment_id` while listing the direct baseline first in `research_experiment_ids`.
+- Correction: Stage 6 validation now invokes the canonical outcome-role export normalizer and reports `change_plan_outcome_roles_export_contract_invalid` before accepting a plan. The same planner session received exact delta feedback and produced plan revision `planrev:sha256:448331253755408e0aa21d9018f24654fcd9350a039fd654a2a2421aafabd7a1`, with the singular direct baseline first and the README baseline retained second.
+- Verification: the full planning-depth contract suite and Ruff pass; the corrected plan exported ready ticket `65683d49a62c3b59`.
+
+### BDS-170 - The single-case materializer ignored Stage-5 option revisions
+
+- Status: `closed_throwaway_harness_parity`
+- Priority: supervision-efficiency, evidence fidelity
+- Objective impact: the narrow validation path fed Stage 6 the stale Stage-4 option even though Stage 5 had revised that option to cover all six exact command occurrences. That could make a good pipeline result appear shallow or make the supervisor repair work the normal pipeline already performs.
+- Exact evidence: Stage 5 `input_meta.option_revisions` contained the role-healed six-location option, while `.tmp/component_validation/materialize_report_schema_ticket.py` embedded the unrevised Stage-4 object.
+- Correction: the throw-away materializer now applies and lineage-binds the exact Stage-5 revision before ticket assembly, matching the normal staged pipeline. No production option semantics were changed.
+- Verification: the resulting ticket contains all six production/documentation locations and the exact Stage-5 selected mechanism.
+
+### BDS-171 - Runner-owned option lineage invalidated an otherwise valid Stage-5 receipt
+
+- Status: `closed`
+- Priority: ticket-blocking, signed-receipt correctness
+- Objective impact: adding server-owned `case_id`, canonical problem, and member IDs after Stage 5 changed the selected-option hash and made a valid falsification receipt look tampered. This blocks good throughput without detecting authored manipulation.
+- Exact evidence: dry export failed with `selection_falsification_server_derived_claims_changed` and `selection_falsification_server_receipt_changed`; recomputation included lineage fields added only after the author signed the option.
+- Correction: selected-option receipt views exclude exactly the runner-owned lineage annotations while continuing to hash all authored mechanism and outcome content.
+- Verification: targeted falsifier-receipt tests prove server lineage is ignored and authored option tampering still fails; Ruff passes; ticket export succeeded.
+
+### BDS-172 - Post-commit provenance treated runner-owned evidence and cache paths as implementation changes
+
+- Status: `closed`
+- Priority: PR-blocking, implementation provenance
+- Objective impact: a correct implementation commit with passing original-scenario verification was prevented from reaching push/PR because provenance used a broader dirty-worktree definition than the commit path.
+- Exact evidence: implementation commit `edad1e4d740258c1df2aaa4dc7bbd51df8837d60` passed all three runner-bound commands, but handoff stopped with `implementation_provenance_workspace_dirty_after_commit`. The only untracked content was 13 runner evidence files under `.usertest_run_dir` and 284 cache files under `pip/cache`; `commit_all` already excluded both.
+- Correction: implementation provenance now uses the same runner-owned Git pathspec exclusions as commit finalization for both newly committed and observed-head modes.
+- Verification: eight provenance tests pass, including rejection of an unrelated untracked file after runner-owned paths are ignored; Ruff passes. The retained commit then bound successfully without a model rerun.
+
+### BDS-173 - A post-commit handoff exception can abort before writing durable resume state
+
+- Status: `open_nonblocking_after_current_recovery`
+- Priority: recovery-efficiency, lifecycle continuity
+- Objective impact: when a deterministic contract check fails after commit, `run.py` raises before `handoff_summary.json` and `ticket_resume_state.json` are written. The exact implementation/session/workspace remain available, but the public resume command cannot continue at push/PR and would otherwise encourage a wasteful model rerun or manual GitHub work.
+- Exact evidence: the offline-first implementation stopped at `commands/run.py` provenance binding after commit and verification. The run retained `git_ref.json`, verification, exact session, and workspace but had no resume state; existing resume paths accepted only failed verification or an already-created PR.
+- Current containment: a one-time throw-away continuation invoked the pipeline's own provenance, push, CI, PR, ticket-move, ledger, and resume-state functions without rerunning the implementation model. Future occurrences of the exact dirty-path defect are prevented by BDS-172.
+- Required action: persist a typed post-commit handoff-pending resume state before raising, and provide a no-model continuation that starts at the earliest incomplete handoff step.
+- Closure proof: an induced post-commit failure writes a resume state and the public CLI completes push/PR without another author turn.
+
+### BDS-174 - PR creation passed a multi-megabyte body through the Windows command line
+
+- Status: `closed`
+- Priority: PR-blocking, transport correctness
+- Objective impact: the system completed implementation, verification, push, and CI but could not start `gh` because the generated ticket was passed as one command-line argument and exceeded the Windows process limit.
+- Exact evidence: the first PR continuation failed with WinError 206 inside `subprocess`; `_run_gh` misleadingly converted that `FileNotFoundError` subclass to `gh not found on PATH`.
+- Correction: production PR creation writes `pr_body.md` and invokes `gh pr create --body-file`.
+- Verification: focused successful-PR and missing-`gh` tests pass and assert body-file transport; Ruff passes. The retained run advanced to GitHub's own body validation, proving the OS transport limit was removed.
+
+### BDS-175 - Full generated tickets exceed GitHub's PR body contract
+
+- Status: `closed`
+- Priority: PR-blocking, review usability
+- Objective impact: even body-file transport cannot publish a 2.9 MB generated ticket because GitHub caps PR bodies at 65,536 characters. Embedding the full audit corpus also obscures the actual causal change and verification plan from reviewers.
+- Exact evidence: GitHub rejected PR creation with `Body is too long (maximum is 65536 characters)`; the source ticket contained 2,906,166 characters, dominated by retained research/audit history.
+- Correction: the full ticket remains in the local `pr_manifest.md` with a SHA-256 receipt, while the PR receives a bounded causal projection containing the problem, success criteria, exact change targets, original-scenario proof, compatibility/failure modes, outcome verification, evidence IDs, and full-ticket hash.
+- Verification: the real PR body is 45,859 bytes, the full manifest remains 2.9 MB, projection tests prove required causal sections and full-source retention, and pipeline-produced PR #219 was created successfully.
+
+### BDS-176 - Initial review missed durable live evidence already present in raw events
+
+- Status: `current_case_closed_systemic_transport_open`
+- Priority: review-throughput, evidence discoverability
+- Objective impact: the reviewer correctly assessed the mechanism but requested changes because it saw the plan's stale `planned_unverified` role marker and did not find the implementation run's completed live observation. Good evidence existed, but its location was not transported as a first-class outcome receipt.
+- Exact evidence: initial review `20260720T161555Z/codex/0` reported live Claude unverified. Implementation raw event `item_19` records the exact live command, exit 0, and structured predicates: README read, one relative invocation, child exit 0, report present, zero absolute retry, no mangled path, and no repository change.
+- Current correction: exact evidence plus the one genuinely missing `pwsh` check was returned to the same reviewer session `019f8050-bd38-7ff1-9345-12e546d8f05d`. It inspected the retained event, executed the exact PowerShell 7.6.3 command, and revised its own decision to approved with causal path closed and zero findings.
+- Required action: promote completed implementation outcome commands into durable handoff receipts or explicit review evidence pointers so the initial reviewer does not rediscover them by broad artifact search.
+- Closure proof: a later independent case's initial review consumes implementation live-role evidence without supervisor guidance or a redundant execution.
+
+### BDS-177 - External implementation run roots are not propagated to terminal outcome trust
+
+- Status: `current_case_closed_configuration_propagation_open`
+- Priority: post-merge lifecycle, provenance continuity
+- Objective impact: all required post-merge roles passed and the PR merged, but the terminal outcome was reported blocked because review/outcome processes trusted only the controller's default `runs` directory and rejected the explicitly selected `U:` implementation run root.
+- Exact evidence: the first merge run produced merge commit `bc70b15bf1f6709a589d308f0739c2b865a65e77` and passed original, live, and mitigation roles, then failed terminal provenance with four `outside_trusted_roots` errors for `U:\usertest_implement_depth\runs\...` receipts.
+- Current correction: the existing explicit `USERTEST_IMPLEMENT_OUTCOME_TRUSTED_RUNS_ROOT=U:\usertest_implement_depth\runs` boundary was supplied and `review merge` resumed the already-merged PR. It ran zero roles, revalidated the retained receipts, and completed the expected `mitigated` outcome in 27.3 seconds.
+- Required action: carry the explicitly configured implementation `--runs-dir` into later review/outcome trust configuration, or persist an authenticated trusted-root receipt that those phases can consume. Do not infer arbitrary trusted roots from mutable ticket text.
+- Closure proof: a subsequent cross-volume implementation proceeds through terminal outcome provenance in one pass without a supervisor-supplied environment variable.
 
 ## Verification-pending fixes
 

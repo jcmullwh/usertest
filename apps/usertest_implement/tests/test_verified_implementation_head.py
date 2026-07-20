@@ -98,6 +98,22 @@ def test_verified_head_receipt_binds_passing_tests_to_committed_head(tmp_path: P
     assert validate_verified_implementation_head(run_dir=run_dir) == receipt
 
 
+def test_verified_head_ignores_only_runner_owned_workspace_artifacts(tmp_path: Path) -> None:
+    run_dir, repo, _revision, _head = _fixture(tmp_path)
+    evidence = repo / ".usertest_run_dir" / "verification" / "result.json"
+    cache = repo / "pip" / "cache" / "wheel.body"
+    evidence.parent.mkdir(parents=True)
+    cache.parent.mkdir(parents=True)
+    evidence.write_text("{}\n", encoding="utf-8")
+    cache.write_bytes(b"cache")
+
+    record_verified_implementation_head(run_dir=run_dir, require_exact_base=True)
+
+    (repo / "unexpected.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="workspace_dirty_after_commit"):
+        record_verified_implementation_head(run_dir=run_dir, require_exact_base=True)
+
+
 def test_verified_head_receipt_rejects_tampered_verification(tmp_path: Path) -> None:
     run_dir, _repo, _revision, _head = _fixture(tmp_path)
     record_verified_implementation_head(run_dir=run_dir, require_exact_base=True)
@@ -165,3 +181,29 @@ def test_existing_head_receipt_rejects_dirty_workspace(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="dirty_existing_head"):
         record_existing_verified_implementation_head(run_dir=run_dir)
+
+
+def test_existing_head_receipt_ignores_runner_owned_workspace_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_dir, repo, _revision, head = _fixture(tmp_path)
+    branch = _git(repo, "branch", "--show-current")
+    _write_json(
+        run_dir / "git_ref.json",
+        {
+            "branch": branch,
+            "commit_attempted": False,
+            "commit_performed": False,
+            "commit_observed": True,
+            "base_commit": head,
+            "head_commit": head,
+        },
+    )
+    evidence = repo / ".usertest_run_dir" / "verification" / "result.json"
+    cache = repo / "pip" / "cache" / "wheel.body"
+    evidence.parent.mkdir(parents=True)
+    cache.parent.mkdir(parents=True)
+    evidence.write_text("{}\n", encoding="utf-8")
+    cache.write_bytes(b"cache")
+
+    record_existing_verified_implementation_head(run_dir=run_dir)

@@ -7948,12 +7948,19 @@ def _adapter_executed_consumer_receipt(
             # never disguise the temporary entrypoint that actually executed.
             return None
         if research_harness and isinstance(current_identity, dict):
+            # The authorization receipt intentionally hashes the model-authored
+            # repository-binding relationship prose.  That protects each arm's
+            # receipt, but the prose is not executable consumer identity: two
+            # arms of one controlled harness may describe the same authenticated
+            # dependency differently.  Pair the arms by their immutable executed
+            # entrypoint here; the content-bound AST dependency edges below still
+            # have to agree exactly before the consumer is accepted.
             current_identity = {
-                **current_identity,
+                "identity_kind": "research_harness_entrypoint",
+                "source_authorization_kind": current_identity.get("identity_kind"),
                 "research_harness_entrypoint": {
-                    "entrypoint_path": entrypoint_path,
+                    "entrypoint_path": entrypoint_path.replace("\\", "/"),
                     "entrypoint_sha256": authorization.get("entrypoint_sha256"),
-                    "artifact_id": authorization.get("artifact_id"),
                 },
             }
         current_kind = (
@@ -8089,6 +8096,7 @@ def _adapter_mechanism_symbol_bindings(
     proof: Mapping[str, Any],
     *,
     hypothesis_symbols: Sequence[str],
+    inspected_symbols: Sequence[str] = (),
 ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     """Map causal locators to the inspected code symbols they actually exercise.
 
@@ -8120,29 +8128,53 @@ def _adapter_mechanism_symbol_bindings(
     )
     touchpoints = [dict(value) for value in touchpoints_raw if isinstance(value, Mapping)]
     declared = list(dict.fromkeys(hypothesis_symbols))
+    inspected = set(inspected_symbols)
     bindings: list[dict[str, Any]] = []
     covered: set[str] = set()
     for node in mechanism_nodes:
         locator = str(node["locator"])
-        direct = [symbol for symbol in declared if symbol == locator]
+        matching_touchpoints = [
+            touchpoint
+            for touchpoint in touchpoints
+            if touchpoint.get("runner_attested") is True
+            and _text(touchpoint.get("causal_locator")) == locator
+            and isinstance(touchpoint.get("symbols"), list)
+            and touchpoint.get("symbols")
+        ]
         touchpoint_symbols = [
             symbol
             for symbol in declared
             if any(
-                touchpoint.get("runner_attested") is True
-                and _text(touchpoint.get("causal_locator")) == locator
-                and symbol
+                symbol
                 in {
                     str(value)
-                    for value in (
-                        touchpoint.get("symbols")
-                        if isinstance(touchpoint.get("symbols"), list)
-                        else []
-                    )
+                    for value in touchpoint.get("symbols", [])
                     if _text(value) is not None
                 }
-                for touchpoint in touchpoints
+                for touchpoint in matching_touchpoints
             )
+        ]
+        # A field/argument/value locator is allowed to be more specific than
+        # the production symbol it controls, but it must not masquerade as an
+        # inspected symbol.  When an authenticated touchpoint maps the locator
+        # to concrete symbols, the hypothesis must name those symbols.  Direct
+        # locators remain valid for non-code mechanisms without symbol-bearing
+        # touchpoints (for example an environment or filesystem condition).
+        touchpoint_declares_locator = any(
+            locator
+            in {
+                str(value)
+                for value in touchpoint.get("symbols", [])
+                if _text(value) is not None
+            }
+            for touchpoint in matching_touchpoints
+        )
+        non_code_locator = locator.startswith(("env:", "fs:", "config:/"))
+        direct = [
+            symbol
+            for symbol in declared
+            if symbol == locator
+            and (symbol in inspected or touchpoint_declares_locator or non_code_locator)
         ]
         mapped = list(dict.fromkeys([*direct, *touchpoint_symbols]))
         if not mapped:
@@ -8165,6 +8197,7 @@ def _adapter_mechanism_evidence_receipt(
     hypothesis_symbols: list[str],
     atom_bindings: Sequence[Mapping[str, Any]],
     clean_replays: Mapping[str, Mapping[str, Any]],
+    inspected_symbols: Sequence[str] = (),
 ) -> dict[str, Any] | None:
     graph = proof.get("mechanism_graph")
     nodes_raw = graph.get("nodes") if isinstance(graph, Mapping) else None
@@ -8183,6 +8216,7 @@ def _adapter_mechanism_evidence_receipt(
         _adapter_mechanism_symbol_bindings(
             proof,
             hypothesis_symbols=hypothesis_symbols,
+            inspected_symbols=inspected_symbols,
         )
     )
     if not locators or not verified_symbols or len(locator_bindings) != len(locators):
@@ -8615,6 +8649,11 @@ def _typed_mechanism_evidence_receipts(
                 hypothesis_symbols=mechanism_symbols,
                 atom_bindings=atom_bindings,
                 clean_replays=clean_replays,
+                inspected_symbols=[
+                    str(receipt["symbol"])
+                    for receipt in symbol_receipts
+                    if isinstance(receipt, Mapping) and _text(receipt.get("symbol")) is not None
+                ],
             )
             observations = proof.get("observations")
             proof_experiment_ids = [

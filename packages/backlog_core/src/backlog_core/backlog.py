@@ -4,6 +4,7 @@ import json
 import os
 import re
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from hashlib import sha256
 from json import JSONDecoder
@@ -239,12 +240,21 @@ def _command_failure_entry_identity(entry: dict[str, Any]) -> str | None:
     return f"{exit_code}|{_normalize_dedupe_key(command)}|{cwd_key}|{artifact_key}"
 
 
-def _extract_failed_commands_from_events(
-    *,
-    events_path: Path,
-    max_items: int | None = None,
-) -> list[dict[str, Any]]:
-    failed_commands: list[dict[str, Any]] = []
+_COMMAND_FOLLOWUP_SAMPLE_LIMIT = 8
+_COMMAND_CONTEXT_TEXT_LIMIT = 2_000
+
+
+def _bounded_command_context_text(value: Any) -> str | None:
+    text = _coerce_string(value)
+    if text is None:
+        return None
+    return text[:_COMMAND_CONTEXT_TEXT_LIMIT]
+
+
+def _extract_run_commands_from_events(*, events_path: Path) -> list[dict[str, Any]]:
+    """Return a bounded-field command timeline from one normalized event stream."""
+
+    commands: list[dict[str, Any]] = []
     try:
         with events_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -255,15 +265,16 @@ def _extract_failed_commands_from_events(
                     event = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(event, dict):
-                    continue
-                if _coerce_string(event.get("type")) != "run_command":
+                if (
+                    not isinstance(event, dict)
+                    or _coerce_string(event.get("type")) != "run_command"
+                ):
                     continue
                 data = event.get("data")
                 if not isinstance(data, dict):
                     continue
                 exit_code = data.get("exit_code")
-                if not isinstance(exit_code, int) or exit_code == 0:
+                if not isinstance(exit_code, int):
                     continue
                 command = _coerce_string(data.get("command"))
                 if command is None:
@@ -272,10 +283,10 @@ def _extract_failed_commands_from_events(
                         command = " ".join(argv)
                 if command is None:
                     continue
-                if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
-                    continue
-                failed_commands.append(
+                commands.append(
                     {
+                        "event_ordinal": len(commands) + 1,
+                        "timestamp_utc": _coerce_string(event.get("ts")),
                         "command": command,
                         "exit_code": exit_code,
                         "cwd": _coerce_string(data.get("cwd")),
@@ -287,12 +298,101 @@ def _extract_failed_commands_from_events(
                         "from_events": True,
                     }
                 )
-                if max_items is not None and len(failed_commands) >= max_items:
-                    break
     except OSError:
         return []
+    return commands
 
+
+def _extract_failed_commands_from_events(
+    *,
+    events_path: Path,
+    max_items: int | None = None,
+) -> list[dict[str, Any]]:
+    failed_commands: list[dict[str, Any]] = []
+    for command_event in _extract_run_commands_from_events(events_path=events_path):
+        command = str(command_event["command"])
+        exit_code = int(command_event["exit_code"])
+        if exit_code == 0 or _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+            continue
+        failed_commands.append(command_event)
+        if max_items is not None and len(failed_commands) >= max_items:
+            break
     return failed_commands
+
+
+def _same_run_command_context(
+    *,
+    failure: Mapping[str, Any],
+    run_commands: Sequence[dict[str, Any]],
+    claimed_event_ordinals: set[int],
+    lifecycle_status: str,
+    report: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Bind a failure to later same-run observations without declaring recovery."""
+
+    failure_command = _coerce_string(failure.get("command"))
+    failure_exit_code = failure.get("exit_code")
+    if failure_command is None or not isinstance(failure_exit_code, int):
+        return None
+
+    normalized_failure = _normalize_dedupe_key(failure_command)
+    failure_cwd = _coerce_string(failure.get("cwd"))
+    failure_cwd_key = failure_cwd.replace("\\", "/").casefold() if failure_cwd else None
+    matched_index: int | None = None
+    for index, command_event in enumerate(run_commands):
+        ordinal = command_event.get("event_ordinal")
+        if not isinstance(ordinal, int) or ordinal in claimed_event_ordinals:
+            continue
+        command = _coerce_string(command_event.get("command"))
+        if (
+            command is None
+            or command_event.get("exit_code") != failure_exit_code
+            or _normalize_dedupe_key(command) != normalized_failure
+        ):
+            continue
+        event_cwd = _coerce_string(command_event.get("cwd"))
+        event_cwd_key = event_cwd.replace("\\", "/").casefold() if event_cwd else None
+        if (
+            failure_cwd_key is not None
+            and event_cwd_key is not None
+            and failure_cwd_key != event_cwd_key
+        ):
+            continue
+        matched_index = index
+        claimed_event_ordinals.add(ordinal)
+        break
+    if matched_index is None:
+        return None
+
+    later = list(run_commands[matched_index + 1 :])
+    sampled = later[:_COMMAND_FOLLOWUP_SAMPLE_LIMIT]
+    projected_commands = []
+    for item in sampled:
+        projected = {
+            "event_ordinal": item.get("event_ordinal"),
+            "timestamp_utc": item.get("timestamp_utc"),
+            "command": _bounded_command_context_text(item.get("command")),
+            "exit_code": item.get("exit_code"),
+        }
+        output_excerpt = _bounded_command_context_text(item.get("output_excerpt"))
+        if output_excerpt is not None:
+            projected["output_excerpt"] = output_excerpt
+        projected_commands.append(projected)
+
+    report_status = _coerce_string(report.get("status")) if isinstance(report, Mapping) else None
+    report_kind = _coerce_string(report.get("kind")) if isinstance(report, Mapping) else None
+    return {
+        "source": "normalized_events.jsonl",
+        "failure_event_ordinal": run_commands[matched_index].get("event_ordinal"),
+        "run_command_count": len(run_commands),
+        "later_command_count": len(later),
+        "later_successful_command_count": sum(item.get("exit_code") == 0 for item in later),
+        "sampled_later_commands": projected_commands,
+        "sample_truncated": len(later) > len(sampled),
+        "run_lifecycle_status": lifecycle_status,
+        "report_status": report_status,
+        "report_kind": report_kind,
+    }
 
 
 def _safe_relpath(path: Path, root: Path) -> str:
@@ -1410,6 +1510,9 @@ def extract_backlog_atoms(
                 generated_at_utc=_coerce_string(token_monitoring_error.get("generated_at_utc")),
             )
 
+        report_raw = record.get("report")
+        report_for_context = report_raw if isinstance(report_raw, Mapping) else None
+
         metrics_raw = record.get("metrics")
         metrics = metrics_raw if isinstance(metrics_raw, dict) else None
 
@@ -1464,6 +1567,11 @@ def extract_backlog_atoms(
             metrics_incomplete = True
 
         events_path = run_dir / "normalized_events.jsonl"
+        run_command_events = (
+            _extract_run_commands_from_events(events_path=events_path)
+            if events_path.exists()
+            else []
+        )
         if not failed_commands and events_path.exists():
             failed_commands = _extract_failed_commands_from_events(
                 events_path=events_path,
@@ -1510,6 +1618,7 @@ def extract_backlog_atoms(
                     failed_commands_omitted_hint or 0,
                 )
             emitted = 0
+            claimed_event_ordinals: set[int] = set()
             for entry in failed_commands:
                 if (
                     max_command_failure_atoms is not None
@@ -1524,6 +1633,13 @@ def extract_backlog_atoms(
                 output_excerpt_truncated = (
                     True if entry.get("output_excerpt_truncated") is True else None
                 )
+                same_run_context = _same_run_command_context(
+                    failure=entry,
+                    run_commands=run_command_events,
+                    claimed_event_ordinals=claimed_event_ordinals,
+                    lifecycle_status=status,
+                    report=report_for_context,
+                )
                 _emit(
                     "command_failure",
                     f"Command failed: exit_code={exit_code}; command={command}",
@@ -1537,6 +1653,7 @@ def extract_backlog_atoms(
                     output_excerpt_truncated=output_excerpt_truncated,
                     from_events=True if entry.get("from_events") else None,
                     from_metrics=True if entry.get("from_metrics") else None,
+                    same_run_command_context=same_run_context,
                 )
                 emitted += 1
 
@@ -1551,7 +1668,7 @@ def extract_backlog_atoms(
                     severity_hint="low",
                 )
 
-        report = record.get("report")
+        report = report_raw
         if isinstance(report, dict):
             confusion = report.get("confusion_points")
             if isinstance(confusion, list):

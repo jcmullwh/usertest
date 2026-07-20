@@ -32,9 +32,15 @@ them as problem evidence. Only assigned atoms may receive decisions or citations
 - A successful originating run is counterevidence, not a blanket negative. A failed diagnostic,
   prerequisite probe, or early attempt is not an actionable problem when terminal evidence shows
   the intended workflow recovered and its relevant verification passed with no residual impact.
+- Recovery bounds the claim and severity; it does not erase observed retry cost. When the same
+  intended action fails deterministically in multiple independent runs and each run must issue a
+  distinct workaround or retry before succeeding, the repeated failed attempt and extra work are
+  themselves an evidenced reliability or usability problem. State that bounded impact rather than
+  claiming the overall mission was blocked. Do not apply this rule to isolated exploratory probes,
+  an explicitly designed fallback working as intended, or failures with no repeated pattern.
 - A successful run can still establish a real problem. Preserve an assigned observed issue when
-  the terminal report says a feature remained degraded, a user-facing defect persisted, or a
-  separate verification oracle failed.
+  the terminal report says a feature remained degraded, a user-facing defect persisted, a
+  separate verification oracle failed, or repeated evidence establishes avoidable recovery work.
 - Separate an upstream blocker from consequences of that blocker. Missing downstream validation,
   confidence, or artifacts are not independent problems unless evidence shows they persist after
   the upstream blocker is removed or have a distinct mechanism and impact.

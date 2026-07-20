@@ -34,6 +34,7 @@ from backlog_core import (
 )
 from backlog_core.stage_contracts import parse_solution_option_sets
 from backlog_core.ticket_readiness import falsification_acceptance_has_adversarial_basis
+from backlog_repo.ticket_provenance import normalize_outcome_role_contracts
 from runner_core import verification_command_safety_errors
 
 _OPTIONING_STATUSES = frozenset({"options_produced", "insufficient_evidence", "no_safe_option"})
@@ -1079,6 +1080,16 @@ def change_plan_quality_errors(
                         repo_root=None,
                         label=f"outcome_role_{role}",
                     )
+                )
+        if _string_list(commands, allow_empty=False):
+            try:
+                normalize_outcome_role_contracts(
+                    outcome_roles,
+                    test_commands=commands,
+                )
+            except ValueError as exc:
+                errors.append(
+                    f"change_plan_outcome_roles_export_contract_invalid: {plan_id}: {exc}"
                 )
 
     reproduction = plan.get("before_after_reproduction")

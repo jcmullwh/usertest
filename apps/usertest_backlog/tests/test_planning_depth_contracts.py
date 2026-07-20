@@ -1145,10 +1145,18 @@ def _valid_change_plan() -> dict[str, object]:
             "live": {
                 "description": "Exercise the runtime report path.",
                 "commands": ["python scripts/live_check.py"],
+                "command_bindings": [
+                    {"command_index": 0, "research_experiment_id": "exp-live"}
+                ],
                 "predicates": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
             },
             "mitigation_effect": None,
-            "recurrence": None,
+            "recurrence": {
+                "description": "Use later canonical-case shadow snapshots.",
+                "verification_owner": "centralized_case_refresh",
+                "commands": [],
+                "predicates": [],
+            },
         },
         "before_after_reproduction": {
             "original_scenario": "Replay the malformed-result fixture.",
@@ -1197,6 +1205,28 @@ def test_change_plan_contract_accepts_decision_complete_plan() -> None:
             expected_case_id="case:case",
         )
         == []
+    )
+
+
+def test_change_plan_rejects_outcome_roles_that_ticket_export_cannot_serialize() -> None:
+    plan = _valid_change_plan()
+    roles = plan["outcome_verification_roles"]
+    assert isinstance(roles, dict)
+    original = roles["original_scenario"]
+    assert isinstance(original, dict)
+    original["research_experiment_ids"] = ["exp-other", "exp-1"]
+    plan = assign_plan_revision_id(plan)
+
+    errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+    )
+
+    assert any(
+        "change_plan_outcome_roles_export_contract_invalid" in error
+        and "outcome_role_research_experiment_ids_invalid" in error
+        for error in errors
     )
 
 

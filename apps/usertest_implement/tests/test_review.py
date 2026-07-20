@@ -46,6 +46,7 @@ from usertest_implement.selection import (
     _case_plan_fingerprint,
     _select_ticket_from_path,
     _selected_ticket_provenance,
+    _write_pr_manifest,
 )
 from usertest_implement.shared import (
     SelectedTicket,
@@ -60,6 +61,67 @@ def _approved_causal_fields() -> dict[str, object]:
         "causal_path_assessment": "closed",
         "remaining_causal_paths": [],
     }
+
+
+def test_pr_manifest_projects_oversized_ticket_but_retains_full_local_source(
+    tmp_path: Path,
+) -> None:
+    oversized_research = "research evidence\n" * 100_000
+    ticket = "\n".join(
+        (
+            "## Problem",
+            "The cross-shell command is malformed.",
+            "## Research context",
+            oversized_research,
+            "## Success criteria",
+            "The original scenario passes without a retry.",
+            "## Implementation plan",
+            "### Implementation steps",
+            "1. Change the exact command producer.",
+            "### Verification steps",
+            "1. Replay the original shell boundary.",
+            "### Exact change targets",
+            "- `src/command.py`",
+            "### Original-scenario before / after proof",
+            "Before fails; after passes.",
+            "### Compatibility and failure modes",
+            "Keep direct PowerShell support.",
+            "### Outcome verification requirement",
+            "Replay the originating case.",
+            "### Rollback notes",
+            "Revert the command literal.",
+            "## Evidence atom ids",
+            "- `atom:1`",
+        )
+    )
+    selected = SelectedTicket(
+        fingerprint="1234567890abcdef",
+        title="Cross-shell command",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=tmp_path / "ticket.md",
+        ticket_markdown=ticket,
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    _title, body = _write_pr_manifest(
+        run_dir=tmp_path,
+        selected=selected,
+        branch="backlog/test",
+        agent="codex",
+        model="gpt-5.6-sol",
+    )
+
+    assert len(body) < 65_536
+    assert "The cross-shell command is malformed." in body
+    assert "The original scenario passes without a retry." in body
+    assert "src/command.py" in body
+    assert "Before fails; after passes." in body
+    assert sha256(ticket.encode("utf-8")).hexdigest() in body
+    manifest = (tmp_path / "pr_manifest.md").read_text(encoding="utf-8")
+    assert oversized_research in manifest
 
 
 def test_review_binding_accepts_only_bucket_move_of_same_ticket(tmp_path: Path) -> None:
@@ -2273,6 +2335,10 @@ def test_run_defers_review_until_for_review_and_green_ci(
     def _fake_run_gh_text(*, cwd: Path, argv: list[str]) -> str:
         assert cwd == workspace_dir
         if argv[:3] == ["gh", "pr", "create"]:
+            assert "--body" not in argv
+            body_path = Path(argv[argv.index("--body-file") + 1])
+            assert body_path == impl_run_dir / "pr_body.md"
+            assert "## Ticket review projection" in body_path.read_text(encoding="utf-8")
             return "https://example.invalid/pr/55\n"
         raise AssertionError(f"unexpected gh call: {argv}")
 

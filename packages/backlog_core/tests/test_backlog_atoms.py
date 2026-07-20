@@ -915,6 +915,93 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
     assert trunc.get("omitted_count") == 3
 
 
+def test_command_failure_atom_retains_bounded_same_run_followup_context(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "claude" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "ts": "2026-01-01T00:00:01Z",
+            "type": "run_command",
+            "data": {
+                "command": "powershell -File .\\scripts\\check.ps1",
+                "exit_code": 1,
+                "output_excerpt": "The relative path was not found",
+            },
+        },
+        {
+            "ts": "2026-01-01T00:00:02Z",
+            "type": "run_command",
+            "data": {
+                "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                "exit_code": 0,
+                "output_excerpt": "Success",
+            },
+        },
+        {
+            "ts": "2026-01-01T00:00:03Z",
+            "type": "run_command",
+            "data": {"command": "python -m tool --help", "exit_code": 0},
+        },
+    ]
+    (run_dir / "normalized_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/claude/0",
+            "agent": "claude",
+            "status": "ok",
+            "report": {"kind": "smoke_v1", "status": "success"},
+            "metrics": {
+                "commands_executed": 3,
+                "commands_failed": 1,
+                "failed_commands": [
+                    {
+                        "command": "powershell -File .\\scripts\\check.ps1",
+                        "exit_code": 1,
+                        "output_excerpt": "The relative path was not found",
+                    }
+                ],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    [failure] = [atom for atom in atoms if atom.get("source") == "command_failure"]
+    context = failure["same_run_command_context"]
+
+    assert context == {
+        "source": "normalized_events.jsonl",
+        "failure_event_ordinal": 1,
+        "run_command_count": 3,
+        "later_command_count": 2,
+        "later_successful_command_count": 2,
+        "sampled_later_commands": [
+            {
+                "event_ordinal": 2,
+                "timestamp_utc": "2026-01-01T00:00:02Z",
+                "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                "exit_code": 0,
+                "output_excerpt": "Success",
+            },
+            {
+                "event_ordinal": 3,
+                "timestamp_utc": "2026-01-01T00:00:03Z",
+                "command": "python -m tool --help",
+                "exit_code": 0,
+            },
+        ],
+        "sample_truncated": False,
+        "run_lifecycle_status": "ok",
+        "report_status": "success",
+        "report_kind": "smoke_v1",
+    }
+
+
 def test_extract_backlog_atoms_retains_every_command_failure_by_default(
     tmp_path: Path,
 ) -> None:

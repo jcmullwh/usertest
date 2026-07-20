@@ -144,6 +144,9 @@ _RESEARCH_DOSSIER_OPTIONAL_CLAIM_FIELDS: tuple[str, ...] = (
     # Stage-3 output must explicitly separate epistemic sufficiency from whether
     # the case actually requires a product change.
     "actionability_assessment",
+    # Stage 1 is a hypothesis formed from atoms. Stage 3 has the source-run context
+    # needed to correct its symptom/impact wording before downstream planning.
+    "observed_problem_refinement",
 )
 _RESEARCH_DOSSIER_ALLOWED: frozenset[str] = frozenset(
     (
@@ -308,7 +311,6 @@ _PROMPT_VERIFIED_EXPERIMENT_FIELDS: tuple[str, ...] = (
     "command",
     "executed_argv",
     "declared_result",
-    "declared_state_transitions",
     "outcome",
     "exit_code",
     "observable_assertion",
@@ -451,14 +453,58 @@ def _research_verification_prompt_projection(value: Any) -> dict[str, Any]:
     )
     source_attempts = value.get("evidence_source_attempts")
     event_sources = value.get("evidence_event_sources")
+    projected_experiments: list[dict[str, Any]] = []
+    for experiment in experiments:
+        projected = _mapping_projection(experiment, _PROMPT_VERIFIED_EXPERIMENT_FIELDS)
+        transitions_raw = experiment.get("declared_state_transitions")
+        transitions = (
+            [transition for transition in transitions_raw if isinstance(transition, Mapping)]
+            if isinstance(transitions_raw, list)
+            else []
+        )
+        if transitions_raw is not None:
+            projected["declared_state_transition_summary"] = {
+                "transition_count": len(transitions),
+                "transition_roots": [
+                    {
+                        "path": transition.get("path"),
+                        "runner_attested": transition.get("runner_attested"),
+                        "before_entry_count": (
+                            len(transition.get("before_entries"))
+                            if isinstance(transition.get("before_entries"), Mapping)
+                            else 0
+                        ),
+                        "after_entry_count": (
+                            len(transition.get("after_entries"))
+                            if isinstance(transition.get("after_entries"), Mapping)
+                            else 0
+                        ),
+                        "changed_entry_count": (
+                            len(transition.get("changed_entries"))
+                            if isinstance(transition.get("changed_entries"), list)
+                            else 0
+                        ),
+                        "changed_entries_sha256": _canonical_sha256(
+                            transition.get("changed_entries")
+                            if isinstance(transition.get("changed_entries"), list)
+                            else []
+                        ),
+                        "transition_sha256": transition.get("transition_sha256"),
+                    }
+                    for transition in transitions
+                ],
+                "full_transition_receipts_sha256": _canonical_sha256(transitions_raw),
+                "omitted_detail": (
+                    "Per-file before/after state inventories remain bound by the Stage-3 "
+                    "verification receipt and are omitted from the downstream prompt."
+                ),
+            }
+        projected_experiments.append(projected)
     projection = {
         "projection_schema_version": 1,
         "projection_kind": "verified_causal_evidence_summary",
         **_mapping_projection(value, _PROMPT_VERIFICATION_FIELDS),
-        "experiments": [
-            _mapping_projection(experiment, _PROMPT_VERIFIED_EXPERIMENT_FIELDS)
-            for experiment in experiments
-        ],
+        "experiments": projected_experiments,
         "source_custody_summary": {
             "evidence_source_attempt_count": (
                 len(source_attempts) if isinstance(source_attempts, list) else 0
@@ -4354,6 +4400,63 @@ def research_actionability_assessment(item: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
+def research_observed_problem_refinement_errors(
+    item: Mapping[str, Any],
+    *,
+    pid: str,
+    require_present: bool = False,
+) -> list[str]:
+    """Validate Stage 3's source-run-grounded correction of the Stage-1 claim."""
+
+    if "observed_problem_refinement" not in item:
+        return [f"research_observed_problem_refinement_missing: {pid}"] if require_present else []
+    raw = item.get("observed_problem_refinement")
+    if not isinstance(raw, Mapping):
+        return [f"research_observed_problem_refinement_invalid: {pid}"]
+
+    errors: list[str] = []
+    allowed_fields = {"problem", "user_impact", "evidence_summary", "evidence_atom_ids"}
+    unknown_fields = sorted(set(raw) - allowed_fields)
+    if unknown_fields:
+        errors.append(
+            f"research_observed_problem_refinement_unknown_fields: {pid}: {unknown_fields!r}"
+        )
+    for field in ("problem", "user_impact", "evidence_summary"):
+        if not _is_nonempty_string(raw.get(field)):
+            errors.append(f"research_observed_problem_refinement_{field}_invalid: {pid}")
+
+    evidence_ids_raw = raw.get("evidence_atom_ids")
+    errors.extend(
+        _validate_string_list(
+            evidence_ids_raw,
+            field="observed_problem_refinement_evidence_atom_ids",
+            pid=pid,
+            require_nonempty=True,
+        )
+    )
+    evidence_ids = {
+        value.strip()
+        for value in (evidence_ids_raw if isinstance(evidence_ids_raw, list) else [])
+        if isinstance(value, str) and value.strip()
+    }
+    assignment_raw = item.get("evidence_assignment")
+    assignment = assignment_raw if isinstance(assignment_raw, Mapping) else {}
+    expected_ids = {
+        value.strip()
+        for value in (
+            assignment.get("expected_atom_ids")
+            if isinstance(assignment.get("expected_atom_ids"), list)
+            else []
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    if expected_ids and evidence_ids != expected_ids:
+        errors.append(
+            f"research_observed_problem_refinement_atom_coverage_mismatch: {pid}"
+        )
+    return errors
+
+
 def _requires_planning_grade_mechanism(item: Mapping[str, Any]) -> bool:
     """Return whether this dossier is asking downstream stages to design a change.
 
@@ -6393,11 +6496,11 @@ def _expected_adapter_executed_consumer(
             return None
         if research_harness and isinstance(current_identity, dict):
             current_identity = {
-                **current_identity,
+                "identity_kind": "research_harness_entrypoint",
+                "source_authorization_kind": current_identity.get("identity_kind"),
                 "research_harness_entrypoint": {
-                    "entrypoint_path": entrypoint_path,
+                    "entrypoint_path": entrypoint_path.replace("\\", "/"),
                     "entrypoint_sha256": authorization.get("entrypoint_sha256"),
-                    "artifact_id": authorization.get("artifact_id"),
                 },
             }
         current_kind = (
@@ -9469,6 +9572,13 @@ def _validate_research_dossier(
     )
     errors.extend(
         research_actionability_assessment_errors(
+            item,
+            pid=pid,
+            require_present=not include_runner_contract,
+        )
+    )
+    errors.extend(
+        research_observed_problem_refinement_errors(
             item,
             pid=pid,
             require_present=not include_runner_contract,

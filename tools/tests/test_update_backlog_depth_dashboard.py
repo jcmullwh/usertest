@@ -244,17 +244,15 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
     assert current["timing"]["start_at"] == "2026-07-19T13:15:00Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 144
-    assert current["rework"]["continuation_launches"] == 96
-    assert current["rework"]["stage_reruns"] == 16
+    assert current["rework"]["author_invocations"] == 215
+    assert current["rework"]["continuation_launches"] == 146
+    assert current["rework"]["stage_reruns"] == 22
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 102
-    assert current["automatic_self_corrections"]["count"] == 34
-    assert current["supervisor_interventions"]["count"] == 63
+    assert current["errors"]["count"] == 115
+    assert current["automatic_self_corrections"]["count"] == 38
+    assert current["supervisor_interventions"]["count"] == 74
     assert current["furthest_stage"] == (
-        "Production ticket assembly for the fourteenth terminal case; Windows-sandbox "
-        "research is verifier/readiness-clean and its earned downstream chain emitted "
-        "no option, selection, plan, or ticket"
+        "Pipeline-produced PR #219 merged with complete terminal outcome provenance"
     )
 
     rendered = mod._render_dashboard(dashboard)

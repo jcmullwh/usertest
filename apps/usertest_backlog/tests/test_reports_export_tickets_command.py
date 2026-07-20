@@ -3030,6 +3030,16 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
                 "Operators repeatedly ask what to do after a preflight failure in batch mode."
             ),
         },
+        "observed_problem_refinement": {
+            "problem": "The first resume attempt lacks context before recovery.",
+            "user_impact": "Recovery succeeds, but only after avoidable rediscovery.",
+            "evidence_summary": (
+                "Source-run context shows the initial failure and a successful later recovery."
+            ),
+            "evidence_atom_ids": [
+                "target_a/20260104T000000Z/codex/0:confusion_point:1"
+            ],
+        },
         "research": {
             "problem_id": "problem:batch_resume",
             "reproduction_status": "reproduced",
@@ -3193,6 +3203,11 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
     )
     body = export_doc["exports"][0]["body_markdown"]
     assert "## Research context" in body
+    assert (
+        "Source-run context shows the initial failure and a successful later recovery."
+        in body
+    )
+    assert "Operators repeatedly ask what to do after a preflight failure" not in body
     assert "### Root cause hypotheses" in body
     assert "## Selected solution context" in body
     assert "### Why other options were not selected" in body

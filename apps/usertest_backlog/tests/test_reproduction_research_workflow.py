@@ -946,6 +946,12 @@ def test_origin_artifact_receipts_include_nested_and_retained_failure_streams(
         '"status":"completed"}}\n',
         encoding="utf-8",
     )
+    raw_agent_events = run_dir / "raw_events.jsonl"
+    raw_agent_events.write_text(
+        '{"type":"assistant","message":{"content":[{"type":"tool_use",'
+        '"id":"tool:read","name":"Read","input":{"file_path":"README.md"}}]}}\n',
+        encoding="utf-8",
+    )
     (run_dir / "prompt.txt").write_text("must not be retained\n", encoding="utf-8")
     atom = {
         "atom_id": "atom:failure",
@@ -976,6 +982,12 @@ def test_origin_artifact_receipts_include_nested_and_retained_failure_streams(
         if receipt.get("source_relpath") == "agent_shell_probe/raw_events.jsonl"
     )
     assert shell_probe_receipt["research_context_role"] == "agent_shell_probe_events"
+    raw_agent_receipt = next(
+        receipt
+        for receipt in receipts
+        if receipt.get("source_relpath") == "raw_events.jsonl"
+    )
+    assert raw_agent_receipt["research_context_role"] == "agent_events"
     assert "prompt.txt" not in by_name
     assert all(receipt["sha256"] for receipt in receipts)
 

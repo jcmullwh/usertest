@@ -1812,6 +1812,18 @@ def _research_retry_remediation_hints(
                 "negative should remain evidence_sufficient with already_addressed or "
                 "non_actionable instead of being downgraded merely to stop optioning."
             )
+        elif code.startswith("research_observed_problem_refinement_"):
+            target_fields = [
+                "extensions.backlog_repro_research.observed_problem_refinement"
+            ]
+            required_change = (
+                "Add or correct the source-run-grounded problem refinement. Read the mandatory "
+                "run-context command timeline and terminal report; distinguish a failed attempt "
+                "from a blocked mission and record any same-run recovery. Emit nonempty problem, "
+                "user_impact, and evidence_summary strings, and cite every assigned atom exactly "
+                "once in evidence_atom_ids. Preserve the causal experiments and actionability "
+                "decision unless the newly accounted outcome evidence materially changes them."
+            )
         elif code == "research_dossier_evidence_sufficient_with_blocking_reasons":
             target_fields = [
                 "research_status",
@@ -2085,7 +2097,11 @@ def _research_retry_remediation_hints(
                 "code symbol, but then an implementation_touchpoint with that exact "
                 "causal_locator must name the inspected containing function in symbols. Keep "
                 "hypothesis mechanism_symbols as exact inspected code symbols; do not rewrite "
-                "them into argument locators merely to satisfy the verifier. Multiple adapter "
+                "them into argument locators merely to satisfy the verifier. In particular, a "
+                "selector or field created only by a research harness may remain the causal "
+                "locator, but it is not a production symbol: map it to the exact inspected "
+                "constant/function that both replay arms reference. Do not append a synthetic "
+                "field suffix to a production constant or function. Multiple adapter "
                 "proofs may establish connected subsets of one hypothesis mechanism."
             )
         elif code.startswith("research_report_"):
@@ -5727,6 +5743,8 @@ def _run_targeted_dossier_repairs(
         coverage_candidate_dossier["evidence_assignment"] = evidence_assignment
         coverage_prior_feedback_dossier = dict(immediate_prior_feedback_dossier)
         coverage_prior_feedback_dossier["evidence_assignment"] = evidence_assignment
+        coverage_objective_best_dossier = dict(best_dossier)
+        coverage_objective_best_dossier["evidence_assignment"] = evidence_assignment
         substantive_coverage_regressions, substantive_revision_basis = (
             _unsupported_substantive_coverage_loss(
                 coverage_forward_dossier,
@@ -5737,6 +5755,10 @@ def _run_targeted_dossier_repairs(
         substantive_coverage_added_since_feedback = sorted(
             _substantive_research_coverage(coverage_candidate_dossier)
             - _substantive_research_coverage(coverage_prior_feedback_dossier)
+        )
+        substantive_coverage_added_since_objective_best = sorted(
+            _substantive_research_coverage(coverage_candidate_dossier)
+            - _substantive_research_coverage(coverage_objective_best_dossier)
         )
         if fundamental_changes:
             # Immutable evidence mutation has its own stricter recovery contract; do not let this
@@ -5806,7 +5828,7 @@ def _run_targeted_dossier_repairs(
         evidence_backed_revision = sorted({*substantive_revision_basis, *epistemic_downgrade_basis})
         candidate_substantive_advancement = bool(
             not candidate_substantive_regression
-            and (substantive_coverage_added_since_feedback or evidence_backed_revision)
+            and (substantive_coverage_added_since_objective_best or evidence_backed_revision)
         )
         candidate_lateral_correction = bool(
             not candidate_advancement_regression
@@ -5843,10 +5865,8 @@ def _run_targeted_dossier_repairs(
             and not candidate_integrity_or_session_failure
             and (
                 progress.get("decision") == "accepted"
-                or progress.get("immediate_prior_feedback_error_count_progress")
-                or candidate_validation_depth_advanced
                 or progress.get("objective_progress")
-                or substantive_coverage_added_since_feedback
+                or substantive_coverage_added_since_objective_best
                 or evidence_backed_revision
             )
         )
@@ -5884,6 +5904,9 @@ def _run_targeted_dossier_repairs(
             consecutive_substantive_regressions = 0
         progress["substantive_coverage_added_since_immediate_feedback"] = list(
             substantive_coverage_added_since_feedback
+        )
+        progress["substantive_coverage_added_since_objective_best"] = list(
+            substantive_coverage_added_since_objective_best
         )
         candidate_not_promoted_to_best = bool(
             not fundamental_changes
@@ -5995,7 +6018,9 @@ def _run_targeted_dossier_repairs(
             consecutive_genuine_nonprogress_count = 0
             progress["feedback_advancement"] = {
                 "validation_frontier_advanced": candidate_validation_depth_advanced,
-                "substantive_coverage_added": list(substantive_coverage_added_since_feedback),
+                "substantive_coverage_added": list(
+                    substantive_coverage_added_since_objective_best
+                ),
                 "epistemic_revision_basis": list(evidence_backed_revision),
             }
             if progress["decision"] != "accepted" and not progress_was_already_genuine:

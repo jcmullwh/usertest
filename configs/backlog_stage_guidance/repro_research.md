@@ -145,6 +145,11 @@ the decision remains open. Cite declared experiment/artifact IDs. An evidence-su
 is successful research: do not delete controls, invent an unknown, or downgrade merely to stop
 optioning. Stage 4 records the no-change outcome without a model call.
 
+Always emit `observed_problem_refinement` after reading the mandatory source-run context. Stage 1 is
+an evidence-bound mining hypothesis, not the final account of impact. Correct it when retained run
+evidence narrows the symptom; distinguish failed first attempt, successful recovery, partial mitigation,
+and blocked mission. Do not infer “no recovery” from a missing success atom. Account for every assigned atom in `evidence_atom_ids`; downstream stages use the refinement while preserving Stage-1 provenance.
+
 Always emit `case_relation_assessment`: `retain` for one causal work unit, `split` for at least two signed distinct causal/action boundaries, `keep_separate` for a relation hypothesis that remains separate, or `undetermined` when evidence cannot decide. Split is boundary research, not readiness; each child needs its own research.
 For `split`, partition `occurrence_evidence_atom_ids` exactly once across two or more facets, each with title, problem, user impact, and boundary. Citations use an RFC 6901 `field_path` into that occurrence's signed snapshot and copy `exact_value` verbatim. Distinguish causal/action boundaries, not run IDs, timestamps, or wording; otherwise use `undetermined` and preserve the unknown.
 
@@ -204,6 +209,7 @@ evidence uses the machine-checkable shapes below, not prose substitutes.
     "rationale": "evidence-based current actionability conclusion",
     "evidence_refs": ["experiment:verified-current-state-or-artifact:retained-history"]
   },
+  "observed_problem_refinement": {"problem": "source-run-grounded observed problem after causal research", "user_impact": "bounded impact, including whether the run recovered or remained blocked", "evidence_summary": "concise account of failure, follow-up outcome, and current mechanism evidence", "evidence_atom_ids": ["atom:every-assigned-id"]},
   "material_unknowns": [{"unknown": "what is unknown", "evidence_needed": "specific evidence", "affects": ["root_cause"], "hypothesis_id": "hypothesis:unique", "material": true}],
   "blocking_reasons": [],
   "evidence_boundaries": []
