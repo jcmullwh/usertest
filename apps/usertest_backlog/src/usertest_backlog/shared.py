@@ -20,7 +20,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 _WINDOWS_OFFLINE_FIRST_SUCCESS_CMD = (
-    r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
+    "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/offline_first_success.ps1"
 )
 _POSIX_OFFLINE_FIRST_SUCCESS_CMD = "bash ./scripts/offline_first_success.sh"
 _BREADTH_PROFILE_EXTERNAL = "external_generalization"
