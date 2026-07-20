@@ -521,6 +521,98 @@ def test_missing_operational_revision_remains_blocked_when_current_revision_is_a
     assert selected["missing_evidence_atom_ids"] == [historical_id]
 
 
+def _content_addressed_derived_atom(
+    *,
+    digest: str = "a" * 64,
+    run_rel: str = "usertest/20260704T161642Z/codex/0",
+) -> dict[str, Any]:
+    return {
+        "atom_id": f"__derived__/usertest_implement/{digest}:maintenance_image_cleanup:1",
+        "run_id": run_rel,
+        "run_rel": run_rel,
+        "origin_run_id": run_rel,
+        "origin_stage": "runner_maintenance_image_cleanup",
+        "source": "maintenance_image_cleanup",
+        "text": "The runner reclaimed maintenance images after the implementation run.",
+        "status": "success",
+        "evidence_class": "observed",
+        "evidence_role": "observation",
+        "derived_source_root_kind": "usertest_implement",
+        "derived_source_run_rel": run_rel,
+        "derived_from_atom_ids": [],
+        "parent_case_id": None,
+        "case_id": None,
+        "supporting_case_ids": [],
+        "disposition": "unresolved",
+        "disposition_status": "pending",
+    }
+
+
+def test_missing_durable_derived_id_uses_exact_content_addressed_alias(
+    tmp_path: Path,
+) -> None:
+    current = _content_addressed_derived_atom()
+    historical_id = (
+        "usertest_implement/usertest/20260704T161642Z/codex/0:"
+        "maintenance_image_cleanup:1"
+    )
+
+    [selected] = mod._build_selected_research_payloads(
+        repo_root=tmp_path,
+        selected_priority_decisions=[{"problem_id": "problem:image-retention"}],
+        problem_records=[
+            {
+                "case_id": "case:image-retention",
+                "problem_id": "problem:image-retention",
+                "source_evidence_atom_ids": [historical_id, current["atom_id"]],
+            }
+        ],
+        atoms=[current],
+    )
+
+    expected_alias = {
+        "historical_atom_id": historical_id,
+        "current_atom_id": current["atom_id"],
+        "current_atom_sha256": mod.source_evidence_atom_sha256(current),
+        "authority": "content_addressed_derived_source_alias",
+    }
+    assert selected["expected_evidence_atom_ids"] == [current["atom_id"]]
+    assert selected["missing_evidence_atom_ids"] == []
+    assert selected["derived_source_currentness_aliases"] == [expected_alias]
+    assert selected["evidence_assignment"]["derived_source_currentness_aliases"] == [
+        expected_alias
+    ]
+    assert selected["evidence_assignment"]["status"] == "complete"
+
+
+def test_missing_durable_derived_id_remains_blocked_when_alias_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    first = _content_addressed_derived_atom(digest="a" * 64)
+    second = _content_addressed_derived_atom(digest="b" * 64)
+    historical_id = (
+        "usertest_implement/usertest/20260704T161642Z/codex/0:"
+        "maintenance_image_cleanup:1"
+    )
+
+    [selected] = mod._build_selected_research_payloads(
+        repo_root=tmp_path,
+        selected_priority_decisions=[{"problem_id": "problem:image-retention"}],
+        problem_records=[
+            {
+                "case_id": "case:image-retention",
+                "problem_id": "problem:image-retention",
+                "source_evidence_atom_ids": [historical_id],
+            }
+        ],
+        atoms=[first, second],
+    )
+
+    assert selected["derived_source_currentness_aliases"] == []
+    assert selected["missing_evidence_atom_ids"] == [historical_id]
+    assert selected["evidence_assignment"]["status"] == "incomplete"
+
+
 def test_split_child_research_receives_authenticated_original_occurrence_not_facet_prose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

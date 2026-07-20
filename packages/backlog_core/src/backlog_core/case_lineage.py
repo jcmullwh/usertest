@@ -947,7 +947,7 @@ def _registry_atom_case_memberships(
     return {atom_id: sorted(case_ids) for atom_id, case_ids in memberships.items() if case_ids}
 
 
-def _derived_source_atom_id_aliases(atom: Mapping[str, Any]) -> list[str]:
+def derived_source_atom_id_aliases(atom: Mapping[str, Any]) -> list[str]:
     """Return durable pre-content-addressing identities for a re-ingested atom.
 
     Derived-run ingestion uses a content-addressed record identity so the same run
@@ -1073,7 +1073,7 @@ def normalize_atom_lineage(
             dict.fromkeys(
                 [
                     *([atom_id] if atom_id is not None else []),
-                    *_derived_source_atom_id_aliases(atom),
+                    *derived_source_atom_id_aliases(atom),
                 ]
             )
         )

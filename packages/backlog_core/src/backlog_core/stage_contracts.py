@@ -424,6 +424,7 @@ def _research_assignment_prompt_projection(value: Any) -> dict[str, Any]:
                 "occurrence_evidence_atom_ids",
                 "provisional_same_cause_member_evidence_atom_ids",
                 "operational_candidate_currentness_aliases",
+                "derived_source_currentness_aliases",
                 "assignment_sha256",
             ),
         ),

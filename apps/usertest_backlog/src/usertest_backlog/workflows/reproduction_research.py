@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from backlog_core import (
     SOURCE_EVIDENCE_PROJECTION_VERSION,
+    derived_source_atom_id_aliases,
     operational_candidate_receipt_errors,
     provisional_same_cause_group_errors,
     source_evidence_atom_projection,
@@ -535,6 +536,50 @@ def _select_current_operational_candidate_evidence(
     return selected_ids, aliases
 
 
+def _select_current_derived_source_evidence(
+    *,
+    evidence_atom_ids: list[str],
+    atoms_by_id: Mapping[str, dict[str, Any]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Resolve a durable derived-run ID to its exact content-addressed identity.
+
+    Derived-run ingestion changed from path-shaped IDs to content-addressed IDs.  The
+    case graph correctly retains both history and the current observation, but Stage 3
+    must not treat the old spelling as missing evidence when exactly one current atom
+    authenticates that durable alias from runner-owned source fields.  Ambiguous or
+    malformed aliases remain unresolved and therefore retain the normal evidence gate.
+    """
+
+    current_by_alias: dict[str, list[str]] = {}
+    for current_id, atom in atoms_by_id.items():
+        for alias in derived_source_atom_id_aliases(atom):
+            current_by_alias.setdefault(alias, [])
+            if current_id not in current_by_alias[alias]:
+                current_by_alias[alias].append(current_id)
+
+    selected_ids: list[str] = []
+    aliases: list[dict[str, str]] = []
+    for atom_id in evidence_atom_ids:
+        selected_id = atom_id
+        if atom_id not in atoms_by_id:
+            available = current_by_alias.get(atom_id, [])
+            if len(available) == 1:
+                selected_id = available[0]
+                aliases.append(
+                    {
+                        "historical_atom_id": atom_id,
+                        "current_atom_id": selected_id,
+                        "current_atom_sha256": source_evidence_atom_sha256(
+                            atoms_by_id[selected_id]
+                        ),
+                        "authority": "content_addressed_derived_source_alias",
+                    }
+                )
+        if selected_id not in selected_ids:
+            selected_ids.append(selected_id)
+    return selected_ids, aliases
+
+
 def _initial_research_evidence_roles(
     evidence_atom_ids: list[str],
     *,
@@ -843,6 +888,12 @@ def _build_selected_research_payloads(
         )
         evidence_ids.extend(provisional_member_evidence_ids)
         evidence_ids = list(dict.fromkeys(evidence_ids))
+        evidence_ids, derived_source_currentness_aliases = (
+            _select_current_derived_source_evidence(
+                evidence_atom_ids=evidence_ids,
+                atoms_by_id=atoms_by_id,
+            )
+        )
         evidence_ids, operational_candidate_currentness_aliases = (
             _select_current_operational_candidate_evidence(
                 evidence_atom_ids=evidence_ids,
@@ -882,7 +933,10 @@ def _build_selected_research_payloads(
                     and atom_id
                     not in {
                         alias["historical_atom_id"]
-                        for alias in operational_candidate_currentness_aliases
+                        for alias in [
+                            *derived_source_currentness_aliases,
+                            *operational_candidate_currentness_aliases,
+                        ]
                     }
                 ]
             )
@@ -917,6 +971,9 @@ def _build_selected_research_payloads(
         assignment["operational_candidate_currentness_aliases"] = list(
             operational_candidate_currentness_aliases
         )
+        assignment["derived_source_currentness_aliases"] = list(
+            derived_source_currentness_aliases
+        )
         missing_evidence_atom_ids.extend(assignment_missing)
         missing_evidence_atom_ids = list(dict.fromkeys(missing_evidence_atom_ids))
         assignment_errors = [
@@ -940,6 +997,7 @@ def _build_selected_research_payloads(
                 "operational_candidate_currentness_aliases": (
                     operational_candidate_currentness_aliases
                 ),
+                "derived_source_currentness_aliases": derived_source_currentness_aliases,
                 "evidence_lineage_errors": evidence_lineage_errors,
                 "missing_evidence_atom_ids": missing_evidence_atom_ids,
                 "evidence_atoms": evidence_atoms,
