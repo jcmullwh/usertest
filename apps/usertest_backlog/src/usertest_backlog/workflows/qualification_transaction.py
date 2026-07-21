@@ -829,6 +829,12 @@ def _semantic_source_value_base_equal(prior: Any, observed: Any) -> bool:
     return prior == observed
 
 
+def _protected_manifest_content(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Return stable protected content without its display-only ordinal name."""
+
+    return {key: value for key, value in manifest.items() if key != "name"}
+
+
 def extend_qualification_preparation_snapshot(
     snapshot: Mapping[str, Any],
     *,
@@ -900,7 +906,10 @@ def extend_qualification_preparation_snapshot(
         if not isinstance(item, Mapping):
             raise ValueError("qualification_input_protected_changed_during_extraction")
         key = (item.get("kind"), item.get("path") or item.get("root"))
-        if observed_protected.get(key) != item:
+        observed_item = observed_protected.get(key)
+        if not isinstance(observed_item, Mapping) or _protected_manifest_content(
+            observed_item
+        ) != _protected_manifest_content(item):
             raise ValueError("qualification_input_protected_changed_during_extraction")
     return observed
 
