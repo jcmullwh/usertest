@@ -2691,6 +2691,16 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: the accepted dossier was rematerialized through the normal zero-call Stage-3 retained-dossier path, which persisted its exact artifact reference and digest into the reconciled registry. Stage 4 was then rerun deterministically from that registry. No model work or authored research was repeated.
 - Verification: `stage3_case_78a46_reuse_corrected_20260721T010426Z` records reuse without a new model invocation and preserves all ten retained attempts. `stage4_case_78a46_final_20260721T010445Z` binds the corrected Stage-3 digest, and exact next-cycle hydration authenticates both artifacts with zero errors.
 
+### BDS-196 - One-for-one verifier frontier changes can still trigger a false nonprogress pause
+
+- Status: `open_nonblocking_baseline_supervised`
+- Priority: self-healing throughput, intervention reduction
+- Objective impact: the same author can resolve every immediately prior finding while exposing one new, narrower finding, yet the correction loop can count the unchanged total as consecutive nonprogress and pause for supervisor adjudication. The authored work is retained, so quality is protected, but useful throughput still requires avoidable manual continuation.
+- Exact evidence: first-run-policy case `case:f257d8e7823de2dddf4b` reached a one-error evidence frontier. Attempts 8, 9, and 10 respectively replaced `inspected_symbol_unresolved:config:/requires_edits` with `research_dossier_hypothesis_symbol_uninspected`, then `research_evidence_verification_mechanism_source_unbound`, then `research_dossier_hypothesis_support_not_linked_to_inspected_code`. Each previous identity was resolved; attempt 9 was even marked `genuine_feedback_progress=true`, but attempt 10 paused with `consecutive_nonadvancing_correction_count=3`.
+- Current containment: the supervisor inspects the retained forward candidate, confirms whether the changed identity reflects real rework, and sends the exact current finding back to the same author. Two focused same-session continuations then resolved the code linkage and adjudicated a current-state hypothesis as non-competing. No dossier or experiment was discarded.
+- Required action: progress accounting should treat resolution of the immediately prior identity plus a changed dossier/frontier as continued repair unless the new finding repeats a previously visited semantic state, regresses substantive coverage, or otherwise meets the genuine nonprogress policy. A constant error count alone must not consume the nonprogress allowance.
+- Closure proof: a synthetic one-error sequence that resolves A while exposing B, then resolves B while exposing C, stays on the same-author frontier; an A-to-A semantic repeat or substantive regression still pauses under the existing policy.
+
 ## Verification-pending fixes
 
 ### BDS-001 — Stage 3 treated future design choices as material research unknowns

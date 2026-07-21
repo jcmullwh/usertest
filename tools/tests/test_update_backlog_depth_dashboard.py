@@ -248,13 +248,13 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     assert current["lifecycle_id"] == "pipeline-cycle:bc70b15b:20260720"
     assert current["timing"]["start_at"] == "2026-07-20T17:50:50Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 45
-    assert current["rework"]["continuation_launches"] == 32
-    assert current["rework"]["stage_reruns"] == 12
+    assert current["rework"]["author_invocations"] == 56
+    assert current["rework"]["continuation_launches"] == 42
+    assert current["rework"]["stage_reruns"] == 13
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 18
-    assert current["automatic_self_corrections"]["count"] == 15
-    assert current["supervisor_interventions"]["count"] == 22
+    assert current["errors"]["count"] == 19
+    assert current["automatic_self_corrections"]["count"] == 18
+    assert current["supervisor_interventions"]["count"] == 24
     assert current["furthest_stage"] == (
         "Authenticated Stage-4 disposition with stable next-cycle routing"
     )
