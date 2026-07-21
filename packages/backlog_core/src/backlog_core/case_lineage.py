@@ -1021,6 +1021,20 @@ def _operational_candidate_signature(atom: Mapping[str, Any]) -> str | None:
     return signature if _valid_sha256(signature) else None
 
 
+def _operational_candidate_signature_from_atom_id(atom_id: str) -> str | None:
+    """Return the stable signature encoded by a synthetic candidate atom ID."""
+
+    parts = atom_id.split(":")
+    if (
+        len(parts) != 3
+        or parts[0] != "operational_failure"
+        or not _valid_sha256(parts[1])
+        or not _valid_sha256(parts[2])
+    ):
+        return None
+    return parts[1].casefold()
+
+
 def normalize_atom_lineage(
     atoms: Sequence[dict[str, Any]],
     *,
@@ -1989,7 +2003,36 @@ def build_case_registry(
             )
         )
         current_evidence = _clean_string_list(record.get("evidence_atom_ids"))
-        previous_evidence_list = _clean_string_list(previous_entry.get("evidence_atom_ids"))
+        current_operational_atom_ids_by_signature: dict[str, set[str]] = {}
+        for atom_id in current_evidence:
+            signature = _operational_candidate_signature(
+                supporting_atoms_by_id.get(atom_id) or {}
+            )
+            if signature is not None:
+                current_operational_atom_ids_by_signature.setdefault(
+                    signature,
+                    set(),
+                ).add(atom_id)
+        previous_evidence_all = _clean_string_list(
+            previous_entry.get("evidence_atom_ids")
+        )
+        superseded_operational_atom_ids = sorted(
+            {
+                atom_id
+                for atom_id in previous_evidence_all
+                for signature in [
+                    _operational_candidate_signature_from_atom_id(atom_id)
+                ]
+                if signature in current_operational_atom_ids_by_signature
+                and atom_id
+                not in current_operational_atom_ids_by_signature.get(signature, set())
+            }
+        )
+        previous_evidence_list = [
+            atom_id
+            for atom_id in previous_evidence_all
+            if atom_id not in set(superseded_operational_atom_ids)
+        ]
         evidence_ids = list(dict.fromkeys(previous_evidence_list + current_evidence))
         derived_evidence_ids = list(
             dict.fromkeys(
@@ -1999,7 +2042,13 @@ def build_case_registry(
         )
         source_evidence_ids = list(
             dict.fromkeys(
-                _clean_string_list(previous_entry.get("source_evidence_atom_ids"))
+                [
+                    atom_id
+                    for atom_id in _clean_string_list(
+                        previous_entry.get("source_evidence_atom_ids")
+                    )
+                    if atom_id not in set(superseded_operational_atom_ids)
+                ]
                 + _clean_string_list(record.get("source_evidence_atom_ids"))
                 + [atom_id for atom_id in evidence_ids if atom_id not in set(derived_evidence_ids)]
             )
@@ -2057,6 +2106,16 @@ def build_case_registry(
             "source_evidence_snapshot_complete": source_snapshot["complete"],
             "source_evidence_snapshot_missing_atom_ids": source_snapshot["missing_atom_ids"],
             "source_evidence_snapshot_sha256": source_snapshot["snapshot_sha256"],
+            "superseded_operational_evidence_atom_ids": list(
+                dict.fromkeys(
+                    _clean_string_list(
+                        previous_entry.get(
+                            "superseded_operational_evidence_atom_ids"
+                        )
+                    )
+                    + superseded_operational_atom_ids
+                )
+            ),
             "case_revision": case_revision,
             "same_cause_group_id": _clean_string(record.get("same_cause_group_id"))
             or _clean_string(previous_entry.get("same_cause_group_id")),

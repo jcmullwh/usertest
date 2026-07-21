@@ -5438,6 +5438,116 @@ def _canonical_candidate_represents_work_unit(
     return bool(represented_problem_ids.intersection(work_unit_problem_ids))
 
 
+def _persisted_identity_split_return(
+    candidate: Mapping[str, Any],
+    *,
+    atoms_by_id: Mapping[str, Mapping[str, Any]],
+    case_registry: Mapping[str, Any],
+    historical_records_by_case: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return one split group to the durable case identified by its evidence.
+
+    A newly aggregated operational candidate can span multiple known case signatures.
+    Stage 1 is allowed to propose one broad record and relation review can correctly
+    split it.  Those split groups are identity resolution, not novel child cases: when
+    every atom in a group maps unambiguously to the same pending durable candidate,
+    retain that case and attach the current evidence to it.
+    """
+
+    split_from_case_id = _coerce_string(candidate.get("split_from_case_id"))
+    evidence_atom_ids = _coerce_string_list(candidate.get("evidence_atom_ids"))
+    candidate_case_ids = set(
+        _coerce_string_list(candidate.get("case_identity_candidate_ids"))
+    )
+    if (
+        split_from_case_id is None
+        or not evidence_atom_ids
+        or len(candidate_case_ids) < 2
+    ):
+        return None
+
+    primary_raw = case_registry.get("atom_id_to_case_id")
+    primary = primary_raw if isinstance(primary_raw, Mapping) else {}
+    memberships_raw = case_registry.get("atom_id_to_case_ids")
+    memberships = memberships_raw if isinstance(memberships_raw, Mapping) else {}
+    signatures_raw = case_registry.get("operational_signature_to_case_id")
+    signatures = signatures_raw if isinstance(signatures_raw, Mapping) else {}
+
+    resolved_by_atom: dict[str, str] = {}
+    for atom_id in evidence_atom_ids:
+        atom = atoms_by_id.get(atom_id)
+        if not isinstance(atom, Mapping):
+            return None
+        mapped_case_ids = set(_coerce_string_list(memberships.get(atom_id)))
+        primary_case_id = _coerce_string(primary.get(atom_id))
+        if primary_case_id is not None:
+            mapped_case_ids.add(primary_case_id)
+        if _coerce_string(atom.get("source")) == "operational_failure_candidate":
+            signature = _coerce_string(atom.get("operational_candidate_signature"))
+            signature_case_id = _coerce_string(signatures.get(signature or ""))
+            if signature_case_id is not None:
+                mapped_case_ids.add(signature_case_id)
+        mapped_case_ids.intersection_update(candidate_case_ids)
+        if len(mapped_case_ids) != 1:
+            return None
+        resolved_by_atom[atom_id] = next(iter(mapped_case_ids))
+
+    resolved_case_ids = sorted(set(resolved_by_atom.values()))
+    if len(resolved_case_ids) != 1:
+        return None
+    resolved_case_id = resolved_case_ids[0]
+    historical = historical_records_by_case.get(resolved_case_id)
+    if not isinstance(historical, Mapping):
+        return None
+
+    returned = deepcopy(dict(historical))
+    derived_roles = {"research", "implementation", "verification"}
+    derived_atom_ids = [
+        atom_id
+        for atom_id in evidence_atom_ids
+        if _coerce_string((atoms_by_id.get(atom_id) or {}).get("evidence_role"))
+        in derived_roles
+    ]
+    returned["evidence_atom_ids"] = evidence_atom_ids
+    returned["derived_evidence_atom_ids"] = derived_atom_ids
+    returned["source_evidence_atom_ids"] = [
+        atom_id for atom_id in evidence_atom_ids if atom_id not in set(derived_atom_ids)
+    ]
+    returned["case_identity_status"] = "resolved"
+    returned.pop("case_identity_candidate_ids", None)
+    returned.pop("provisional_same_cause_group", None)
+    returned.pop("provisional_same_cause_integrity_errors", None)
+    relation_actions_raw = candidate.get("case_relation_actions")
+    relation_actions = (
+        [dict(item) for item in relation_actions_raw if isinstance(item, Mapping)]
+        if isinstance(relation_actions_raw, list)
+        else []
+    )
+    if relation_actions:
+        returned["case_relation_actions"] = relation_actions
+    returned["_relation_active_split_return"] = True
+
+    audit: dict[str, Any] = {
+        "schema_version": 1,
+        "return_kind": "persisted_case_identity_partition",
+        "split_from_case_id": split_from_case_id,
+        "returned_child_case_id": _coerce_string(candidate.get("case_id")),
+        "returned_child_problem_id": _coerce_string(candidate.get("problem_id")),
+        "resolved_case_id": resolved_case_id,
+        "evidence_atom_ids": evidence_atom_ids,
+        "resolved_case_id_by_atom_id": resolved_by_atom,
+    }
+    audit["content_sha256"] = sha256(
+        json.dumps(
+            audit,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return returned, audit
+
+
 def _derived_split_return_to_parent_lineage(
     candidate: Mapping[str, Any],
     *,
@@ -5641,7 +5751,24 @@ def _run_relation_review_batches(
         response_path = review_dir / f"{batch_tag}.response.txt"
         provisional_path = review_dir / f"{batch_tag}.provisional.json"
         prompt_path.write_text(prompt, encoding="utf-8")
-        workspace_dir = review_dir / f"{batch_tag}.workspace"
+        # Keep the process working directory shallow.  Relation tags repeat the
+        # already descriptive artifact path and can push an otherwise valid Windows
+        # cwd to MAX_PATH, where process creation reports WinError 267 before Codex
+        # can even verify the host subscription.  Prompt, response, auth, and
+        # invocation artifacts remain in ``review_dir``; only the empty agent cwd is
+        # placed beside the stage artifact tree under a content-stable short name.
+        workspace_base = review_dir.parent
+        if (
+            workspace_base.name == "problem_mining"
+            and workspace_base.parent.name == "backlog_artifacts"
+        ):
+            workspace_base = workspace_base.parent.parent
+        workspace_token = sha256(
+            (str(review_dir.resolve()) + "\n" + batch_tag).encode("utf-8")
+        ).hexdigest()[:16]
+        workspace_dir = (
+            workspace_base / "_relation_workspaces" / f"workspace_{workspace_token}"
+        )
         workspace_dir.mkdir(parents=True, exist_ok=True)
         continuity_key = sha256(
             _json.dumps(
@@ -6899,8 +7026,18 @@ def _run_problem_case_relation_review(
     for candidate in canonical_candidates:
         _synchronize_provisional_research_unit_membership(candidate)
     canonical_records: list[dict[str, Any]] = []
+    persisted_identity_split_returns: list[dict[str, Any]] = []
     derived_split_returns: list[dict[str, Any]] = []
     for candidate in canonical_candidates:
+        persisted_return = _persisted_identity_split_return(
+            candidate,
+            atoms_by_id=atoms_by_id,
+            case_registry=previous_case_registry,
+            historical_records_by_case=historical_context_by_case,
+        )
+        if persisted_return is not None:
+            candidate, return_audit = persisted_return
+            persisted_identity_split_returns.append(return_audit)
         derived_split_return = _derived_split_return_to_parent_lineage(
             candidate,
             atoms_by_id=atoms_by_id,
@@ -6908,7 +7045,11 @@ def _run_problem_case_relation_review(
         if derived_split_return is not None:
             derived_split_returns.append(derived_split_return)
             continue
-        if not _canonical_candidate_represents_work_unit(
+        active_split_return = candidate.pop(
+            "_relation_active_split_return",
+            False,
+        ) is True
+        if not active_split_return and not _canonical_candidate_represents_work_unit(
             candidate,
             work_unit_problem_ids=work_unit_problem_ids,
         ):
@@ -7159,6 +7300,9 @@ def _run_problem_case_relation_review(
             ),
             "relation_review_batches": relation_review_batches,
             "relation_review_decisions": decisions,
+            "relation_review_persisted_identity_split_returns": (
+                persisted_identity_split_returns
+            ),
             "relation_review_derived_split_returns": derived_split_returns,
             "pre_relation_problem_records": problem_records,
             "atom_dispositions": atom_disposition_summary(updated_atoms),

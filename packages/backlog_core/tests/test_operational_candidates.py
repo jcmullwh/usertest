@@ -718,6 +718,13 @@ def test_occurrence_set_identity_changes_but_signature_reuses_and_reopens_case(
 
     assert updated["operational_signature_to_case_id"] == {signature: case_id}
     assert updated["atom_id_to_case_id"][expanded_candidate["atom_id"]] == case_id
+    assert updated["cases"][case_id]["source_evidence_atom_ids"] == [
+        expanded_candidate["atom_id"]
+    ]
+    assert updated["cases"][case_id]["source_evidence_snapshot_complete"] is True
+    assert updated["cases"][case_id][
+        "superseded_operational_evidence_atom_ids"
+    ] == [first_candidate["atom_id"]]
     assert updated["cases"][case_id]["state"] == "active"
     assert updated["cases"][case_id]["recurrence_reopen"] == {
         "from_state": "resolved",

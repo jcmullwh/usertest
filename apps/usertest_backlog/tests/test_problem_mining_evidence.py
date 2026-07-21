@@ -42,6 +42,7 @@ from usertest_backlog.workflows.problem_mining import (
     _failed_relation_review_batch_count,
     _order_problem_mining_atoms_for_local_context,
     _partition_problem_mining_chunks,
+    _persisted_identity_split_return,
     _preserve_primary_after_coverage_review_failure,
     _problem_mining_attempt_manifest_sha256,
     _problem_mining_job_batches,
@@ -5071,6 +5072,10 @@ def test_relation_review_repairs_structural_errors_in_exact_reviewer_session(
     assert len(calls) == 2
     assert calls[1]["resume_session_id"] == "019f2cca-9011-7e32-88ae-6c25af578b49"
     assert calls[0]["workspace_dir"] == calls[1]["workspace_dir"]
+    workspace_dir = Path(str(calls[0]["workspace_dir"]))
+    assert workspace_dir.parent == tmp_path / "_relation_workspaces"
+    assert workspace_dir.name.startswith("workspace_")
+    assert len(workspace_dir.name) == len("workspace_") + 16
     assert batches[0]["status"] == "completed"
     assert batches[0]["correction_status"] == "corrected"
     assert batches[0]["candidate_frontier"] == [_relation_case_preview(relation_items[0])]
@@ -5720,6 +5725,64 @@ def test_derived_split_group_returns_to_existing_parent_lineage() -> None:
         _derived_split_return_to_parent_lineage(candidate, atoms_by_id=atoms_by_id)
         is None
     )
+
+
+def test_operational_split_group_returns_to_persisted_signature_case() -> None:
+    signature = "a" * 64
+    atom_id = f"operational_failure:{signature}:{'b' * 64}"
+    candidate = {
+        "problem_id": "problem:broad:split:1",
+        "case_id": "case:new-child",
+        "split_from_case_id": "case:gemini",
+        "case_identity_status": "pending_relation",
+        "case_identity_candidate_ids": ["case:docker", "case:gemini"],
+        "evidence_atom_ids": [atom_id],
+        "case_relation_actions": [
+            {"action": "split", "rationale": "The mechanisms are distinct."}
+        ],
+    }
+    atoms_by_id = {
+        atom_id: {
+            "atom_id": atom_id,
+            "source": "operational_failure_candidate",
+            "operational_candidate_signature": signature,
+            "evidence_role": "observation",
+        }
+    }
+    registry = {
+        "atom_id_to_case_id": {},
+        "atom_id_to_case_ids": {},
+        "operational_signature_to_case_id": {signature: "case:docker"},
+    }
+    historical = {
+        "case:docker": {
+            "case_id": "case:docker",
+            "problem_id": "problem:docker-shell",
+            "canonical_problem_id": "problem:docker-shell",
+            "case_member_problem_ids": ["problem:docker-shell"],
+            "title": "Docker shell probe is blocked",
+            "evidence_atom_ids": ["operational_failure:old"],
+        }
+    }
+
+    result = _persisted_identity_split_return(
+        candidate,
+        atoms_by_id=atoms_by_id,
+        case_registry=registry,
+        historical_records_by_case=historical,
+    )
+
+    assert result is not None
+    returned, audit = result
+    assert returned["case_id"] == "case:docker"
+    assert returned["problem_id"] == "problem:docker-shell"
+    assert returned["evidence_atom_ids"] == [atom_id]
+    assert returned["source_evidence_atom_ids"] == [atom_id]
+    assert returned["case_identity_status"] == "resolved"
+    assert returned["_relation_active_split_return"] is True
+    assert audit["resolved_case_id"] == "case:docker"
+    assert audit["resolved_case_id_by_atom_id"] == {atom_id: "case:docker"}
+    assert len(audit["content_sha256"]) == 64
 
 
 def test_verified_relation_edges_require_hash_bound_runner_receipt(tmp_path: Path) -> None:
