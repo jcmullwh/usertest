@@ -530,7 +530,7 @@
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
               <span class="value">Validate and land controller PR #217</span>
-              <span class="detail">PR #220 is merged at `2b132e20...` and its case is terminally mitigated. The controller now has seven additional correction clusters that must pass the broad local suites, be reconciled with current `dev`, and pass PR #217 CI before backlog regeneration continues.</span>
+              <span class="detail">PR #220 is merged at `2b132e20...` and its case is terminally mitigated. The controller is reconciled with current `dev` at local merge head `b3df410`; the complete 2,208-test affected matrix and all four Ruff scopes pass. PR #217 must now be pushed and pass its PR-event CI before backlog regeneration continues.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -704,19 +704,19 @@
               </tr>
               <tr class="ops-current">
                 <td><strong>Fresh merged-dev qualification cycle through the first complete implementation and outcome chain</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>17 h 27 m active</strong><span class="ops-kind">active</span></td>
+                <td><strong>18 h 10 m active</strong><span class="ops-kind">active</span></td>
                 <td><span class="tag warn">Merged implementation with terminal, evidence-bounded outcome</span><span class="ops-detail">PR #220 merged into `dev` at `2b132e20f6d822bf517b55f847875a84b2d420e3`. The checkout-ENOSPC ticket is complete with outcome `mitigated`: original-scenario and faithful…</span></td>
                 <td><strong>One automated case reached merged PR and terminal mitigated disposition; zero cases claimed resolved; three tickets remain ready; zero bad-ready escape established; full-cycle qualification still 0/2</strong></td>
-                <td><strong>28</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Twenty-eight deduplicated system clusters have been observed in this fresh cycle. The seven clusters added by the first complete delivery chain are closed locally: split-child…</span></td>
+                <td><strong>29</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Twenty-nine deduplicated system clusters have been observed in this fresh cycle. Eight added by the first complete delivery and integration chain are closed locally: split-child…</span></td>
                 <td><strong>23</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The checkout case adds three lifecycle-level self-repair clusters: the Stage-3 researcher corrected its own proof, the implementation author corrected the reviewed defect on the…</span></td>
-                <td><strong>36</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision advanced one authenticated case through the full chain, returned exact findings to the responsible author/reviewer, and implemented seven general controller…</span></td>
+                <td><strong>37</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision advanced one authenticated case through the full chain, returned exact findings to the responsible author/reviewer, and implemented seven general controller…</span></td>
                 <td><strong>95</strong> author calls; 61 continuations; Unknown stage reruns; 0 full restarts<span class="ops-detail">Ninety-five signed-in Sol/high calls and 61 exact-session continuations are reconciled from retained invocation manifests. The 32 calls since the prior checkpoint include 17…</span></td>
-                <td>Run the full affected controller suites without abbreviated timeouts, reconcile PR #217 with current `dev`, push and pass its PR-event CI, then regenerate from the landed…</td>
+                <td>Push reconciled controller head `b3df410` to PR #217, pass its PR-event CI, merge the controller, then regenerate from the landed revision and supervise the next ready ticket…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-21T11:18:47Z. Showing 16 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-21T12:01:01Z. Showing 16 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

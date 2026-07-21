@@ -2782,9 +2782,18 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: natural live evidence remains mandatory for `live_verified` or `resolved`. A plan whose maximum expected state is deliberately `mitigated` advances on the bound original-scenario and faithful mitigation-effect roles while retaining missing live proof as a risk. This does not promote the case to resolved.
 - Verification: 87 focused outcome/review tests pass. Post-merge replay ran the original-scenario and mitigation-effect roles, both passed, and terminal provenance validated across the explicit `I:` and `U:` roots. Ticket `8bf5f7a551cf4cd4` is complete at `mitigated`; `live_evidence` is empty and both remaining risks are explicit.
 
-### Broad verification checkpoint after BDS-199 through BDS-205
+### BDS-206 - Local-ref resolution bypassed ENOSPC recovery validation context after branch integration
 
-- The canonical source-bound complete affected matrix passed in 392.3 seconds: `usertest_implement` 337/337, `usertest_backlog` 841 passed plus two expected skips out of 843 collected, and `backlog_core` 534/534. All three complete Ruff scopes passed. No timeout was shortened.
+- Status: `closed`
+- Priority: merged-mechanism correctness, diagnostic preservation, cleanup safety
+- Objective impact: the controller branch already resolved local remote-tracking refs before cloning so an isolated workspace could fetch the exact commit. PR #220 added one-shot ENOSPC clone recovery and expected checkout/ref validation to occur after fallback acquisition. A direct either-side merge would therefore lose either exact remote-only ref support or the fallback's combined original/validation error and cleanup path.
+- Exact evidence: the first conflict-specific run of complete `runner_core` files `test_basic.py` and `test_runner_retry_followup.py` failed exactly one parametrized node. The `missing-ref` case stopped at source-side `rev-parse` with `fatal: Needed a single revision`, so the retained error omitted the original `No space left on device` failure that the fallback contract must preserve.
+- Correction: resolvable local refs are still converted to exact commits, fetched into the isolated clone, and checked out detached. An unresolvable ref is now deferred to workspace checkout after clone/fallback acquisition, allowing `_raise_enospc_validation_error` to retain both failures and the fallback cleanup contract.
+- Verification: the same two complete files passed on rerun in 366.6 seconds. The subsequent source-bound post-merge matrix passed all 493 collected `runner_core` tests except four expected skips, plus every controller test described below. No timeout was shortened.
+
+### Broad verification checkpoint after BDS-199 through BDS-206
+
+- The pre-merge canonical source-bound controller matrix passed in 392.3 seconds: `usertest_implement` 337/337, `usertest_backlog` 841 passed plus two expected skips out of 843 collected, and `backlog_core` 534/534. After merging current `origin/dev` and resolving BDS-206, the full source-bound affected matrix passed again in 1,666.7 seconds: `runner_core` 489 passed plus four expected skips out of 493 collected, `usertest_implement` 337/337, `usertest_backlog` 841 passed plus two expected skips out of 843, and `backlog_core` 535/535. All four complete Ruff scopes passed. No timeout was shortened.
 - A package-local PDM launch first stopped during collection because its installed sibling packages were stale. This is a recurrence of the already-deduplicated AN-38 environment-launch cluster, not a product or test failure; the corrected source-bound command ran every affected test. A root-level PDM attempt also stopped immediately because the monorepo intentionally has no root PDM project.
 - Strict full-project mypy remains red across substantial pre-existing typing debt and untyped sibling-package boundaries. It is not a currently green repository/PR contract and was not used to overrule the green runtime suites or to expand this PR into unrelated typing work.
 

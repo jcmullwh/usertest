@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "as_of": "2026-07-21T11:18:47Z",
+  "as_of": "2026-07-21T12:01:01Z",
   "current_run_id": "qualification-cycle-bc70b15b-20260720",
   "summary_cards": [
     {
@@ -24,7 +24,7 @@
     {
       "label": "Next delivery gate",
       "value": "Validate and land controller PR #217",
-      "detail": "PR #220 is merged at `2b132e20...` and its case is terminally mitigated. The controller now has seven additional correction clusters that must pass the broad local suites, be reconciled with current `dev`, and pass PR #217 CI before backlog regeneration continues.",
+      "detail": "PR #220 is merged at `2b132e20...` and its case is terminally mitigated. The controller is reconciled with current `dev` at local merge head `b3df410`; the complete 2,208-test affected matrix and all four Ruff scopes pass. PR #217 must now be pushed and pass its PR-event CI before backlog regeneration continues.",
       "tone": "warn"
     }
   ],
@@ -45,18 +45,18 @@
     "timing": {
       "start_at": "2026-07-20T17:50:50Z",
       "end_at": null,
-      "elapsed_seconds": 62877,
+      "elapsed_seconds": 65411,
       "coverage": "active",
-      "display": "17 h 27 m active",
-      "note": "Wall time from fresh qualification preparation through the first completed implementation/outcome chain and broad controller verification. Checkout Stage 4 took 228.7 seconds, Stage 5 took 416.5 seconds, and Stage 6 took 844.1 seconds. Handoff adoption reran the five exact plan commands in 1,013.7 seconds. The complete affected 1,714-test matrix passed in 392.3 seconds. Long model, test, and CI work is observed at roughly ten-minute intervals; no test timeout was shortened."
+      "display": "18 h 10 m active",
+      "note": "Wall time from fresh qualification preparation through the first completed implementation/outcome chain and post-merge controller verification. Checkout Stage 4 took 228.7 seconds, Stage 5 took 416.5 seconds, and Stage 6 took 844.1 seconds. Handoff adoption reran the five exact plan commands in 1,013.7 seconds. The pre-merge 1,714-test controller matrix passed in 392.3 seconds; after integrating current `dev`, the complete 2,208-test affected matrix passed in 1,666.7 seconds. Long model, test, and CI work is observed at roughly ten-minute intervals; no test timeout was shortened."
     },
     "furthest_stage": "Merged implementation with terminal, evidence-bounded outcome",
-    "current_state": "PR #220 merged into `dev` at `2b132e20f6d822bf517b55f847875a84b2d420e3`. The checkout-ENOSPC ticket is complete with outcome `mitigated`: original-scenario and faithful controlled mitigation-effect evidence passed, natural live disk exhaustion was not manufactured, and the absence of live proof remains explicit. The qualification queue contains three ready tickets, one historical in-progress plan, one completed ticket, and no real discarded ticket. Controller PR #217 contains the general pipeline corrections and must now pass broad verification and be reconciled with current `dev`.",
+    "current_state": "PR #220 merged into `dev` at `2b132e20f6d822bf517b55f847875a84b2d420e3`. The checkout-ENOSPC ticket is complete with outcome `mitigated`: original-scenario and faithful controlled mitigation-effect evidence passed, natural live disk exhaustion was not manufactured, and the absence of live proof remains explicit. Controller head `b3df410` now includes current `dev`; its full affected matrix and Ruff scopes pass. The qualification queue contains three ready tickets, one historical in-progress plan, one completed ticket, and no real discarded ticket. PR #217 push/CI is the remaining controller gate.",
     "outcome": "One automated case reached merged PR and terminal mitigated disposition; zero cases claimed resolved; three tickets remain ready; zero bad-ready escape established; full-cycle qualification still 0/2",
     "errors": {
-      "count": 28,
+      "count": 29,
       "count_kind": "deduplicated_clusters",
-      "summary": "Twenty-eight deduplicated system clusters have been observed in this fresh cycle. The seven clusters added by the first complete delivery chain are closed locally: split-child lineage, bounded-residual review acceptance, runner-output tracking, exact CI event selection, same-reviewer head continuity, semantic review self-correction, and honest mitigated outcome progression. Individual validation messages and repeated symptoms are not counted as separate defects.",
+      "summary": "Twenty-nine deduplicated system clusters have been observed in this fresh cycle. Eight added by the first complete delivery and integration chain are closed locally: split-child lineage, bounded-residual review acceptance, runner-output tracking, exact CI event selection, same-reviewer head continuity, semantic review self-correction, honest mitigated outcome progression, and preservation of both exact local refs and ENOSPC fallback diagnostics. Individual validation messages and repeated symptoms are not counted as separate defects.",
       "cluster_ids": [
         "BDS-178",
         "BDS-179",
@@ -85,7 +85,8 @@
         "BDS-202",
         "BDS-203",
         "BDS-204",
-        "BDS-205"
+        "BDS-205",
+        "BDS-206"
       ]
     },
     "automatic_self_corrections": {
@@ -119,7 +120,7 @@
       ]
     },
     "supervisor_interventions": {
-      "count": 36,
+      "count": 37,
       "count_kind": "deduplicated_clusters",
       "summary": "Supervision advanced one authenticated case through the full chain, returned exact findings to the responsible author/reviewer, and implemented seven general controller corrections exposed by that chain. Two run-level interventions bounded Stage 3-6 and implementation/review/outcome progression. The system authored the research, mechanisms, selection, plan, code change, review, and outcome evidence; supervision fixed pipeline mechanics and rejected overclaiming without replacing the substantive work.",
       "cluster_ids": [
@@ -157,13 +158,14 @@
         "BDS-203",
         "BDS-204",
         "BDS-205",
+        "BDS-206",
         "SUPERVISOR-STAGE3-6-CHECKOUT-ENOSPC-01",
         "SUPERVISOR-IMPLEMENT-REVIEW-OUTCOME-CHECKOUT-ENOSPC-01"
       ]
     },
-    "next_action": "Run the full affected controller suites without abbreviated timeouts, reconcile PR #217 with current `dev`, push and pass its PR-event CI, then regenerate from the landed controller revision and supervise the next ready ticket through its correct final disposition.",
+    "next_action": "Push reconciled controller head `b3df410` to PR #217, pass its PR-event CI, merge the controller, then regenerate from the landed revision and supervise the next ready ticket through its correct final disposition.",
     "tone": "warn",
-    "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. The retained manifests reconcile 95 signed-in Sol/high calls and 61 continuations through this checkpoint. PR #220 is merged at exact commit `2b132e20f6d822bf517b55f847875a84b2d420e3`; its reviewed implementation head was `86e7aee79818332fbbd3924aa56e143709939a6b`. Original-scenario and mitigation-effect roles pass, while `live_evidence` remains empty and the outcome remains mitigated. The complete source-bound affected suites pass 337/337 `usertest_implement`, 841 passed plus two expected skips in 843 `usertest_backlog`, and 534/534 `backlog_core` (1,712 passed, two skipped; 1,714 collected) in 392.3 seconds; all three complete Ruff scopes pass. Strict full-project mypy is not a green repository contract and still reports extensive pre-existing typing debt, so it is not represented as passing evidence. No source input, ticket, workspace, image, container, or retained evidence artifact was removed.",
+    "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. The retained manifests reconcile 95 signed-in Sol/high calls and 61 continuations through this checkpoint. PR #220 is merged at exact commit `2b132e20f6d822bf517b55f847875a84b2d420e3`; its reviewed implementation head was `86e7aee79818332fbbd3924aa56e143709939a6b`. Original-scenario and mitigation-effect roles pass, while `live_evidence` remains empty and the outcome remains mitigated. Post-merge controller head `b3df410` passed 2,202 tests with six expected skips out of 2,208 collected in 1,666.7 seconds: `runner_core` 489+4 skips, `usertest_implement` 337, `usertest_backlog` 841+2 skips, and `backlog_core` 535. All four complete Ruff scopes pass. Strict full-project mypy is not a green repository contract and still reports extensive pre-existing typing debt, so it is not represented as passing evidence. No source input, ticket, workspace, image, container, or retained evidence artifact was removed.",
     "source_ids": [
       "backlog_depth_supervision_issue_ledger"
     ]
