@@ -2576,8 +2576,8 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Status: `open_nonblocking`
 - Priority: launch-efficiency, premodel correctness
 - Objective impact: a live research launch failed before the model because Git rejected the clean `U:` worktree as dubious ownership, although the immediately preceding preflight had passed.
-- Exact evidence: `stage3_case_131290_sol_high_20260720T183200Z` stopped before dispatch in repository-ref resolution. Preflight `stage3_case_131290_preflight_20260720T183100Z` had not executed that same resolution boundary.
-- Current containment: the successful launch supplied only a process-local `safe.directory=U:/usertest_backlog_qualification/execution_roots/bc70b15b`; no global Git configuration changed. The successful research receipt binds exact revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`.
+- Exact evidence: `stage3_case_131290_sol_high_20260720T183200Z` stopped before dispatch in repository-ref resolution. Preflight `stage3_case_131290_preflight_20260720T183100Z` had not executed that same resolution boundary. The same gap recurred after the host reboot: `stage3_case_dc5bf_sol_high_20260720T230232Z` passed preflight, then its first live launch stopped in 3.5 seconds with Git's `dubious ownership` rejection and zero model calls.
+- Current containment: the exact clean worktree `U:/usertest_backlog_qualification/execution_roots/bc70b15b` is now registered in the host Git safe-directory list and resolves to `bc70b15bf1f6709a589d308f0739c2b865a65e77`. The successful research receipt binds that exact revision. This contains the current worktree but does not close the missing preflight-parity defect.
 - Required action: Stage-3 preflight should exercise the exact repository-ref/Git ownership path used by live execution and report a premodel launch error there.
 - Closure proof: an induced cross-volume qualification preflight either succeeds under an explicit scoped trust receipt or fails before the live launch with the same typed reason.
 
@@ -2663,6 +2663,15 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: the first Windows next-cycle replay returned `retained_research_dossier_sha256_mismatch`; its current research summary referenced the original `stage3_group_windows_sol_high_20260720T210800Z/usertest.research.json` while binding the corrected dossier hash.
 - Correction: the throw-away post-research materializer remaps the Stage-3 document's `research_json` self-reference to the corrected, persisted artifact before case-registry lineage is recorded.
 - Verification: the repeated deterministic relation and Stage-4 handoff hydrate the corrected research and zero-option disposition with no errors. The canonical route is `await_evidence`, the absorbed case is absent from projected work, and neither research nor downstream is selected.
+
+### BDS-193 - Bounded carried-case handoff skipped source-snapshot reconciliation
+
+- Status: `closed_throwaway_wrapper`
+- Priority: lifecycle correctness, repeated-work prevention
+- Objective impact: a valid 49.9-minute research result and zero-option disposition would have been selected for immediate repeat research because the bounded Stage-2 carry restored current atom bytes without rebuilding the registry snapshot that authenticates those bytes.
+- Exact evidence: `case:dc5bf9281cc94e1856f8` retained 34 source atoms. Six historical `command_failure` atoms now include runner-owned `same_run_command_context`; Stage 3 correctly hashed those richer source projections, while the carried registry retained the older six hashes. Exact hydration returned `retained_research_source_evidence_content_mismatch` and route `research_update` despite an otherwise verified `already_addressed` dossier.
+- Correction: bounded carried-case materialization now runs the deterministic `build_case_registry(..., supporting_atoms=atoms)` reconciliation performed by the normal Stage-1 handoff before Stage 2/3. The existing verified dossier was passed through the normal retained-dossier reuse path with zero new model calls; the reuse wrapper also applies the production `research_contract_view` to runner-enriched lineage fields.
+- Verification: the reconciled source snapshot has zero atom-hash mismatches and advances the case revision from 2 to 3. Retained Stage 3 reuse and deterministic Stage 4 both completed without model calls. Exact next-cycle hydration reports zero research errors and zero no-change errors, returns `runner_retained_no_change_v1`, and routes `await_evidence` with research and downstream both deselected.
 
 ## Verification-pending fixes
 
