@@ -839,6 +839,72 @@ def test_preparation_snapshot_rejects_post_read_drift_across_all_input_classes(
             _build_bundle(inputs, preparation_input_snapshot=snapshot)
 
 
+def test_preparation_snapshot_extension_ignores_protected_ordinal_renumbering(
+    tmp_path: Path,
+) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    repo = inputs["repo_root"]
+    source_runs = inputs["source_runs_dir"]
+    ledger = inputs["atom_actions_path"]
+    seed = inputs["case_registry_seed_path"]
+    atoms = inputs["atoms"]
+    assert isinstance(repo, Path)
+    assert isinstance(source_runs, Path)
+    assert isinstance(ledger, Path)
+    assert isinstance(seed, Path)
+    assert isinstance(atoms, list)
+
+    existing_plan = repo / ".agents" / "plans" / "2 - ready" / "existing.md"
+    existing_plan.parent.mkdir(parents=True)
+    existing_plan.write_text("existing protected plan\n", encoding="utf-8")
+    discovered_owner, _revision = _repo(tmp_path, "00-discovered-owner")
+    discovered_plan = (
+        discovered_owner / ".agents" / "plans" / "2 - ready" / "discovered.md"
+    )
+    discovered_plan.parent.mkdir(parents=True)
+    discovered_plan.write_text("newly discovered protected plan\n", encoding="utf-8")
+
+    snapshot = capture_qualification_preparation_snapshot(
+        repo_root=repo,
+        repo_input=repo,
+        research_ref=str(inputs["research_ref"]),
+        source_runs_dir=source_runs,
+        atom_actions_path=ledger,
+        case_registry_seed_path=seed,
+        target="fixture",
+        atoms=atoms,
+    )
+    original_names = {
+        (item.get("kind"), item.get("path") or item.get("root")): item.get("name")
+        for item in snapshot["protected_paths"]
+    }
+
+    extended = transaction_module.extend_qualification_preparation_snapshot(
+        snapshot,
+        repo_root=repo,
+        repo_input=repo,
+        research_ref=str(inputs["research_ref"]),
+        source_runs_dir=source_runs,
+        atom_actions_path=ledger,
+        case_registry_seed_path=seed,
+        target="fixture",
+        atoms=atoms,
+        owner_roots=[discovered_owner],
+    )
+
+    extended_names = {
+        (item.get("kind"), item.get("path") or item.get("root")): item.get("name")
+        for item in extended["protected_paths"]
+    }
+    assert any(
+        extended_names[key] != name for key, name in original_names.items()
+    ), "the fixture must exercise ordinal renumbering"
+    assert any(
+        str(discovered_owner.resolve()) in str(item.get("root") or item.get("path"))
+        for item in extended["protected_paths"]
+    )
+
+
 def test_runtime_compatibility_projection_ignores_unrelated_apps_but_tracks_backlog_behavior(
     tmp_path: Path,
 ) -> None:

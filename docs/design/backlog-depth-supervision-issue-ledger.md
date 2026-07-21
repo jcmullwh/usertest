@@ -2791,6 +2791,15 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: resolvable local refs are still converted to exact commits, fetched into the isolated clone, and checked out detached. An unresolvable ref is now deferred to workspace checkout after clone/fallback acquisition, allowing `_raise_enospc_validation_error` to retain both failures and the fallback cleanup contract.
 - Verification: the same two complete files passed on rerun in 366.6 seconds. The subsequent source-bound post-merge matrix passed all 493 collected `runner_core` tests except four expected skips, plus every controller test described below. No timeout was shortened.
 
+### BDS-207 - Newly discovered owner roots falsely looked like protected-plan mutations
+
+- Status: `closed`
+- Priority: qualification baseline throughput, evidence custody
+- Objective impact: fresh qualification preparation could ingest the retained implementation evidence and discover its repository owners, but then stopped before sealing the corpus because adding a protected owner tree renumbered the display-only `protected:NNNN` labels of unchanged manifests. This made valid new evidence impossible to prepare even though no protected ticket changed.
+- Exact evidence: preparation attempt `U:\usertest_backlog_qualification\2311c166_20260721T132000Z_a3` ran model-free extraction for 328.3 seconds and exited with `qualification_input_protected_changed_during_extraction`. No protected file had a write time inside the launch interval. The comparison keyed manifests by stable kind/path but then compared the full objects, including the order-derived `name` field; record-derived owner discovery inserted additional sorted manifests and changed those ordinals only.
+- Correction: protected-manifest extension compares stable path-bound content while excluding the display-only ordinal name. Path, kind, file hash, size, tree entries, and tree digest remain mandatory and unchanged-content additions are still one-way: previously protected content may not disappear or mutate.
+- Verification: a regression constructs a later-discovered Git owner whose protected tree sorts ahead of the original tree and proves ordinal renumbering is accepted. The existing all-input-class drift test still rejects an actual protected-plan content mutation. Both focused tests and Ruff pass; the exact preparation replay is the required operational proof.
+
 ### Broad verification checkpoint after BDS-199 through BDS-206
 
 - The pre-merge canonical source-bound controller matrix passed in 392.3 seconds: `usertest_implement` 337/337, `usertest_backlog` 841 passed plus two expected skips out of 843 collected, and `backlog_core` 534/534. After merging current `origin/dev` and resolving BDS-206, the full source-bound affected matrix passed again in 1,666.7 seconds: `runner_core` 489 passed plus four expected skips out of 493 collected, `usertest_implement` 337/337, `usertest_backlog` 841 passed plus two expected skips out of 843, and `backlog_core` 535/535. All four complete Ruff scopes passed. No timeout was shortened.
