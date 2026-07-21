@@ -1026,6 +1026,116 @@ def test_problem_mining_split_receipt_authenticates_source_occurrences(
     assert "problem_mining_split_relation_receipt_sha256_mismatch" in errors
 
 
+def test_problem_mining_split_binding_preserves_historical_post_research_child(
+    tmp_path: Path,
+) -> None:
+    current_decision = {
+        "focus_id": "problem:historical-child",
+        "action": "keep_separate",
+        "rationale": "The prior split remains the correct durable identity boundary.",
+        "review_confidence": 0.98,
+    }
+    response_path = tmp_path / "relation.response.txt"
+    response_path.write_text(json.dumps([current_decision]), encoding="utf-8")
+    historical_split_receipt = {
+        "schema_version": 1,
+        "receipt_kind": "post_research_case_split",
+        "receipt_path": str(tmp_path / "historical-split.json"),
+        "receipt_sha256": "1" * 64,
+        "content_sha256": "2" * 64,
+    }
+    child = {
+        "problem_id": "problem:historical-child",
+        "case_id": "case:historical-child",
+        "split_from_case_id": "case:historical-parent",
+        "split_parent_problem_id": "problem:historical-parent",
+        "evidence_atom_ids": ["atom:source"],
+        "source_evidence_atom_ids": ["atom:source"],
+        "derived_evidence_atom_ids": [],
+        "case_relation_actions": [{"action": "keep_separate"}],
+        "post_research_split_receipt": deepcopy(historical_split_receipt),
+    }
+    registry = {
+        "cases": {
+            "case:historical-child": {
+                "case_id": "case:historical-child",
+                "post_research_split_receipt": deepcopy(historical_split_receipt),
+            }
+        }
+    }
+    _, receipt_path = _persist_canonical_relation_receipts(
+        canonical_records=[child],
+        registry=registry,
+        review_response_path=response_path,
+        receipt_path=tmp_path / "relations.json",
+    )
+
+    _bind_problem_mining_relation_split_receipts(
+        canonical_records=[child],
+        registry=registry,
+        relation_decisions=[current_decision],
+        relation_receipt_path=receipt_path,
+    )
+
+    assert child["post_research_split_receipt"] == historical_split_receipt
+    assert "problem_mining_relation_split_receipt" not in child
+    assert (
+        registry["cases"]["case:historical-child"]["post_research_split_receipt"]
+        == historical_split_receipt
+    )
+    assert (
+        "problem_mining_relation_split_receipt"
+        not in registry["cases"]["case:historical-child"]
+    )
+
+
+def test_problem_mining_split_binding_rejects_current_split_group_mismatch(
+    tmp_path: Path,
+) -> None:
+    import pytest
+
+    decision = {
+        "focus_id": "problem:parent",
+        "action": "split",
+        "split_groups": [
+            {"evidence_atom_ids": ["atom:one"]},
+            {"evidence_atom_ids": ["atom:two"]},
+        ],
+        "rationale": "The evidence establishes two distinct boundaries.",
+        "review_confidence": 0.9,
+    }
+    response_path = tmp_path / "relation.response.txt"
+    response_path.write_text(json.dumps([decision]), encoding="utf-8")
+    child = {
+        "problem_id": "problem:parent:split:1",
+        "case_id": "case:child",
+        "split_from_case_id": "case:parent",
+        "split_parent_problem_id": "problem:parent",
+        "evidence_atom_ids": ["atom:not-in-decision"],
+        "source_evidence_atom_ids": ["atom:not-in-decision"],
+        "derived_evidence_atom_ids": [],
+        "case_relation_actions": [{"action": "split"}],
+    }
+    registry = {"cases": {"case:child": {"case_id": "case:child"}}}
+    _, receipt_path = _persist_canonical_relation_receipts(
+        canonical_records=[child],
+        registry=registry,
+        review_response_path=response_path,
+        receipt_path=tmp_path / "relations.json",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="problem_mining_relation_split_decision_binding_invalid",
+    ):
+        _bind_problem_mining_relation_split_receipts(
+            canonical_records=[child],
+            registry=registry,
+            relation_decisions=[decision],
+            relation_receipt_path=receipt_path,
+        )
+
+
 def test_revised_split_replaces_old_active_children_but_preserves_registry_history(
     tmp_path: Path,
 ) -> None:
