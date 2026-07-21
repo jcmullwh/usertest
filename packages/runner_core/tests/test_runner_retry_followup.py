@@ -3,14 +3,18 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from normalized_events import iter_events_jsonl
 from reporter import validate_report
 from run_artifacts.history import load_run_record
 
+import runner_core.target_acquire as target_acquire_mod
 from runner_core import RunnerConfig, RunRequest, run_once
 
 
@@ -345,6 +349,42 @@ def _setup_target_repo(tmp_path: Path) -> Path:
     return target
 
 
+def _setup_git_target_repo(tmp_path: Path) -> tuple[Path, str]:
+    target = _setup_target_repo(tmp_path)
+    subprocess.run(["git", "-C", str(target), "init"], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(target), "config", "user.email", "usertest@local"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(target), "config", "user.name", "usertest"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(target), "add", "-A"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(target), "commit", "-m", "initial"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sha = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return target, sha
+
+
 def _use_task_run_schema(runner_root: Path) -> dict[str, object]:
     repo_root = Path(__file__).resolve().parents[3]
     schema = json.loads(
@@ -575,6 +615,109 @@ def test_run_once_followup_prompt_recovers_invalid_json(
         for event in events
     )
     assert (result.run_dir / "raw_events.all_attempts.jsonl").is_file()
+
+
+@pytest.mark.parametrize("keep_workspace", [False, True])
+def test_run_once_uses_relocated_workspace_after_clone_enospc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    keep_workspace: bool,
+) -> None:
+    import runner_core.runner as runner_mod
+
+    runner_root = _setup_runner_root(tmp_path)
+    target, expected_sha = _setup_git_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+    state_file = tmp_path / "relocated_attempt_state.txt"
+    runs_dir = tmp_path / "runs"
+    fallback = Path(tempfile.gettempdir()) / f"ut_runner_enospc_{uuid4().hex}"
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    (unrelated / "sentinel").write_text("keep\n", encoding="utf-8")
+    clone_calls: list[Path] = []
+    runner_cleanup_calls: list[Path] = []
+    original_clone = target_acquire_mod._git_clone
+    original_runner_cleanup = runner_mod.remove_acquired_workspace
+
+    def controlled_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
+        clone_calls.append(dest_dir)
+        if len(clone_calls) == 1:
+            dest_dir.mkdir(parents=True)
+            (dest_dir / "partial").write_text("partial\n", encoding="utf-8")
+            raise RuntimeError("checkout: No space left on device")
+        original_clone(repo=repo, dest_dir=dest_dir, no_local=no_local)
+
+    def tracked_runner_cleanup(path: Path) -> None:
+        runner_cleanup_calls.append(path)
+        original_runner_cleanup(path)
+
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "always_success")
+    monkeypatch.setattr(target_acquire_mod, "_is_windows", lambda: True)
+    monkeypatch.setattr(target_acquire_mod, "_workspace_candidates", lambda **_: [fallback])
+    monkeypatch.setattr(
+        target_acquire_mod,
+        "_windows_volume_identity",
+        lambda path: "fallback:" if path == fallback else "preferred:",
+    )
+    monkeypatch.setattr(target_acquire_mod, "_git_clone", controlled_clone)
+    monkeypatch.setattr(runner_mod, "remove_acquired_workspace", tracked_runner_cleanup)
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=runs_dir,
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    try:
+        result = run_once(
+            cfg,
+            RunRequest(
+                repo=str(target),
+                agent="codex",
+                policy="safe",
+                persona_id="p",
+                mission_id="m",
+                seed=1 if keep_workspace else 0,
+                keep_workspace=keep_workspace,
+                agent_rate_limit_retries=0,
+                agent_followup_attempts=0,
+            ),
+        )
+
+        assert result.exit_code == 0
+        assert result.report_validation_errors == []
+        assert len(clone_calls) == 2
+        preferred = clone_calls[0]
+        assert clone_calls[1] == fallback
+        assert not preferred.exists()
+        assert target.exists()
+        assert (unrelated / "sentinel").read_text(encoding="utf-8") == "keep\n"
+
+        workspace_ref = json.loads(
+            (result.run_dir / "workspace_ref.json").read_text(encoding="utf-8")
+        )
+        assert Path(workspace_ref["workspace_dir"]).resolve() == fallback.resolve()
+        assert workspace_ref["keep_workspace_requested"] is keep_workspace
+        assert workspace_ref["will_cleanup_workspace"] is (not keep_workspace)
+
+        target_ref = json.loads((result.run_dir / "target_ref.json").read_text(encoding="utf-8"))
+        assert target_ref["commit_sha"] == expected_sha
+        assert target_ref["acquire_mode"] == "git"
+
+        attempts = json.loads(
+            (result.run_dir / "agent_attempts.json").read_text(encoding="utf-8")
+        )
+        assert len(attempts["attempts"]) == 1
+        argv = attempts["attempts"][0]["argv"]
+        cd_index = argv.index("--cd")
+        assert Path(argv[cd_index + 1]).resolve() == fallback.resolve()
+        assert fallback.exists() is keep_workspace
+        assert runner_cleanup_calls == ([] if keep_workspace else [fallback])
+    finally:
+        if os.path.lexists(fallback):
+            target_acquire_mod.remove_acquired_workspace(fallback)
 
 
 def test_run_once_repairs_unique_eof_delimiter_without_model_followup(

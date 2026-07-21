@@ -191,7 +191,11 @@ from runner_core.stderr_diagnostics import (
 from runner_core.stderr_diagnostics import (
     _sanitize_agent_stderr_text as _sanitize_agent_stderr_text,
 )
-from runner_core.target_acquire import acquire_existing_target, acquire_target
+from runner_core.target_acquire import (
+    acquire_existing_target,
+    acquire_target,
+    remove_acquired_workspace,
+)
 from runner_core.verification_broker import (
     VerificationBrokerAttempt,
     VerificationBrokerContract,
@@ -8227,7 +8231,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             and acquired.workspace_dir.exists()
         ):
             cleanup_wall_start = time.monotonic()
-            shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+            try:
+                remove_acquired_workspace(acquired.workspace_dir)
+            except OSError:
+                pass
             cleanup_seconds = time.monotonic() - cleanup_wall_start
 
         try:
