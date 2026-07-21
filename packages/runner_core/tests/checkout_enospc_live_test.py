@@ -16,9 +16,43 @@ import sys
 import tempfile
 from pathlib import Path
 
-from runner_core import RunnerConfig, RunRequest, RunResult, run_once
-from runner_core import target_acquire as target_acquire_mod
-from runner_core.target_acquire import remove_acquired_workspace
+
+def _prepend_reviewed_checkout_sources() -> Path:
+    """Load runner_core and its monorepo dependencies from this probe's checkout."""
+
+    repo_root = Path(__file__).resolve().parents[3]
+    package_names = (
+        "runner_core",
+        "agent_adapters",
+        "normalized_events",
+        "reporter",
+        "sandbox_runner",
+        "run_artifacts",
+    )
+    source_dirs = [repo_root / "packages" / name / "src" for name in package_names]
+    missing = [source_dir for source_dir in source_dirs if not source_dir.is_dir()]
+    if missing:
+        raise RuntimeError(f"reviewed checkout is missing package sources: {missing}")
+    for source_dir in reversed(source_dirs):
+        sys.path.insert(0, str(source_dir))
+    return repo_root
+
+
+REVIEWED_REPO_ROOT = _prepend_reviewed_checkout_sources()
+
+from runner_core import RunnerConfig, RunRequest, RunResult, run_once  # noqa: E402
+from runner_core import target_acquire as target_acquire_mod  # noqa: E402
+from runner_core.target_acquire import remove_acquired_workspace  # noqa: E402
+
+EXPECTED_TARGET_ACQUIRE = (
+    REVIEWED_REPO_ROOT / "packages" / "runner_core" / "src" / "runner_core" / "target_acquire.py"
+).resolve()
+LOADED_TARGET_ACQUIRE = Path(target_acquire_mod.__file__ or "").resolve()
+if LOADED_TARGET_ACQUIRE != EXPECTED_TARGET_ACQUIRE:
+    raise RuntimeError(
+        "checkout probe loaded runner_core from outside the reviewed checkout: "
+        f"expected {EXPECTED_TARGET_ACQUIRE}, loaded {LOADED_TARGET_ACQUIRE}"
+    )
 
 MIB = 1024 * 1024
 
