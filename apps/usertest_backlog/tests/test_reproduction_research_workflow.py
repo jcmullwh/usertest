@@ -1049,6 +1049,31 @@ def test_platform_router_keeps_docker_default_and_routes_host_platform(
     assert any(route["executor"] == "trusted_host" for route in route_receipt["routes"].values())
 
 
+def test_platform_router_repo_input_root_is_portable_across_checkout_roots(
+    tmp_path: Path,
+) -> None:
+    controller = tmp_path / "qualification" / "controller"
+    controller.mkdir(parents=True)
+    source = tmp_path / "target" / "repo"
+    source.mkdir(parents=True)
+
+    executor, metadata = mod._configured_replay_executor(
+        research_config={
+            "replay_executor": "platform_router",
+            "replay_docker_image": "example.invalid/replay@sha256:" + "a" * 64,
+            "replay_trusted_host_roots": ["${repo_input}"],
+        },
+        repo_root=controller,
+        repo_input=str(source),
+    )
+
+    assert isinstance(executor, PlatformRoutingReplayExecutor)
+    assert metadata["approved_source_roots"] == [str(source.resolve())]
+    assert metadata["source_identity"] == str(source.resolve())
+    route_receipt = executor.isolation_receipt(source_workspace=source)
+    assert route_receipt["trust_decision"] == "explicit_routes"
+
+
 @pytest.mark.parametrize(
     ("research_config", "message"),
     [

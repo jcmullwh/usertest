@@ -235,29 +235,27 @@ def test_checked_in_dashboard_has_only_lifecycle_rows_in_generated_html() -> Non
     )
 
     lifecycle_runs = mod._lifecycle_runs(dashboard)
-    assert len(lifecycle_runs) == 16
-    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 16
+    assert len(lifecycle_runs) == 18
+    assert len({run["lifecycle_id"] for run in lifecycle_runs}) == 18
     assert mod._entry_count(dashboard, "supporting_activity") >= 1
     assert mod._entry_count(dashboard, "baseline") == 1
     assert dashboard["current_run_id"] == lifecycle_runs[-1]["run_id"]
     previous = lifecycle_runs[-2]
-    assert previous["lifecycle_id"] == "pipeline-cycle:383cf41f:20260719"
+    assert previous["lifecycle_id"] == "pipeline-cycle:43b3eae5:20260721"
     assert previous["timing"]["coverage"] == "complete"
-    assert previous["timing"]["end_at"] == "2026-07-20T17:50:50Z"
+    assert previous["timing"]["end_at"] == "2026-07-21T15:33:08Z"
     current = lifecycle_runs[-1]
-    assert current["lifecycle_id"] == "pipeline-cycle:bc70b15b:20260720"
-    assert current["timing"]["start_at"] == "2026-07-20T17:50:50Z"
+    assert current["lifecycle_id"] == "pipeline-cycle:4b51384d:20260721"
+    assert current["timing"]["start_at"] == "2026-07-21T15:33:08Z"
     assert current["timing"]["end_at"] is None
-    assert current["rework"]["author_invocations"] == 63
-    assert current["rework"]["continuation_launches"] == 44
-    assert current["rework"]["stage_reruns"] == 16
+    assert current["rework"]["author_invocations"] == 20
+    assert current["rework"]["continuation_launches"] == 0
+    assert current["rework"]["stage_reruns"] == 0
     assert current["rework"]["full_restarts"] == 0
-    assert current["errors"]["count"] == 21
-    assert current["automatic_self_corrections"]["count"] == 20
-    assert current["supervisor_interventions"]["count"] == 27
-    assert current["furthest_stage"] == (
-        "Authenticated Stage-4 disposition with stable next-cycle routing"
-    )
+    assert current["errors"]["count"] == 1
+    assert current["automatic_self_corrections"]["count"] == 0
+    assert current["supervisor_interventions"]["count"] == 1
+    assert current["furthest_stage"] == "Stage 2 complete; Stage 3 stopped before research authoring"
 
     rendered = mod._render_dashboard(dashboard)
     html_text = mod.DEFAULT_HTML.read_text(encoding="utf-8")
