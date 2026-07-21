@@ -514,23 +514,23 @@
           <div class="status-grid ops-summary">
             <div class="stat warn">
               <span class="label">Current pipeline state</span>
-              <span class="value">Stage 1 authored; replay green; cycle unscored</span>
-              <span class="detail">The exact merged-revision cycle completed all 19 Stage-1 model calls and wrote two newly mined records plus current relation decisions. Runner postprocessing then stopped on BDS-208 before Stage 2. A model-free replay of the retained outputs now passes on the correction without changing or adding a model invocation, but the stopped release cycle does not count as successful.</span>
+              <span class="value">Stages 1-2 complete; Stage 3 acquisition fix green</span>
+              <span class="detail">The exact merged-revision cycle completed Stage 1 and Stage 2 with 20 verified Sol/high calls. It stopped before the first Stage-3 research call because the trusted-root config assumed the target repository was adjacent to the detached checkout. BDS-209 now passes the exact failed-path preflight and the complete application suite locally.</span>
             </div>
             <div class="stat warn">
               <span class="label">Latest run efficiency</span>
-              <span class="value">19 calls; 0 author corrections; 1 runner stop</span>
-              <span class="detail">All 19 signed-in Sol/high calls completed with verified provenance. No author output required correction or restart. The only stop was a deterministic runner provenance defect after relation review; the successful 48.2 minutes of model work was retained and replayed rather than regenerated.</span>
+              <span class="value">20 calls; 0 author corrections; 1 acquisition stop</span>
+              <span class="detail">All authored Stage-1 and Stage-2 outputs completed once with signed-in subscription provenance. No model output was discarded or corrected. The stopped artifacts are retained for a Stage-3 boundary replay; no full restart has been performed.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">The current cycle did not pass Stage 1 postprocessing and is not scored. No claim is made about precision, recall, plan quality, or end-to-end qualification from this stopped run.</span>
+              <span class="detail">Stages 3-6 did not run, so the cycle is incomplete and unscored. There is no new claim about case precision, research readiness, plan quality, ticket throughput, or outcomes.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Land BDS-208, then rerun exact revision</span>
-              <span class="detail">The correction passes the complete usertest_backlog project and an exact retained-output Stage-1 replay. It must pass PR-event CI and merge before a new exact-revision sealed cycle can count toward the two-cycle gate.</span>
+              <span class="value">Land BDS-209; replay Stage 3; rerun exact revision</span>
+              <span class="detail">Publish the portable repo-input trust binding, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary without regenerating Stage 1/2, then start one fresh exact merged-revision end-to-end cycle.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -713,21 +713,32 @@
                 <td><strong>95</strong> author calls; 61 continuations; Unknown stage reruns; 0 full restarts<span class="ops-detail">Ninety-five signed-in Sol/high calls and 61 exact-session continuations are reconciled from retained invocation manifests. The 32 calls since the prior checkpoint include 17…</span></td>
                 <td>Push reconciled controller head `b3df410` to PR #217, pass its PR-event CI, merge the controller, then regenerate from the landed revision and supervise the next ready ticket…</td>
               </tr>
-              <tr class="ops-current">
+              <tr class="">
                 <td><strong>Exact-revision qualification cycle through retained Stage-1 recovery</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>1 h 26 m active</strong><span class="ops-kind">active</span></td>
+                <td><strong>1 h 43 m complete</strong><span class="ops-kind">complete</span></td>
                 <td><span class="tag warn">Stage 1 model work complete; deterministic postprocessing recovered locally</span><span class="ops-detail">The release-shadow attempt is retained as failed and unscored at exact revision 43b3eae5. It produced 19 verified model invocation manifests, two newly mined problem records, 28…</span></td>
                 <td><strong>0 successful qualification cycles; 0 exports; 0 newly implemented cases; Stage-1 authored output retained and locally recoverable; one deterministic runner defect found</strong></td>
                 <td><strong>2</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">BDS-207 was the preparation-side manifest-comparison defect that had to land before this exact cycle could start. BDS-208 was the sole stop inside the current sealed run:…</span></td>
                 <td><strong>0</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">No model-authored result required feedback or correction in this run. Every Stage-1 invocation completed once. The recovery was deterministic runner correction and checkpoint…</span></td>
                 <td><strong>2</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision diagnosed and corrected BDS-207 to make exact preparation possible, then diagnosed BDS-208 after the first sealed cycle reached relation application. Both are general…</span></td>
                 <td><strong>19</strong> author calls; 0 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">The sealed cycle used 19 fresh signed-in Sol/high invocations: six primary mining passes, six coverage/depth reviews, routed and exact cross-partition synthesis with independent…</span></td>
-                <td>Commit and publish BDS-208, pass its complete PR-event checks, merge it, prepare a new exact-revision sealed bundle, and run the next shadow cycle through all six stages before…</td>
+                <td>Continue the new exact-revision lifecycle at 4b51384d; retain this stopped cycle as unscored historical evidence.</td>
+              </tr>
+              <tr class="ops-current">
+                <td><strong>Exact-revision qualification cycle through Stage-2 completion</strong><span class="ops-kind">pipeline cycle</span></td>
+                <td><strong>1 h 11 m active</strong><span class="ops-kind">active</span></td>
+                <td><span class="tag warn">Stage 2 complete; Stage 3 stopped before research authoring</span><span class="ops-detail">The exact 4b51384d cycle retains complete Stage-1 and Stage-2 artifacts and 20 verified model invocation manifests. Stage 3 selected work but made no research call because `..`…</span></td>
+                <td><strong>0 successful qualification cycles; 0 exports; 0 newly implemented cases; 20 authored calls retained; one deterministic Stage-3 acquisition blocker corrected locally</strong></td>
+                <td><strong>1</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">BDS-209 is the sole new stop in this lifecycle: trusted-root configuration encoded a checkout-layout assumption. Repeated diagnostics and the initial wrong-PYTHONPATH test launch…</span></td>
+                <td><strong>0</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">No model-authored output needed correction. The only correction is deterministic controller/configuration work before Stage-3 authoring began.</span></td>
+                <td><strong>1</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision diagnosed BDS-209 from the exact launcher receipt and added a portable repository-input trust binding. No problem record, priority decision, research claim, or plan…</span></td>
+                <td><strong>20</strong> author calls; 0 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">The cycle made 20 fresh signed-in Sol/high calls: 19 in Stage 1 and one in Stage 2. None required correction, discard, or restart. The Stage-3 acquisition stop happened before a…</span></td>
+                <td>Commit and publish BDS-209, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary, then run a fresh exact merged-revision shadow through all six stages before…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-21T15:16:21Z. Showing 17 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-21T16:44:21Z. Showing 18 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

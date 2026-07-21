@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "as_of": "2026-07-21T15:16:21Z",
+  "as_of": "2026-07-21T15:33:08Z",
   "current_run_id": "qualification-cycle-43b3eae5-20260721",
   "summary_cards": [
     {
@@ -44,14 +44,14 @@
     "scope": "Preparation and first release-shadow execution at merged controller revision 43b3eae5 over the sealed 2,854-atom internal-maintenance corpus. Exports were disabled. Host ChatGPT subscription authentication was required, API billing variables were blank, Docker was not invoked, and no source, image, container, ticket, or retained artifact was removed.",
     "timing": {
       "start_at": "2026-07-21T13:50:28Z",
-      "end_at": null,
-      "elapsed_seconds": 5153,
-      "coverage": "active",
-      "display": "1 h 26 m active",
-      "note": "Exact preparation took 694.820 seconds. The sealed phase-one attempt took 2,889.428 seconds before the deterministic Stage-1 binding stop. The retained model-free Stage-1 replay took 3.3 seconds, and the complete usertest_backlog test project plus Ruff and diff checks took 278.7 seconds. Long work was observed at roughly ten-minute intervals; no timeout was shortened."
+      "end_at": "2026-07-21T15:33:08Z",
+      "elapsed_seconds": 6160,
+      "coverage": "complete",
+      "display": "1 h 43 m complete",
+      "note": "Wall time from exact preparation through PR #222 merge and the start of the next exact-revision lifecycle. Exact preparation took 694.820 seconds. The sealed phase-one attempt took 2,889.428 seconds before the deterministic Stage-1 binding stop. The retained model-free Stage-1 replay took 3.3 seconds, and the complete usertest_backlog test project plus Ruff and diff checks took 278.7 seconds. Long work was observed at roughly ten-minute intervals; no timeout was shortened."
     },
     "furthest_stage": "Stage 1 model work complete; deterministic postprocessing recovered locally",
-    "current_state": "The release-shadow attempt is retained as failed and unscored at exact revision 43b3eae5. It produced 19 verified model invocation manifests, two newly mined problem records, 28 relation decisions in three batches, and no ticket mutations. The model correctly kept the existing Claude ENOSPC storage child separate. BDS-208 fixes the runner's attempt to rebind that authenticated Stage-3 child to the current keep-separate response; the replay canonicalized 28 active/new inputs to 23 work units while preserving all 19 manifests byte-for-byte.",
+    "current_state": "The release-shadow attempt is retained as failed and unscored at exact revision 43b3eae5. It produced 19 verified model invocation manifests, two newly mined problem records, 28 relation decisions in three batches, and no ticket mutations. The model correctly kept the existing Claude ENOSPC storage child separate. BDS-208 fixed the runner's attempt to rebind that authenticated Stage-3 child to the current keep-separate response; PR #222 merged at 4b51384d, and the next exact-revision cycle completed both Stage 1 and Stage 2.",
     "outcome": "0 successful qualification cycles; 0 exports; 0 newly implemented cases; Stage-1 authored output retained and locally recoverable; one deterministic runner defect found",
     "errors": {
       "count": 2,
@@ -77,7 +77,7 @@
         "BDS-208"
       ]
     },
-    "next_action": "Commit and publish BDS-208, pass its complete PR-event checks, merge it, prepare a new exact-revision sealed bundle, and run the next shadow cycle through all six stages before scoring it.",
+    "next_action": "Continue the new exact-revision lifecycle at 4b51384d; retain this stopped cycle as unscored historical evidence.",
     "tone": "warn",
     "data_quality": "Preparation receipt records exit zero at exact revision 43b3eae5, 2,854 eligible atoms, zero model calls, zero ticket mutations, and zero Docker. The phase-one launcher records signed-in ChatGPT status, blank API billing variables, model gpt-5.6-sol with high reasoning, 2,889.428 seconds, and exit two at the exact BDS-208 binding error. The retained replay receipt records 2 new plus 26 carried records, 23 canonical work units, 2,854 updated atoms, 28 decisions, three relation batches, and 19 unchanged model manifests. The complete application suite passed 843 tests with two expected skips; Ruff and diff checks passed. These facts establish mechanics recovery, not a successful or scored end-to-end cycle.",
     "source_ids": [

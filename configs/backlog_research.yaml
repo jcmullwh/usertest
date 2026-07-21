@@ -10,4 +10,7 @@ backlog_research:
   replay_executor: platform_router
   replay_docker_image: ghcr.io/jcmullwh/usertest-maintenance:dev-latest
   replay_trusted_host_roots:
-    - ..
+    # Bind host execution to the explicit repository supplied for this run. This
+    # remains portable when the controller executes from a detached qualification
+    # worktree on another volume.
+    - "${repo_input}"

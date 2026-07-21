@@ -99,7 +99,8 @@ through research, optioning, selection, and planning.
 networking disabled and no inherited host environment. An explicitly Windows-only experiment may
 use `trusted_host` only for an existing local `--repo-input` under a non-empty
 `replay_trusted_host_roots` allowlist. Invalid, absent, or platform-mismatched routing is
-fail-closed.
+fail-closed. An allowlist entry of `${repo_input}` binds host replay to the exact local repository
+supplied by `--repo-input`; other relative entries remain relative to `--repo-root`.
 
 `--shadow` runs all six stages and records depth-invariant and stability hashes, but does not update
 the atom-action ledger or export tickets. It cannot be combined with `--dry-run`. With the default

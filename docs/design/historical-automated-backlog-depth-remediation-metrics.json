@@ -4,32 +4,32 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 3,
-    "as_of": "2026-07-21T15:16:21Z",
-    "current_run_id": "qualification-cycle-43b3eae5-20260721",
+    "as_of": "2026-07-21T16:44:21Z",
+    "current_run_id": "qualification-cycle-4b51384d-20260721",
     "counting_rule": "One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Stage 1 authored; replay green; cycle unscored",
-        "detail": "The exact merged-revision cycle completed all 19 Stage-1 model calls and wrote two newly mined records plus current relation decisions. Runner postprocessing then stopped on BDS-208 before Stage 2. A model-free replay of the retained outputs now passes on the correction without changing or adding a model invocation, but the stopped release cycle does not count as successful.",
+        "value": "Stages 1-2 complete; Stage 3 acquisition fix green",
+        "detail": "The exact merged-revision cycle completed Stage 1 and Stage 2 with 20 verified Sol/high calls. It stopped before the first Stage-3 research call because the trusted-root config assumed the target repository was adjacent to the detached checkout. BDS-209 now passes the exact failed-path preflight and the complete application suite locally.",
         "tone": "warn"
       },
       {
         "label": "Latest run efficiency",
-        "value": "19 calls; 0 author corrections; 1 runner stop",
-        "detail": "All 19 signed-in Sol/high calls completed with verified provenance. No author output required correction or restart. The only stop was a deterministic runner provenance defect after relation review; the successful 48.2 minutes of model work was retained and replayed rather than regenerated.",
+        "value": "20 calls; 0 author corrections; 1 acquisition stop",
+        "detail": "All authored Stage-1 and Stage-2 outputs completed once with signed-in subscription provenance. No model output was discarded or corrected. The stopped artifacts are retained for a Stage-3 boundary replay; no full restart has been performed.",
         "tone": "warn"
       },
       {
         "label": "Full qualification",
         "value": "0 / 2 cycles",
-        "detail": "The current cycle did not pass Stage 1 postprocessing and is not scored. No claim is made about precision, recall, plan quality, or end-to-end qualification from this stopped run.",
+        "detail": "Stages 3-6 did not run, so the cycle is incomplete and unscored. There is no new claim about case precision, research readiness, plan quality, ticket throughput, or outcomes.",
         "tone": "bad"
       },
       {
         "label": "Next delivery gate",
-        "value": "Land BDS-208, then rerun exact revision",
-        "detail": "The correction passes the complete usertest_backlog project and an exact retained-output Stage-1 replay. It must pass PR-event CI and merge before a new exact-revision sealed cycle can count toward the two-cycle gate.",
+        "value": "Land BDS-209; replay Stage 3; rerun exact revision",
+        "detail": "Publish the portable repo-input trust binding, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary without regenerating Stage 1/2, then start one fresh exact merged-revision end-to-end cycle.",
         "tone": "warn"
       }
     ],
@@ -3516,14 +3516,14 @@
         "scope": "Preparation and first release-shadow execution at merged controller revision 43b3eae5 over the sealed 2,854-atom internal-maintenance corpus. Exports were disabled. Host ChatGPT subscription authentication was required, API billing variables were blank, Docker was not invoked, and no source, image, container, ticket, or retained artifact was removed.",
         "timing": {
           "start_at": "2026-07-21T13:50:28Z",
-          "end_at": null,
-          "elapsed_seconds": 5153,
-          "coverage": "active",
-          "display": "1 h 26 m active",
-          "note": "Exact preparation took 694.820 seconds. The sealed phase-one attempt took 2,889.428 seconds before the deterministic Stage-1 binding stop. The retained model-free Stage-1 replay took 3.3 seconds, and the complete usertest_backlog test project plus Ruff and diff checks took 278.7 seconds. Long work was observed at roughly ten-minute intervals; no timeout was shortened."
+          "end_at": "2026-07-21T15:33:08Z",
+          "elapsed_seconds": 6160,
+          "coverage": "complete",
+          "display": "1 h 43 m complete",
+          "note": "Wall time from exact preparation through PR #222 merge and the start of the next exact-revision lifecycle. Exact preparation took 694.820 seconds. The sealed phase-one attempt took 2,889.428 seconds before the deterministic Stage-1 binding stop. The retained model-free Stage-1 replay took 3.3 seconds, and the complete usertest_backlog test project plus Ruff and diff checks took 278.7 seconds. Long work was observed at roughly ten-minute intervals; no timeout was shortened."
         },
         "furthest_stage": "Stage 1 model work complete; deterministic postprocessing recovered locally",
-        "current_state": "The release-shadow attempt is retained as failed and unscored at exact revision 43b3eae5. It produced 19 verified model invocation manifests, two newly mined problem records, 28 relation decisions in three batches, and no ticket mutations. The model correctly kept the existing Claude ENOSPC storage child separate. BDS-208 fixes the runner's attempt to rebind that authenticated Stage-3 child to the current keep-separate response; the replay canonicalized 28 active/new inputs to 23 work units while preserving all 19 manifests byte-for-byte.",
+        "current_state": "The release-shadow attempt is retained as failed and unscored at exact revision 43b3eae5. It produced 19 verified model invocation manifests, two newly mined problem records, 28 relation decisions in three batches, and no ticket mutations. The model correctly kept the existing Claude ENOSPC storage child separate. BDS-208 fixed the runner's attempt to rebind that authenticated Stage-3 child to the current keep-separate response; PR #222 merged at 4b51384d, and the next exact-revision cycle completed both Stage 1 and Stage 2.",
         "outcome": "0 successful qualification cycles; 0 exports; 0 newly implemented cases; Stage-1 authored output retained and locally recoverable; one deterministic runner defect found",
         "errors": {
           "count": 2,
@@ -3549,9 +3549,63 @@
             "BDS-208"
           ]
         },
-        "next_action": "Commit and publish BDS-208, pass its complete PR-event checks, merge it, prepare a new exact-revision sealed bundle, and run the next shadow cycle through all six stages before scoring it.",
+        "next_action": "Continue the new exact-revision lifecycle at 4b51384d; retain this stopped cycle as unscored historical evidence.",
         "tone": "warn",
         "data_quality": "Preparation receipt records exit zero at exact revision 43b3eae5, 2,854 eligible atoms, zero model calls, zero ticket mutations, and zero Docker. The phase-one launcher records signed-in ChatGPT status, blank API billing variables, model gpt-5.6-sol with high reasoning, 2,889.428 seconds, and exit two at the exact BDS-208 binding error. The retained replay receipt records 2 new plus 26 carried records, 23 canonical work units, 2,854 updated atoms, 28 decisions, three relation batches, and 19 unchanged model manifests. The complete application suite passed 843 tests with two expected skips; Ruff and diff checks passed. These facts establish mechanics recovery, not a successful or scored end-to-end cycle.",
+        "source_ids": [
+          "backlog_depth_supervision_issue_ledger"
+        ]
+      },
+      {
+        "run_id": "qualification-cycle-4b51384d-20260721",
+        "entry_kind": "lifecycle_run",
+        "lifecycle_id": "pipeline-cycle:4b51384d:20260721",
+        "lifecycle_kind": "pipeline_cycle",
+        "rework": {
+          "author_invocations": 20,
+          "continuation_launches": 0,
+          "stage_reruns": 0,
+          "full_restarts": 0,
+          "summary": "The cycle made 20 fresh signed-in Sol/high calls: 19 in Stage 1 and one in Stage 2. None required correction, discard, or restart. The Stage-3 acquisition stop happened before a research call, and the completed upstream artifacts remain retained."
+        },
+        "label": "Exact-revision qualification cycle through Stage-2 completion",
+        "scope": "Preparation and release-shadow execution at merged controller revision 4b51384d over the output-blind 2,854-atom internal-maintenance corpus. Exports were disabled. Host ChatGPT subscription authentication was required, API billing variables were blank, Docker was not invoked, and no source, image, container, ticket, or retained artifact was removed.",
+        "timing": {
+          "start_at": "2026-07-21T15:33:08Z",
+          "end_at": null,
+          "elapsed_seconds": 4273,
+          "coverage": "active",
+          "display": "1 h 11 m active",
+          "note": "Exact model-free preparation took 426.121 seconds. The release-shadow attempt took 2,994.767 seconds through Stage-2 completion and the deterministic Stage-3 acquisition stop. The complete usertest_backlog application suite plus Ruff took 252.686 seconds after the narrow correction. Long model work was observed at roughly ten-minute intervals; no timeout was shortened."
+        },
+        "furthest_stage": "Stage 2 complete; Stage 3 stopped before research authoring",
+        "current_state": "The exact 4b51384d cycle retains complete Stage-1 and Stage-2 artifacts and 20 verified model invocation manifests. Stage 3 selected work but made no research call because `..` in the repository-owned trusted-root config resolved under the detached U: checkout while `--repo-input` named I:\\code\\usertest. The portable `${repo_input}` correction now resolves that exact source as the approved host root without weakening Docker or platform routing.",
+        "outcome": "0 successful qualification cycles; 0 exports; 0 newly implemented cases; 20 authored calls retained; one deterministic Stage-3 acquisition blocker corrected locally",
+        "errors": {
+          "count": 1,
+          "count_kind": "deduplicated_clusters",
+          "summary": "BDS-209 is the sole new stop in this lifecycle: trusted-root configuration encoded a checkout-layout assumption. Repeated diagnostics and the initial wrong-PYTHONPATH test launch are not counted as separate product defects.",
+          "cluster_ids": [
+            "BDS-209"
+          ]
+        },
+        "automatic_self_corrections": {
+          "count": 0,
+          "count_kind": "deduplicated_clusters",
+          "summary": "No model-authored output needed correction. The only correction is deterministic controller/configuration work before Stage-3 authoring began.",
+          "cluster_ids": []
+        },
+        "supervisor_interventions": {
+          "count": 1,
+          "count_kind": "deduplicated_clusters",
+          "summary": "Supervision diagnosed BDS-209 from the exact launcher receipt and added a portable repository-input trust binding. No problem record, priority decision, research claim, or plan was manually rewritten.",
+          "cluster_ids": [
+            "BDS-209"
+          ]
+        },
+        "next_action": "Commit and publish BDS-209, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary, then run a fresh exact merged-revision shadow through all six stages before scoring.",
+        "tone": "warn",
+        "data_quality": "Preparation sealed 2,854 atoms with zero model calls in 426.121 seconds at exact revision 4b51384d. The launcher receipt records signed-in ChatGPT status, blank API billing variables, gpt-5.6-sol with high reasoning, 2,994.767 seconds, and exit two at the trusted-root error. The cycle contains 20 verified invocation manifests, complete Stage-1 and Stage-2 documents, and no Stage-3 model invocation. The exact failed-path preflight now resolves I:\\code\\usertest as both approved source and source identity. The complete app suite passed 845 tests with two expected skips out of 847 collected, and Ruff passed, in 252.686 seconds. These facts prove boundary recovery locally, not end-to-end qualification.",
         "source_ids": [
           "backlog_depth_supervision_issue_ledger"
         ]

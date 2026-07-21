@@ -43,6 +43,7 @@ from usertest_backlog.workflows.post_research_relations import (
 )
 
 _REPLAY_EXECUTOR_MODES = frozenset({"blocked", "docker", "platform_router", "trusted_host"})
+_REPLAY_REPO_INPUT_ROOT = "${repo_input}"
 _OPERATIONAL_CANDIDATE_ID_RE = re.compile(
     r"^operational_failure:(?P<signature>[0-9a-f]{64}):(?P<occurrence_set>[0-9a-f]{64})$"
 )
@@ -140,6 +141,10 @@ def _configured_replay_executor(
             )
         if not isinstance(repo_input, str) or not repo_input.strip():
             raise ValueError("replay_executor=platform_router requires a local --repo-input path")
+        source_identity = Path(repo_input.strip()).expanduser()
+        if not source_identity.is_absolute():
+            source_identity = repo_root / source_identity
+        source_identity = source_identity.resolve()
         roots: list[Path] = []
         for index, value in enumerate(roots_raw):
             if not isinstance(value, str) or not value.strip():
@@ -147,20 +152,20 @@ def _configured_replay_executor(
                     "backlog_research.replay_trusted_host_roots"
                     f"[{index}] must be a non-empty path string"
                 )
-            candidate = Path(value.strip()).expanduser()
-            if not candidate.is_absolute():
-                candidate = repo_root / candidate
-            candidate = candidate.resolve()
+            root_value = value.strip()
+            if root_value == _REPLAY_REPO_INPUT_ROOT:
+                candidate = source_identity
+            else:
+                candidate = Path(root_value).expanduser()
+                if not candidate.is_absolute():
+                    candidate = repo_root / candidate
+                candidate = candidate.resolve()
             if not candidate.is_dir():
                 raise ValueError(
                     "backlog_research.replay_trusted_host_roots"
                     f"[{index}] is not an existing directory: {candidate}"
                 )
             roots.append(candidate)
-        source_identity = Path(repo_input.strip()).expanduser()
-        if not source_identity.is_absolute():
-            source_identity = repo_root / source_identity
-        source_identity = source_identity.resolve()
         if not source_identity.is_dir() or not any(
             source_identity == root or _path_is_within(source_identity, root) for root in roots
         ):
@@ -223,6 +228,12 @@ def _configured_replay_executor(
                 "backlog_research.replay_trusted_host_roots must be a non-empty list "
                 "for replay_executor=trusted_host"
             )
+        if not isinstance(repo_input, str) or not repo_input.strip():
+            raise ValueError("replay_executor=trusted_host requires a local --repo-input path")
+        source_identity = Path(repo_input.strip()).expanduser()
+        if not source_identity.is_absolute():
+            source_identity = repo_root / source_identity
+        source_identity = source_identity.resolve()
         roots: list[Path] = []
         for index, value in enumerate(roots_raw):
             if not isinstance(value, str) or not value.strip():
@@ -230,10 +241,14 @@ def _configured_replay_executor(
                     "backlog_research.replay_trusted_host_roots"
                     f"[{index}] must be a non-empty path string"
                 )
-            candidate = Path(value.strip()).expanduser()
-            if not candidate.is_absolute():
-                candidate = repo_root / candidate
-            candidate = candidate.resolve()
+            root_value = value.strip()
+            if root_value == _REPLAY_REPO_INPUT_ROOT:
+                candidate = source_identity
+            else:
+                candidate = Path(root_value).expanduser()
+                if not candidate.is_absolute():
+                    candidate = repo_root / candidate
+                candidate = candidate.resolve()
             if not candidate.is_dir():
                 raise ValueError(
                     "backlog_research.replay_trusted_host_roots"
@@ -241,12 +256,6 @@ def _configured_replay_executor(
                 )
             roots.append(candidate)
         unique_roots = list(dict.fromkeys(roots))
-        if not isinstance(repo_input, str) or not repo_input.strip():
-            raise ValueError("replay_executor=trusted_host requires a local --repo-input path")
-        source_identity = Path(repo_input.strip()).expanduser()
-        if not source_identity.is_absolute():
-            source_identity = repo_root / source_identity
-        source_identity = source_identity.resolve()
         if not source_identity.is_dir():
             raise ValueError(
                 "replay_executor=trusted_host requires an existing local repository: "
