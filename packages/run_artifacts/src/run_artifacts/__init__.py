@@ -5,7 +5,13 @@ from run_artifacts.capture import (
     TextExcerpt,
     capture_text_artifact,
 )
-from run_artifacts.history import iter_report_history, write_report_history_jsonl
+from run_artifacts.history import (
+    HISTORY_NONE_RUN_ARTIFACT_RELATIVE_PATHS,
+    HISTORY_RUN_ARTIFACT_RELATIVE_PATHS,
+    MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
+    iter_report_history,
+    write_report_history_jsonl,
+)
 from run_artifacts.outcome_predicates import (
     COMMAND_STREAM_OPERATORS,
     COMMAND_STREAM_PREDICATE_TYPES,
@@ -27,6 +33,9 @@ __all__ = [
     "COMMAND_STREAM_OPERATORS",
     "COMMAND_STREAM_PREDICATE_TYPES",
     "COMMAND_STREAMS",
+    "HISTORY_NONE_RUN_ARTIFACT_RELATIVE_PATHS",
+    "HISTORY_RUN_ARTIFACT_RELATIVE_PATHS",
+    "MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH",
     "TextCapturePolicy",
     "TextExcerpt",
     "capture_text_artifact",

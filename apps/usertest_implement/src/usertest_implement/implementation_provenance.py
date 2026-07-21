@@ -10,6 +10,8 @@ from typing import Any
 
 from backlog_repo.plan_scope import validate_plan_target_contract
 
+from usertest_implement.git_ops import RUNNER_OWNED_GIT_EXCLUDES
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
@@ -65,6 +67,20 @@ def _git_is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     )
 
 
+def _implementation_workspace_status(repo: Path) -> str:
+    """Return user/agent changes while excluding runner-owned evidence and cache paths."""
+
+    return _git(
+        repo,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        ".",
+        *RUNNER_OWNED_GIT_EXCLUDES,
+    )
+
+
 def _contract_from_ticket_ref(ticket_ref: Mapping[str, Any]) -> dict[str, Any]:
     raw = ticket_ref.get("ticket_provenance")
     provenance = raw if isinstance(raw, Mapping) else {}
@@ -108,7 +124,7 @@ def record_verified_implementation_head(
     workspace = Path(workspace_raw).expanduser().resolve()
     if _git(workspace, "rev-parse", "HEAD").casefold() != head:
         raise ValueError("implementation_provenance_workspace_head_mismatch")
-    if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+    if _implementation_workspace_status(workspace):
         raise ValueError("implementation_provenance_workspace_dirty_after_commit")
     payload = {
         "schema_version": 1,
@@ -155,8 +171,8 @@ def record_existing_verified_implementation_head(*, run_dir: Path) -> dict[str, 
     workspace_ref = _read_json(workspace_ref_path)
     if verification.get("passed") is not True:
         raise ValueError("implementation_provenance_verification_not_passed")
-    if git_ref.get("commit_attempted") is not False:
-        raise ValueError("implementation_provenance_existing_head_commit_attempted")
+    if not isinstance(git_ref.get("commit_attempted"), bool):
+        raise ValueError("implementation_provenance_existing_head_commit_attempt_invalid")
     if git_ref.get("commit_performed") is not False:
         raise ValueError("implementation_provenance_existing_head_commit_performed")
     if git_ref.get("commit_observed") is not True:
@@ -183,7 +199,7 @@ def record_existing_verified_implementation_head(*, run_dir: Path) -> dict[str, 
         raise ValueError("implementation_provenance_workspace_head_mismatch")
     if _git(workspace, "branch", "--show-current") != branch:
         raise ValueError("implementation_provenance_workspace_branch_mismatch")
-    if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+    if _implementation_workspace_status(workspace):
         raise ValueError("implementation_provenance_workspace_dirty_existing_head")
     if not _git_is_ancestor(workspace, planned, head):
         raise ValueError("implementation_provenance_planned_revision_not_ancestor")
@@ -283,8 +299,8 @@ def validate_verified_implementation_head(*, run_dir: Path) -> dict[str, Any]:
     ).casefold():
         raise ValueError("implementation_provenance_git_head_mismatch")
     if raw.get("schema_version") == 2:
-        if git_ref.get("commit_attempted") is not False:
-            raise ValueError("implementation_provenance_existing_head_commit_attempted")
+        if not isinstance(git_ref.get("commit_attempted"), bool):
+            raise ValueError("implementation_provenance_existing_head_commit_attempt_invalid")
         if git_ref.get("commit_performed") is not False:
             raise ValueError("implementation_provenance_existing_head_commit_performed")
         if git_ref.get("commit_observed") is not True:
@@ -303,7 +319,7 @@ def validate_verified_implementation_head(*, run_dir: Path) -> dict[str, Any]:
             git_ref.get("branch") or ""
         ).strip():
             raise ValueError("implementation_provenance_workspace_branch_mismatch")
-        if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+        if _implementation_workspace_status(workspace):
             raise ValueError("implementation_provenance_workspace_dirty_existing_head")
         if not _git_is_ancestor(workspace, str(raw["repo_revision"]), head):
             raise ValueError("implementation_provenance_planned_revision_not_ancestor")

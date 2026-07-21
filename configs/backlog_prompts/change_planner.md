@@ -65,6 +65,10 @@ The pipeline has already inferred the live-verification requirement from provena
 - Honor `selection.falsification_review.selected_outcome_contract.strategy.post_change_replay_mode`.
   With `verified_fail_first`, use the exact unchanged runner-retained command; never create,
   modify, rename, move, or delete any path in its retained `.usertest_research` asset manifest.
+  A runner-verified staged replay is a content-addressed input that the outcome runner materializes;
+  it is intentionally allowed to be absent from the clean Git revision. Do not add it as a change
+  target or return to research solely because its path is absent from the read-only checkout. Use
+  the exact asset path, command, selected contract, and bound oracle supplied by the runner.
   With `stage6_planned_unverified`, define a distinct future solution-specific command and
   predicates and leave its evidence unverified until the outcome runner executes it. An
   exit-zero assertion of old behavior is not an exact post-change oracle and must not be

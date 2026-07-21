@@ -27,6 +27,9 @@ This is a short correction turn, not research and not implementation.
   references byte-for-byte. The runner will reverify revised interpretations against them.
 - An honest downgrade from `evidence_sufficient` to `insufficient_evidence` is allowed when the
   retained evidence cannot support the claim. Never upgrade status or fabricate support.
+- For `already_addressed` or `non_actionable`, preserve evidence for the terminal disposition but
+  remove an optional mechanism or falsification claim when the retained evidence does not verify
+  it. Do not turn a diagnostic classifier into the historical cause merely to satisfy feedback.
 - Apply only corrections needed for the listed deterministic errors. Do not opportunistically
   rewrite unrelated prose.
 - Return the complete baseline dossier, not a JSON Patch and not a partial fragment.

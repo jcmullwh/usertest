@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import backlog_miner.pipeline as pipeline_module
 import pytest
 import yaml
 from backlog_core.case_lineage import eligible_problem_mining_atoms
@@ -25,6 +26,7 @@ from usertest_backlog.cli import _write_chunked_problem_mining_atoms_workspace, 
 from usertest_backlog.parser import build_parser
 from usertest_backlog.workflows.problem_mining import _validate_relation_decision_focuses
 from usertest_backlog.workflows.staged import (
+    _load_stage1_relation_resume,
     _reset_stale_unproven_actioned_atoms,
     _sync_case_registry_outcomes,
 )
@@ -38,6 +40,110 @@ def _write_json(path: Path, obj: object) -> None:
 def _write_yaml(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
+
+
+def test_stage1_relation_resume_reuses_complete_attempt_frontier(tmp_path: Path) -> None:
+    def write_invocation(tag: str, *, response: str | None, error: str | None) -> Path:
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / f"{tag}.prompt.txt").write_text("prompt", encoding="utf-8")
+        (review_dir / f"{tag}.raw_events.jsonl").write_text("{}\n", encoding="utf-8")
+        (review_dir / f"{tag}.last_message.txt").write_text(
+            response or "", encoding="utf-8"
+        )
+        (review_dir / f"{tag}.stderr.txt").write_text("", encoding="utf-8")
+        if response is not None:
+            (review_dir / f"{tag}.response.txt").write_text(response, encoding="utf-8")
+        return pipeline_module._write_model_invocation_manifest(
+            stage="problem_mining",
+            tag=tag,
+            agent="claude",
+            out_dir=review_dir,
+            prompt="prompt",
+            response=response,
+            error_kind=error,
+        )
+
+    artifacts_dir = tmp_path / "artifacts"
+    review_dir = artifacts_dir / "problem_mining" / "problem_mining_relation_review_001"
+    base_dir = artifacts_dir / "problem_mining" / "base"
+    base_dir.mkdir(parents=True)
+    base_tag = "problem_mining_001"
+    for suffix, content in (
+        ("prompt.txt", "base prompt"),
+        ("response.txt", "{}"),
+        ("raw_events.jsonl", "{}\n"),
+        ("last_message.txt", "{}"),
+        ("stderr.txt", ""),
+    ):
+        (base_dir / f"{base_tag}.{suffix}").write_text(content, encoding="utf-8")
+    base_manifest = pipeline_module._write_model_invocation_manifest(
+        stage="problem_mining",
+        tag=base_tag,
+        agent="claude",
+        out_dir=base_dir,
+        prompt="base prompt",
+        response="{}",
+        error_kind=None,
+    )
+    stage_doc = pipeline_module.attach_stage_model_invocation_contract(
+        {
+            "stage": "problem_mining",
+            "items": [{"problem_id": "problem:new", "case_id": "case:new"}],
+            "input_meta": {"problem_mining_evidence_draft": {"status": "verified"}},
+        },
+        agent="claude",
+        dry_run=False,
+        manifest_refs=[pipeline_module.model_invocation_manifest_ref(base_manifest)],
+        invocation_expected=True,
+    )
+    problem_records = tmp_path / "problem_records.json"
+    _write_json(problem_records, stage_doc)
+
+    failed_tag = "problem_mining_relation_review_001_batch_001"
+    completed_tag = "problem_mining_relation_review_001_batch_002"
+    write_invocation(failed_tag, response=None, error="RuntimeError")
+    write_invocation(completed_tag, response="[]", error=None)
+    batches = [
+        {
+            "tag": failed_tag,
+            "focus_ids": ["problem:new"],
+            "status": "failed_provisional_keep_separate",
+            "decision_count": 1,
+            "attempt_history": [{"tag": failed_tag}],
+        },
+        {
+            "tag": completed_tag,
+            "focus_ids": ["problem:old"],
+            "status": "completed",
+            "decision_count": 1,
+            "successful_attempt_tag": completed_tag,
+            "attempt_history": [{"tag": completed_tag}],
+        },
+    ]
+    _write_json(
+        review_dir / "problem_mining_relation_review_001.prompt.txt",
+        {
+            "schema_version": "problem_relation_review_batches_v1",
+            "batch_count": 2,
+            "batches": batches,
+        },
+    )
+    _write_json(
+        review_dir / "problem_mining_relation_review_001.response.txt",
+        [
+            {"focus_id": "problem:new", "action": "keep_separate"},
+            {"focus_id": "problem:old", "action": "keep_separate"},
+        ],
+    )
+
+    resumed = _load_stage1_relation_resume(
+        problem_records_path=problem_records,
+        artifacts_dir=artifacts_dir,
+    )
+
+    assert resumed is not None
+    assert len(resumed["decisions"]) == 2
+    assert [ref["status"] for ref in resumed["manifest_refs"]] == ["failed", "verified"]
 
 
 def test_stage3_progress_checkpoint_integrity_detects_dossier_tampering() -> None:
@@ -372,6 +478,38 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
         target_ref["repo_input"] = str(repo_root)
         _write_json(target_ref_path, target_ref)
     (source_runs.parent / "usertest_implement").mkdir(parents=True)
+    retained_runs = tmp_path / "retained-component-validation" / "stage_runs"
+    retained_run = (
+        retained_runs / "target_a" / "20260103T000000Z" / "codex" / "0"
+    )
+    _write_json(
+        retained_run / "target_ref.json",
+        {
+            "repo_input": str(repo_root),
+            "agent": "codex",
+            "mission_id": "backlog_repro_research",
+            "backlog_lineage": {
+                "evidence_role": "research",
+                "origin_stage": "repro_research",
+                "parent_case_id": "case:retained-research",
+            },
+        },
+    )
+    _write_json(retained_run / "effective_run_spec.json", {})
+    _write_json(
+        retained_run / "report.json",
+        {
+            "schema_version": 1,
+            "kind": "troubleshoot_v1",
+            "status": "success",
+            "confidence": 0.9,
+            "goal": "Establish a retained causal mechanism.",
+            "failure_point": (
+                "The retained control proves a causal failure outside the inferred roots."
+            ),
+            "recommended_fix_path": [],
+        },
+    )
 
     atom_actions_path = tmp_path / "custody" / "atom_actions.yaml"
     case_registry_seed = tmp_path / "custody" / "case_registry.json"
@@ -380,7 +518,12 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
         case_registry_seed,
         {
             "schema_version": 1,
-            "cases": {},
+            "cases": {
+                "case:retained-research": {
+                    "case_id": "case:retained-research",
+                    "case_state": "active",
+                }
+            },
             "problem_id_to_case_id": {},
             "atom_id_to_case_id": {},
             "atom_id_to_case_ids": {},
@@ -437,6 +580,8 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
                 research_ref,
                 "--source-runs-dir",
                 str(source_runs),
+                "--additional-evidence-runs-dir",
+                str(retained_runs),
                 "--atom-actions-yaml",
                 str(atom_actions_path),
                 "--case-registry-seed",
@@ -460,6 +605,57 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
     assert bundle["scope"]["research_ref"] == research_ref.casefold()
     assert bundle["atom_corpus"]["count"] == len(bundle["atoms"])
     assert bundle["atom_corpus"]["count"] > 0
+    retained_manifests = bundle["source_inputs"]["additional_evidence_runs"]
+    assert len(retained_manifests) == 1
+    assert retained_manifests[0]["root"] == str(retained_runs.resolve())
+    retained_atoms = [
+        atom
+        for atom in bundle["atoms"]
+        if atom.get("retained_evidence_source_root") == str(retained_runs.resolve())
+    ]
+    assert retained_atoms
+    assert all(atom["evidence_role"] == "research" for atom in retained_atoms)
+    assert len({atom["atom_id"] for atom in retained_atoms}) == len(retained_atoms)
+    assert all(
+        str(atom["atom_id"]).startswith("__retained__/usertest/")
+        for atom in retained_atoms
+    )
+    assert all(
+        atom["parent_case_id"] == "case:retained-research"
+        for atom in retained_atoms
+    )
+    assert all(
+        atom.get("lineage_mining_blocker")
+        in {None, "runner_terminal_context_only"}
+        for atom in retained_atoms
+    )
+    assert any(
+        atom.get("lineage_mining_blocker") is None
+        and "causal failure outside the inferred roots" in str(atom.get("text"))
+        for atom in retained_atoms
+    )
+    assert all(
+        atom.get("derived_parent_binding_status") in {"verified", "reconstructed"}
+        for atom in retained_atoms
+    )
+    assert not any(
+        atom.get("derived_source_root_kind") == "usertest_implement"
+        for atom in retained_atoms
+    )
+    assert any(
+        "causal failure outside the inferred roots" in str(atom.get("text"))
+        for atom in retained_atoms
+    )
+    assert all(
+        atom["retained_evidence_source_root_sha256"]
+        == retained_manifests[0]["entries_sha256"]
+        for atom in retained_atoms
+    )
+    assert all(
+        isinstance(atom.get("retained_evidence_source_run_sha256"), str)
+        and len(atom["retained_evidence_source_run_sha256"]) == 64
+        for atom in retained_atoms
+    )
     assert not (work_dir / "prepared.backlog.json").exists()
     command_output = capsys.readouterr().out
     assert '"model_invocations": 0' in command_output
@@ -496,6 +692,31 @@ def test_qualification_execution_restores_sealed_case_membership_before_mining()
     assert restored[0]["disposition"] == "supports_case"
     assert restored[0]["disposition_status"] == "decided"
     assert eligible_problem_mining_atoms(restored) == []
+
+
+def test_qualification_execution_selects_the_sealed_registry_seed_before_sync(
+    tmp_path: Path,
+) -> None:
+    seed = tmp_path / "custody" / "case_registry_seed.json"
+    seed.parent.mkdir(parents=True)
+    seed.write_text('{"schema_version": 1, "cases": {}}\n', encoding="utf-8")
+
+    selected = staged_module._qualification_case_registry_seed_path(
+        {
+            "source_inputs": {
+                "case_registry_seed": {
+                    "path": str(seed),
+                }
+            }
+        }
+    )
+
+    assert selected == seed.resolve()
+
+
+def test_qualification_execution_requires_a_sealed_registry_seed() -> None:
+    with pytest.raises(ValueError, match="missing its registry seed"):
+        staged_module._qualification_case_registry_seed_path({"source_inputs": {}})
 
 
 def test_shadow_pipeline_rejects_invalid_export_gate_config(

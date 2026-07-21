@@ -79,6 +79,28 @@ _EXTERNAL_PROVIDER_RUNTIME_RE = re.compile(
     r"raw_events|agent_last_message)\b)",
     re.IGNORECASE,
 )
+
+
+def _research_contract_view(
+    research: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Remove only runner-owned lineage before validating the authored proof.
+
+    Canonical lineage is attached after the Stage-3 model contract and evidence
+    receipt have been accepted.  It remains part of the persisted stage envelope,
+    but it must not be presented to the strict research-proof parser as an authored
+    field when a complete ticket chain is revalidated.
+    """
+
+    if not isinstance(research, Mapping):
+        return None
+    return {
+        key: value
+        for key, value in research.items()
+        if key not in {"canonical_problem_id", "case_member_problem_ids"}
+    }
+
+
 _RUNTIME_ARTIFACT_KINDS = frozenset(
     {
         "agent_stderr",
@@ -157,6 +179,16 @@ def _canonical_sha256(value: Any) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _selected_option_contract_view(selected_option: Mapping[str, Any]) -> dict[str, Any]:
+    """Exclude runner-owned lineage annotations from the authored option contract."""
+
+    return {
+        key: value
+        for key, value in selected_option.items()
+        if key not in {"case_id", "canonical_problem_id", "case_member_problem_ids"}
+    }
 
 
 def _observable_assertion_predicate(assertion: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -642,6 +674,103 @@ def _verified_fail_first_experiment_ids(
     return eligible - conflicts
 
 
+def _verified_origin_bound_baseline_experiment_ids(
+    research: Mapping[str, Any] | None,
+) -> set[str]:
+    """Return runner-observed baselines directly bound to an originating symptom.
+
+    Research scenario labels are intentionally open-ended.  Downstream optioning must not
+    turn those labels into an undocumented enum: a new but valid replay description would
+    otherwise become unusable solely because the model did not call it ``original_replay``.
+    The general contract is evidence-based instead.  An open-labelled baseline is eligible
+    when the runner verified the executed command and assertion, the declaration binds the
+    observation directly to an originating symptom atom, and the replay stayed on the
+    researched revision without undeclared mutations.  Controls remain ineligible.
+    """
+
+    eligible: set[str] = set()
+    conflicts: set[str] = set()
+    seen_commands: dict[str, str] = {}
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        origin_atom_ids = {
+            value
+            for value in verification.get("origin_atom_ids", [])
+            if isinstance(value, str) and value
+        }
+        if not origin_atom_ids:
+            continue
+        repo_revision = _string(member.get("repo_revision")) or _string(
+            verification.get("repo_revision")
+        )
+        declared = {
+            _string(item.get("experiment_id")): item
+            for item in (
+                member.get("experiments", [])
+                if isinstance(member.get("experiments"), list)
+                else []
+            )
+            if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
+        }
+        raw_receipts = verification.get("experiments")
+        for receipt in raw_receipts if isinstance(raw_receipts, list) else []:
+            if not isinstance(receipt, Mapping):
+                continue
+            experiment_id = _string(receipt.get("experiment_id"))
+            source = declared.get(experiment_id)
+            if experiment_id is None or not isinstance(source, Mapping):
+                continue
+            bindings = source.get("origin_evidence_bindings")
+            bound_symptom_atoms = {
+                _string(binding.get("atom_id"))
+                for binding in (bindings if isinstance(bindings, list) else [])
+                if isinstance(binding, Mapping) and binding.get("role") == "symptom"
+            }
+            addressed_atoms = {
+                value
+                for value in source.get("addresses_atom_ids", [])
+                if isinstance(value, str) and value
+            }
+            command = _string(receipt.get("command"))
+            source_command = _string(source.get("command"))
+            exit_code = receipt.get("exit_code")
+            authorization = receipt.get("command_authorization")
+            workspace_head = _string(receipt.get("workspace_head"))
+            if (
+                source.get("scenario_kind") == "control"
+                or source.get("outcome") != "supports"
+                or receipt.get("outcome") != "supports"
+                or receipt.get("assertion_passed") is not True
+                or command is None
+                or source_command is None
+                or " ".join(source_command.split()) != " ".join(command.split())
+                or isinstance(exit_code, bool)
+                or not isinstance(exit_code, int)
+                or not origin_atom_ids.intersection(addressed_atoms)
+                or not origin_atom_ids.intersection(bound_symptom_atoms)
+                or receipt.get("post_replay_mutations") not in (None, False)
+                or receipt.get("undeclared_post_replay_mutations") not in (None, [])
+                or not isinstance(authorization, Mapping)
+                or authorization.get("runner_attested") is not True
+                or (
+                    repo_revision is not None
+                    and workspace_head is not None
+                    and workspace_head != repo_revision
+                )
+            ):
+                continue
+            normalized = " ".join(command.split())
+            previous = seen_commands.get(experiment_id)
+            if previous is not None and previous != normalized:
+                conflicts.add(experiment_id)
+                continue
+            seen_commands[experiment_id] = normalized
+            eligible.add(experiment_id)
+    return eligible - conflicts
+
+
 def _verified_fail_first_outcome_oracles(
     research: Mapping[str, Any] | None,
 ) -> dict[str, Mapping[str, Any]]:
@@ -899,7 +1028,7 @@ def _retained_outcome_asset_paths(
 ) -> set[str]:
     """Return immutable Stage-3 replay paths that Stage 6 must never rewrite."""
 
-    paths: set[str] = set()
+    paths = _verified_workspace_overlay_paths(research)
     for member in _research_dossier_members(research):
         verification = member.get("evidence_verification")
         if not isinstance(verification, Mapping) or verification.get("status") != "verified":
@@ -930,6 +1059,45 @@ def _retained_outcome_asset_paths(
                 for path in manifest
                 if isinstance(path, str) and path
             )
+    return paths
+
+
+def _verified_workspace_overlay_paths(
+    research: Mapping[str, Any] | None,
+) -> set[str]:
+    """Return every content-addressed path in a verified Stage-3 research overlay."""
+
+    paths: set[str] = set()
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        overlay = verification.get("workspace_overlay")
+        manifest = (
+            overlay.get("research_overlay_manifest")
+            if isinstance(overlay, Mapping)
+            else None
+        )
+        if (
+            not isinstance(manifest, Mapping)
+            or overlay.get("research_overlay_manifest_sha256")
+            != _canonical_sha256(manifest)
+        ):
+            continue
+        normalized_manifest: set[str] = set()
+        valid = True
+        for path, entry in manifest.items():
+            normalized = _normalized_retained_asset_path(path)
+            if (
+                normalized is None
+                or normalized in normalized_manifest
+                or not isinstance(entry, Mapping)
+            ):
+                valid = False
+                break
+            normalized_manifest.add(normalized)
+        if valid:
+            paths.update(normalized_manifest)
     return paths
 
 
@@ -977,19 +1145,23 @@ def _option_outcome_strategy(
         )
         if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
     }
+    verified_open_label_baselines = _verified_origin_bound_baseline_experiment_ids(research)
     selected_atoms: set[str] = set()
     for experiment_id in experiment_ids:
         experiment = experiments.get(experiment_id)
         if (
             not isinstance(experiment, Mapping)
             or experiment.get("outcome") != "supports"
-            or experiment.get("scenario_kind")
-            not in {
-                "original_replay",
-                "faithful_replay",
-                "live_runtime",
-                "fail_first_contract",
-            }
+            or (
+                experiment.get("scenario_kind")
+                not in {
+                    "original_replay",
+                    "faithful_replay",
+                    "live_runtime",
+                    "fail_first_contract",
+                }
+                and experiment_id not in verified_open_label_baselines
+            )
         ):
             return None
         selected_atoms.update(
@@ -1309,6 +1481,81 @@ def verified_staged_replay_command_asset_paths(
         if normalized in manifest_paths
     }
     return {command: referenced_paths} if referenced_paths else {}
+
+
+def verified_research_overlay_command_asset_paths(
+    research: Mapping[str, Any] | None,
+    *,
+    experiment_id: str | None,
+) -> dict[str, set[str]]:
+    """Map one verified historical command to overlay paths referenced by its argv.
+
+    A ``stage6_planned_unverified`` plan keeps the exact Stage-3 command as historical
+    before-change evidence, but that research-only harness is intentionally absent from the
+    clean implementation checkout. This projection lets planning validate that descriptive
+    baseline without treating the overlay as a future executable or repository change.
+    """
+
+    if experiment_id is None:
+        return {}
+    overlay_paths = _verified_workspace_overlay_paths(research)
+    if not overlay_paths:
+        return {}
+    matches: list[tuple[str, set[str]]] = []
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        declared = {
+            _string(item.get("experiment_id")): item
+            for item in (
+                member.get("experiments", [])
+                if isinstance(member.get("experiments"), list)
+                else []
+            )
+            if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
+        }
+        receipts = verification.get("experiments")
+        for receipt in receipts if isinstance(receipts, list) else []:
+            if not isinstance(receipt, Mapping) or _string(receipt.get("experiment_id")) != (
+                experiment_id
+            ):
+                continue
+            source = declared.get(experiment_id)
+            source_command = _string(source.get("command")) if isinstance(source, Mapping) else None
+            receipt_command = _string(receipt.get("command"))
+            authorization = receipt.get("command_authorization")
+            argv = receipt.get("executed_argv")
+            if (
+                source_command is None
+                or receipt_command is None
+                or " ".join(source_command.split()) != " ".join(receipt_command.split())
+                or receipt.get("assertion_passed") is not True
+                or not isinstance(authorization, Mapping)
+                or authorization.get("runner_attested") is not True
+                or not isinstance(argv, list)
+                or not all(isinstance(token, str) and token for token in argv)
+            ):
+                continue
+            referenced_paths = {
+                normalized
+                for token in argv
+                for normalized in [
+                    _normalized_retained_asset_path(
+                        token.split("::", 1)[0].strip("'\"(),;:")
+                    )
+                ]
+                if normalized in overlay_paths
+            }
+            if referenced_paths:
+                matches.append((" ".join(receipt_command.split()), referenced_paths))
+    if not matches:
+        return {}
+    commands = {command for command, _paths in matches}
+    if len(commands) != 1:
+        return {}
+    command = next(iter(commands))
+    return {command: set().union(*(paths for _command, paths in matches))}
 
 
 def _baseline_inverse_assertion(oracle: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -3592,7 +3839,9 @@ def bind_falsification_review(
         "kind": "selected_option_outcome_strategy",
         "problem_id": problem_id,
         "selected_option_id": selected_option_id,
-        "selected_option_sha256": _canonical_sha256(selected_option),
+        "selected_option_sha256": _canonical_sha256(
+            _selected_option_contract_view(selected_option)
+        ),
         "research_receipt_sha256": research_receipt_sha256,
         "strategy": outcome_strategy,
         "review": outcome_strategy_review,
@@ -3623,7 +3872,9 @@ def bind_falsification_review(
         "binding_method": "runner_causal_falsification_binding_v1",
         "problem_id": problem_id,
         "selected_option_id": selected_option_id,
-        "selected_option_sha256": _canonical_sha256(selected_option),
+        "selected_option_sha256": _canonical_sha256(
+            _selected_option_contract_view(selected_option)
+        ),
         "research_receipt_sha256": research_receipt_sha256,
         "review_claims_sha256": _canonical_sha256(bound),
         "evidence": evidence_projection,
@@ -4064,11 +4315,6 @@ def _research_binding_reasons(
         target_symbol = None
         target_path = None
         if generic_point:
-            if mechanism_symbol is not None and mechanism_symbol != causal_locator:
-                reasons.append(
-                    f"solution_option_intervention_causal_locator_mismatch:{index}"
-                )
-            mechanism_symbol = causal_locator
             touchpoint_ids = _string_list(
                 point.get("implementation_touchpoint_ids"),
                 nonempty=True,
@@ -4105,8 +4351,6 @@ def _research_binding_reasons(
             target_symbol = _string(point.get("target_symbol"))
             target_path = _string(point.get("target_path"))
         intervention = _string(point.get("intervention"))
-        if mechanism_symbol is None or mechanism_symbol not in (expected_symbols or []):
-            reasons.append(f"solution_option_intervention_mechanism_symbol_unbound:{index}")
         controlled_symbols = _string_list(
             point.get("controls_mechanism_symbols"),
             nonempty=True,
@@ -4114,7 +4358,16 @@ def _research_binding_reasons(
         if controlled_symbols is None:
             # Preserve the single-symbol v1 shape while requiring multi-symbol
             # mechanisms to state exactly which chain a control point dominates.
-            controlled_symbols = [mechanism_symbol] if mechanism_symbol is not None else []
+            if mechanism_symbol is not None:
+                controlled_symbols = [mechanism_symbol]
+            elif generic_point and len(expected_symbols or []) == 1:
+                controlled_symbols = list(expected_symbols or [])
+            else:
+                controlled_symbols = []
+        if mechanism_symbol is None and len(controlled_symbols) == 1:
+            mechanism_symbol = controlled_symbols[0]
+        if mechanism_symbol is None or mechanism_symbol not in (expected_symbols or []):
+            reasons.append(f"solution_option_intervention_mechanism_symbol_unbound:{index}")
         if (
             not controlled_symbols
             or len(controlled_symbols) != len(set(controlled_symbols))
@@ -5298,6 +5551,16 @@ def assess_change_plan_readiness(
     if plan.get("plan_revision_source") != "server_content_addressed_v1":
         reasons.append("change_plan_revision_source_invalid")
     stage5_outcome_contract = _selected_stage5_outcome_contract(selection)
+    stage5_outcome_strategy = (
+        stage5_outcome_contract.get("strategy")
+        if isinstance(stage5_outcome_contract, Mapping)
+        else None
+    )
+    stage5_replay_mode = (
+        _string(stage5_outcome_strategy.get("post_change_replay_mode"))
+        if isinstance(stage5_outcome_strategy, Mapping)
+        else None
+    )
     if verified_outcome_oracles(research) or stage5_outcome_contract is not None:
         try:
             rebound_plan = bind_plan_outcome_oracle(
@@ -5630,9 +5893,29 @@ def assess_change_plan_readiness(
                 ):
                     reasons.append("change_plan_before_observable_not_research_replay")
             if before is not None and after is not None:
-                if " ".join(str(before.get("command") or "").split()) != " ".join(
+                normalized_before_command = " ".join(
+                    str(before.get("command") or "").split()
+                )
+                normalized_after_command = " ".join(
                     str(after.get("command") or "").split()
-                ):
+                )
+                if stage5_replay_mode == "stage6_planned_unverified":
+                    historical_overlay_commands = (
+                        verified_research_overlay_command_asset_paths(
+                            research,
+                            experiment_id=_string(
+                                reproduction.get("research_experiment_id")
+                            ),
+                        )
+                    )
+                    if (
+                        normalized_before_command == normalized_after_command
+                        and normalized_before_command in historical_overlay_commands
+                    ):
+                        reasons.append(
+                            "change_plan_after_command_reuses_historical_baseline"
+                        )
+                elif normalized_before_command != normalized_after_command:
                     reasons.append("change_plan_after_command_not_original_replay")
                 verification_commands = _string_list(plan.get("verification_commands")) or []
                 if " ".join(str(after.get("command") or "").split()) not in {
@@ -6014,15 +6297,16 @@ def assess_ticket_readiness(ticket: Mapping[str, Any] | None) -> tuple[bool, lis
     if research is not None and _string(research.get("_parse_warning")) is not None:
         reasons.append("research_parse_warning_present")
 
+    contract_research = _research_contract_view(research)
     research_ready, research_reasons = assess_research_readiness(
-        dict(research) if research is not None else None
+        contract_research
     )
     if not research_ready:
         reasons.extend(research_reasons)
     selection_ready, selection_reasons = assess_selection_readiness(
         selection,
         options=options,
-        research=research,
+        research=contract_research,
     )
     if not selection_ready:
         reasons.extend(selection_reasons)
@@ -6040,7 +6324,7 @@ def assess_ticket_readiness(ticket: Mapping[str, Any] | None) -> tuple[bool, lis
     plan_ready, plan_reasons = assess_change_plan_readiness(
         plan,
         problem=problem,
-        research=research,
+        research=contract_research,
         selection=selection_for_plan,
     )
     if not plan_ready:
@@ -6065,5 +6349,6 @@ __all__ = [
     "research_limitation_references",
     "verified_mechanism_evidence",
     "verified_outcome_oracles",
+    "verified_research_overlay_command_asset_paths",
     "verified_staged_replay_command_asset_paths",
 ]

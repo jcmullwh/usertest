@@ -11,6 +11,7 @@ from backlog_repo.ticket_provenance import (
 )
 
 from usertest_implement.shared import *
+from usertest_implement.ticket_prompt import project_ticket_prompt_context
 
 
 def _fingerprint_from_text(text: str) -> str:
@@ -463,7 +464,7 @@ def _compose_ticket_blob(selected: SelectedTicket) -> str:
         lines.append(f"- export_index: {selected.export_index}")
     lines.append("")
     lines.append("# Ticket markdown")
-    lines.append(selected.ticket_markdown.rstrip())
+    lines.append(project_ticket_prompt_context(selected).rstrip())
     lines.append("")
     return "\n".join(lines)
 
@@ -583,6 +584,81 @@ def _write_pr_manifest(
 ) -> tuple[str, str]:
     title = f"{selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
 
+    def _section(markdown: str, heading: str) -> str:
+        start = markdown.find(heading)
+        if start < 0:
+            return ""
+        next_heading = markdown.find("\n## ", start + len(heading))
+        return markdown[start:] if next_heading < 0 else markdown[start:next_heading]
+
+    def _pr_ticket_projection(markdown: str) -> str:
+        # GitHub rejects PR bodies above 65,536 characters. Generated tickets retain
+        # complete proof and audit history and can legitimately be several megabytes,
+        # so preserve that source locally while sending the causal implementation slice.
+        if len(markdown) <= 50_000:
+            return markdown
+        research_start = markdown.find("\n## Research context")
+        front = markdown if research_start < 0 else markdown[:research_start]
+        projected = "\n\n".join(
+            part.strip()
+            for part in (
+                front,
+                _section(markdown, "## Success criteria"),
+                _section(markdown, "## Implementation plan"),
+                _section(markdown, "## Problem-local evidence breadth (counts)"),
+                _section(markdown, "## Evidence atom ids"),
+            )
+            if part.strip()
+        )
+        if len(projected) > 50_000:
+            implementation = _section(markdown, "## Implementation plan")
+            subsection_names = (
+                "### Implementation steps",
+                "### Verification steps",
+                "### Exact change targets",
+                "### Original-scenario before / after proof",
+                "### Compatibility and failure modes",
+                "### Outcome verification requirement",
+                "### Rollback notes",
+            )
+
+            def _subsection(heading: str) -> str:
+                start = implementation.find(heading)
+                if start < 0:
+                    return ""
+                next_heading = implementation.find("\n### ", start + len(heading))
+                return implementation[start:] if next_heading < 0 else implementation[start:next_heading]
+
+            compact_implementation = "\n\n".join(
+                part.strip()
+                for part in (_subsection(name) for name in subsection_names)
+                if part.strip()
+            )
+            projected = "\n\n".join(
+                part.strip()
+                for part in (
+                    front,
+                    _section(markdown, "## Success criteria"),
+                    "## Implementation plan\n\n" + compact_implementation,
+                    _section(markdown, "## Problem-local evidence breadth (counts)"),
+                    _section(markdown, "## Evidence atom ids"),
+                )
+                if part.strip()
+            )
+        receipt = (
+            "## Full ticket receipt\n\n"
+            "The complete generated ticket and research proof remain in the pipeline's "
+            "`pr_manifest.md`; this PR projection retains the problem, success criteria, exact "
+            "change targets, original-scenario proof, compatibility boundaries, and outcome "
+            "verification contract.\n\n"
+            f"- Characters: `{len(markdown)}`\n"
+            f"- SHA-256: `{hashlib.sha256(markdown.encode('utf-8')).hexdigest()}`\n"
+        )
+        projected = projected.rstrip() + "\n\n" + receipt
+        if len(projected) > 60_000:
+            raise ValueError("pr_ticket_projection_exceeds_github_body_limit")
+        return projected
+
     def _markdown_fence(text: str) -> str:
         max_run = 0
         cur = 0
@@ -596,7 +672,8 @@ def _write_pr_manifest(
         fence_len = max(3, max_run + 1)
         return "`" * fence_len
 
-    ticket_text = selected.ticket_markdown.rstrip()
+    full_ticket_text = selected.ticket_markdown.rstrip()
+    ticket_text = _pr_ticket_projection(full_ticket_text)
     ticket_fence = _markdown_fence(ticket_text)
 
     body_lines: list[str] = []
@@ -604,7 +681,7 @@ def _write_pr_manifest(
     body_lines.append(f"Agent: `{agent}`")
     body_lines.append(f"Model: `{model or 'unknown'}`")
     body_lines.append("")
-    body_lines.append("## Ticket (full)")
+    body_lines.append("## Ticket review projection")
     body_lines.append("")
     body_lines.append(ticket_fence)
     body_lines.append(ticket_text)
@@ -618,7 +695,16 @@ def _write_pr_manifest(
     manifest_lines: list[str] = []
     manifest_lines.append(f"# {title}")
     manifest_lines.append("")
-    manifest_lines.append(body.rstrip())
+    full_ticket_fence = _markdown_fence(full_ticket_text)
+    manifest_lines.append(f"Fingerprint: `{selected.fingerprint}`")
+    manifest_lines.append(f"Agent: `{agent}`")
+    manifest_lines.append(f"Model: `{model or 'unknown'}`")
+    manifest_lines.append("")
+    manifest_lines.append("## Ticket (full)")
+    manifest_lines.append("")
+    manifest_lines.append(full_ticket_fence)
+    manifest_lines.append(full_ticket_text)
+    manifest_lines.append(full_ticket_fence)
     manifest_lines.append("")
     manifest_lines.append("## Branch")
     manifest_lines.append("")

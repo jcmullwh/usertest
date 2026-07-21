@@ -297,8 +297,12 @@ def _render_export_issue_body(
 
     problem_record_raw = ticket.get("problem_record")
     problem_record = problem_record_raw if isinstance(problem_record_raw, dict) else {}
-    evidence_summary = _coerce_string(problem_record.get("evidence_summary")) or _coerce_string(
-        ticket.get("evidence_summary")
+    refinement_raw = ticket.get("observed_problem_refinement")
+    refinement = refinement_raw if isinstance(refinement_raw, dict) else {}
+    evidence_summary = (
+        _coerce_string(refinement.get("evidence_summary"))
+        or _coerce_string(ticket.get("evidence_summary"))
+        or _coerce_string(problem_record.get("evidence_summary"))
     )
     if evidence_summary:
         lines.append("## Evidence summary")

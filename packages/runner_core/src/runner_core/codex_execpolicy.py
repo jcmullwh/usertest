@@ -55,6 +55,39 @@ _ACTIVATION_OMITTED_MISSION_CONFIG_KEYS: frozenset[str] = frozenset(
 )
 CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE = 'windows.sandbox="unelevated"'
 _CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE = "unelevated"
+_CODEX_ACTIVATION_SANDBOX_MODES: frozenset[str] = frozenset(
+    {"read-only", "workspace-write", "danger-full-access"}
+)
+
+
+def build_codex_shell_probe_config_overrides(mission: Sequence[str]) -> list[str]:
+    """Build mission-free Codex configuration for an agent-equivalent shell probe.
+
+    The probe must exercise the same binary, model, authentication route, sandbox, and project
+    policy as mission dispatch, but it must not load the mission's instruction payload.  Loading a
+    large ticket or research appendix can exhaust the context window before the probe executes its
+    marker command, which is not evidence that shell capability is unavailable.
+    """
+
+    mission_values = list(mission)
+    route_suffix = list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
+    has_route_suffix = mission_values[-len(route_suffix) :] == route_suffix
+    base = mission_values[: -len(route_suffix)] if has_route_suffix else mission_values
+    activation_base: list[str] = []
+    for override in base:
+        key, separator, _value = override.partition("=")
+        normalized_key = key.strip().lower().replace("-", "_")
+        if separator and normalized_key in {
+            *_ACTIVATION_OMITTED_MISSION_CONFIG_KEYS,
+            "model_reasoning_effort",
+        }:
+            continue
+        activation_base.append(override)
+    return [
+        *activation_base,
+        *_ACTIVATION_SAFE_CONFIG_DELTA,
+        *(route_suffix if has_route_suffix else []),
+    ]
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -124,19 +157,10 @@ def _activation_overrides_from_mission(
     suffix_length = len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
     if mission_values[-suffix_length:] != list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES):
         return []
-    activation_base: list[str] = []
-    for override in mission_values[:-suffix_length]:
-        key, separator, _value = override.partition("=")
-        normalized_key = key.strip().lower().replace("-", "_")
-        if (
-            omit_mission_instructions
-            and separator
-            and normalized_key in _ACTIVATION_OMITTED_MISSION_CONFIG_KEYS
-        ):
-            continue
-        activation_base.append(override)
+    if omit_mission_instructions:
+        return build_codex_shell_probe_config_overrides(mission_values)
     return [
-        *activation_base,
+        *mission_values[:-suffix_length],
         *_ACTIVATION_SAFE_CONFIG_DELTA,
         *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
     ]
@@ -346,7 +370,7 @@ def controlled_codex_execpolicy_receipt_errors(
             if isinstance(expected_activation_sandbox_raw, str)
             else ""
         )
-        if expected_activation_sandbox not in {"read-only", "workspace-write"}:
+        if expected_activation_sandbox not in _CODEX_ACTIVATION_SANDBOX_MODES:
             errors.append("codex_execpolicy_expected_activation_sandbox_mode_invalid")
         if (
             activation.get("ok") is not True
@@ -457,7 +481,7 @@ def revalidate_controlled_codex_execpolicy_receipt_for_expected_sandbox(
     """
 
     expected = str(expected_sandbox_mode).strip()
-    if expected not in {"read-only", "workspace-write"}:
+    if expected not in _CODEX_ACTIVATION_SANDBOX_MODES:
         return {
             "schema_version": 1,
             "verified": False,
@@ -1445,7 +1469,7 @@ def install_controlled_codex_execpolicy(
     if not normalized:
         raise ValueError("codex_execpolicy_prefixes_empty")
     expected_sandbox_mode = str(expected_activation_sandbox_mode).strip()
-    if expected_sandbox_mode not in {"read-only", "workspace-write"}:
+    if expected_sandbox_mode not in _CODEX_ACTIVATION_SANDBOX_MODES:
         raise ValueError(
             "codex_execpolicy_expected_activation_sandbox_mode_invalid:"
             f"{expected_sandbox_mode or '<empty>'}"

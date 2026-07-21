@@ -208,6 +208,36 @@ def test_mitigated_requires_tests_and_dedicated_effect_role() -> None:
         validate_outcome_record(record)
 
 
+def test_outcome_accepts_stage5_planned_post_change_oracle_receipt() -> None:
+    original = _passed("original_scenario", "runs/original/outcome_role.json")
+    original["outcome_oracle_id"] = "outcome_oracle:" + "9" * 64
+    original["proof_scope"] = "planned_post_change_verification"
+    original_receipt = original["runner_receipt"]
+    assert isinstance(original_receipt, dict)
+    original_receipt["outcome_oracle_id"] = original["outcome_oracle_id"]
+    original_receipt["proof_scope"] = original["proof_scope"]
+
+    mitigation = _passed("mitigation_effect", "runs/mitigation/outcome_role.json")
+    mitigation["outcome_oracle_id"] = "outcome_oracle:" + "9" * 64
+    mitigation["proof_scope"] = "planned_post_change_verification"
+    mitigation_receipt = mitigation["runner_receipt"]
+    assert isinstance(mitigation_receipt, dict)
+    mitigation_receipt["outcome_oracle_id"] = mitigation["outcome_oracle_id"]
+    mitigation_receipt["proof_scope"] = mitigation["proof_scope"]
+
+    record = _record(
+        state="mitigated",
+        target_branch="dev",
+        merged_commit="abc123",
+        requires_live_verification=False,
+        test_evidence=[_passed("test", "tests/test_x.py")],
+        original_scenario_evidence=[original],
+        mitigation_evidence=[mitigation],
+    )
+
+    assert validate_outcome_record(record)["state"] == "mitigated"
+
+
 def test_terminal_stale_blocker_reconciliation_changes_only_runner_owned_risk() -> None:
     terminal = validate_outcome_record(
         _record(

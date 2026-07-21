@@ -48,6 +48,10 @@ def test_live_research_prompts_teach_open_causal_proof_and_same_session_repair()
         "does not require a future solution contract",
         "future solution oracle is optional",
         "present mechanism or connected change surface",
+        "wrong value with exit zero",
+        "fail-first semantic assertion",
+        "retained_harness_semantic_assertion",
+        "optional portability aid",
     ):
         assert required.casefold() in combined.casefold()
 
@@ -135,5 +139,5 @@ def test_initial_research_guidance_discloses_nested_machine_contract() -> None:
 def test_research_prompt_payload_is_concise_enough_for_live_throughput() -> None:
     prompts = _prompt_texts()
 
-    assert len(prompts["guidance"].splitlines()) < 260
+    assert len(prompts["guidance"].splitlines()) < 280
     assert len(prompts["mission"].splitlines()) < 100

@@ -23,9 +23,12 @@ from backlog_core.stage_contracts import (
     research_relation_assessment_errors,
 )
 from backlog_miner.research_evidence import verify_persisted_research_evidence
+from backlog_repo import validate_case_relation_receipt
 
 POST_RESEARCH_SPLIT_RECEIPT_SCHEMA_VERSION = 1
 POST_RESEARCH_SPLIT_RECEIPT_KIND = "post_research_case_split"
+PROBLEM_MINING_RELATION_SPLIT_RECEIPT_SCHEMA_VERSION = 1
+PROBLEM_MINING_RELATION_SPLIT_RECEIPT_KIND = "problem_mining_relation_split"
 
 
 def _text(value: Any) -> str | None:
@@ -232,7 +235,60 @@ def verified_causal_evidence_projection(
         for projected in [_control_point_identity(value)]
         if projected is not None
     ]
-    if not interventions and not closures and not projected_control_points:
+    selected_mechanism_evidence_ids = set(_strings(provenance.get("mechanism_evidence_ids")))
+    adapter_interventions = [
+        {
+            "kind": kind,
+            "target": target,
+        }
+        for raw in (
+            provenance.get("intervention_targets")
+            if isinstance(provenance.get("intervention_targets"), list)
+            else []
+        )
+        if isinstance(raw, dict)
+        for kind in [_text(raw.get("kind"))]
+        for target in [_text(raw.get("target"))]
+        if kind is not None and target is not None
+    ]
+    adapter_causal_edges: list[dict[str, Any]] = []
+    support_connectivity = provenance.get("support_connectivity")
+    for support in support_connectivity if isinstance(support_connectivity, list) else []:
+        if (
+            not isinstance(support, dict)
+            or support.get("connection_kind") != "causal_root"
+            or _text(support.get("mechanism_evidence_id"))
+            not in selected_mechanism_evidence_ids
+        ):
+            continue
+        edges_raw = support.get("verified_causal_edges")
+        edges = edges_raw if isinstance(edges_raw, list) else []
+        single_edge = support.get("verified_causal_edge")
+        if isinstance(single_edge, dict):
+            edges = [*edges, single_edge]
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            projection = {
+                key: edge.get(key)
+                for key in (
+                    "edge_kind",
+                    "caller_path",
+                    "caller_symbol",
+                    "callee_path",
+                    "callee_symbol",
+                )
+                if edge.get(key) is not None
+            }
+            if projection:
+                adapter_causal_edges.append(projection)
+    adapter_proof_available = bool(adapter_interventions and adapter_causal_edges)
+    if (
+        not interventions
+        and not closures
+        and not projected_control_points
+        and not adapter_proof_available
+    ):
         return None
     return {
         "schema_version": 2,
@@ -248,6 +304,14 @@ def verified_causal_evidence_projection(
         ),
         "deterministic_closures": sorted(
             _unique_sorted_records(closures),
+            key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+        ),
+        "adapter_interventions": sorted(
+            _unique_sorted_records(adapter_interventions if adapter_proof_available else []),
+            key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+        ),
+        "adapter_causal_edges": sorted(
+            _unique_sorted_records(adapter_causal_edges if adapter_proof_available else []),
             key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
         ),
     }
@@ -407,8 +471,112 @@ def authenticated_split_child_occurrence_evidence(
     IDs into a problem record is intentionally insufficient.
     """
 
-    # Occurrence membership is useful on ordinary cases too.  Enter the special
-    # receipt path only when a record claims runner-owned split provenance.
+    problem_mining_ref_raw = record.get("problem_mining_relation_split_receipt")
+    if isinstance(problem_mining_ref_raw, Mapping):
+        errors: list[str] = []
+        split_ref = dict(problem_mining_ref_raw)
+        supplied_content_sha = _text(split_ref.pop("content_sha256", None))
+        if supplied_content_sha != _canonical_sha256(split_ref):
+            errors.append("problem_mining_split_reference_content_sha256_mismatch")
+        split_ref["content_sha256"] = supplied_content_sha
+        occurrence_ids = sorted(_strings(record.get("occurrence_evidence_atom_ids")))
+        evidence_ids = sorted(_strings(record.get("evidence_atom_ids")))
+        if (
+            split_ref.get("schema_version")
+            != PROBLEM_MINING_RELATION_SPLIT_RECEIPT_SCHEMA_VERSION
+            or split_ref.get("producer") != "usertest_backlog.problem_mining"
+            or split_ref.get("receipt_kind")
+            != PROBLEM_MINING_RELATION_SPLIT_RECEIPT_KIND
+        ):
+            errors.append("problem_mining_split_reference_contract_invalid")
+        if (
+            _text(split_ref.get("parent_case_id"))
+            != _text(record.get("split_from_case_id"))
+            or _text(split_ref.get("parent_problem_id"))
+            != _text(record.get("split_parent_problem_id"))
+            or _text(split_ref.get("child_case_id")) != _text(record.get("case_id"))
+            or _text(split_ref.get("child_problem_id"))
+            != _text(record.get("problem_id"))
+            or sorted(_strings(split_ref.get("evidence_atom_ids"))) != evidence_ids
+            or sorted(_strings(split_ref.get("occurrence_evidence_atom_ids")))
+            != occurrence_ids
+            or not occurrence_ids
+            or not set(occurrence_ids).issubset(evidence_ids)
+        ):
+            errors.append("problem_mining_split_reference_record_mismatch")
+
+        receipt_path_raw = _text(split_ref.get("relation_receipt_path"))
+        expected_receipt_sha = _text(split_ref.get("relation_receipt_sha256"))
+        expected_receipt_content_sha = _text(
+            split_ref.get("relation_receipt_content_sha256")
+        )
+        try:
+            receipt_path = Path(receipt_path_raw or "").expanduser().resolve()
+            receipt_bytes = receipt_path.read_bytes()
+        except (OSError, RuntimeError):
+            return [], [*errors, "problem_mining_split_relation_receipt_unavailable"]
+        if sha256(receipt_bytes).hexdigest() != expected_receipt_sha:
+            errors.append("problem_mining_split_relation_receipt_sha256_mismatch")
+        try:
+            receipt_raw = json.loads(receipt_bytes.decode("utf-8"))
+            receipt = validate_case_relation_receipt(receipt_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+            return [], [*errors, "problem_mining_split_relation_receipt_invalid"]
+        if (
+            receipt.get("stage") != "problem_mining"
+            or receipt.get("content_sha256") != expected_receipt_content_sha
+        ):
+            errors.append("problem_mining_split_relation_receipt_contract_mismatch")
+        response_path = Path(str(receipt["relation_review_response_path"]))
+        try:
+            response_bytes = response_path.read_bytes()
+        except OSError:
+            return [], [*errors, "problem_mining_split_response_unavailable"]
+        if sha256(response_bytes).hexdigest() != receipt["relation_review_response_sha256"]:
+            errors.append("problem_mining_split_response_sha256_mismatch")
+        try:
+            decisions = json.loads(response_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return [], [*errors, "problem_mining_split_response_invalid"]
+        decision_index = split_ref.get("decision_index")
+        split_group_index = split_ref.get("split_group_index")
+        if (
+            not isinstance(decisions, list)
+            or not isinstance(decision_index, int)
+            or isinstance(decision_index, bool)
+            or not 0 <= decision_index < len(decisions)
+        ):
+            return [], [*errors, "problem_mining_split_decision_reference_invalid"]
+        decision = decisions[decision_index]
+        decision_sha = _canonical_sha256(decision)
+        groups = decision.get("split_groups") if isinstance(decision, Mapping) else None
+        if (
+            not isinstance(decision, Mapping)
+            or decision.get("action") != "split"
+            or _text(decision.get("focus_id"))
+            != _text(record.get("split_parent_problem_id"))
+            or decision_sha != _text(split_ref.get("decision_sha256"))
+            or not isinstance(groups, list)
+            or not isinstance(split_group_index, int)
+            or isinstance(split_group_index, bool)
+            or not 0 <= split_group_index < len(groups)
+        ):
+            return [], [*errors, "problem_mining_split_decision_binding_invalid"]
+        split_group = groups[split_group_index]
+        if (
+            not isinstance(split_group, Mapping)
+            or sorted(_strings(split_group.get("evidence_atom_ids"))) != evidence_ids
+        ):
+            errors.append("problem_mining_split_group_binding_invalid")
+        for atom_id in occurrence_ids:
+            if atom_id not in atoms_by_id:
+                errors.append(f"split_occurrence_atom_missing:{atom_id}")
+        if errors:
+            return [], list(dict.fromkeys(errors))
+        return occurrence_ids, []
+
+    # Occurrence membership is useful on ordinary cases too. Enter the post-research
+    # receipt path only when a record claims that distinct provenance contract.
     if (
         record.get("split_from_case_id") is None
         and record.get("post_research_split_receipt") is None
@@ -664,9 +832,12 @@ def apply_post_research_relation_assessments(
                 "root_cause_confidence": 0.0,
                 "evidence_atom_ids": [facet_atom["atom_id"]],
                 # The generated facet description is downstream research context.
-                # Original occurrences are authenticated separately by the split
-                # receipt when this child returns to Stage 3.
-                "source_evidence_atom_ids": [],
+                # The immutable split receipt authenticates the original occurrences
+                # assigned to this child.  They are therefore its durable source
+                # frontier (and can be snapshot-bound for retained-research reuse),
+                # while the generated facet remains derived context.  Stage 3 still
+                # revalidates the receipt before assigning any occurrence to research.
+                "source_evidence_atom_ids": occurrence_ids,
                 "derived_evidence_atom_ids": [facet_atom["atom_id"]],
                 "occurrence_evidence_atom_ids": occurrence_ids,
                 "split_from_case_id": case_id,

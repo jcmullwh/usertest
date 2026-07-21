@@ -13,6 +13,10 @@ from urllib.parse import urlparse
 
 from runner_core import capture_local_verification
 
+from usertest_implement.git_ops import (
+    RUNNER_OWNED_GIT_EXCLUDES,
+    is_runner_owned_git_path,
+)
 from usertest_implement.implementation_provenance import (
     record_existing_verified_implementation_head,
     validate_verified_implementation_head,
@@ -236,10 +240,12 @@ def _existing_head_relation(
 ) -> dict[str, Any]:
     """Classify the only supported head movement for a no-model handoff adoption.
 
-    An unchanged head may reuse an exact source verification receipt. A changed head must be
-    the direct result of merging the PR's current base into that exact source head. The command
-    then re-runs the plan's exact verification commands and the ordinary review still evaluates
-    the complete new head; this is not a way to adopt arbitrary author changes without review.
+    An unchanged head may reuse an exact source verification receipt. A descendant that only
+    removes runner-owned verification/cache paths has an identical product tree and may reuse
+    that receipt while retaining the evidence bytes locally. Any other changed head must be the
+    direct result of merging the PR's current base into that exact source head. The command then
+    re-runs the plan's exact verification commands and the ordinary review still evaluates the
+    complete new head; this is not a way to adopt arbitrary author changes without review.
     """
 
     if adopted_head == source_head:
@@ -249,6 +255,40 @@ def _existing_head_relation(
             "adopted_head": adopted_head,
             "pr_base_oid": pr_base_oid,
             "parents": [source_head],
+            "verification_reuse_allowed": True,
+        }
+
+    changed_lines = [
+        line
+        for line in _git(
+            workspace,
+            "diff",
+            "--name-status",
+            "--no-renames",
+            source_head,
+            adopted_head,
+        ).splitlines()
+        if line.strip()
+    ]
+    runner_cleanup_paths: list[str] = []
+    runner_cleanup_only = bool(changed_lines)
+    for line in changed_lines:
+        fields = line.split("\t", 1)
+        if (
+            len(fields) != 2
+            or fields[0] != "D"
+            or not is_runner_owned_git_path(fields[1])
+        ):
+            runner_cleanup_only = False
+            break
+        runner_cleanup_paths.append(fields[1])
+    if runner_cleanup_only:
+        return {
+            "kind": "runner_owned_cleanup",
+            "source_head": source_head,
+            "adopted_head": adopted_head,
+            "pr_base_oid": pr_base_oid,
+            "paths": runner_cleanup_paths,
             "verification_reuse_allowed": True,
         }
 
@@ -402,7 +442,15 @@ def _cmd_handoff_adopt_pr(args: Any) -> int:
         head = _sha(_git(workspace, "rev-parse", "HEAD"), label="Workspace head")
         if _git(workspace, "branch", "--show-current") != branch:
             raise ValueError("handoff_adoption_workspace_branch_mismatch")
-        if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+        if _git(
+            workspace,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            *RUNNER_OWNED_GIT_EXCLUDES,
+        ):
             raise ValueError("handoff_adoption_workspace_dirty")
         _require_ancestor(
             workspace,
@@ -574,7 +622,15 @@ def _cmd_handoff_adopt_pr(args: Any) -> int:
             raise ValueError("handoff_adoption_head_changed_during_verification")
         if _git(workspace, "branch", "--show-current") != branch:
             raise ValueError("handoff_adoption_branch_changed_during_verification")
-        if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+        if _git(
+            workspace,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            *RUNNER_OWNED_GIT_EXCLUDES,
+        ):
             raise ValueError("handoff_adoption_workspace_dirtied_by_verification")
         _require_ticket_unchanged(path=ticket_path, expected_bytes=ticket_bytes)
 

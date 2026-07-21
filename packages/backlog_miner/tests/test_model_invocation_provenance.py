@@ -77,8 +77,67 @@ def test_mixed_failed_and_successful_invocations_are_both_retained(
 
     assert success_manifest.is_file()
     assert failed_manifest.is_file()
-    errors = mod.verify_stage_model_invocation_contract(attached)
-    assert any("model_invocation_manifest_not_verified" in error for error in errors)
+    assert mod.verify_stage_model_invocation_contract(attached) == []
+
+
+def test_stage_contract_requires_one_verified_invocation_when_expected(
+    tmp_path: Path,
+) -> None:
+    tracker = mod.ModelInvocationTracker(tmp_path)
+    failed_dir = tmp_path / "failed"
+    _write_prompt_artifacts(
+        failed_dir,
+        tag="solution_optioning_001",
+        prompt="failed prompt",
+        response=None,
+    )
+    mod._write_model_invocation_manifest(
+        stage="solution_optioning",
+        tag="solution_optioning_001",
+        agent="claude",
+        out_dir=failed_dir,
+        prompt="failed prompt",
+        response=None,
+        error_kind="RuntimeError",
+    )
+    attached = mod.attach_stage_model_invocation_contract(
+        _stage_doc(),
+        agent="claude",
+        dry_run=False,
+        manifest_refs=tracker.collect(),
+        invocation_expected=True,
+    )
+
+    assert "stage_model_invocation_verified_manifest_missing" in (
+        mod.verify_stage_model_invocation_contract(attached)
+    )
+
+
+def test_failed_invocation_absent_response_can_later_be_used_by_controller(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "failed"
+    _write_prompt_artifacts(
+        out_dir,
+        tag="solution_optioning_001",
+        prompt="failed prompt",
+        response=None,
+    )
+    manifest = mod._write_model_invocation_manifest(
+        stage="solution_optioning",
+        tag="solution_optioning_001",
+        agent="claude",
+        out_dir=out_dir,
+        prompt="failed prompt",
+        response=None,
+        error_kind="RuntimeError",
+    )
+    (out_dir / "solution_optioning_001.response.txt").write_text(
+        '{"status":"controller_fallback"}\n',
+        encoding="utf-8",
+    )
+
+    assert mod.verify_model_invocation_manifest(manifest, require_verified=False) == []
 
 
 def test_codex_stage_contract_cannot_downgrade_subscription_requirement(

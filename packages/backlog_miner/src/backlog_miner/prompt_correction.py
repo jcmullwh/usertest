@@ -24,6 +24,13 @@ T = TypeVar("T")
 # allowing changing validator identities to reset the economic clock forever.
 _CONSECUTIVE_NONADVANCING_CORRECTION_LIMIT = 3
 
+# Before a session UUID exists there is no author to resume and no model work to
+# correct. Distinct transport text is not progress by itself: launchers commonly add
+# timestamps, paths, or nonces to the same underlying failure. Count the initial
+# sessionless result plus subsequent attempts, but reset when independently valid work
+# increases or the validator frontier actually shrinks.
+_CONSECUTIVE_NONADVANCING_SESSION_ACQUISITION_LIMIT = 3
+
 
 def normalize_validation_error(error: str) -> str:
     """Normalize presentation whitespace while preserving an unknown error's identity."""
@@ -328,8 +335,9 @@ def acquire_author_session(
     A transport attempt made before a session UUID exists contains no author work, so a
     fresh invocation is safe.  Once an invocation returns a UUID, callers must use only
     exact-session continuation. Equivalent failure recurrence pauses the frontier while
-    preserving every receipt. Direct invocation exceptions are content-addressed and retried
-    until the same failure identity recurs. A failed pre-session call is not completed author
+    preserving every receipt. Distinct transport strings do not extend retries forever:
+    three consecutive sessionless attempts with no smaller validator frontier or additional
+    valid keyed work pause as nonadvancing. A failed pre-session call is not completed author
     work, so its duration is telemetry rather than a rework budget.
     """
 
@@ -348,6 +356,11 @@ def acquire_author_session(
     seen_failure_identities: set[str] = set()
     total_cost = max(0.0, float(initial.cost_seconds))
     cost_since_progress = 0.0
+    consecutive_nonadvancing_attempts = 1
+    minimum_error_count_seen = len(
+        normalized_validation_error_identities(initial.validation_errors)
+    )
+    maximum_valid_item_count_seen = len(set(initial.valid_item_keys))
     attempt_number = 2
     while True:
         invocation_started = time.monotonic()
@@ -390,6 +403,23 @@ def acquire_author_session(
                     total_cost=total_cost,
                 )
             seen_failure_identities.add(failure_identity)
+            consecutive_nonadvancing_attempts += 1
+            if (
+                consecutive_nonadvancing_attempts
+                >= _CONSECUTIVE_NONADVANCING_SESSION_ACQUISITION_LIMIT
+            ):
+                return AuthorSessionAcquisitionResult(
+                    status=(
+                        "repairable_paused:"
+                        "author_session_acquisition_nonadvancing"
+                    ),
+                    current=best,
+                    best=best,
+                    attempts=tuple(attempts),
+                    invocation_failures=tuple(invocation_failures),
+                    cost_since_progress=cost_since_progress,
+                    total_cost=total_cost,
+                )
             attempt_number += 1
             continue
         attempts.append(candidate)
@@ -409,23 +439,50 @@ def acquire_author_session(
             return AuthorSessionAcquisitionResult(
                 status="repairable_paused:author_session_acquisition_repeated",
                 current=candidate,
-                best=candidate,
+                best=best,
                 attempts=tuple(attempts),
                 invocation_failures=tuple(invocation_failures),
-                cost_since_progress=cost_since_progress,
+                cost_since_progress=cost_since_progress + candidate_cost,
                 total_cost=total_cost,
             )
         seen_states.add(candidate.state_sha256)
-        valid_items_increased = len(candidate.valid_item_keys) > len(best.valid_item_keys)
-        error_count_decreased = len(
+        candidate_valid_item_count = len(set(candidate.valid_item_keys))
+        candidate_error_count = len(
             normalized_validation_error_identities(candidate.validation_errors)
-        ) < len(normalized_validation_error_identities(best.validation_errors))
+        )
+        valid_items_increased = candidate_valid_item_count > maximum_valid_item_count_seen
+        error_count_decreased = candidate_error_count < minimum_error_count_seen
         if valid_items_increased or error_count_decreased:
             best = candidate
+            maximum_valid_item_count_seen = max(
+                maximum_valid_item_count_seen,
+                candidate_valid_item_count,
+            )
+            minimum_error_count_seen = min(
+                minimum_error_count_seen,
+                candidate_error_count,
+            )
             cost_since_progress = 0.0
+            consecutive_nonadvancing_attempts = 0
         else:
-            best = candidate
             cost_since_progress += candidate_cost
+            consecutive_nonadvancing_attempts += 1
+            if (
+                consecutive_nonadvancing_attempts
+                >= _CONSECUTIVE_NONADVANCING_SESSION_ACQUISITION_LIMIT
+            ):
+                return AuthorSessionAcquisitionResult(
+                    status=(
+                        "repairable_paused:"
+                        "author_session_acquisition_nonadvancing"
+                    ),
+                    current=candidate,
+                    best=best,
+                    attempts=tuple(attempts),
+                    invocation_failures=tuple(invocation_failures),
+                    cost_since_progress=cost_since_progress,
+                    total_cost=total_cost,
+                )
         attempt_number += 1
 
 

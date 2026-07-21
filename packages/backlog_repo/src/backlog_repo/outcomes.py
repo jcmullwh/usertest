@@ -335,7 +335,12 @@ def _runner_receipt(
             if (
                 not isinstance(oracle_id, str)
                 or not oracle_id.startswith("outcome_oracle:")
-                or proof_scope not in {"behavioral", "configuration_state"}
+                or proof_scope
+                not in {
+                    "behavioral",
+                    "configuration_state",
+                    "planned_post_change_verification",
+                }
                 or item.get("outcome_oracle_id") != oracle_id
                 or item.get("proof_scope") != proof_scope
             ):

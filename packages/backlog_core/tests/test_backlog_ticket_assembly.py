@@ -1380,6 +1380,225 @@ def test_assemble_backlog_tickets_splits_by_change_plan() -> None:
     assert triage[0]["stage"] == "triage"
 
 
+def test_ready_ticket_does_not_reopen_explicitly_nonmaterial_unknown() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        material_unknowns=[
+            {
+                "unknown": "Which historical producer exhausted the workspace volume",
+                "affects": ["solution_scope"],
+                "evidence_needed": "A contemporaneous producer-level capacity inventory",
+                "material": False,
+            }
+        ],
+    )
+    option = _option(problem_id)
+    selection = _selection(problem_id)
+    selection["falsification_review"] = bind_falsification_review(
+        selection["falsification_review"],
+        problem_id=problem_id,
+        selected_option=option,
+        research=research,
+    )
+    plan = _plan(problem_id, 1)
+    plan.pop("plan_revision_id", None)
+    plan.pop("plan_revision_source", None)
+    plan = bind_plan_outcome_oracle(plan, research=research, selection=selection)
+    plan = assign_plan_revision_id(plan)
+
+    [ticket] = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[
+            {
+                "case_id": "case:one",
+                "problem_id": problem_id,
+                "priority_bucket": "p1",
+                "selected_for_research": True,
+                "priority_rationale": "The verified acquisition failure requires a change.",
+                "priority_status": "prioritized",
+            }
+        ],
+        research_dossiers=[research],
+        solution_option_sets=[option],
+        selection_decisions=[selection],
+        change_plans=[plan],
+    )
+
+    assert ticket["stage"] == "ready_for_ticket"
+    assert ticket["ticket_readiness"] == {"ready": True, "reasons": []}
+    assert ticket["investigation_steps"] == []
+    assert ticket["research"]["material_unknowns"] == research["material_unknowns"]
+
+
+def test_ticket_promotes_research_problem_refinement_over_stale_stage1_and_plan() -> None:
+    problem_id = "problem:one"
+    refinement = {
+        "problem": "The first command attempt fails before the same run recovers.",
+        "user_impact": "The failure adds retry cost but does not block the mission.",
+        "evidence_summary": "Two assigned failures are followed by successful same-run retries.",
+        "evidence_atom_ids": ["a1", "a2"],
+    }
+    research = _research_proof(
+        problem_id,
+        observed_problem_refinement=refinement,
+    )
+
+    [ticket] = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[
+            {
+                "case_id": "case:one",
+                "problem_id": problem_id,
+                "priority_bucket": "p2",
+                "selected_for_research": True,
+                "priority_rationale": "Research the repeated friction.",
+                "priority_status": "prioritized",
+            }
+        ],
+        research_dossiers=[research],
+        solution_option_sets=[_option(problem_id)],
+        selection_decisions=[_selection(problem_id)],
+        change_plans=[_plan(problem_id, 1)],
+    )
+
+    assert ticket["problem"] == refinement["problem"]
+    assert ticket["user_impact"] == refinement["user_impact"]
+    assert ticket["evidence_summary"] == refinement["evidence_summary"]
+    assert ticket["observed_problem_refinement"] == refinement
+    assert ticket["problem_record"]["problem"] == "P"
+
+
+@pytest.mark.parametrize("disposition", ["already_addressed", "non_actionable"])
+def test_assemble_backlog_tickets_does_not_reopen_terminal_no_change_research(
+    disposition: str,
+) -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        actionability_assessment={
+            "disposition": disposition,
+            "rationale": "Verified evidence establishes that no product change is due.",
+            "evidence_refs": ["exp-1"],
+        },
+    )
+    research["canonical_problem_id"] = problem_id
+    research["case_member_problem_ids"] = [problem_id]
+
+    tickets = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[],
+        research_dossiers=[research],
+        solution_option_sets=[],
+        selection_decisions=[],
+        change_plans=[],
+    )
+
+    assert tickets == []
+
+
+def test_assemble_backlog_tickets_rejects_downstream_work_for_terminal_no_change() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        actionability_assessment={
+            "disposition": "already_addressed",
+            "rationale": "Verified evidence establishes that no product change is due.",
+            "evidence_refs": ["exp-1"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="terminal no-change research"):
+        assemble_backlog_tickets(
+            problem_records=[_problem_record(problem_id)],
+            priority_decisions=[],
+            research_dossiers=[research],
+            solution_option_sets=[_option(problem_id)],
+            selection_decisions=[],
+            change_plans=[],
+        )
+
+
+def test_assemble_backlog_tickets_does_not_trust_no_change_on_unready_research() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        reproduction_status="partial",
+        research_status="insufficient_evidence",
+        root_cause_confidence=0.4,
+        material_unknowns=[
+            {
+                "unknown": "Whether the claimed fix covers the original failure",
+                "affects": ["root_cause"],
+                "evidence_needed": "Replay the original scenario",
+            }
+        ],
+        actionability_assessment={
+            "disposition": "already_addressed",
+            "rationale": "The model claimed the issue was addressed without sufficient proof.",
+            "evidence_refs": ["exp-1"],
+        },
+    )
+
+    tickets = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[],
+        research_dossiers=[research],
+        solution_option_sets=[],
+        selection_decisions=[],
+        change_plans=[],
+    )
+
+    assert len(tickets) == 1
+    assert tickets[0]["stage"] == "research_required"
+    assert tickets[0]["research_readiness"]["ready"] is False
+
+
+def test_research_required_ticket_accepts_runner_owned_research_lineage_envelope() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        reproduction_status="partial",
+        research_status="insufficient_evidence",
+        root_cause_confidence=0.4,
+        material_unknowns=[
+            {
+                "unknown": "Which producer exhausted the workspace volume",
+                "affects": ["root_cause", "actionability"],
+                "evidence_needed": "Contemporaneous capacity and ownership evidence",
+            }
+        ],
+    )
+    research["canonical_problem_id"] = problem_id
+    research["case_member_problem_ids"] = [problem_id]
+
+    tickets = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[
+            {
+                "case_id": "case:one",
+                "problem_id": problem_id,
+                "priority_bucket": "p2",
+                "selected_for_research": True,
+                "priority_rationale": "The material unknown requires research.",
+                "priority_status": "prioritized",
+            }
+        ],
+        research_dossiers=[research],
+        solution_option_sets=[],
+        selection_decisions=[],
+        change_plans=[],
+    )
+
+    assert len(tickets) == 1
+    ticket = tickets[0]
+    assert ticket["stage"] == "research_required"
+    reasons = ticket["ticket_readiness"]["reasons"]
+    assert "research_status_insufficient_evidence" in reasons
+    assert "research_proof_invalid" not in reasons
+    assert not any("research_dossier_unknown_fields" in reason for reason in reasons)
+
+
 def test_plan_cannot_abandon_verified_intervention_for_unbound_target() -> None:
     problem = _problem_record("problem:one", title="One")
     option = _option("problem:one")

@@ -415,6 +415,19 @@ def _require_terminal_outcome_provenance(
     repo_root: Path,
     owner_root: Path,
 ) -> None:
+    target_branch = str(current.get("target_branch") or "").strip()
+    if target_branch:
+        # A GitHub merge updates the remote before this long-lived supervisor's
+        # tracking ref. Refresh only the recorded target branch so ancestry checks
+        # evaluate the actual merged state rather than a stale local snapshot.
+        _git(
+            owner_root,
+            "fetch",
+            "--no-tags",
+            "origin",
+            f"{target_branch}:refs/remotes/origin/{target_branch}",
+            check=False,
+        )
     trusted_runs_roots: list[Path] = []
     for candidate in (
         (repo_root / "runs").resolve(),
@@ -1075,7 +1088,11 @@ def progress_post_merge_outcome(
             trusted_runs_root=runs_root,
         ):
             roles_needed.append("original_scenario")
-        if requires_live and not _has_bound_passing_role_evidence(
+        # A natural live role is required to claim live verification or resolution. It is not
+        # required for a deliberately bounded ``mitigated`` outcome when the separate faithful
+        # mitigation-effect role passes. Otherwise an unavailable external precondition would
+        # erase demonstrated controlled progress and force permanent zero throughput.
+        if expected_state == "resolved" and requires_live and not _has_bound_passing_role_evidence(
             current=current,
             field="live_evidence",
             role="live",
@@ -1179,8 +1196,6 @@ def progress_post_merge_outcome(
         if expected_state == "mitigated" and current["state"] != "mitigated":
             if not _passing_evidence(current, "original_scenario_evidence"):
                 raise ValueError("Original-scenario proof is missing after role execution")
-            if requires_live and not _passing_evidence(current, "live_evidence"):
-                raise ValueError("Required live proof is missing after role execution")
             if not _passing_evidence(current, "mitigation_evidence"):
                 raise ValueError("Mitigation-effect proof is missing after role execution")
             mitigation_risk = (

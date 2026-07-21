@@ -629,7 +629,7 @@ def test_broad_scope_accepts_two_runner_verified_independent_failure_paths() -> 
         research=research,
     )
 
-    assert ready is True
+    assert ready is True, reasons
     assert reasons == []
 
 
@@ -658,11 +658,12 @@ def _generic_adapter_option_fixture() -> tuple[
 ]:
     research, _paths = _runner_research()
     locator = "env:USERTEST_MODE"
+    mechanism_symbol = "runtime.settings.load"
     implementation_path = "config/runtime.toml"
     intervention = "Read USERTEST_MODE through the retained configuration boundary."
     hypothesis = research["root_cause_hypotheses"][0]
     assert isinstance(hypothesis, dict)
-    hypothesis["mechanism_symbols"] = [locator]
+    hypothesis["mechanism_symbols"] = [mechanism_symbol]
     verification = research["evidence_verification"]
     assert isinstance(verification, dict)
     file_sha256 = "9" * 64
@@ -673,12 +674,14 @@ def _generic_adapter_option_fixture() -> tuple[
             "observed_content_sha256": file_sha256,
         }
     ]
-    verification["inspected_symbols"] = []
+    verification["inspected_symbols"] = [
+        {"symbol": mechanism_symbol, "path": implementation_path}
+    ]
     interventions = verification["falsification_interventions"]
     assert isinstance(interventions, list)
     for receipt in interventions:
         assert isinstance(receipt, dict)
-        receipt["mechanism_symbols"] = [locator]
+        receipt["mechanism_symbols"] = [mechanism_symbol]
         receipt["intervention_receipt_id"] = _content_id(
             "falsification_intervention",
             receipt,
@@ -692,7 +695,7 @@ def _generic_adapter_option_fixture() -> tuple[
     touchpoint_projection: dict[str, object] = {
         "causal_locator": locator,
         "path": implementation_path,
-        "symbols": [],
+        "symbols": [mechanism_symbol],
         "relationship": "This inspected config file defines the environment binding.",
         "runner_attested": True,
         "inspected_content_sha256": file_sha256,
@@ -706,7 +709,7 @@ def _generic_adapter_option_fixture() -> tuple[
     evidence.update(
         {
             "evidence_type": "adapter_proof",
-            "mechanism_symbols": [locator],
+            "mechanism_symbols": [mechanism_symbol],
             "mechanism_targets": [
                 {
                     "node_id": "proof:environment",
@@ -716,10 +719,12 @@ def _generic_adapter_option_fixture() -> tuple[
                     "evidence_sha256": node_evidence_sha256,
                 }
             ],
-            "code_paths": [{"symbol": locator, "path": locator}],
+            "code_paths": [{"symbol": mechanism_symbol, "path": implementation_path}],
             "mechanism_link": {
                 "verification_method": "runner_causal_proof_adapter_v1",
-                "code_path": [{"symbol": locator, "path": locator}],
+                "code_path": [
+                    {"symbol": mechanism_symbol, "path": implementation_path}
+                ],
             },
             "intervention_targets": [
                 {
@@ -761,11 +766,12 @@ def _generic_adapter_option_fixture() -> tuple[
     assert isinstance(coverage, dict)
     binding = coverage["research_binding"]
     assert isinstance(binding, dict)
-    binding["mechanism_symbols"] = [locator]
+    binding["mechanism_symbols"] = [mechanism_symbol]
     binding["intervention_points"] = [
         {
             "causal_locator": locator,
             "implementation_touchpoint_ids": [touchpoint["touchpoint_id"]],
+            "controls_mechanism_symbols": [mechanism_symbol],
             "intervention": intervention,
         }
     ]
@@ -788,7 +794,7 @@ def test_generic_adapter_locator_resolves_to_attested_repo_plan_target() -> None
         binding,
         research=research,
     )
-    assert required == {(implementation_path, None): intervention}
+    assert required == {(implementation_path, "runtime.settings.load"): intervention}
     assert all(not path.startswith(("env:", "fs:", "platform:")) for path, _ in required)
 
 
@@ -1642,6 +1648,181 @@ def test_stage6_binds_exact_plan_checks_to_stage5_outcome_contract() -> None:
     } in original["predicates"]
 
 
+def test_stage6_planned_outcome_rejects_reused_research_overlay_command() -> None:
+    plan, problem, research, selection = _observable_change_plan_fixture(
+        expected_outcome_state="mitigated"
+    )
+    historical_command = "python -B .usertest_research/replay_original.py"
+    research_experiment = research["experiments"][0]
+    assert isinstance(research_experiment, dict)
+    research_experiment["command"] = historical_command
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    manifest = {
+        ".usertest_research/replay_original.py": {
+            "kind": "file",
+            "mode": 0o644,
+            "sha256": "7" * 64,
+            "size_bytes": 20,
+        }
+    }
+    verification.update(
+        {
+            "repo_revision": "abc123",
+            "workspace_overlay": {
+                "research_overlay_manifest": manifest,
+                "research_overlay_manifest_sha256": ticket_readiness._canonical_sha256(
+                    manifest
+                ),
+            },
+        }
+    )
+    verification_experiments = verification["experiments"]
+    assert isinstance(verification_experiments, list)
+    verification_experiments.append(
+        {
+            "experiment_id": "exp-original",
+            "command": historical_command,
+            "executed_argv": [
+                "python",
+                "-B",
+                ".usertest_research/replay_original.py",
+            ],
+            "assertion_passed": True,
+            "command_authorization": {"runner_attested": True},
+        }
+    )
+    reproduction = plan["before_after_reproduction"]
+    assert isinstance(reproduction, dict)
+    before = reproduction["before_change"]
+    assert isinstance(before, dict)
+    before["command"] = historical_command
+    original_role = plan["outcome_verification_roles"]["original_scenario"]
+    assert isinstance(original_role, dict)
+    original_role["commands"] = [historical_command]
+    strategy = {
+        "intended_operation": "Classify the original input from its actual cause.",
+        "success_properties": ["The useful classification is incomplete."],
+        "safety_constraints": ["True provider failures remain failures."],
+        "original_scenario_experiment_ids": ["exp-original"],
+        "post_change_replay_mode": "stage6_planned_unverified",
+    }
+    contract: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "selected_option_outcome_strategy",
+        "outcome_contract_status": "approved_for_planning",
+        "post_change_evidence_status": "unverified",
+        "strategy": strategy,
+        "review": {"verdict": "sufficient"},
+    }
+    contract["outcome_contract_id"] = _content_id(
+        "stage5_outcome_contract",
+        contract,
+        "outcome_contract_id",
+    )
+    selection["falsification_review"] = {
+        "selected_outcome_contract": contract,
+        "outcome_claim_status": "mitigated",
+    }
+    solution_command = (
+        "python -m pytest tests/test_classifier_contract.py::test_original_input -q"
+    )
+    after = reproduction["after_change"]
+    assert isinstance(after, dict)
+    after["command"] = solution_command
+    plan["verification_commands"] = [solution_command]
+    plan = assign_plan_revision_id(
+        bind_plan_outcome_oracle(plan, research=research, selection=selection)
+    )
+
+    ready, reasons = assess_change_plan_readiness(
+        plan,
+        problem=problem,
+        research=research,
+        selection=selection,
+    )
+
+    assert ready is True, reasons
+    assert reasons == []
+
+    reused = json.loads(json.dumps(plan))
+    reused_reproduction = reused["before_after_reproduction"]
+    reused_after = reused_reproduction["after_change"]
+    reused_after["command"] = reused_reproduction["before_change"]["command"]
+    reused["verification_commands"] = [reused_after["command"]]
+    reused = assign_plan_revision_id(
+        bind_plan_outcome_oracle(reused, research=research, selection=selection)
+    )
+
+    reused_ready, reused_reasons = assess_change_plan_readiness(
+        reused,
+        problem=problem,
+        research=research,
+        selection=selection,
+    )
+
+    assert reused_ready is False
+    assert "change_plan_after_command_reuses_historical_baseline" in reused_reasons
+
+
+def test_verified_historical_command_projects_only_attested_overlay_paths() -> None:
+    research, _paths = _runner_research()
+    command = "python -B .usertest_research/replay_original.py"
+    source = research["experiments"][0]
+    assert isinstance(source, dict)
+    source["command"] = command
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    receipt = verification["experiments"][0]
+    assert isinstance(receipt, dict)
+    receipt.update(
+        {
+            "command": command,
+            "executed_argv": [
+                "python",
+                "-B",
+                ".usertest_research/replay_original.py",
+            ],
+            "command_authorization": {"runner_attested": True},
+        }
+    )
+    manifest = {
+        ".usertest_research/replay_original.py": {
+            "kind": "file",
+            "mode": 0o644,
+            "sha256": "7" * 64,
+            "size_bytes": 20,
+        },
+        ".usertest_research/unrelated.py": {
+            "kind": "file",
+            "mode": 0o644,
+            "sha256": "8" * 64,
+            "size_bytes": 20,
+        },
+    }
+    verification["workspace_overlay"] = {
+        "research_overlay_manifest": manifest,
+        "research_overlay_manifest_sha256": _canonical_hash(manifest),
+    }
+
+    projected = ticket_readiness.verified_research_overlay_command_asset_paths(
+        research,
+        experiment_id="experiment:support",
+    )
+
+    assert projected == {
+        command: {".usertest_research/replay_original.py"}
+    }
+    verification["workspace_overlay"]["research_overlay_manifest_sha256"] = "0" * 64
+    assert (
+        ticket_readiness.verified_research_overlay_command_asset_paths(
+            research,
+            experiment_id="experiment:support",
+        )
+        == {}
+    )
+
+
 def _two_oracle_falsification_fixture() -> tuple[
     dict[str, object], dict[str, object], dict[str, object], list[str]
 ]:
@@ -2467,6 +2648,42 @@ def test_falsifier_receipt_detects_selected_option_and_receipt_tampering() -> No
     )
 
 
+def test_falsifier_receipt_ignores_runner_owned_option_lineage_annotations() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+        first_name=str(paths[0]["path_name"]),
+        second_name=str(paths[1]["path_name"]),
+    )
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    evidence = verification["mechanism_evidence"]
+    assert isinstance(evidence, list)
+    bound = bind_falsification_review(
+        _falsification_review(
+            str(evidence[0]["mechanism_evidence_id"]),
+            research=research,
+        ),
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+    persisted_option = {
+        **option,
+        "case_id": "case:test",
+        "canonical_problem_id": "problem:test",
+        "case_member_problem_ids": ["problem:test"],
+    }
+
+    assert falsification_review_receipt_errors(
+        bound,
+        problem_id="problem:test",
+        selected_option=persisted_option,
+        research=research,
+    ) == []
+
+
 def _observable_change_plan_fixture(
     *,
     baseline_exit: int = 0,
@@ -2965,6 +3182,67 @@ def test_option_strategy_prefers_verified_fail_first_over_exit_zero_old_behavior
     normalized = ticket_readiness._option_outcome_strategy(option, research=research)
     assert normalized is not None
     assert normalized["post_change_replay_mode"] == "stage6_planned_unverified"
+
+
+def test_option_strategy_accepts_open_label_when_replay_is_origin_bound_and_verified() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+    )
+    source = research["experiments"][0]
+    assert isinstance(source, dict)
+    source["scenario_kind"] = "retained validation-message classifier replay"
+    source["exit_code"] = 0
+    source["origin_evidence_bindings"] = [
+        {
+            "atom_id": "atom:a",
+            "field_path": "$.signal.validation_issues[0].code",
+            "observation_predicate": {
+                "kind": "equals",
+                "expected": "schema_constraint_failed",
+            },
+            "role": "symptom",
+        }
+    ]
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    verification["origin_atom_ids"] = ["atom:a", "atom:b"]
+    receipts = verification["experiments"]
+    assert isinstance(receipts, list)
+    for receipt in receipts:
+        assert isinstance(receipt, dict)
+        receipt["exit_code"] = 0
+        receipt["workspace_head"] = "a" * 40
+        receipt["post_replay_mutations"] = False
+        receipt["undeclared_post_replay_mutations"] = []
+        receipt["command_authorization"] = {"runner_attested": True}
+        if receipt.get("experiment_id") == "experiment:support":
+            receipt["scenario_kind"] = source["scenario_kind"]
+    research["repo_revision"] = "a" * 40
+    strategy = option["causal_coverage"]["outcome_strategy"]
+    strategy["post_change_replay_mode"] = "stage6_planned_unverified"
+
+    normalized = ticket_readiness._option_outcome_strategy(option, research=research)
+
+    assert normalized is not None
+    assert normalized["original_scenario_experiment_ids"] == ["experiment:support"]
+
+
+def test_option_strategy_rejects_open_label_without_direct_origin_symptom_binding() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+    )
+    source = research["experiments"][0]
+    assert isinstance(source, dict)
+    source["scenario_kind"] = "diagnostic probe"
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    verification["origin_atom_ids"] = ["atom:a"]
+
+    assert ticket_readiness._option_outcome_strategy(option, research=research) is None
 
 
 def _stage5_contract_fixture() -> dict[str, object]:
@@ -3568,6 +3846,48 @@ def test_change_plan_cannot_create_or_move_over_retained_oracle_asset() -> None:
 
     assert "change_plan_target_rewrites_retained_outcome_asset:1" in reasons
     assert "change_plan_target_rewrites_retained_outcome_asset:2" in reasons
+
+
+def test_change_plan_cannot_rewrite_verified_stage3_workspace_overlay() -> None:
+    plan, problem, research, selection = _observable_change_plan_fixture()
+    manifest = {
+        ".usertest_research/replay.py": {
+            "kind": "file",
+            "mode": 0o644,
+            "sha256": "8" * 64,
+            "size_bytes": 20,
+        }
+    }
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    verification["workspace_overlay"] = {
+        "research_overlay_manifest": manifest,
+        "research_overlay_manifest_sha256": _canonical_hash(manifest),
+    }
+    targets = plan["change_targets"]
+    assert isinstance(targets, list)
+    targets.append(
+        {
+            "action": "create",
+            "path": ".usertest_research/replay.py",
+            "symbols": [],
+            "change": "Commit a replacement for the historical research harness.",
+        }
+    )
+    target_contract = plan["target_contract"]
+    assert isinstance(target_contract, dict)
+    target_contract["targets"] = targets
+    plan = assign_plan_revision_id(plan)
+
+    ready, reasons = assess_change_plan_readiness(
+        plan,
+        problem=problem,
+        research=research,
+        selection=selection,
+    )
+
+    assert ready is False
+    assert "change_plan_target_rewrites_retained_outcome_asset:1" in reasons
 
 
 def test_mitigated_falsification_bound_cannot_be_planned_as_resolved() -> None:
@@ -4770,7 +5090,7 @@ def test_research_prompts_expose_causal_boundary_and_correction_contract() -> No
             "authenticated origin/repository meaning",
             "open registered proof adapter",
             "future solution oracle is optional",
-            "stage guidance",
+            "system prompt's adapter and output contracts",
             "exact author session",
             "do not start over",
         },

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -286,6 +287,30 @@ def _retained_implemented_outcome(
     return owner_root, outcome
 
 
+def test_outcome_trust_boundary_includes_explicit_qualification_roots(
+    tmp_path: Path,
+) -> None:
+    primary_runs_root = tmp_path / "source" / "runs" / "usertest"
+    implementation_runs_root = inferred_implementation_runs_root(primary_runs_root)
+    controller_runs_root = tmp_path / "controller" / "runs" / "usertest_implement"
+    external_runs_root = tmp_path / "external" / "runs"
+
+    trusted_roots = _outcome_trusted_runs_roots(
+        primary_runs_dir=primary_runs_root,
+        configured_runs_dir=tmp_path / "cycle" / "stage_runs",
+        implementation_runs_root=implementation_runs_root,
+        additional_runs_roots=(controller_runs_root, external_runs_root),
+    )
+
+    assert set(trusted_roots) == {
+        primary_runs_root.resolve(),
+        (tmp_path / "cycle" / "stage_runs").resolve(),
+        implementation_runs_root.resolve(),
+        controller_runs_root.resolve(),
+        external_runs_root.resolve(),
+    }
+
+
 def test_sibling_implementation_outcome_uses_same_trust_boundary_for_sync_and_shadow(
     tmp_path: Path,
 ) -> None:
@@ -366,6 +391,211 @@ def test_sibling_implementation_outcome_uses_same_trust_boundary_for_sync_and_sh
         and "outcome_review_run_dir_outside_trusted_roots" in error
         for error in shadow_errors
     )
+
+
+def test_verified_outcome_materializes_missing_case_once(
+    monkeypatch: Any,
+) -> None:
+    case_id = "case:maintenance"
+    problem_id = "problem:maintenance"
+    revision_id = "plan:maintenance:v1"
+    fingerprint = "0123456789abcdef"
+    atom_ids = [
+        "usertest_implement/usertest/20260704T161642Z/codex/0:maintenance_image_cleanup:1",
+        "usertest_implement/usertest/20260707T135227Z/codex/0:maintenance_image_cleanup:1",
+        "operator_recovery/docker_cleanup_20260713:maintenance_image_cleanup:1",
+    ]
+    outcome = {
+        "case_id": case_id,
+        "plan_revision_id": revision_id,
+        "state": "mitigated",
+        "outcome_scope": "case",
+        "recorded_at": "2026-07-16T00:00:00Z",
+    }
+    identity = {
+        "schema_version": 1,
+        "source": "verified_plan_target_contract",
+        "case_id": case_id,
+        "problem_id": problem_id,
+        "plan_revision_id": revision_id,
+        "fingerprint": fingerprint,
+        "target_contract_sha256": "8" * 64,
+        "verified_plan_path": "I:/repo/.agents/plans/5 - complete/plan.md",
+    }
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.staged.verify_outcome_record_provenance",
+        lambda record, **_: {
+            "structural_status": "valid",
+            "provenance_status": "verified",
+            "verified": True,
+            "errors": [],
+            "outcome_record": record,
+            "verified_case_identity": identity,
+            "verified_case_identity_errors": [],
+        },
+    )
+    atom_actions = {
+        atom_id: {
+            "atom_id": atom_id,
+            "case_id": case_id,
+            "plan_outcomes": {
+                revision_id: {
+                    "state": "mitigated",
+                    "recorded_at": outcome["recorded_at"],
+                    "fingerprint": fingerprint,
+                    "required": True,
+                    "outcome_record": outcome,
+                }
+            },
+        }
+        for atom_id in atom_ids
+    }
+    registry = _registry()
+    existing_case = deepcopy(registry["cases"]["case:aggregate"])
+
+    summary = _sync_case_registry_outcomes(
+        case_registry=registry,
+        atom_actions=atom_actions,
+    )
+
+    assert summary["missing_case_outcomes"] == 1
+    assert summary["materialized_cases"] == 1
+    assert summary["unmaterializable_case_outcomes"] == 0
+    assert summary["conflicting_case_identities"] == 0
+    assert registry["cases"]["case:aggregate"] == existing_case
+    materialized = registry["cases"][case_id]
+    assert materialized["canonical_problem_id"] == problem_id
+    assert materialized["evidence_atom_ids"] == sorted(atom_ids)
+    assert materialized["state"] == "mitigated"
+    assert materialized["context_status"] == "identity_only"
+    assert materialized["identity_materialization"]["selected_plan_revision_id"] == revision_id
+    assert materialized["current_lifecycle"]["outcome_reference"]["validation_status"] == (
+        "verified"
+    )
+    assert registry["problem_id_to_case_id"][problem_id] == case_id
+    assert registry["ticket_fingerprint_to_case_id"][fingerprint] == case_id
+    for atom_id in atom_ids:
+        assert registry["atom_id_to_case_id"][atom_id] == case_id
+        assert registry["atom_id_to_case_ids"][atom_id] == [case_id]
+
+    after_first_sync = deepcopy(registry)
+    second_summary = _sync_case_registry_outcomes(
+        case_registry=registry,
+        atom_actions=atom_actions,
+    )
+    assert second_summary["missing_case_outcomes"] == 0
+    assert second_summary["materialized_cases"] == 0
+    assert second_summary["cases_updated"] == 0
+    assert registry == after_first_sync
+
+
+def test_missing_case_requires_externally_verified_bound_identity(
+    monkeypatch: Any,
+) -> None:
+    case_id = "case:missing"
+    revision_id = "plan:missing:v1"
+    outcome = {
+        "case_id": case_id,
+        "plan_revision_id": revision_id,
+        "state": "planned",
+        "outcome_scope": "case",
+        "recorded_at": "2026-07-16T00:00:00Z",
+    }
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.staged.verify_outcome_record_provenance",
+        lambda record, **_: {
+            "structural_status": "valid",
+            "provenance_status": "not_required_nonterminal",
+            "verified": True,
+            "errors": [],
+            "outcome_record": record,
+            "verified_case_identity": {
+                "case_id": case_id,
+                "problem_id": "problem:prose-only",
+                "plan_revision_id": revision_id,
+            },
+        },
+    )
+    registry = _registry()
+    summary = _sync_case_registry_outcomes(
+        case_registry=registry,
+        atom_actions={
+            "source/run:signal:1": {
+                "case_id": case_id,
+                "plan_outcomes": {
+                    revision_id: {
+                        "state": "planned",
+                        "recorded_at": outcome["recorded_at"],
+                        "required": True,
+                        "outcome_record": outcome,
+                    }
+                },
+            }
+        },
+    )
+
+    assert case_id not in registry["cases"]
+    assert summary["missing_case_outcomes"] == 1
+    assert summary["materialized_cases"] == 0
+    assert summary["unmaterializable_case_outcomes"] == 1
+
+
+def test_conflicting_verified_identities_do_not_materialize_case(
+    monkeypatch: Any,
+) -> None:
+    case_id = "case:conflict"
+    revision_id = "plan:conflict:v1"
+
+    def verify(record: dict[str, Any], **_: Any) -> dict[str, Any]:
+        return {
+            "structural_status": "valid",
+            "provenance_status": "verified",
+            "verified": True,
+            "errors": [],
+            "outcome_record": record,
+            "verified_case_identity": {
+                "case_id": case_id,
+                "problem_id": record["identity_problem_id"],
+                "plan_revision_id": revision_id,
+                "fingerprint": "0123456789abcdef",
+            },
+        }
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.staged.verify_outcome_record_provenance",
+        verify,
+    )
+    atom_actions = {}
+    for index, problem_id in enumerate(("problem:one", "problem:two"), start=1):
+        outcome = {
+            "case_id": case_id,
+            "plan_revision_id": revision_id,
+            "state": "mitigated",
+            "outcome_scope": "case",
+            "recorded_at": "2026-07-16T00:00:00Z",
+            "identity_problem_id": problem_id,
+        }
+        atom_actions[f"source/run:signal:{index}"] = {
+            "case_id": case_id,
+            "plan_outcomes": {
+                revision_id: {
+                    "state": "mitigated",
+                    "recorded_at": outcome["recorded_at"],
+                    "required": True,
+                    "outcome_record": outcome,
+                }
+            },
+        }
+    registry = _registry()
+
+    summary = _sync_case_registry_outcomes(
+        case_registry=registry,
+        atom_actions=atom_actions,
+    )
+
+    assert case_id not in registry["cases"]
+    assert summary["conflicting_case_identities"] == 1
+    assert summary["unmaterializable_case_outcomes"] == 1
 
 
 def test_required_planned_revision_keeps_case_open_when_another_is_resolved() -> None:

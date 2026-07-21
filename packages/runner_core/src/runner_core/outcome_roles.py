@@ -1876,6 +1876,7 @@ def _run_command(
             cwd=str(workspace),
             capture_output=True,
             text=True,
+            env=_workspace_bound_environment(workspace),
             timeout=timeout_seconds,
             check=False,
         )
@@ -1913,6 +1914,39 @@ def _sanitized_environment() -> dict[str, str]:
     } | {"CI": "1", "PYTHONDONTWRITEBYTECODE": "1"}
 
 
+def _workspace_bound_environment(workspace: Path) -> dict[str, str]:
+    """Bind first-party Python imports to the exact outcome-proof checkout.
+
+    Outcome verification commonly runs from a supervisor whose ``PYTHONPATH`` or
+    editable installs point at a different worktree.  Letting that path leak into a
+    clean outcome checkout can execute the planned test file against stale product
+    code and produce a false causal failure.  Put every conventional monorepo
+    ``src`` root from the verified checkout ahead of site-packages and discard the
+    inherited ``PYTHONPATH`` entirely.  Third-party dependencies remain available
+    from the selected interpreter's environment.
+    """
+
+    environment = _sanitized_environment()
+    source_roots: list[Path] = []
+    for container_name in ("packages", "apps"):
+        container = workspace / container_name
+        if not container.is_dir():
+            continue
+        source_roots.extend(
+            child / "src"
+            for child in sorted(container.iterdir(), key=lambda item: item.name.casefold())
+            if child.is_dir() and (child / "src").is_dir()
+        )
+    root_src = workspace / "src"
+    if root_src.is_dir():
+        source_roots.append(root_src)
+    if source_roots:
+        environment["PYTHONPATH"] = os.pathsep.join(str(path.resolve()) for path in source_roots)
+    else:
+        environment.pop("PYTHONPATH", None)
+    return environment
+
+
 def _run_argv(
     argv: list[str],
     *,
@@ -1921,7 +1955,7 @@ def _run_argv(
     environment_overrides: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any]:
     timed_out = False
-    environment = _sanitized_environment()
+    environment = _workspace_bound_environment(workspace)
     for key, value in (environment_overrides or {}).items():
         if value is None:
             environment.pop(key, None)

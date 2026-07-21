@@ -3917,6 +3917,99 @@ def test_shadow_invariants_reject_terminal_case_without_validated_outcome(
     assert report["failures"] == ["terminal_case_missing_validated_outcome:case:closed:resolved"]
 
 
+def _qualification_evidence_retracted_case(case_id: str) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "producer": "usertest_backlog.problem_mining",
+        "receipt_kind": "case_evidence_retraction",
+        "case_id": case_id,
+        "prior_case_revision": 2,
+        "prior_state": "active",
+        "retracted_atom_ids": ["atom:retracted"],
+        "remaining_source_evidence_atom_ids": [],
+        "disposition_receipt_sha256_by_atom_id": {
+            "atom:retracted": "f" * 64,
+        },
+        "qualification_feedback_sha256": "a" * 64,
+        "corrected_author_response_sha256": "b" * 64,
+        "author_workspace_manifest_sha256": "c" * 64,
+        "source_problem_mining_evidence_receipt_file_sha256": "d" * 64,
+        "source_problem_mining_evidence_receipt_sha256": "e" * 64,
+        "resulting_state": "superseded",
+        "resulting_case_revision": 3,
+    }
+    receipt["content_sha256"] = sha256(
+        json.dumps(
+            receipt,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "case_id": case_id,
+        "state": "superseded",
+        "superseded_reason": "qualification_evidence_retracted",
+        "case_revision": 3,
+        "evidence_atom_ids": [],
+        "source_evidence_atom_ids": [],
+        "derived_evidence_atom_ids": [],
+        "occurrence_evidence_atom_ids": [],
+        "evidence_retraction_receipts": [receipt],
+        "plan_outcomes": {},
+    }
+
+
+def test_shadow_invariants_accept_hash_bound_qualification_evidence_retraction(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["case_registry"]["cases"]["case:retracted"] = (
+        _qualification_evidence_retracted_case("case:retracted")
+    )
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is True
+    assert report["failures"] == []
+
+
+def test_shadow_invariants_reject_tampered_qualification_evidence_retraction(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    retracted_case = _qualification_evidence_retracted_case("case:retracted")
+    retracted_case["evidence_retraction_receipts"][0]["content_sha256"] = "0" * 64
+    inputs["case_registry"]["cases"]["case:retracted"] = retracted_case
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert report["failures"] == [
+        "terminal_case_missing_validated_outcome:case:retracted:superseded"
+    ]
+
+
+def test_shadow_invariants_still_require_outcome_for_ordinary_superseded_case(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["case_registry"]["cases"]["case:ordinary"] = {
+        "case_id": "case:ordinary",
+        "state": "superseded",
+        "case_revision": 2,
+        "superseded_reason": "implementation_replaced",
+        "plan_outcomes": {},
+    }
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert report["failures"] == [
+        "terminal_case_missing_validated_outcome:case:ordinary:superseded"
+    ]
+
+
 def test_shadow_relation_check_uses_action_specific_target_fields(tmp_path: Path) -> None:
     inputs = _passing_inputs(tmp_path)
     decisions: list[dict[str, object]] = [
@@ -3994,6 +4087,64 @@ def test_shadow_relation_check_uses_action_specific_target_fields(tmp_path: Path
     assert "relation_decision_not_applied:0:merge" in report["failures"]
 
 
+def test_shadow_relation_check_accepts_exact_controller_downgrade(
+    tmp_path: Path,
+) -> None:
+    decision: dict[str, object] = {
+        "focus_id": "problem:a",
+        "action": "same_cause_group",
+        "group_id": "provisional:shared-mechanism",
+        "member_ids": ["problem:a", "problem:b"],
+        "evidence_atom_ids": ["atom:a", "atom:b"],
+        "rationale": "The symptoms support a shared-mechanism research hypothesis.",
+        "review_confidence": 0.9,
+    }
+    relation_artifacts = _relation_review_artifacts(
+        tmp_path,
+        name="downgraded-relation",
+        decisions=[decision],
+        relations=[],
+    )
+    suggestion = {
+        **decision,
+        "group_id": "cause:provisional:canonical",
+        "_submitted_group_id": "provisional:shared-mechanism",
+        "_provisional_same_cause": True,
+    }
+    stage1 = {
+        "items": [
+            {
+                "problem_id": "problem:a",
+                "case_id": "case:a",
+                "case_member_problem_ids": ["problem:a"],
+                "case_relation_actions": [
+                    {
+                        "action": "keep_separate",
+                        "provisional_relation_suggestion": suggestion,
+                        "relation_validation_errors": [
+                            "collapse_not_reciprocal:case:b"
+                        ],
+                    }
+                ],
+            },
+            {
+                "problem_id": "problem:b",
+                "case_id": "case:b",
+                "case_member_problem_ids": ["problem:b"],
+            },
+        ],
+        "input_meta": {"relation_review_decision_count": 1},
+        "artifacts": relation_artifacts,
+    }
+
+    assert shadow_mod._relation_application_errors(stage1) == []
+
+    suggestion["member_ids"] = ["problem:a", "problem:c"]
+    assert shadow_mod._relation_application_errors(stage1) == [
+        "relation_decision_not_applied:0:same_cause_group"
+    ]
+
+
 def test_shadow_relation_check_accepts_exact_applied_split_groups(tmp_path: Path) -> None:
     inputs = _passing_inputs(tmp_path)
     split_groups = [
@@ -4063,6 +4214,88 @@ def test_shadow_relation_check_accepts_exact_applied_split_groups(tmp_path: Path
                 "blocking_reasons": ["Fixture stops after relation validation."],
             }
             for index in (1, 2)
+        ]
+    }
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is True
+    assert not any("relation_split_not_applied" in error for error in report["failures"])
+
+
+def test_shadow_relation_check_accepts_derived_split_returned_to_parent_lineage(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    decisions: list[dict[str, object]] = [
+        {
+            "focus_id": "problem:parent",
+            "action": "split",
+            "split_groups": [
+                {"evidence_atom_ids": ["atom:source"]},
+                {"evidence_atom_ids": ["atom:derived"]},
+            ],
+        }
+    ]
+    relation_artifacts = _relation_review_artifacts(
+        tmp_path,
+        name="derived-return-split-relation",
+        decisions=decisions,
+        relations=[],
+    )
+    returned_group = {
+        "schema_version": 1,
+        "return_kind": "derived_evidence_parent_lineage",
+        "split_from_case_id": "case:parent",
+        "split_parent_problem_ids": ["problem:parent"],
+        "returned_child_case_id": "case:derived-child",
+        "returned_child_problem_id": "problem:parent:split:2",
+        "evidence_atom_ids": ["atom:derived"],
+        "parent_case_ids": ["case:existing-parent"],
+    }
+    returned_group["content_sha256"] = shadow_mod._canonical_hash(returned_group)
+    base_stage1 = inputs["stage1"]
+    inputs["stage1"] = {
+        "items": [
+            {
+                "problem_id": "problem:parent:split:1",
+                "case_id": "case:source-child",
+                "case_member_problem_ids": ["problem:parent:split:1"],
+                "split_parent_problem_ids": ["problem:parent"],
+                "evidence_atom_ids": ["atom:source"],
+            }
+        ],
+        "input_meta": {
+            **base_stage1["input_meta"],
+            "relation_review_decision_count": 1,
+            "relation_review_derived_split_returns": [returned_group],
+        },
+        "artifacts": {
+            **relation_artifacts,
+            "problem_mining_evidence_receipt": base_stage1["artifacts"][
+                "problem_mining_evidence_receipt"
+            ],
+        },
+    }
+    inputs["stage2"] = {
+        "items": [
+            {
+                "problem_id": "problem:parent:split:1",
+                "case_id": "case:source-child",
+                "priority_bucket": "watch",
+                "selected_for_research": True,
+                "priority_rationale": "Source-backed child remains actionable.",
+            }
+        ]
+    }
+    inputs["stage3"] = {
+        "items": [
+            {
+                "problem_id": "problem:parent:split:1",
+                "case_id": "case:source-child",
+                "research_status": "blocked",
+                "blocking_reasons": ["Fixture stops after relation validation."],
+            }
         ]
     }
 

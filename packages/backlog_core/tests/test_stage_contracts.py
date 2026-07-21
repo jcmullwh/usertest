@@ -11,6 +11,7 @@ These tests assert observable behavior for each stage parser:
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from hashlib import sha256
 
 import pytest
@@ -1285,6 +1286,12 @@ def _valid_dossier(**overrides: object) -> dict:
             "rationale": "The verified failure remains present at the pinned revision.",
             "evidence_refs": ["exp-support"],
         },
+        "observed_problem_refinement": {
+            "problem": "The parser rejects the retained valid input.",
+            "user_impact": "The reported operation cannot complete.",
+            "evidence_summary": "The assigned atom and controlled replay retain the failure.",
+            "evidence_atom_ids": ["atom:test"],
+        },
     }
     base.update(overrides)
     assignment = {
@@ -1457,6 +1464,44 @@ def test_verified_falsification_projection_uses_paired_intervention_for_challeng
         for evidence in retained_evidence
         if baseline_id in evidence["experiment_ids"]
     )
+
+
+def test_verified_falsification_projection_accepts_attested_causal_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossier = _valid_dossier()
+    receipt, _intervention = _helper_parameter_intervention_fixture(dossier)
+    hypothesis = dossier["root_cause_hypotheses"][0]
+    hypothesis["mechanism_symbols"] = [
+        "parser.parse_record",
+        "parser.load_record",
+    ]
+    attempt = hypothesis["falsification_attempts"][0]
+    receipt["proof_adapter_receipts"] = [
+        {
+            "hypothesis_id": hypothesis["hypothesis_id"],
+            "intervention": {
+                "baseline_experiment_id": attempt["baseline_experiment_id"],
+                "challenge_experiment_id": attempt["challenge_experiment_id"],
+            },
+            "adapter_evidence": {
+                "implementation_touchpoints": [
+                    {"symbols": ["parser.parse_record"]},
+                ],
+            },
+            "intervention_id": "intervention:causal-subset",
+            "proof_receipt_id": "causal_proof:causal-subset",
+        }
+    ]
+    monkeypatch.setattr(contracts, "validate_causal_proof_receipt", lambda _receipt: [])
+
+    projected = contracts.verified_hypothesis_falsification_attempts(
+        dossier,
+        hypothesis_id=hypothesis["hypothesis_id"],
+    )
+
+    assert len(projected) == 1
+    assert projected[0]["mechanism_symbols"] == ["parser.parse_record"]
 
 
 @pytest.mark.parametrize(
@@ -1656,6 +1701,41 @@ def test_fresh_research_output_requires_explicit_actionability_assessment() -> N
     assert "research_actionability_assessment_missing: problem:test-issue" in errors
 
 
+def test_fresh_research_output_requires_observed_problem_refinement() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("observed_problem_refinement")
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert "research_observed_problem_refinement_missing: problem:test-issue" in errors
+
+
+def test_observed_problem_refinement_must_cover_every_assigned_atom() -> None:
+    dossier = _valid_dossier()
+    dossier["observed_problem_refinement"]["evidence_atom_ids"] = ["atom:other"]
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert (
+        "research_observed_problem_refinement_atom_coverage_mismatch: problem:test-issue"
+        in errors
+    )
+
+
+def test_retained_v3_research_without_problem_refinement_remains_readable() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("observed_problem_refinement")
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert parsed == [dossier]
+    assert warnings == []
+
+
 def test_retained_v3_research_without_actionability_uses_legacy_change_route() -> None:
     dossier = _valid_dossier()
     dossier.pop("actionability_assessment")
@@ -1721,6 +1801,15 @@ def test_actionability_assessment_rejects_unresolved_evidence_reference() -> Non
 def test_actionability_claim_tamper_breaks_persisted_claim_hash() -> None:
     dossier = _valid_dossier()
     dossier["actionability_assessment"]["disposition"] = "already_addressed"
+
+    errors = contracts.research_evidence_verification_contract_errors(dossier)
+
+    assert "research_evidence_verification_claims_hash_mismatch: problem:test-issue" in errors
+
+
+def test_problem_refinement_tamper_breaks_persisted_claim_hash() -> None:
+    dossier = _valid_dossier()
+    dossier["observed_problem_refinement"]["user_impact"] = "The run recovered immediately."
 
     errors = contracts.research_evidence_verification_contract_errors(dossier)
 
@@ -1936,6 +2025,7 @@ def test_stage_contract_rejects_unbound_wrong_value_correction(tamper: str) -> N
     ("match_kind", "binding_role", "field_path"),
     [
         ("explicit_symptom_field_binding", "symptom", "$.exit_code"),
+        ("explicit_symptom_field_predicate_declaration", "symptom", "$.text"),
         ("explicit_command_field_binding", "command", "$.command"),
         ("explicit_corroborating_field_binding", "corroborating", "$.text"),
         ("explicit_context_field_binding", "context", "$.text"),
@@ -1951,17 +2041,28 @@ def test_stage_contract_accepts_immutable_explicit_atom_field_bindings(
     snapshot = assignment_receipt["atom_snapshot"]
     field_name = field_path.removeprefix("$.")
     existing_symptom_binding = dossier["evidence_verification"]["atom_bindings"][0]
+    binding = {
+        "experiment_id": "exp-support",
+        "atom_id": "atom:test",
+        "match_kind": match_kind,
+        "binding_role": binding_role,
+        "origin_atom_sha256": assignment_receipt["atom_sha256"],
+        "origin_atom_field_path": field_path,
+        "origin_atom_value_sha256": _fixture_json_sha256(snapshot[field_name]),
+    }
+    if match_kind == "explicit_symptom_field_predicate_declaration":
+        predicate = {"kind": "equals", "expected": snapshot[field_name]}
+        binding.update(
+            {
+                "origin_atom_value": snapshot[field_name],
+                "observation_predicate": predicate,
+                "observation_predicate_sha256": _fixture_json_sha256(predicate),
+            }
+        )
+        binding["declared_binding_sha256"] = _fixture_json_sha256(binding)
     dossier["evidence_verification"]["atom_bindings"] = [
         existing_symptom_binding,
-        {
-            "experiment_id": "exp-support",
-            "atom_id": "atom:test",
-            "match_kind": match_kind,
-            "binding_role": binding_role,
-            "origin_atom_sha256": assignment_receipt["atom_sha256"],
-            "origin_atom_field_path": field_path,
-            "origin_atom_value_sha256": _fixture_json_sha256(snapshot[field_name]),
-        },
+        binding,
     ]
     _refresh_receipt_hashes(dossier)
 
@@ -1969,6 +2070,107 @@ def test_stage_contract_accepts_immutable_explicit_atom_field_bindings(
 
     assert len(parsed) == 1
     assert warnings == []
+
+
+def test_typed_mechanism_evidence_accepts_attested_predicate_binding_declaration() -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    atom_receipt = dossier["evidence_assignment"]["atom_receipts"][0]
+    atom_value = atom_receipt["atom_snapshot"]["text"]
+    predicate = {"kind": "equals", "expected": atom_value}
+    declaration = {
+        "experiment_id": "exp-support",
+        "atom_id": "atom:test",
+        "match_kind": "explicit_symptom_field_predicate_declaration",
+        "binding_role": "symptom",
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.text",
+        "origin_atom_value": atom_value,
+        "origin_atom_value_sha256": _fixture_json_sha256(atom_value),
+        "observation_predicate": predicate,
+        "observation_predicate_sha256": _fixture_json_sha256(predicate),
+    }
+    declaration["declared_binding_sha256"] = _fixture_json_sha256(declaration)
+    attestation = {
+        "declared_binding_sha256": declaration["declared_binding_sha256"],
+        "atom_id": declaration["atom_id"],
+        "origin_atom_sha256": declaration["origin_atom_sha256"],
+        "origin_atom_field_path": declaration["origin_atom_field_path"],
+        "origin_atom_value": declaration["origin_atom_value"],
+        "origin_atom_value_sha256": declaration["origin_atom_value_sha256"],
+        "observation_predicate": declaration["observation_predicate"],
+        "observation_predicate_sha256": declaration["observation_predicate_sha256"],
+        "baseline_experiment_id": declaration["experiment_id"],
+        "baseline_observation_sha256": "a" * 64,
+        "binding_verification_method": (
+            "runner_bound_source_predicate_with_baseline_experiment_v1"
+        ),
+        "adapter_id": "structured_replay.v1",
+        "adapter_version": "1",
+        "runner_attested": True,
+    }
+    attestation["atom_field_binding_sha256"] = _fixture_json_sha256(attestation)
+    receipt["atom_bindings"] = [declaration]
+    mechanism = receipt["mechanism_evidence"][0]
+    mechanism["origin_symptom_bindings"] = [attestation]
+    mechanism["mechanism_evidence_id"] = "mechanism_evidence:" + _fixture_json_sha256(
+        {
+            key: value
+            for key, value in mechanism.items()
+            if key != "mechanism_evidence_id"
+        }
+    )
+
+    errors = contracts._validate_typed_mechanism_evidence(
+        dossier,
+        receipt,
+        pid=dossier["problem_id"],
+    )
+
+    assert "research_mechanism_evidence_invalid: problem:test-issue: 0" not in errors
+
+
+def test_typed_mechanism_evidence_rejects_unlinked_predicate_binding_attestation() -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    mechanism = receipt["mechanism_evidence"][0]
+    attestation = {
+        "declared_binding_sha256": "a" * 64,
+        "atom_id": "atom:test",
+        "origin_atom_sha256": "b" * 64,
+        "origin_atom_field_path": "$.text",
+        "origin_atom_value": "observed failure",
+        "origin_atom_value_sha256": _fixture_json_sha256("observed failure"),
+        "observation_predicate": {"kind": "equals", "expected": "observed failure"},
+        "observation_predicate_sha256": _fixture_json_sha256(
+            {"kind": "equals", "expected": "observed failure"}
+        ),
+        "baseline_experiment_id": "exp-support",
+        "baseline_observation_sha256": "c" * 64,
+        "binding_verification_method": (
+            "runner_bound_source_predicate_with_baseline_experiment_v1"
+        ),
+        "adapter_id": "structured_replay.v1",
+        "adapter_version": "1",
+        "runner_attested": True,
+    }
+    attestation["atom_field_binding_sha256"] = _fixture_json_sha256(attestation)
+    mechanism["origin_symptom_bindings"] = [attestation]
+    mechanism["mechanism_evidence_id"] = "mechanism_evidence:" + _fixture_json_sha256(
+        {
+            key: value
+            for key, value in mechanism.items()
+            if key != "mechanism_evidence_id"
+        }
+    )
+
+    errors = contracts._validate_typed_mechanism_evidence(
+        dossier,
+        receipt,
+        pid=dossier["problem_id"],
+    )
+
+    assert "research_mechanism_evidence_invalid: problem:test-issue: 0" in errors
 
 
 def test_causal_roots_accept_content_bound_unlisted_source_identity_contracts() -> None:
@@ -2082,7 +2284,99 @@ def test_research_prompt_projection_excludes_runner_only_content() -> None:
     assert marker not in json.dumps(projection)
     assert "artifacts" not in projection
     assert "repo_workspace" not in projection
-    assert projection["evidence_verification"] == dossier["evidence_verification"]
+    assert projection["evidence_verification"] != dossier["evidence_verification"]
+    assert projection["evidence_verification"]["status"] == "verified"
+    assert (
+        projection["evidence_verification"]["receipt_sha256"]
+        == dossier["evidence_verification"]["receipt_sha256"]
+    )
+    assert "evidence_source_attempts" not in projection["evidence_verification"]
+    assignment = projection["evidence_assignment"]
+    assert assignment["assignment_sha256"] == dossier["evidence_assignment"][
+        "assignment_sha256"
+    ]
+    assert assignment["atom_receipts"][0]["snapshot"]["text"] == "failure"
+    assert "atom_snapshot" not in assignment["atom_receipts"][0]
+
+
+def test_research_prompt_projection_bounds_large_runner_custody_payload() -> None:
+    marker = "RUNNER_CUSTODY_PAYLOAD_DO_NOT_FORWARD"
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    receipt["evidence_source_attempts"] = [{"raw": marker + ("x" * 1_100_000)}]
+    receipt["evidence_source_attempts_sha256"] = "9" * 64
+    _refresh_receipt_hashes(dossier)
+
+    projection = research_prompt_projection(dossier)
+    encoded = json.dumps(projection, ensure_ascii=False)
+
+    assert marker not in encoded
+    assert len(encoded) < 100_000
+    custody = projection["evidence_verification"]["source_custody_summary"]
+    assert custody["evidence_source_attempt_count"] == 1
+    assert custody["evidence_source_attempts_sha256"] == "9" * 64
+    assert projection["experiments"] == dossier["experiments"]
+
+
+def test_research_prompt_projection_summarizes_large_state_transition_inventories() -> None:
+    marker = "VIRTUALENV_FILE_INVENTORY_DO_NOT_FORWARD"
+    transitions = [
+        {
+            "path": ".venv",
+            "runner_attested": True,
+            "before_entries": {},
+            "after_entries": {
+                f".venv/site-packages/package_{index}.py": {
+                    "kind": "file",
+                    "sha256": str(index).zfill(64),
+                    "size_bytes": 1,
+                    "marker": marker,
+                }
+                for index in range(2_000)
+            },
+            "changed_entries": [
+                f".venv/site-packages/package_{index}.py" for index in range(2_000)
+            ],
+            "transition_sha256": "a" * 64,
+        }
+    ]
+    projection = contracts._research_verification_prompt_projection(
+        {
+            "status": "verified",
+            "receipt_sha256": "b" * 64,
+            "experiments": [
+                {
+                    "experiment_id": "experiment:large-state-inventory",
+                    "outcome": "supports",
+                    "declared_state_transitions": transitions,
+                }
+            ],
+        }
+    )
+    encoded = json.dumps(projection, ensure_ascii=False)
+    experiment = projection["experiments"][0]
+    summary = experiment["declared_state_transition_summary"]
+
+    assert marker not in encoded
+    assert "declared_state_transitions" not in experiment
+    assert summary["transition_count"] == 1
+    assert summary["transition_roots"] == [
+        {
+            "path": ".venv",
+            "runner_attested": True,
+            "before_entry_count": 0,
+            "after_entry_count": 2_000,
+            "changed_entry_count": 2_000,
+            "changed_entries_sha256": contracts._canonical_sha256(
+                transitions[0]["changed_entries"]
+            ),
+            "transition_sha256": "a" * 64,
+        }
+    ]
+    assert summary["full_transition_receipts_sha256"] == contracts._canonical_sha256(
+        transitions
+    )
+    assert len(encoded) < 150_000
 
 
 def test_parse_research_dossier_list_accepts_valid() -> None:
@@ -3196,6 +3490,14 @@ def _historical_rich_partial_output_dossier() -> dict:
         "atom:test",
         "atom:unexamined",
     ]
+    dossier["observed_problem_refinement"]["evidence_atom_ids"] = [
+        "atom:test",
+        "atom:unexamined",
+    ]
+    dossier["observed_problem_refinement"]["evidence_summary"] = (
+        "One assigned facet is bounded; the second remains unexamined and is not claimed "
+        "as reproduced."
+    )
     experiment = dict(dossier["experiments"][0])
     experiment["outcome"] = "inconclusive"
     dossier["experiments"] = [experiment]
@@ -3282,6 +3584,24 @@ def test_advancing_research_still_requires_complete_atom_coverage_and_support() 
     assert any("primary_hypothesis_missing_supporting_experiment" in error for error in errors)
 
 
+def test_descriptive_scenario_kind_can_support_primary_hypothesis() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("evidence_verification", None)
+    dossier["experiments"][0]["scenario_kind"] = (
+        "deterministic production mechanism classification"
+    )
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert not any(
+        "primary_hypothesis_missing_supporting_experiment" in error
+        for error in errors
+    )
+
+
 def test_partial_research_relaxation_keeps_claim_integrity_checks() -> None:
     dossier = _historical_rich_partial_output_dossier()
     dossier["experiments"][0]["artifact_refs"].append("artifact:missing")
@@ -3354,6 +3674,52 @@ def test_partial_research_links_adapter_support_through_inspected_touchpoint_sym
         "proof_adapter_positive_contract_role_invalid" in error
         for error in invalid_role_errors
     )
+
+
+def test_proof_adapter_rejects_semantic_basis_the_consumer_cannot_attest() -> None:
+    dossier = _valid_dossier(research_status="insufficient_evidence")
+    support = dossier["experiments"][0]
+    challenge = dossier["experiments"][2]
+    challenge["proof_adapter"] = {
+        "adapter_id": "structured_replay.v1",
+        "baseline_experiment_id": support["experiment_id"],
+        "challenge_experiment_id": challenge["experiment_id"],
+        "hypothesis_id": "h1",
+        "intervention": {
+            "kind": "parser_guard_delta",
+            "target": "parser.parse_record",
+            "predicted_polarity": "bad_to_good",
+        },
+        "observations": {
+            "baseline": {"source": "exit_code"},
+            "challenge": {"source": "exit_code"},
+        },
+        "positive_outcome": {
+            "predicate": {"kind": "equals", "expected": 0},
+            "semantic_basis": {
+                "kind": "repository_contract_quote",
+                "path": "src/parser.py",
+                "exact_quote": "return parsed",
+                "contract_type": "regression_test",
+            },
+        },
+    }
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert any("proof_adapter_semantic_basis_invalid" in error for error in errors)
+
+    challenge["proof_adapter"]["positive_outcome"]["semantic_basis"][
+        "contract_type"
+    ] = "api_contract"
+    corrected = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+    assert not any("proof_adapter_semantic_basis_invalid" in error for error in corrected)
 
 
 def test_historical_static_trace_shape_reports_exact_retryable_contract_errors() -> None:
@@ -3476,6 +3842,92 @@ def test_research_attempt_history_is_bounded_and_content_addressed() -> None:
         parse_research_dossier_list(json.dumps([dossier]))
 
 
+def test_research_attempt_resolution_is_bound_to_raw_author_output_and_source() -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:one",
+                "scenario_kind": "assigned_evidence_audit",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python audit.py",
+                "result": "panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"expected": "panic"},
+                "origin_evidence_bindings": [
+                    {"atom_id": "atom:one"},
+                    {"atom_id": "atom:two"},
+                ],
+            }
+        ]
+    }
+    authored = deepcopy(baseline)
+    authored["experiments"][0].pop("origin_evidence_bindings")
+    resolved = deepcopy(baseline)
+    preserved = [
+        {
+            "experiment_id": "experiment:one",
+            "path": "experiments[0].origin_evidence_bindings",
+            "authored_binding_count": 0,
+            "resolved_binding_count": 2,
+            "resolved_bindings_sha256": _fixture_json_sha256(
+                baseline["experiments"][0]["origin_evidence_bindings"]
+            ),
+        }
+    ]
+    resolution: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "preserve_omitted_unchanged_origin_bindings",
+        "baseline_dossier_sha256": _fixture_json_sha256(baseline),
+        "authored_dossier": authored,
+        "authored_dossier_sha256": _fixture_json_sha256(authored),
+        "resolved_dossier_sha256": _fixture_json_sha256(resolved),
+        "preserved_bindings": preserved,
+    }
+    resolution["resolution_sha256"] = _fixture_json_sha256(resolution)
+    source = {"attempted_dossier": baseline}
+    attempt = {
+        "attempted_dossier": resolved,
+        "attempted_dossier_sha256": _fixture_json_sha256(resolved),
+        "baseline_dossier_sha256": _fixture_json_sha256(baseline),
+        "repair_progress": {"authored_dossier_resolution": resolution},
+    }
+
+    assert contracts._research_attempt_resolution_local_errors(
+        attempt, pid="problem:one", index=1
+    ) == []
+    assert contracts._research_attempt_resolution_source_errors(
+        attempt,
+        source_attempt=source,
+        pid="problem:one",
+        index=1,
+    ) == []
+
+    tampered = deepcopy(attempt)
+    tampered["attempted_dossier"]["experiments"][0]["result"] = "fabricated"
+    tampered["attempted_dossier_sha256"] = _fixture_json_sha256(
+        tampered["attempted_dossier"]
+    )
+    tampered_resolution = tampered["repair_progress"]["authored_dossier_resolution"]
+    tampered_resolution["resolved_dossier_sha256"] = tampered["attempted_dossier_sha256"]
+    unsigned = dict(tampered_resolution)
+    unsigned.pop("resolution_sha256")
+    tampered_resolution["resolution_sha256"] = _fixture_json_sha256(unsigned)
+
+    assert contracts._research_attempt_resolution_local_errors(
+        tampered, pid="problem:one", index=1
+    ) == []
+    assert contracts._research_attempt_resolution_source_errors(
+        tampered,
+        source_attempt=source,
+        pid="problem:one",
+        index=1,
+    ) == [
+        "research_dossier_research_attempt_resolution_invalid: "
+        "problem:one: index=1:projection"
+    ]
+
+
 def test_current_research_attempt_history_allows_adaptive_same_session_corrections() -> None:
     session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
 
@@ -3583,6 +4035,502 @@ def test_current_research_attempt_history_allows_adaptive_same_session_correctio
     )
     _refresh_receipt_hashes(dossier)
     with pytest.raises(ValueError, match="session_id_invalid"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def _rescore_attempt_chain() -> tuple[list[dict[str, object]], dict[str, object]]:
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+
+    def artifacts(attempt_number: int) -> list[dict[str, object]]:
+        return [
+            {
+                "kind": kind,
+                "path": f"C:/retained/rescore-{attempt_number}/{filename}",
+                "exists": False,
+                "sha256": None,
+                "size_bytes": None,
+            }
+            for kind, filename in (
+                ("report", "report.json"),
+                ("workspace_ref", "workspace_ref.json"),
+                ("target_ref", "target_ref.json"),
+                ("normalized_events", "normalized_events.jsonl"),
+                ("codex_subscription_auth", "codex_execpolicy_overlay.json"),
+            )
+        ]
+
+    source_dossier = {"phase": "source"}
+    source: dict[str, object] = {
+        "attempt_number": 1,
+        "attempt_kind": "full_research",
+        "outcome": "output_contract_invalid",
+        "run_dir": "C:/retained/rescore-1",
+        "report_path": "C:/retained/rescore-1/report.json",
+        "validation_errors": ["obsolete:evaluator-finding"],
+        "validation_errors_before": [],
+        "validation_errors_after": ["obsolete:evaluator-finding"],
+        "attempted_dossier": source_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(source_dossier),
+        "source_attempt_sha256": None,
+        "authorized_paths": [],
+        "baseline_dossier_sha256": None,
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": None,
+        "attempt_wall_seconds": 10.0,
+        "repair_progress": None,
+        "attempt_artifacts": artifacts(1),
+    }
+    source["attempt_sha256"] = contracts.research_attempt_sha256(source)
+    candidate = {"phase": "corrected"}
+    continuation: dict[str, object] = {
+        "attempt_number": 2,
+        "attempt_kind": "evidence_verification_research_continuation",
+        "outcome": "repair_contract_valid",
+        "run_dir": "C:/retained/rescore-2",
+        "report_path": "C:/retained/rescore-2/report.json",
+        "validation_errors": [],
+        "validation_errors_before": ["replacement:finding"],
+        "validation_errors_after": [],
+        "attempted_dossier": candidate,
+        "attempted_dossier_sha256": _fixture_json_sha256(candidate),
+        "source_attempt_sha256": source["attempt_sha256"],
+        "authorized_paths": ["extensions.backlog_repro_research"],
+        "baseline_dossier_sha256": source["attempted_dossier_sha256"],
+        "baseline_projection_sha256": "a" * 64,
+        "repair_contract_sha256": "b" * 64,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": session_id,
+        "attempt_wall_seconds": 20.0,
+        "repair_progress": {
+            "decision": "accepted",
+            "reason": "rescored_evaluator_findings_corrected",
+        },
+        "attempt_artifacts": artifacts(2),
+    }
+    authored_sha256 = contracts.research_attempt_sha256(continuation)
+    continuation["attempt_sha256"] = authored_sha256
+    rescore: dict[str, object] = {
+        "schema_version": 1,
+        "contract_kind": "research_validation_error_rescore",
+        "source_attempt_sha256": source["attempt_sha256"],
+        "source_attempted_dossier_sha256": source["attempted_dossier_sha256"],
+        "source_validation_errors": source["validation_errors_after"],
+        "replacement_validation_errors": continuation["validation_errors_before"],
+        "reason": "authenticated evaluator defect correction",
+        "evaluator_defect_ids": ["BDS-test"],
+        "rescore_receipt_path": "C:/retained/rescore-receipt.json",
+        "rescore_receipt_sha256": "c" * 64,
+        "authored_attempt_sha256": authored_sha256,
+    }
+    rescore["rescore_sha256"] = _fixture_json_sha256(rescore)
+    continuation["validation_error_rescore"] = rescore
+    continuation["attempt_sha256"] = contracts.research_attempt_sha256(continuation)
+    return [source, continuation], rescore
+
+
+def test_research_attempt_rescore_authenticates_replaced_error_frontier() -> None:
+    attempts, _ = _rescore_attempt_chain()
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert parsed[0]["research_attempts"][1]["validation_errors_before"] == [
+        "replacement:finding"
+    ]
+
+
+def test_research_attempt_rescore_accepts_zero_model_terminal_transition() -> None:
+    attempts, rescore = _rescore_attempt_chain()
+    terminal = attempts[1]
+    terminal.pop("validation_error_rescore")
+    terminal.update(
+        {
+            "attempt_kind": "evidence_verification_rescore",
+            "outcome": "evidence_verification_rescore_valid",
+            "validation_errors": [],
+            "validation_errors_before": [],
+            "validation_errors_after": [],
+            "authorized_paths": [],
+            "baseline_projection_sha256": None,
+            "repair_contract_sha256": None,
+            "repair_progress": {
+                "decision": "accepted",
+                "reason": "authenticated_zero_error_evaluator_rescore",
+                "model_invocation_count": 0,
+            },
+        }
+    )
+    authored_sha256 = contracts.research_attempt_sha256(terminal)
+    terminal["attempt_sha256"] = authored_sha256
+    rescore.update(
+        {
+            "replacement_validation_errors": [],
+            "authored_attempt_sha256": authored_sha256,
+        }
+    )
+    rescore["rescore_sha256"] = _fixture_json_sha256(
+        {key: value for key, value in rescore.items() if key != "rescore_sha256"}
+    )
+    terminal["validation_error_rescore"] = rescore
+    terminal["attempt_sha256"] = contracts.research_attempt_sha256(terminal)
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert parsed[0]["research_attempts"][-1]["attempt_kind"] == (
+        "evidence_verification_rescore"
+    )
+
+
+def test_research_attempt_accepts_zero_model_persistence_replay_transition() -> None:
+    attempts, _ = _rescore_attempt_chain()
+    source = attempts[-1]
+    terminal: dict[str, object] = {
+        "attempt_number": 3,
+        "attempt_kind": "evidence_verification_persistence_replay",
+        "outcome": "evidence_verification_persistence_replay_valid",
+        "run_dir": "C:/retained/persistence-replay-3",
+        "report_path": "C:/retained/persistence-replay-3/report.json",
+        "validation_errors": [],
+        "validation_errors_before": [],
+        "validation_errors_after": [],
+        "attempted_dossier": deepcopy(source["attempted_dossier"]),
+        "attempted_dossier_sha256": source["attempted_dossier_sha256"],
+        "source_attempt_sha256": source["attempt_sha256"],
+        "authorized_paths": [],
+        "baseline_dossier_sha256": source["attempted_dossier_sha256"],
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": source["agent_session_id"],
+        "observed_agent_session_id": source["observed_agent_session_id"],
+        "resumed_from_session_id": source["agent_session_id"],
+        "attempt_wall_seconds": 0.0,
+        "repair_progress": {
+            "decision": "accepted",
+            "reason": "verified unchanged research after persistence repair",
+            "model_invocation_count": 0,
+            "persistence_defect_ids": ["BDS-test"],
+            "replay_receipt_path": "C:/retained/persistence-replay.json",
+            "replay_receipt_sha256": "d" * 64,
+            "replay_receipt_self_sha256": "e" * 64,
+        },
+        "attempt_artifacts": deepcopy(source["attempt_artifacts"]),
+    }
+    terminal["attempt_sha256"] = contracts.research_attempt_sha256(terminal)
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = [*attempts, terminal]
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert parsed[0]["research_attempts"][-1]["attempt_kind"] == (
+        "evidence_verification_persistence_replay"
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source_attempt",
+        "source_dossier",
+        "source_errors",
+        "replacement_errors",
+        "authored_attempt",
+        "receipt_hash",
+        "self_hash",
+    ],
+)
+def test_research_attempt_rescore_rejects_any_changed_binding(mutation: str) -> None:
+    attempts, rescore = _rescore_attempt_chain()
+    if mutation == "source_attempt":
+        rescore["source_attempt_sha256"] = "d" * 64
+    elif mutation == "source_dossier":
+        rescore["source_attempted_dossier_sha256"] = "d" * 64
+    elif mutation == "source_errors":
+        rescore["source_validation_errors"] = ["different"]
+    elif mutation == "replacement_errors":
+        rescore["replacement_validation_errors"] = ["different"]
+    elif mutation == "authored_attempt":
+        rescore["authored_attempt_sha256"] = "d" * 64
+    elif mutation == "receipt_hash":
+        rescore["rescore_receipt_sha256"] = "invalid"
+    if mutation != "self_hash":
+        rescore["rescore_sha256"] = _fixture_json_sha256(
+            {key: value for key, value in rescore.items() if key != "rescore_sha256"}
+        )
+    else:
+        rescore["rescore_sha256"] = "d" * 64
+    attempts[1]["attempt_sha256"] = contracts.research_attempt_sha256(attempts[1])
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError, match="research_attempt_rescore_invalid"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def _promotion_attempt_chain() -> list[dict[str, object]]:
+    attempts, _ = _rescore_attempt_chain()
+    initial, selected = attempts
+    session_id = str(selected["agent_session_id"])
+    regression_dossier = {"phase": "regressed"}
+    regression: dict[str, object] = {
+        "attempt_number": 3,
+        "attempt_kind": "evidence_verification_research_continuation",
+        "outcome": "repair_contract_invalid",
+        "run_dir": "C:/retained/promotion-3",
+        "report_path": "C:/retained/promotion-3/report.json",
+        "validation_errors": ["regression:finding"],
+        "validation_errors_before": initial["validation_errors_after"],
+        "validation_errors_after": ["regression:finding"],
+        "attempted_dossier": regression_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(regression_dossier),
+        "source_attempt_sha256": initial["attempt_sha256"],
+        "authorized_paths": ["extensions.backlog_repro_research"],
+        "baseline_dossier_sha256": initial["attempted_dossier_sha256"],
+        "baseline_projection_sha256": "d" * 64,
+        "repair_contract_sha256": "e" * 64,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": session_id,
+        "attempt_wall_seconds": 15.0,
+        "repair_progress": {
+            "decision": "continue",
+            "reason": "substantive_research_regression_requires_same_author_resolution",
+        },
+        "attempt_artifacts": deepcopy(selected["attempt_artifacts"]),
+    }
+    regression["attempt_sha256"] = contracts.research_attempt_sha256(regression)
+    progress = {
+        "decision": "accepted",
+        "reason": "verified_prior_author_result_after_progression_defect",
+        "model_invocation_count": 0,
+        "selected_attempt_sha256": selected["attempt_sha256"],
+        "selected_attempted_dossier_sha256": selected["attempted_dossier_sha256"],
+        "superseded_attempt_sha256s": [regression["attempt_sha256"]],
+        "progression_defect_ids": ["BDS-test"],
+        "replay_receipt_path": "C:/retained/promotion-replay.json",
+        "replay_receipt_sha256": "f" * 64,
+        "replay_receipt_self_sha256": "a" * 64,
+    }
+    promotion: dict[str, object] = {
+        "attempt_number": 4,
+        "attempt_kind": "evidence_verification_promotion",
+        "outcome": "evidence_verification_promotion_valid",
+        "run_dir": "C:/retained/promotion-4",
+        "report_path": "C:/retained/promotion-4/report.json",
+        "validation_errors": [],
+        "validation_errors_before": [],
+        "validation_errors_after": [],
+        "attempted_dossier": deepcopy(selected["attempted_dossier"]),
+        "attempted_dossier_sha256": selected["attempted_dossier_sha256"],
+        "source_attempt_sha256": selected["attempt_sha256"],
+        "authorized_paths": [],
+        "baseline_dossier_sha256": selected["attempted_dossier_sha256"],
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": session_id,
+        "attempt_wall_seconds": 0.0,
+        "repair_progress": progress,
+        "attempt_artifacts": deepcopy(selected["attempt_artifacts"]),
+    }
+    promotion["attempt_sha256"] = contracts.research_attempt_sha256(promotion)
+    return [initial, selected, regression, promotion]
+
+
+def test_research_attempt_promotion_preserves_and_supersedes_later_regression() -> None:
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = _promotion_attempt_chain()
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    terminal = parsed[0]["research_attempts"][-1]
+    assert terminal["attempt_kind"] == "evidence_verification_promotion"
+    assert terminal["repair_progress"]["superseded_attempt_sha256s"] == [
+        parsed[0]["research_attempts"][-2]["attempt_sha256"]
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["superseded", "candidate", "session"])
+def test_research_attempt_promotion_rejects_changed_custody(mutation: str) -> None:
+    attempts = _promotion_attempt_chain()
+    terminal = attempts[-1]
+    if mutation == "superseded":
+        terminal["repair_progress"]["superseded_attempt_sha256s"] = ["0" * 64]
+    elif mutation == "candidate":
+        terminal["attempted_dossier"] = {"phase": "different"}
+        terminal["attempted_dossier_sha256"] = _fixture_json_sha256(
+            terminal["attempted_dossier"]
+        )
+    else:
+        terminal["observed_agent_session_id"] = "11111111-1111-4111-8111-111111111111"
+    terminal["attempt_sha256"] = contracts.research_attempt_sha256(terminal)
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError, match="promotion_attempt_binding_invalid"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def test_research_attempt_prior_error_mismatch_still_fails_without_rescore() -> None:
+    attempts, rescore = _rescore_attempt_chain()
+    attempts[1].pop("validation_error_rescore")
+    attempts[1]["attempt_sha256"] = rescore["authored_attempt_sha256"]
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError, match="research_attempt_prior_errors_mismatch"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def _rejected_repair_branch_attempt_chain() -> list[dict[str, object]]:
+    """Model correction may branch from the retained safe pre-rejection baseline."""
+
+    [initial, template], _ = _rescore_attempt_chain()
+    initial.pop("validation_error_rescore", None)
+    initial["attempt_sha256"] = contracts.research_attempt_sha256(initial)
+    session_id = str(initial["agent_session_id"])
+
+    rejected = deepcopy(template)
+    rejected.pop("validation_error_rescore", None)
+    rejected.update(
+        {
+            "attempt_number": 2,
+            "attempt_kind": "model_output_repair",
+            "outcome": "repair_scope_rejected",
+            "validation_errors": [],
+            "validation_errors_before": deepcopy(initial["validation_errors_after"]),
+            "validation_errors_after": [],
+            "attempted_dossier": {"phase": "rejected-candidate"},
+            "source_attempt_sha256": initial["attempt_sha256"],
+            "baseline_dossier_sha256": initial["attempted_dossier_sha256"],
+            "agent_session_id": session_id,
+            "observed_agent_session_id": session_id,
+            "resumed_from_session_id": session_id,
+            "repair_progress": None,
+        }
+    )
+    rejected["attempted_dossier_sha256"] = _fixture_json_sha256(
+        rejected["attempted_dossier"]
+    )
+    rejected["repair_progress"] = {
+        "candidate_dossier_sha256": rejected["attempted_dossier_sha256"],
+        "assessment_reason": "candidate_removed_established_substantive_coverage",
+    }
+    rejected["attempt_sha256"] = contracts.research_attempt_sha256(rejected)
+
+    evidence_transition = deepcopy(template)
+    evidence_transition.pop("validation_error_rescore", None)
+    evidence_transition.update(
+        {
+            "attempt_number": 3,
+            "attempt_kind": "model_output_repair",
+            "outcome": "evidence_verification_invalid",
+            "validation_errors": ["deep:evidence-finding"],
+            "validation_errors_before": deepcopy(initial["validation_errors_after"]),
+            "validation_errors_after": ["deep:evidence-finding"],
+            "attempted_dossier": {"phase": "evidence-transition"},
+            "source_attempt_sha256": rejected["attempt_sha256"],
+            "baseline_dossier_sha256": rejected["baseline_dossier_sha256"],
+            "agent_session_id": session_id,
+            "observed_agent_session_id": session_id,
+            "resumed_from_session_id": session_id,
+            "repair_progress": None,
+        }
+    )
+    evidence_transition["attempted_dossier_sha256"] = _fixture_json_sha256(
+        evidence_transition["attempted_dossier"]
+    )
+    evidence_transition["attempt_sha256"] = contracts.research_attempt_sha256(
+        evidence_transition
+    )
+
+    accepted = deepcopy(template)
+    accepted.pop("validation_error_rescore", None)
+    accepted.update(
+        {
+            "attempt_number": 4,
+            "attempt_kind": "evidence_verification_research_continuation",
+            "outcome": "repair_contract_valid",
+            "validation_errors": [],
+            "validation_errors_before": deepcopy(
+                evidence_transition["validation_errors_after"]
+            ),
+            "validation_errors_after": [],
+            "attempted_dossier": {"phase": "accepted"},
+            "source_attempt_sha256": evidence_transition["attempt_sha256"],
+            "baseline_dossier_sha256": evidence_transition[
+                "attempted_dossier_sha256"
+            ],
+            "agent_session_id": session_id,
+            "observed_agent_session_id": session_id,
+            "resumed_from_session_id": session_id,
+            "repair_progress": {
+                "decision": "accepted",
+                "reason": "evidence_verification_satisfied",
+            },
+        }
+    )
+    accepted["attempted_dossier_sha256"] = _fixture_json_sha256(
+        accepted["attempted_dossier"]
+    )
+    accepted["attempt_sha256"] = contracts.research_attempt_sha256(accepted)
+    return [initial, rejected, evidence_transition, accepted]
+
+
+def test_research_attempt_history_accepts_safe_branch_after_rejected_candidate() -> None:
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = _rejected_repair_branch_attempt_chain()
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert [
+        attempt["outcome"] for attempt in parsed[0]["research_attempts"]
+    ] == [
+        "output_contract_invalid",
+        "repair_scope_rejected",
+        "evidence_verification_invalid",
+        "repair_contract_valid",
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["baseline", "prior_errors", "terminal_transition"])
+def test_research_attempt_rejected_branch_rejects_changed_custody(mutation: str) -> None:
+    attempts = _rejected_repair_branch_attempt_chain()
+    if mutation == "baseline":
+        attempts[2]["baseline_dossier_sha256"] = "f" * 64
+    elif mutation == "prior_errors":
+        attempts[2]["validation_errors_before"] = ["different:error"]
+    else:
+        attempts = attempts[:3]
+    attempts[2]["attempt_sha256"] = contracts.research_attempt_sha256(attempts[2])
+    if len(attempts) == 4:
+        attempts[3]["source_attempt_sha256"] = attempts[2]["attempt_sha256"]
+        attempts[3]["attempt_sha256"] = contracts.research_attempt_sha256(attempts[3])
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError):
         parse_research_dossier_list(json.dumps([dossier]))
 
 
@@ -4039,6 +4987,66 @@ def test_research_readiness_requires_causal_falsification_and_exact_code_path() 
     assert ready is False
     assert "research_proof_invalid" in reasons
     assert any("falsification_attempt" in reason for reason in reasons)
+
+
+def test_complete_negative_readiness_does_not_require_planning_grade_mechanism() -> None:
+    dossier = _valid_dossier()
+    dossier["root_cause_hypotheses"] = [
+        {
+            "hypothesis_id": "hypothesis:external-runtime",
+            "statement": "The retained failure occurred in an external runtime boundary.",
+            "supporting_evidence": ["exp-support"],
+            "counterevidence": [],
+            "falsification_attempts": [],
+            "mechanism_symbols": [],
+            "disposition": "primary",
+            "disposition_evidence": ["exp-support"],
+        }
+    ]
+    dossier["inspected_symbols"] = []
+    dossier["actionability_assessment"] = {
+        "disposition": "already_addressed",
+        "rationale": "The pinned revision contains the controlled route; no new change is due.",
+        "evidence_refs": ["exp-support", "artifact:source"],
+    }
+    receipt = dossier["evidence_verification"]
+    receipt["inspected_symbols"] = []
+    receipt["hypothesis_refs"] = [
+        {
+            "hypothesis_id": "hypothesis:external-runtime",
+            "supporting_refs": ["exp-support"],
+            "counterevidence_refs": [],
+            "mechanism_symbols": [],
+            "disposition": "primary",
+            "disposition_evidence_refs": ["exp-support"],
+            "control_links": [],
+            "falsification_attempts": [],
+        }
+    ]
+    for field in (
+        "causal_links",
+        "mechanism_evidence",
+        "outcome_oracles",
+        "test_selections",
+        "control_verifications",
+        "falsification_interventions",
+        "deterministic_mechanism_closures",
+        "failure_paths",
+    ):
+        receipt[field] = []
+    for field in (
+        "verified_mechanism",
+        "verified_mechanism_sha256",
+        "verified_mechanism_provenance",
+        "verified_mechanism_provenance_sha256",
+    ):
+        receipt[field] = None
+    _refresh_receipt_hashes(dossier)
+
+    assert contracts.research_evidence_verification_contract_errors(dossier) == []
+    ready, reasons = assess_research_readiness(dossier)
+    assert reasons == []
+    assert ready is True
 
 
 def test_research_readiness_does_not_relax_missing_code_symbol_inspection() -> None:

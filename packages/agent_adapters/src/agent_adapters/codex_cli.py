@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -9,7 +10,7 @@ import time
 import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from uuid import UUID
 
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
@@ -18,6 +19,13 @@ from agent_adapters.events import utc_now_iso
 _CODEX_REFRESH_TOKEN_REUSED_MARKER = "[usertest] detected codex auth error: refresh_token_reused"
 _CODEX_REFRESH_TOKEN_REUSED_SUBSTRING = "refresh_token_reused"
 _CHATGPT_LOGIN_STATUS = "Logged in using ChatGPT"
+_CODEX_LOGIN_STALE_ARG0_WARNING = (
+    "WARNING: failed to clean up stale arg0 temp dirs: Access is denied. (os error 5)"
+)
+_CODEX_LOGIN_PATH_ALIAS_WARNING_PREFIX = (
+    "WARNING: proceeding, even though we could not create PATH aliases: "
+    'Access is denied. (os error 5) at path "'
+)
 _PLAIN_CODEX_BINARY_NAMES: frozenset[str] = frozenset({"codex", "codex.exe"})
 _WINDOWS_DESKTOP_CODEX_RELATIVE_BIN = Path("OpenAI") / "Codex" / "bin"
 _WINDOWS_DESKTOP_CODEX_PROBE_TIMEOUT_SECONDS = 10.0
@@ -271,14 +279,61 @@ class CodexLoginStatusResult:
     auth_env_vars_blank: dict[str, bool]
     error_kind: str | None = None
 
+    def _ignored_launcher_diagnostic_kind(self, line: str) -> str | None:
+        if line == _CODEX_LOGIN_STALE_ARG0_WARNING:
+            return "stale_arg0_cleanup_access_denied"
+        if not line.startswith(_CODEX_LOGIN_PATH_ALIAS_WARNING_PREFIX) or not line.endswith('"'):
+            return None
+        raw_path = line[len(_CODEX_LOGIN_PATH_ALIAS_WARNING_PREFIX) : -1]
+        if not raw_path or '"' in raw_path:
+            return None
+        path_type = PureWindowsPath if "\\" in raw_path else PurePosixPath
+        candidate = path_type(raw_path)
+        expected_root = path_type(self.codex_home) / "tmp" / "arg0"
+        try:
+            relative = candidate.relative_to(expected_root)
+        except ValueError:
+            return None
+        if (
+            len(relative.parts) != 1
+            or re.fullmatch(r"codex-arg0[A-Za-z0-9_-]+", relative.name) is None
+        ):
+            return None
+        return "path_alias_creation_access_denied"
+
+    def _status_output_lines(self) -> tuple[list[str], list[str]]:
+        """Separate the login result from known Desktop launcher diagnostics.
+
+        Recent signed Desktop builds can emit arg0/PATH-alias cleanup warnings on
+        stderr before writing the login result to that same stream.  These two
+        launcher diagnostics do not describe authentication.  No other warning or
+        output is ignored, so an API-key result, a contradictory result, or a new
+        diagnostic still fails closed.
+        """
+
+        status_lines: list[str] = []
+        ignored_diagnostics: list[str] = []
+        for channel, value in (("stdout", self.stdout), ("stderr", self.stderr)):
+            normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+            for raw_line in normalized.split("\n"):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                ignored_kind = (
+                    self._ignored_launcher_diagnostic_kind(line)
+                    if channel == "stderr"
+                    else None
+                )
+                if ignored_kind is not None:
+                    ignored_diagnostics.append(ignored_kind)
+                else:
+                    status_lines.append(line)
+        return status_lines, ignored_diagnostics
+
     @property
     def normalized_status_output(self) -> str:
-        normalized_outputs = [
-            value.replace("\r\n", "\n").replace("\r", "\n").strip()
-            for value in (self.stdout, self.stderr)
-        ]
-        nonempty = [value for value in normalized_outputs if value]
-        return nonempty[0] if len(nonempty) == 1 else "\n".join(nonempty)
+        status_lines, _ = self._status_output_lines()
+        return "\n".join(status_lines)
 
     @property
     def ok(self) -> bool:
@@ -294,6 +349,7 @@ class CodexLoginStatusResult:
 
     def to_redacted_dict(self) -> dict[str, object]:
         normalized = self.normalized_status_output
+        _, ignored_diagnostics = self._status_output_lines()
         if normalized == _CHATGPT_LOGIN_STATUS:
             status_kind = "chatgpt"
         elif normalized.lower().startswith("logged in using an api key"):
@@ -310,6 +366,8 @@ class CodexLoginStatusResult:
             "chatgpt_status_exact": normalized == _CHATGPT_LOGIN_STATUS,
             "stdout_length": len(self.stdout.encode("utf-8", errors="replace")),
             "stderr_length": len(self.stderr.encode("utf-8", errors="replace")),
+            "ignored_launcher_diagnostic_count": len(ignored_diagnostics),
+            "ignored_launcher_diagnostic_kinds": sorted(set(ignored_diagnostics)),
             "codex_home": self.codex_home,
             "auth_env_vars_blank": dict(self.auth_env_vars_blank),
             "error_kind": self.error_kind,

@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import tomllib
+from collections.abc import Mapping
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -28,10 +29,12 @@ from backlog_core import (
     plan_revision_id_for,
     research_limitation_references,
     verified_mechanism_evidence,
+    verified_research_overlay_command_asset_paths,
     verified_staged_replay_command_asset_paths,
 )
 from backlog_core.stage_contracts import parse_solution_option_sets
 from backlog_core.ticket_readiness import falsification_acceptance_has_adversarial_basis
+from backlog_repo.ticket_provenance import normalize_outcome_role_contracts
 from runner_core import verification_command_safety_errors
 
 _OPTIONING_STATUSES = frozenset({"options_produced", "insufficient_evidence", "no_safe_option"})
@@ -49,6 +52,23 @@ _DISCOVERY_FIRST_RE = re.compile(
     r"discover|decide|choose|assess)\b",
     re.IGNORECASE,
 )
+
+
+def research_contract_view(research: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Remove only server-owned case-lineage annotations from a Stage-3 proof.
+
+    Case lineage is attached after the strict model-authored research contract is accepted.
+    Stages 4-6 retain that envelope in persisted documents while validating and prompting
+    from the underlying proof. Unknown authored fields remain and still fail the contract.
+    """
+
+    if not isinstance(research, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in research.items()
+        if key not in {"canonical_problem_id", "case_member_problem_ids"}
+    }
 
 
 def _mechanisms_too_similar(left: str, right: str) -> bool:
@@ -72,6 +92,26 @@ _COMMAND_PATH_RE = re.compile(
 )
 
 
+def _read_only_git_command(repo_root: Path, *args: str) -> list[str]:
+    """Build a Git command that can inspect retained worktrees without global config writes.
+
+    Runtime workspaces can live on filesystems that do not preserve Windows ownership
+    metadata. Git then rejects even read-only commands as dubious unless the exact workspace
+    is declared safe. Keep that exception command-scoped so planning can inspect the pinned
+    checkout without mutating the user's global Git configuration.
+    """
+
+    resolved_root = repo_root.resolve()
+    return [
+        "git",
+        "-c",
+        f"safe.directory={resolved_root}",
+        "-C",
+        str(resolved_root),
+        *args,
+    ]
+
+
 def read_repo_revision(repo_root: Path) -> str:
     """Return the exact checked-out Git revision used for repository inspection.
 
@@ -80,7 +120,7 @@ def read_repo_revision(repo_root: Path) -> str:
     """
 
     result = subprocess.run(
-        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        _read_only_git_command(repo_root, "rev-parse", "HEAD"),
         capture_output=True,
         check=False,
         text=True,
@@ -100,7 +140,7 @@ def repo_contains_revision(repo_root: Path, revision: str) -> bool:
     if not revision.strip() or revision.casefold().startswith("unavailable"):
         return False
     result = subprocess.run(
-        ["git", "-C", str(repo_root), "cat-file", "-e", f"{revision}^{{commit}}"],
+        _read_only_git_command(repo_root, "cat-file", "-e", f"{revision}^{{commit}}"),
         capture_output=True,
         check=False,
         text=True,
@@ -130,7 +170,7 @@ def assess_repo_grounding(repo_root: Path, revision: str) -> tuple[bool, list[st
     if head_revision.casefold() != revision.strip().casefold():
         reasons.append(f"workspace_head_mismatch: expected={revision!r} actual={head_revision!r}")
     status = subprocess.run(
-        ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
+        _read_only_git_command(repo_root, "status", "--porcelain", "--untracked-files=all"),
         capture_output=True,
         check=False,
         text=True,
@@ -525,9 +565,7 @@ def falsification_review_errors(
         values = outcome_strategy_review.get("residual_untested_paths")
         if isinstance(values, list):
             material_risks.update(
-                value.strip()
-                for value in values
-                if isinstance(value, str) and value.strip()
+                value.strip() for value in values if isinstance(value, str) and value.strip()
             )
     else:
         # Compatibility for persisted pre-strategy reviews.  In the current contract,
@@ -543,9 +581,7 @@ def falsification_review_errors(
             values = contract_review.get("residual_untested_paths")
             if isinstance(values, list):
                 material_risks.update(
-                    value.strip()
-                    for value in values
-                    if isinstance(value, str) and value.strip()
+                    value.strip() for value in values if isinstance(value, str) and value.strip()
                 )
     dispositions = review.get("material_risk_dispositions")
     if not isinstance(dispositions, list):
@@ -583,9 +619,7 @@ def falsification_review_errors(
             elif decision == "mitigated" and not (
                 adversarial_refs.intersection(refs) or has_adversarial_basis
             ):
-                errors.append(
-                    f"falsification_mitigation_lacks_adversarial_evidence: index={index}"
-                )
+                errors.append(f"falsification_mitigation_lacks_adversarial_evidence: index={index}")
             if not _nonempty_string(disposition.get("rationale")):
                 errors.append(f"falsification_missing_risk_rationale: index={index}")
         missing = sorted(material_risks - disposed)
@@ -869,6 +903,18 @@ def change_plan_quality_errors(
         plan,
         research=research_dossier,
     )
+    reproduction_for_historical_assets = plan.get("before_after_reproduction")
+    historical_overlay_paths_by_command = verified_research_overlay_command_asset_paths(
+        research_dossier,
+        experiment_id=(
+            str(reproduction_for_historical_assets.get("research_experiment_id")).strip()
+            if isinstance(reproduction_for_historical_assets, dict)
+            and _nonempty_string(
+                reproduction_for_historical_assets.get("research_experiment_id")
+            )
+            else None
+        ),
+    )
     if _nonempty_string(plan.get("_parse_warning")):
         errors.append(f"change_plan_stage_contract_invalid: {plan_id}")
     if not _nonempty_string(plan.get("change_plan_id")):
@@ -940,16 +986,11 @@ def change_plan_quality_errors(
                     target_path is None or not target_path.exists()
                 ):
                     errors.append(f"change_plan_target_path_missing: {plan_id}: {path}")
-                elif action == "create" and (
-                    target_path is None or target_path.exists()
-                ):
+                elif action == "create" and (target_path is None or target_path.exists()):
                     errors.append(f"change_plan_create_target_invalid: {plan_id}: {path}")
-                elif action in {"rename", "move"} and (
-                    destination is None or destination.exists()
-                ):
+                elif action in {"rename", "move"} and (destination is None or destination.exists()):
                     errors.append(
-                        f"change_plan_target_destination_invalid: {plan_id}:"
-                        f"{destination_path}"
+                        f"change_plan_target_destination_invalid: {plan_id}:{destination_path}"
                     )
                 elif action == "modify" and symbols:
                     target_text = target_path.read_text(encoding="utf-8", errors="replace")
@@ -1016,9 +1057,7 @@ def change_plan_quality_errors(
                 "multi_scenario",
             }
             owner = role_contract.get("verification_owner")
-            centralized_recurrence = (
-                role == "recurrence" and owner == _CENTRALIZED_RECURRENCE_OWNER
-            )
+            centralized_recurrence = role == "recurrence" and owner == _CENTRALIZED_RECURRENCE_OWNER
             if owner is not None and not centralized_recurrence:
                 errors.append(
                     f"change_plan_outcome_role_verification_owner_invalid: {plan_id}: {role}"
@@ -1030,13 +1069,9 @@ def change_plan_quality_errors(
                 errors.append(f"change_plan_missing_outcome_role_commands: {plan_id}: {role}")
                 continue
             if centralized_recurrence and role_commands:
-                errors.append(
-                    f"change_plan_centralized_recurrence_commands_invalid: {plan_id}"
-                )
+                errors.append(f"change_plan_centralized_recurrence_commands_invalid: {plan_id}")
             if centralized_recurrence and role_contract.get("predicates") != []:
-                errors.append(
-                    f"change_plan_centralized_recurrence_predicates_invalid: {plan_id}"
-                )
+                errors.append(f"change_plan_centralized_recurrence_predicates_invalid: {plan_id}")
             for command in role_commands:
                 errors.extend(
                     _command_quality_errors(
@@ -1045,6 +1080,16 @@ def change_plan_quality_errors(
                         repo_root=None,
                         label=f"outcome_role_{role}",
                     )
+                )
+        if _string_list(commands, allow_empty=False):
+            try:
+                normalize_outcome_role_contracts(
+                    outcome_roles,
+                    test_commands=commands,
+                )
+            except ValueError as exc:
+                errors.append(
+                    f"change_plan_outcome_roles_export_contract_invalid: {plan_id}: {exc}"
                 )
 
     reproduction = plan.get("before_after_reproduction")
@@ -1082,9 +1127,7 @@ def change_plan_quality_errors(
                     for command in commands
                     if isinstance(command, str)
                 }:
-                    errors.append(
-                        f"change_plan_alternate_not_in_verification_commands: {plan_id}"
-                    )
+                    errors.append(f"change_plan_alternate_not_in_verification_commands: {plan_id}")
             limitation_refs_raw = reproduction.get("proof_limitation_refs")
             limitation_refs = (
                 [ref.strip() for ref in limitation_refs_raw if isinstance(ref, str) and ref.strip()]
@@ -1123,15 +1166,9 @@ def change_plan_quality_errors(
             if reproduction.get("proof_limitation_refs") not in (None, []):
                 errors.append(f"change_plan_limitation_refs_without_limitation: {plan_id}")
             roles = plan.get("outcome_verification_roles")
-            original_role = (
-                roles.get("original_scenario") if isinstance(roles, dict) else None
-            )
-            bound_oracle = (
-                original_role.get("oracle") if isinstance(original_role, dict) else None
-            )
-            oracle_kind = (
-                bound_oracle.get("kind") if isinstance(bound_oracle, dict) else None
-            )
+            original_role = roles.get("original_scenario") if isinstance(roles, dict) else None
+            bound_oracle = original_role.get("oracle") if isinstance(original_role, dict) else None
+            oracle_kind = bound_oracle.get("kind") if isinstance(bound_oracle, dict) else None
             for phase, mapping in (("before", before), ("after", after)):
                 if not isinstance(mapping, dict):
                     errors.append(f"change_plan_missing_{phase}_mapping: {plan_id}")
@@ -1139,20 +1176,32 @@ def change_plan_quality_errors(
                 if phase == "after" and oracle_kind == "causal_proof_replay":
                     expectations = mapping.get("causal_proof_expectations")
                     if not isinstance(expectations, list) or not expectations:
-                        errors.append(
-                            f"change_plan_missing_after_causal_expectations: {plan_id}"
-                        )
+                        errors.append(f"change_plan_missing_after_causal_expectations: {plan_id}")
                     continue
                 if phase == "after" and oracle_kind == "multi_scenario":
                     expectations = mapping.get("scenario_expectations")
                     if not isinstance(expectations, list) or not expectations:
-                        errors.append(
-                            f"change_plan_missing_after_scenario_expectations: {plan_id}"
-                        )
+                        errors.append(f"change_plan_missing_after_scenario_expectations: {plan_id}")
                     continue
                 if not _nonempty_string(mapping.get("command")):
                     errors.append(f"change_plan_missing_{phase}_command: {plan_id}")
                 else:
+                    normalized_phase_command = " ".join(
+                        str(mapping.get("command")).split()
+                    )
+                    bound_asset_paths = set(
+                        staged_replay_paths_by_command.get(
+                            normalized_phase_command,
+                            set(),
+                        )
+                    )
+                    if phase == "before":
+                        bound_asset_paths.update(
+                            historical_overlay_paths_by_command.get(
+                                normalized_phase_command,
+                                set(),
+                            )
+                        )
                     errors.extend(
                         _command_quality_errors(
                             str(mapping.get("command")),
@@ -1160,10 +1209,7 @@ def change_plan_quality_errors(
                             repo_root=repo_root,
                             label=f"{phase}_command",
                             planned_create_paths=planned_create_paths,
-                            bound_asset_paths=staged_replay_paths_by_command.get(
-                                " ".join(str(mapping.get("command")).split()),
-                                set(),
-                            ),
+                            bound_asset_paths=bound_asset_paths,
                         )
                     )
                 if not _nonempty_string(mapping.get("expected_result")):

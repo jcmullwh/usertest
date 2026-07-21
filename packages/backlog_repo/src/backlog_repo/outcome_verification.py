@@ -10,6 +10,7 @@ from typing import Any
 
 from backlog_repo.case_relation_receipts import validate_case_relation_receipt
 from backlog_repo.outcomes import validate_outcome_record
+from backlog_repo.plan_scope import parse_plan_target_contract_markdown
 from backlog_repo.ticket_provenance import (
     canonical_plan_sha256,
     canonical_ticket_body_sha256,
@@ -262,6 +263,48 @@ def _role_contracts_from_verified_plan(
     return roles_raw if isinstance(roles_raw, Mapping) else {}
 
 
+def _case_identity_from_verified_plan(
+    plan_path: Path,
+    *,
+    provenance: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Recover stable case identity only from an exact, provenance-bound plan."""
+
+    target_contract_sha256 = provenance.get("target_contract_sha256")
+    if target_contract_sha256 is None:
+        return None, []
+    errors: list[str] = []
+    try:
+        contract = parse_plan_target_contract_markdown(_read_utf8_raw(plan_path))
+    except (OSError, UnicodeError, ValueError) as exc:
+        return None, [f"verified_case_identity_target_contract_invalid:{type(exc).__name__}"]
+    if not isinstance(contract, dict):
+        return None, ["verified_case_identity_target_contract_missing"]
+    if contract.get("contract_sha256") != target_contract_sha256:
+        errors.append("verified_case_identity_target_contract_hash_mismatch")
+    case_id = contract.get("case_id")
+    if case_id != provenance.get("case_id"):
+        errors.append("verified_case_identity_case_id_mismatch")
+    problem_id = contract.get("problem_id")
+    if not isinstance(problem_id, str) or not problem_id.strip():
+        errors.append("verified_case_identity_problem_id_missing")
+    if errors:
+        return None, errors
+    return (
+        {
+            "schema_version": 1,
+            "source": "verified_plan_target_contract",
+            "case_id": case_id,
+            "problem_id": problem_id.strip(),
+            "plan_revision_id": provenance.get("plan_revision_id"),
+            "fingerprint": provenance.get("fingerprint"),
+            "target_contract_sha256": target_contract_sha256,
+            "verified_plan_path": str(plan_path),
+        },
+        [],
+    )
+
+
 def _verify_ticket_ref(
     ticket_ref: dict[str, Any],
     *,
@@ -423,7 +466,7 @@ def _verify_ticket_ref(
                         "outcome_ticket_ref_implementation_provenance_git_head_mismatch"
                     )
                 if implementation_schema == 2 and (
-                    git_ref.get("commit_attempted") is not False
+                    not isinstance(git_ref.get("commit_attempted"), bool)
                     or git_ref.get("commit_performed") is not False
                     or git_ref.get("commit_observed") is not True
                     or str(git_ref.get("base_commit") or "").casefold()
@@ -433,10 +476,15 @@ def _verify_ticket_ref(
                         "outcome_ticket_ref_implementation_provenance_existing_head_invalid"
                     )
             if implementation_schema == 2 and workspace_ref is not None:
+                workspace_strategy = workspace_ref.get("workspace_strategy")
                 if (
                     workspace_ref.get("schema_version") != 1
-                    or workspace_ref.get("workspace_strategy")
-                    != implementation.get("provenance_mode")
+                    or not isinstance(workspace_ref.get("workspace_dir"), str)
+                    or not str(workspace_ref.get("workspace_dir") or "").strip()
+                    or (
+                        workspace_strategy is not None
+                        and workspace_strategy != implementation.get("provenance_mode")
+                    )
                 ):
                     errors.append(
                         "outcome_ticket_ref_implementation_provenance_workspace_invalid"
@@ -1263,12 +1311,20 @@ def verify_outcome_record_provenance(
         _verify_merge_provenance(normalized, owner_root=owner_root, errors=errors)
 
     role_contracts: Mapping[str, Any] = {}
+    verified_case_identity: dict[str, Any] | None = None
+    verified_case_identity_errors: list[str] = []
     if verified_plan is not None and provenance is not None:
         _owner_root, plan_path = verified_plan
         role_contracts = _role_contracts_from_verified_plan(
             plan_path,
             provenance=provenance,
             errors=errors,
+        )
+        verified_case_identity, verified_case_identity_errors = (
+            _case_identity_from_verified_plan(
+                plan_path,
+                provenance=provenance,
+            )
         )
 
     if provenance is not None and trusted_roots:
@@ -1314,6 +1370,8 @@ def verify_outcome_record_provenance(
                         errors=errors,
                     )
     errors = list(dict.fromkeys(errors))
+    if errors:
+        verified_case_identity = None
     return {
         "schema_version": 1,
         "structural_status": "valid",
@@ -1321,6 +1379,8 @@ def verify_outcome_record_provenance(
         "verified": not errors,
         "errors": errors,
         "outcome_record": normalized,
+        "verified_case_identity": verified_case_identity,
+        "verified_case_identity_errors": verified_case_identity_errors,
     }
 
 

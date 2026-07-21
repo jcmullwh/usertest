@@ -75,6 +75,29 @@ def test_sync_atom_actions_from_dequeued_plan_folders_ignores_hidden_archive(
     assert atom_actions[atom_id]["status"] == "actioned"
 
 
+def test_dequeued_plan_does_not_treat_unlabelled_backtick_as_atom_evidence(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path
+    dequeued_dir = owner_root / ".agents" / "plans" / "_dequeued"
+    dequeued_dir.mkdir(parents=True, exist_ok=True)
+    atom_id = "usertest/20260220T194226Z/codex/0:suggested_change:2"
+    (dequeued_dir / "ticket.md").write_text(
+        f"Diagnostic example: `{atom_id}`\n",
+        encoding="utf-8",
+    )
+    atom_actions = {atom_id: {"atom_id": atom_id, "status": "queued"}}
+
+    meta = sync_atom_actions_from_dequeued_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=[owner_root],
+        generated_at="2026-02-28T00:00:00Z",
+    )
+
+    assert meta["atoms_demoted"] == 0
+    assert atom_actions[atom_id]["status"] == "queued"
+
+
 def test_nul_corrupt_dequeued_plan_cannot_demote_atom_lifecycle(tmp_path: Path) -> None:
     owner_root = tmp_path
     dequeued_dir = owner_root / ".agents" / "plans" / "_dequeued"

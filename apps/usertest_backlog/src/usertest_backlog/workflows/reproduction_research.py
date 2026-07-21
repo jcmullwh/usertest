@@ -1,11 +1,14 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from backlog_core import (
     SOURCE_EVIDENCE_PROJECTION_VERSION,
+    derived_source_atom_id_aliases,
     operational_candidate_receipt_errors,
+    provisional_same_cause_group_errors,
     source_evidence_atom_projection,
     source_evidence_atom_sha256,
 )
@@ -22,7 +25,12 @@ from backlog_miner.research_evidence import (
     TrustedHostReplayExecutor,
 )
 from backlog_miner.research_runner import (
+    _authenticate_assignment_source_classifications,
     _completed_prefix_checkpoint,
+    _materialize_terminal_research_validation_error_rescore,
+    _persisted_source_evidence_assignment_sha256,
+    _resume_completed_prefix_from_stage_document,
+    _source_evidence_assignment_sha256,
     _valid_stage3_research_compatibility_contract,
     _validated_completed_stage3_checkpoint,
     completed_stage3_checkpoint,
@@ -35,6 +43,29 @@ from usertest_backlog.workflows.post_research_relations import (
 )
 
 _REPLAY_EXECUTOR_MODES = frozenset({"blocked", "docker", "platform_router", "trusted_host"})
+_OPERATIONAL_CANDIDATE_ID_RE = re.compile(
+    r"^operational_failure:(?P<signature>[0-9a-f]{64}):(?P<occurrence_set>[0-9a-f]{64})$"
+)
+
+# Canonical run-local context that Stage 3 hashes for every assigned origin atom.
+# Qualification source custody imports the same declaration; keep this as the single
+# source of truth instead of duplicating the list in the snapshot implementation.
+ORIGIN_EVIDENCE_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = (
+    "preflight.json",
+    "agent_shell_probe/raw_events.jsonl",
+    "agent_attempts.json",
+    "settings_ref.json",
+    "effective_run_spec.json",
+    "report.json",
+    "error.json",
+    "report_validation_errors.json",
+    "normalized_events.jsonl",
+    "raw_events.jsonl",
+    "metrics.json",
+    "workspace_ref.json",
+    "target_ref.json",
+    "run_meta.json",
+)
 
 
 def _atomic_write_research_json(path: Path, document: Mapping[str, Any]) -> None:
@@ -267,11 +298,11 @@ def _research_file_receipt(path: Path, *, run_dir: Path | None = None) -> dict[s
         except ValueError:
             relative = None
         if relative is not None:
-            receipt["source_relpath"] = relative.as_posix()
-            if len(relative.parts) == 1:
-                role = RESEARCH_RUN_CONTEXT_FILES.get(relative.name)
-                if role is not None:
-                    receipt["research_context_role"] = role
+            relative_path = relative.as_posix()
+            receipt["source_relpath"] = relative_path
+            role = RESEARCH_RUN_CONTEXT_FILES.get(relative_path)
+            if role is not None:
+                receipt["research_context_role"] = role
     return receipt
 
 
@@ -327,21 +358,7 @@ def _origin_artifact_receipts(atom: dict[str, Any], *, repo_root: Path) -> list[
         # references onto each atom.  Hash the canonical full streams when they
         # exist so research receives the actual diagnostic, not only an excerpt.
         candidates.extend([run_dir / "agent_stderr.txt", run_dir / "agent_last_message.txt"])
-    for name in (
-        "preflight.json",
-        "agent_attempts.json",
-        "settings_ref.json",
-        "effective_run_spec.json",
-        "report.json",
-        "error.json",
-        "report_validation_errors.json",
-        "normalized_events.jsonl",
-        "raw_events.jsonl",
-        "metrics.json",
-        "workspace_ref.json",
-        "target_ref.json",
-        "run_meta.json",
-    ):
+    for name in ORIGIN_EVIDENCE_RUN_ARTIFACT_RELATIVE_PATHS:
         candidates.append(run_dir / name)
 
     receipts: list[dict[str, Any]] = []
@@ -455,6 +472,114 @@ def _expand_operational_candidate_evidence(
     return expanded_ids, occurrence_ids, errors
 
 
+def _select_current_operational_candidate_evidence(
+    *,
+    evidence_atom_ids: list[str],
+    atoms_by_id: Mapping[str, dict[str, Any]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Use the one verified current revision of a cited operational aggregate.
+
+    An operational candidate's stable failure signature identifies the case while its
+    second identity component identifies the exact occurrence-set revision.  The durable
+    case graph intentionally retains prior revision IDs, but a later atom corpus contains
+    only the currently materialized aggregate.  Requiring every historical revision to be
+    rematerialized makes an expanded occurrence set look like missing evidence and parks
+    Stage 3 before research can begin.
+
+    This adapter is deliberately narrow.  It replaces a missing prior revision only when
+    the same problem record already cites exactly one available candidate with the same
+    authenticated stable signature.  Different signatures, invalid receipts, and multiple
+    available revisions remain unresolved and therefore keep the assignment incomplete.
+    The returned alias records make the active/historical boundary explicit and hash-bound;
+    the historical atom ID remains in the durable case graph.
+    """
+
+    available_by_signature: dict[str, list[str]] = {}
+    for atom_id in evidence_atom_ids:
+        atom = atoms_by_id.get(atom_id)
+        match = _OPERATIONAL_CANDIDATE_ID_RE.fullmatch(atom_id)
+        if (
+            atom is None
+            or match is None
+            or atom.get("source") != "operational_failure_candidate"
+            or operational_candidate_receipt_errors(atom)
+        ):
+            continue
+        signature = match.group("signature")
+        if atom.get("operational_candidate_signature") != signature:
+            continue
+        available_by_signature.setdefault(signature, [])
+        if atom_id not in available_by_signature[signature]:
+            available_by_signature[signature].append(atom_id)
+
+    selected_ids: list[str] = []
+    aliases: list[dict[str, str]] = []
+    for atom_id in evidence_atom_ids:
+        selected_id = atom_id
+        if atom_id not in atoms_by_id:
+            match = _OPERATIONAL_CANDIDATE_ID_RE.fullmatch(atom_id)
+            if match is not None:
+                signature = match.group("signature")
+                available = available_by_signature.get(signature, [])
+                if len(available) == 1:
+                    selected_id = available[0]
+                    aliases.append(
+                        {
+                            "historical_atom_id": atom_id,
+                            "current_atom_id": selected_id,
+                            "candidate_signature": signature,
+                            "authority": ("verified_cited_operational_candidate_signature"),
+                        }
+                    )
+        if selected_id not in selected_ids:
+            selected_ids.append(selected_id)
+    return selected_ids, aliases
+
+
+def _select_current_derived_source_evidence(
+    *,
+    evidence_atom_ids: list[str],
+    atoms_by_id: Mapping[str, dict[str, Any]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Resolve a durable derived-run ID to its exact content-addressed identity.
+
+    Derived-run ingestion changed from path-shaped IDs to content-addressed IDs.  The
+    case graph correctly retains both history and the current observation, but Stage 3
+    must not treat the old spelling as missing evidence when exactly one current atom
+    authenticates that durable alias from runner-owned source fields.  Ambiguous or
+    malformed aliases remain unresolved and therefore retain the normal evidence gate.
+    """
+
+    current_by_alias: dict[str, list[str]] = {}
+    for current_id, atom in atoms_by_id.items():
+        for alias in derived_source_atom_id_aliases(atom):
+            current_by_alias.setdefault(alias, [])
+            if current_id not in current_by_alias[alias]:
+                current_by_alias[alias].append(current_id)
+
+    selected_ids: list[str] = []
+    aliases: list[dict[str, str]] = []
+    for atom_id in evidence_atom_ids:
+        selected_id = atom_id
+        if atom_id not in atoms_by_id:
+            available = current_by_alias.get(atom_id, [])
+            if len(available) == 1:
+                selected_id = available[0]
+                aliases.append(
+                    {
+                        "historical_atom_id": atom_id,
+                        "current_atom_id": selected_id,
+                        "current_atom_sha256": source_evidence_atom_sha256(
+                            atoms_by_id[selected_id]
+                        ),
+                        "authority": "content_addressed_derived_source_alias",
+                    }
+                )
+        if selected_id not in selected_ids:
+            selected_ids.append(selected_id)
+    return selected_ids, aliases
+
+
 def _initial_research_evidence_roles(
     evidence_atom_ids: list[str],
     *,
@@ -477,6 +602,84 @@ def _initial_research_evidence_roles(
         else:
             occurrence_evidence_ids.append(atom_id)
     return case_evidence_ids, occurrence_evidence_ids
+
+
+def _provisional_same_cause_source_evidence(
+    problem_record: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return the complete authenticated evidence boundary for a provisional group.
+
+    A provisional same-cause group is one research unit, not an alias.  Its member
+    facets preserve the evidence that made each candidate case independently real.
+    Stage 3 must receive that union or it can neither test the shared-mechanism
+    hypothesis nor clear it honestly.  Cross-check the runner-owned group against the
+    canonical record before trusting facet membership; inconsistent packets block the
+    assignment instead of silently narrowing or widening it.
+    """
+
+    if problem_record.get("case_identity_status") != "provisional_same_cause":
+        return [], []
+
+    case_id_raw = problem_record.get("case_id")
+    case_id = case_id_raw.strip() if isinstance(case_id_raw, str) else ""
+    group_raw = problem_record.get("provisional_same_cause_group")
+    group = group_raw if isinstance(group_raw, Mapping) else {}
+    errors = provisional_same_cause_group_errors(
+        group_raw,
+        owning_case_id=case_id or None,
+    )
+
+    def strings(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
+        )
+
+    record_case_ids = strings(problem_record.get("case_identity_candidate_ids"))
+    group_case_ids = strings(group.get("member_case_ids"))
+    if set(record_case_ids) != set(group_case_ids):
+        errors.append("provisional_same_cause_record_case_members_mismatch")
+
+    record_problem_ids = strings(problem_record.get("case_member_problem_ids"))
+    group_problem_ids = strings(group.get("member_problem_ids"))
+    if set(record_problem_ids) != set(group_problem_ids):
+        errors.append("provisional_same_cause_record_problem_members_mismatch")
+
+    facets_raw = group.get("member_facets")
+    facets = (
+        [dict(item) for item in facets_raw if isinstance(item, Mapping)]
+        if isinstance(facets_raw, list)
+        else []
+    )
+    facet_pairs: list[tuple[str, str]] = []
+    for facet in facets:
+        facet_case_raw = facet.get("case_id")
+        facet_problem_raw = facet.get("problem_id")
+        facet_case_id = facet_case_raw.strip() if isinstance(facet_case_raw, str) else ""
+        facet_problem_id = facet_problem_raw.strip() if isinstance(facet_problem_raw, str) else ""
+        if not facet_problem_id:
+            errors.append(
+                f"provisional_same_cause_facet_problem_missing:{facet_case_id or '(missing)'}"
+            )
+        facet_pairs.append((facet_case_id, facet_problem_id))
+    facet_problem_ids = [problem_id for _, problem_id in facet_pairs if problem_id]
+    if (
+        len(facet_pairs) != len(set(facet_pairs))
+        or set(facet_problem_ids) != set(group_problem_ids)
+        or len(facet_problem_ids) != len(group_problem_ids)
+    ):
+        errors.append("provisional_same_cause_facet_problem_members_mismatch")
+
+    if errors:
+        return [], list(
+            dict.fromkeys(f"provisional_same_cause_group_invalid:{error}" for error in errors)
+        )
+
+    evidence_atom_ids = [
+        atom_id for facet in facets for atom_id in strings(facet.get("source_evidence_atom_ids"))
+    ]
+    return list(dict.fromkeys(evidence_atom_ids)), []
 
 
 def _render_research_dossiers_markdown(
@@ -621,45 +824,29 @@ def _render_research_dossiers_markdown(
     return "\n".join(lines)
 
 
-def _run_repro_research_stage(
+def _build_selected_research_payloads(
     *,
     repo_root: Path,
-    repo_input: str | None,
-    repo_ref: str | None,
-    target_slug: str | None,
-    selected_priority_decisions: list[dict[str, Any]],
-    problem_records: list[dict[str, Any]],
-    atoms: list[dict[str, Any]],
-    artifacts_dir: Path,
-    out_json: Path,
-    out_md: Path,
-    agent: str,
-    model: str | None,
-    cfg: RunnerConfig,
-    dry_run: bool,
-    replay_timeout_seconds: float,
-    replay_executor: ReplayExecutor,
-    replay_executor_metadata: dict[str, Any],
-    resume_stage_document: Mapping[str, Any] | None = None,
-    reused_research_dossiers: Sequence[dict[str, Any]] = (),
-    resume_upstream_contract: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run stage 3 reproduce-plus-research and write the stage artifacts."""
-    import json as _json
+    selected_priority_decisions: Sequence[Mapping[str, Any]],
+    problem_records: Sequence[Mapping[str, Any]],
+    atoms: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the exact ordered Stage-3 assignments used by dispatch and resume."""
 
     records_by_id: dict[str, dict[str, Any]] = {
-        str(item.get("problem_id")): item
+        str(item.get("problem_id")): dict(item)
         for item in problem_records
-        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+        if isinstance(item, Mapping) and isinstance(item.get("problem_id"), str)
     }
     atoms_by_id: dict[str, dict[str, Any]] = {
-        str(item.get("atom_id")): item
+        str(item.get("atom_id")): dict(item)
         for item in atoms
-        if isinstance(item, dict) and isinstance(item.get("atom_id"), str)
+        if isinstance(item, Mapping) and isinstance(item.get("atom_id"), str)
     }
 
     selected_payloads: list[dict[str, Any]] = []
-    for dec in selected_priority_decisions:
+    for decision in selected_priority_decisions:
+        dec = dict(decision)
         pid = dec.get("problem_id")
         if not isinstance(pid, str) or not pid.strip():
             continue
@@ -696,7 +883,23 @@ def _run_repro_research_stage(
             if isinstance(source_ids_raw, list)
             else [atom_id for atom_id in all_evidence_ids if atom_id not in set(derived_ids)]
         )
+        provisional_member_evidence_ids, provisional_group_errors = (
+            _provisional_same_cause_source_evidence(rec)
+        )
+        evidence_ids.extend(provisional_member_evidence_ids)
         evidence_ids = list(dict.fromkeys(evidence_ids))
+        evidence_ids, derived_source_currentness_aliases = (
+            _select_current_derived_source_evidence(
+                evidence_atom_ids=evidence_ids,
+                atoms_by_id=atoms_by_id,
+            )
+        )
+        evidence_ids, operational_candidate_currentness_aliases = (
+            _select_current_operational_candidate_evidence(
+                evidence_atom_ids=evidence_ids,
+                atoms_by_id=atoms_by_id,
+            )
+        )
         case_evidence_ids, occurrence_evidence_ids = _initial_research_evidence_roles(
             evidence_ids,
             atoms_by_id=atoms_by_id,
@@ -720,12 +923,21 @@ def _run_repro_research_stage(
             if atom_id not in occurrence_evidence_ids:
                 occurrence_evidence_ids.append(atom_id)
         evidence_lineage_errors.extend(split_lineage_errors)
+        evidence_lineage_errors.extend(provisional_group_errors)
         derived_ids = list(
             dict.fromkeys(
                 [
                     atom_id
                     for atom_id in [*derived_ids, *all_evidence_ids]
                     if atom_id not in set(evidence_ids)
+                    and atom_id
+                    not in {
+                        alias["historical_atom_id"]
+                        for alias in [
+                            *derived_source_currentness_aliases,
+                            *operational_candidate_currentness_aliases,
+                        ]
+                    }
                 ]
             )
         )
@@ -753,6 +965,15 @@ def _run_repro_research_stage(
         )
         assignment["case_evidence_atom_ids"] = list(case_evidence_ids)
         assignment["occurrence_evidence_atom_ids"] = list(occurrence_evidence_ids)
+        assignment["provisional_same_cause_member_evidence_atom_ids"] = list(
+            provisional_member_evidence_ids
+        )
+        assignment["operational_candidate_currentness_aliases"] = list(
+            operational_candidate_currentness_aliases
+        )
+        assignment["derived_source_currentness_aliases"] = list(
+            derived_source_currentness_aliases
+        )
         missing_evidence_atom_ids.extend(assignment_missing)
         missing_evidence_atom_ids = list(dict.fromkeys(missing_evidence_atom_ids))
         assignment_errors = [
@@ -761,24 +982,208 @@ def _run_repro_research_stage(
         assignment["status"] = "incomplete" if assignment_errors else "complete"
         assignment["errors"] = assignment_errors
         assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
-        payload = {
-            "case_id": case_id,
-            "problem_id": pid,
-            "problem_record": rec,
-            "priority_decision": dec,
-            "expected_evidence_atom_ids": evidence_ids,
-            "case_evidence_atom_ids": case_evidence_ids,
-            "occurrence_evidence_atom_ids": occurrence_evidence_ids,
-            "evidence_lineage_errors": evidence_lineage_errors,
-            "missing_evidence_atom_ids": missing_evidence_atom_ids,
-            "evidence_atoms": evidence_atoms,
-            # Prior research/implementation output is context, never a mandatory
-            # symptom to reproduce and never an independent new problem source.
-            "derived_evidence_atom_ids": derived_ids,
-            "derived_evidence_atoms": derived_evidence_atoms,
-            "evidence_assignment": assignment,
-        }
-        selected_payloads.append(payload)
+        selected_payloads.append(
+            {
+                "case_id": case_id,
+                "problem_id": pid,
+                "problem_record": rec,
+                "priority_decision": dec,
+                "expected_evidence_atom_ids": evidence_ids,
+                "case_evidence_atom_ids": case_evidence_ids,
+                "occurrence_evidence_atom_ids": occurrence_evidence_ids,
+                "provisional_same_cause_member_evidence_atom_ids": (
+                    provisional_member_evidence_ids
+                ),
+                "operational_candidate_currentness_aliases": (
+                    operational_candidate_currentness_aliases
+                ),
+                "derived_source_currentness_aliases": derived_source_currentness_aliases,
+                "evidence_lineage_errors": evidence_lineage_errors,
+                "missing_evidence_atom_ids": missing_evidence_atom_ids,
+                "evidence_atoms": evidence_atoms,
+                # Prior research/implementation output is context, never a mandatory
+                # symptom to reproduce and never an independent new problem source.
+                "derived_evidence_atom_ids": derived_ids,
+                "derived_evidence_atoms": derived_evidence_atoms,
+                "evidence_assignment": assignment,
+            }
+        )
+    return selected_payloads
+
+
+def _build_authenticated_stage3_single_case_prefix(
+    *,
+    repo_root: Path,
+    selected_priority_decisions: Sequence[Mapping[str, Any]],
+    problem_records: Sequence[Mapping[str, Any]],
+    atoms: Sequence[Mapping[str, Any]],
+    imported_dossier: Mapping[str, Any],
+    resolved_repo_ref: str | None,
+    repo_input: str | None,
+    target_slug: str | None,
+    agent: str,
+    model: str | None,
+    artifacts: Mapping[str, Any],
+    prior_stage_document: Mapping[str, Any] | None = None,
+    validation_error_rescore: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Authenticate one completed dossier as the next resumable Stage-3 prefix item."""
+
+    selected_payloads = _build_selected_research_payloads(
+        repo_root=repo_root,
+        selected_priority_decisions=selected_priority_decisions,
+        problem_records=problem_records,
+        atoms=atoms,
+    )
+    compatibility = stage3_research_compatibility_contract(agent=agent)
+    completed = _resume_completed_prefix_from_stage_document(
+        prior_stage_document,
+        selected_problems=selected_payloads,
+        resolved_repo_ref=resolved_repo_ref,
+        expected_compatibility_contract=compatibility,
+    )
+    if len(completed) >= len(selected_payloads):
+        raise ValueError("stage3_prefix_import_has_no_next_case")
+
+    dossier = (
+        _materialize_terminal_research_validation_error_rescore(
+            imported_dossier,
+            validation_error_rescore=validation_error_rescore,
+        )
+        if isinstance(validation_error_rescore, Mapping)
+        else dict(imported_dossier)
+    )
+    expected = selected_payloads[len(completed)]
+    expected_assignment_raw = expected.get("evidence_assignment")
+    expected_assignment = (
+        expected_assignment_raw if isinstance(expected_assignment_raw, Mapping) else {}
+    )
+    expected_atoms = [
+        atom
+        for field in ("evidence_atoms", "derived_evidence_atoms")
+        for atom in (expected.get(field) if isinstance(expected.get(field), list) else [])
+        if isinstance(atom, Mapping)
+    ]
+    expected_assignment = _authenticate_assignment_source_classifications(
+        expected_assignment,
+        atoms=expected_atoms,
+    )
+    dossier_assignment_raw = dossier.get("evidence_assignment")
+    dossier_assignment = (
+        dossier_assignment_raw if isinstance(dossier_assignment_raw, Mapping) else {}
+    )
+    verification_raw = dossier.get("evidence_verification")
+    verification = verification_raw if isinstance(verification_raw, Mapping) else {}
+    if dossier.get("problem_id") != expected.get("problem_id"):
+        raise ValueError("stage3_prefix_import_problem_order_mismatch")
+    if dossier.get("case_id") != expected.get("case_id"):
+        raise ValueError("stage3_prefix_import_case_mismatch")
+    if _persisted_source_evidence_assignment_sha256(
+        dossier_assignment
+    ) != _source_evidence_assignment_sha256(expected_assignment):
+        raise ValueError("stage3_prefix_import_assignment_mismatch")
+    if dossier.get("repo_revision") != resolved_repo_ref:
+        raise ValueError("stage3_prefix_import_revision_mismatch")
+    if verification.get("status") != "verified":
+        raise ValueError("stage3_prefix_import_evidence_not_verified")
+
+    candidate_items = [*completed, dossier]
+    progress_checkpoint = _completed_prefix_checkpoint(
+        selected_problems=selected_payloads,
+        completed_dossiers=candidate_items,
+        resolved_repo_ref=resolved_repo_ref,
+        compatibility_contract=compatibility,
+    )
+    candidate = build_stage_document(
+        "repro_research",
+        candidate_items,
+        input_meta={
+            "selected_problem_count": len(selected_payloads),
+            "fresh_research_dossier_count": len(candidate_items),
+            "retained_research_reused_count": 0,
+            "research_dossier_count": len(candidate_items),
+            "stage_status": "checkpointed_progress",
+            "dry_run": False,
+            "agent": agent,
+            "model": model,
+            "repo_input": repo_input,
+            "target_slug": target_slug,
+            "research_compatibility": compatibility,
+            "progress_checkpoint": progress_checkpoint,
+            "supervised_prefix_import_count": 1,
+        },
+        artifacts=dict(artifacts),
+    )
+    authenticated = _resume_completed_prefix_from_stage_document(
+        candidate,
+        selected_problems=selected_payloads,
+        resolved_repo_ref=resolved_repo_ref,
+        expected_compatibility_contract=compatibility,
+    )
+    if len(authenticated) != len(candidate_items):
+        raise ValueError("stage3_prefix_import_native_validation_incomplete")
+
+    # Rebuild all hashes from the native normalized dossiers, then validate the
+    # exact document that the persistence layer will receive.
+    final_checkpoint = _completed_prefix_checkpoint(
+        selected_problems=selected_payloads,
+        completed_dossiers=authenticated,
+        resolved_repo_ref=resolved_repo_ref,
+        compatibility_contract=compatibility,
+    )
+    candidate["items"] = authenticated
+    candidate["item_count"] = len(authenticated)
+    candidate_meta = dict(candidate["input_meta"])
+    candidate_meta["progress_checkpoint"] = final_checkpoint
+    candidate["input_meta"] = candidate_meta
+    final_authenticated = _resume_completed_prefix_from_stage_document(
+        candidate,
+        selected_problems=selected_payloads,
+        resolved_repo_ref=resolved_repo_ref,
+        expected_compatibility_contract=compatibility,
+    )
+    if final_authenticated != authenticated:
+        raise ValueError("stage3_prefix_import_native_validation_unstable")
+    return candidate
+
+
+def _run_repro_research_stage(
+    *,
+    repo_root: Path,
+    repo_input: str | None,
+    repo_ref: str | None,
+    target_slug: str | None,
+    selected_priority_decisions: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+    atoms: list[dict[str, Any]],
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    dry_run: bool,
+    replay_timeout_seconds: float,
+    replay_executor: ReplayExecutor,
+    replay_executor_metadata: dict[str, Any],
+    resume_stage_document: Mapping[str, Any] | None = None,
+    reused_research_dossiers: Sequence[dict[str, Any]] = (),
+    resume_upstream_contract: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run stage 3 reproduce-plus-research and write the stage artifacts."""
+    import json as _json
+
+    records_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    selected_payloads = _build_selected_research_payloads(
+        repo_root=repo_root,
+        selected_priority_decisions=selected_priority_decisions,
+        problem_records=problem_records,
+        atoms=atoms,
+    )
 
     reused = [dict(item) for item in reused_research_dossiers]
     core_resume_stage_document = resume_stage_document

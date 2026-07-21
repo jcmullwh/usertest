@@ -4,6 +4,7 @@ import json
 import os
 import re
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from hashlib import sha256
 from json import JSONDecoder
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from run_artifacts.capture import CaptureResult, TextCapturePolicy, capture_text_artifact
+from run_artifacts.history import MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH
 from run_artifacts.lifecycle import classify_history_record_lifecycle
 from run_artifacts.path_normalization import normalize_agent_path
 from run_artifacts.run_failure_event import (
@@ -101,6 +103,8 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "report_validation_error": 0.90,
     "token_monitoring_signal": 0.80,
     "token_monitoring_error": 0.75,
+    "maintenance_image_cleanup": 0.90,
+    "maintenance_image_cleanup_artifact_error": 0.80,
     "agent_stderr_artifact": 0.85,
     "capability_warning_artifact": 0.20,
     "capability_notice_artifact": 0.20,
@@ -115,6 +119,18 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "suggested_change": 0.65,
     "confidence_missing": 0.45,
 }
+
+# Files consulted directly by ``extract_backlog_atoms`` in addition to the
+# structured record returned by ``iter_report_history(embed="none")``.  Qualification
+# source custody imports this declaration so adding a new direct run-artifact reader
+# cannot require a second, drifting whitelist.
+BACKLOG_ATOM_EXTRACTION_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = (
+    "token_monitoring.json",
+    "token_monitoring_error.json",
+    "normalized_events.jsonl",
+    "agent_stderr.txt",
+    "agent_last_message.txt",
+)
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -224,12 +240,21 @@ def _command_failure_entry_identity(entry: dict[str, Any]) -> str | None:
     return f"{exit_code}|{_normalize_dedupe_key(command)}|{cwd_key}|{artifact_key}"
 
 
-def _extract_failed_commands_from_events(
-    *,
-    events_path: Path,
-    max_items: int | None = None,
-) -> list[dict[str, Any]]:
-    failed_commands: list[dict[str, Any]] = []
+_COMMAND_FOLLOWUP_SAMPLE_LIMIT = 8
+_COMMAND_CONTEXT_TEXT_LIMIT = 2_000
+
+
+def _bounded_command_context_text(value: Any) -> str | None:
+    text = _coerce_string(value)
+    if text is None:
+        return None
+    return text[:_COMMAND_CONTEXT_TEXT_LIMIT]
+
+
+def _extract_run_commands_from_events(*, events_path: Path) -> list[dict[str, Any]]:
+    """Return a bounded-field command timeline from one normalized event stream."""
+
+    commands: list[dict[str, Any]] = []
     try:
         with events_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -240,15 +265,16 @@ def _extract_failed_commands_from_events(
                     event = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(event, dict):
-                    continue
-                if _coerce_string(event.get("type")) != "run_command":
+                if (
+                    not isinstance(event, dict)
+                    or _coerce_string(event.get("type")) != "run_command"
+                ):
                     continue
                 data = event.get("data")
                 if not isinstance(data, dict):
                     continue
                 exit_code = data.get("exit_code")
-                if not isinstance(exit_code, int) or exit_code == 0:
+                if not isinstance(exit_code, int):
                     continue
                 command = _coerce_string(data.get("command"))
                 if command is None:
@@ -257,10 +283,10 @@ def _extract_failed_commands_from_events(
                         command = " ".join(argv)
                 if command is None:
                     continue
-                if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
-                    continue
-                failed_commands.append(
+                commands.append(
                     {
+                        "event_ordinal": len(commands) + 1,
+                        "timestamp_utc": _coerce_string(event.get("ts")),
                         "command": command,
                         "exit_code": exit_code,
                         "cwd": _coerce_string(data.get("cwd")),
@@ -272,12 +298,101 @@ def _extract_failed_commands_from_events(
                         "from_events": True,
                     }
                 )
-                if max_items is not None and len(failed_commands) >= max_items:
-                    break
     except OSError:
         return []
+    return commands
 
+
+def _extract_failed_commands_from_events(
+    *,
+    events_path: Path,
+    max_items: int | None = None,
+) -> list[dict[str, Any]]:
+    failed_commands: list[dict[str, Any]] = []
+    for command_event in _extract_run_commands_from_events(events_path=events_path):
+        command = str(command_event["command"])
+        exit_code = int(command_event["exit_code"])
+        if exit_code == 0 or _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+            continue
+        failed_commands.append(command_event)
+        if max_items is not None and len(failed_commands) >= max_items:
+            break
     return failed_commands
+
+
+def _same_run_command_context(
+    *,
+    failure: Mapping[str, Any],
+    run_commands: Sequence[dict[str, Any]],
+    claimed_event_ordinals: set[int],
+    lifecycle_status: str,
+    report: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Bind a failure to later same-run observations without declaring recovery."""
+
+    failure_command = _coerce_string(failure.get("command"))
+    failure_exit_code = failure.get("exit_code")
+    if failure_command is None or not isinstance(failure_exit_code, int):
+        return None
+
+    normalized_failure = _normalize_dedupe_key(failure_command)
+    failure_cwd = _coerce_string(failure.get("cwd"))
+    failure_cwd_key = failure_cwd.replace("\\", "/").casefold() if failure_cwd else None
+    matched_index: int | None = None
+    for index, command_event in enumerate(run_commands):
+        ordinal = command_event.get("event_ordinal")
+        if not isinstance(ordinal, int) or ordinal in claimed_event_ordinals:
+            continue
+        command = _coerce_string(command_event.get("command"))
+        if (
+            command is None
+            or command_event.get("exit_code") != failure_exit_code
+            or _normalize_dedupe_key(command) != normalized_failure
+        ):
+            continue
+        event_cwd = _coerce_string(command_event.get("cwd"))
+        event_cwd_key = event_cwd.replace("\\", "/").casefold() if event_cwd else None
+        if (
+            failure_cwd_key is not None
+            and event_cwd_key is not None
+            and failure_cwd_key != event_cwd_key
+        ):
+            continue
+        matched_index = index
+        claimed_event_ordinals.add(ordinal)
+        break
+    if matched_index is None:
+        return None
+
+    later = list(run_commands[matched_index + 1 :])
+    sampled = later[:_COMMAND_FOLLOWUP_SAMPLE_LIMIT]
+    projected_commands = []
+    for item in sampled:
+        projected = {
+            "event_ordinal": item.get("event_ordinal"),
+            "timestamp_utc": item.get("timestamp_utc"),
+            "command": _bounded_command_context_text(item.get("command")),
+            "exit_code": item.get("exit_code"),
+        }
+        output_excerpt = _bounded_command_context_text(item.get("output_excerpt"))
+        if output_excerpt is not None:
+            projected["output_excerpt"] = output_excerpt
+        projected_commands.append(projected)
+
+    report_status = _coerce_string(report.get("status")) if isinstance(report, Mapping) else None
+    report_kind = _coerce_string(report.get("kind")) if isinstance(report, Mapping) else None
+    return {
+        "source": "normalized_events.jsonl",
+        "failure_event_ordinal": run_commands[matched_index].get("event_ordinal"),
+        "run_command_count": len(run_commands),
+        "later_command_count": len(later),
+        "later_successful_command_count": sum(item.get("exit_code") == 0 for item in later),
+        "sampled_later_commands": projected_commands,
+        "sample_truncated": len(later) > len(sampled),
+        "run_lifecycle_status": lifecycle_status,
+        "report_status": report_status,
+        "report_kind": report_kind,
+    }
 
 
 def _safe_relpath(path: Path, root: Path) -> str:
@@ -571,6 +686,149 @@ def _load_token_monitoring_artifacts(record: dict[str, Any], run_dir: Path) -> t
         error_obj = _read_optional_json_object(run_dir / "token_monitoring_error.json")
 
     return monitoring_obj, error_obj
+
+
+def _maintenance_string_list_count(
+    payload: dict[str, Any],
+    key: str,
+    errors: list[str],
+) -> tuple[int | None, list[str] | None]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        errors.append(f"{key}_not_list")
+        return None, None
+    normalized = [
+        item.strip() for item in value if isinstance(item, str) and item.strip()
+    ]
+    if len(normalized) != len(value):
+        errors.append(f"{key}_contains_invalid_entry")
+        return None, None
+    return len(normalized), normalized
+
+
+def _maintenance_tag_identity(ref: str) -> str | None:
+    """Return the tag component used by the legacy two-repository alias contract."""
+
+    slash_index = ref.rfind("/")
+    colon_index = ref.rfind(":")
+    if colon_index <= slash_index or colon_index == len(ref) - 1:
+        return None
+    return ref[colon_index + 1 :]
+
+
+def _maintenance_cleanup_observation(
+    value: Any,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    errors: list[str] = []
+    if not isinstance(value, dict):
+        return None, ["artifact_root_not_object"]
+    if value.get("schema_version") != 1:
+        errors.append("schema_version_not_1")
+
+    cleanup_enabled = value.get("cleanup_enabled")
+    if not isinstance(cleanup_enabled, bool):
+        errors.append("cleanup_enabled_not_boolean")
+    dry_run = value.get("dry_run")
+    if not isinstance(dry_run, bool):
+        errors.append("dry_run_not_boolean")
+
+    repos_scanned_count, _ = _maintenance_string_list_count(
+        value, "repos_scanned", errors
+    )
+    kept_tag_count, kept_tags = _maintenance_string_list_count(
+        value, "kept_tags", errors
+    )
+    deleted_tag_count, _ = _maintenance_string_list_count(
+        value, "deleted_tags", errors
+    )
+    deleted_image_id_count, _ = _maintenance_string_list_count(
+        value, "deleted_image_ids", errors
+    )
+    error_count, _ = _maintenance_string_list_count(value, "errors", errors)
+
+    derived_tag_suffixes: set[str | None] | None = None
+    if kept_tags is not None:
+        derived_tag_suffixes = {_maintenance_tag_identity(ref) for ref in kept_tags}
+        if None in derived_tag_suffixes:
+            errors.append("kept_tag_identity_unresolved")
+
+    kept_image_id_count: int | None = None
+    if "kept_image_ids" in value:
+        _, retained_identity_list = _maintenance_string_list_count(
+            value, "kept_image_ids", errors
+        )
+        if retained_identity_list is not None:
+            kept_image_id_count = len(set(retained_identity_list))
+
+    if errors:
+        return None, errors
+    assert isinstance(cleanup_enabled, bool)
+    assert isinstance(dry_run, bool)
+    assert repos_scanned_count is not None
+    assert kept_tag_count is not None
+    assert deleted_tag_count is not None
+    assert deleted_image_id_count is not None
+    assert error_count is not None
+    assert derived_tag_suffixes is not None
+    assert None not in derived_tag_suffixes
+    observation: dict[str, Any] = {
+        "cleanup_enabled": cleanup_enabled,
+        "dry_run": dry_run,
+        "repos_scanned_count": repos_scanned_count,
+        "kept_tag_count": kept_tag_count,
+        # Legacy schema-v1 sidecars did not persist Docker image IDs. Distinct tag
+        # suffixes reveal alias growth but do not prove distinct physical identities.
+        "unique_retained_tag_suffix_count": len(derived_tag_suffixes),
+        "retained_identity_measurement_basis": (
+            "kept_image_ids_and_tag_suffix_proxy"
+            if kept_image_id_count is not None
+            else "tag_suffix_proxy_only"
+        ),
+        "physical_retained_identity_count_known": False,
+        "deleted_tag_count": deleted_tag_count,
+        "deleted_image_id_count": deleted_image_id_count,
+        "error_count": error_count,
+    }
+    if kept_image_id_count is not None:
+        # This is deliberately named after the persisted field. Ref-only fallback
+        # identities are absent from `kept_image_ids`, so it is not a claim about the
+        # complete physical identity population.
+        observation["kept_image_id_count"] = kept_image_id_count
+    return observation, []
+
+
+def _runner_operational_observation_lineage(
+    *,
+    run_id: str,
+    origin_stage: str,
+) -> dict[str, Any]:
+    """Return independent lineage for runner-owned operational telemetry.
+
+    A run's mission describes the agent work product, not every runner-owned sidecar
+    written beside it.  In particular, maintenance telemetry can reveal a runner
+    infrastructure problem while an implementation, research, or verification mission
+    is in progress.  Inheriting that mission's derived-evidence role would make an
+    unparented operational observation ineligible for problem mining.
+
+    Keep this override source-specific.  Agent-authored report atoms must continue to
+    inherit the enclosing run's normal lineage contract.
+    """
+
+    return {
+        "origin_run_id": run_id,
+        "origin_stage": origin_stage,
+        "parent_case_id": None,
+        "parent_problem_id": None,
+        "parent_ticket_fingerprint": None,
+        "derived_from_atom_ids": [],
+        "evidence_role": "observation",
+        "case_id": None,
+        "supporting_case_ids": [],
+        "disposition": "unresolved",
+        "disposition_status": "pending",
+        "disposition_receipt": None,
+        "lineage_authorities": ["runner_operational_sidecar"],
+    }
 
 
 def _bounded_terminal_context_text(
@@ -1105,6 +1363,81 @@ def extract_backlog_atoms(
             severity_counts[severity_hint] += 1
             return atom_id
 
+        cleanup_sidecar = record.get("maintenance_image_cleanup")
+        cleanup_read_raw = record.get("maintenance_image_cleanup_read")
+        cleanup_read = cleanup_read_raw if isinstance(cleanup_read_raw, dict) else None
+        cleanup_artifact_ref_raw = record.get(
+            "maintenance_image_cleanup_artifact_ref"
+        )
+        cleanup_artifact_ref = (
+            dict(cleanup_artifact_ref_raw)
+            if isinstance(cleanup_artifact_ref_raw, dict)
+            else {
+                "path": MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
+                "exists": cleanup_sidecar is not None,
+            }
+        )
+        cleanup_exists = cleanup_sidecar is not None or (
+            cleanup_read is not None and cleanup_read.get("exists") is True
+        )
+        if cleanup_exists:
+            cleanup_lineage_context = _runner_operational_observation_lineage(
+                run_id=run_id,
+                origin_stage="runner_maintenance_image_cleanup",
+            )
+            cleanup_observation, cleanup_contract_errors = (
+                _maintenance_cleanup_observation(cleanup_sidecar)
+            )
+            if cleanup_observation is not None:
+                kept_image_id_text = (
+                    "kept_image_ids="
+                    f"{cleanup_observation['kept_image_id_count']}; "
+                    if "kept_image_id_count" in cleanup_observation
+                    else ""
+                )
+                _emit(
+                    "maintenance_image_cleanup",
+                    (
+                        "Maintenance image cleanup observation: "
+                        f"enabled={str(cleanup_observation['cleanup_enabled']).lower()}; "
+                        f"dry_run={str(cleanup_observation['dry_run']).lower()}; "
+                        "repos_scanned="
+                        f"{cleanup_observation['repos_scanned_count']}; "
+                        f"kept_tags={cleanup_observation['kept_tag_count']}; "
+                        "unique_retained_tag_suffixes="
+                        f"{cleanup_observation['unique_retained_tag_suffix_count']}; "
+                        f"{kept_image_id_text}"
+                        "physical_retained_identity_count=unknown; "
+                        f"deleted_tags={cleanup_observation['deleted_tag_count']}; "
+                        "deleted_image_ids="
+                        f"{cleanup_observation['deleted_image_id_count']}; "
+                        f"errors={cleanup_observation['error_count']}."
+                    ),
+                    **cleanup_observation,
+                    artifact_ref=cleanup_artifact_ref,
+                    artifact_read=cleanup_read,
+                    severity_hint="medium",
+                    _lineage_context=cleanup_lineage_context,
+                )
+            else:
+                read_failure = (
+                    cleanup_read.get("error_type")
+                    if cleanup_read is not None
+                    else None
+                )
+                detail = read_failure or ",".join(cleanup_contract_errors) or "unknown"
+                _emit(
+                    "maintenance_image_cleanup_artifact_error",
+                    f"Maintenance image cleanup artifact is unreadable or invalid: {detail}.",
+                    artifact_ref=cleanup_artifact_ref,
+                    artifact_read=cleanup_read,
+                    contract_errors=(
+                        cleanup_contract_errors if cleanup_contract_errors else None
+                    ),
+                    severity_hint="medium",
+                    _lineage_context=cleanup_lineage_context,
+                )
+
         token_monitoring, token_monitoring_error = _load_token_monitoring_artifacts(record, run_dir)
         if isinstance(token_monitoring, dict):
             signals_raw = token_monitoring.get("signals")
@@ -1177,6 +1510,9 @@ def extract_backlog_atoms(
                 generated_at_utc=_coerce_string(token_monitoring_error.get("generated_at_utc")),
             )
 
+        report_raw = record.get("report")
+        report_for_context = report_raw if isinstance(report_raw, Mapping) else None
+
         metrics_raw = record.get("metrics")
         metrics = metrics_raw if isinstance(metrics_raw, dict) else None
 
@@ -1231,6 +1567,11 @@ def extract_backlog_atoms(
             metrics_incomplete = True
 
         events_path = run_dir / "normalized_events.jsonl"
+        run_command_events = (
+            _extract_run_commands_from_events(events_path=events_path)
+            if events_path.exists()
+            else []
+        )
         if not failed_commands and events_path.exists():
             failed_commands = _extract_failed_commands_from_events(
                 events_path=events_path,
@@ -1277,6 +1618,7 @@ def extract_backlog_atoms(
                     failed_commands_omitted_hint or 0,
                 )
             emitted = 0
+            claimed_event_ordinals: set[int] = set()
             for entry in failed_commands:
                 if (
                     max_command_failure_atoms is not None
@@ -1291,6 +1633,13 @@ def extract_backlog_atoms(
                 output_excerpt_truncated = (
                     True if entry.get("output_excerpt_truncated") is True else None
                 )
+                same_run_context = _same_run_command_context(
+                    failure=entry,
+                    run_commands=run_command_events,
+                    claimed_event_ordinals=claimed_event_ordinals,
+                    lifecycle_status=status,
+                    report=report_for_context,
+                )
                 _emit(
                     "command_failure",
                     f"Command failed: exit_code={exit_code}; command={command}",
@@ -1304,6 +1653,7 @@ def extract_backlog_atoms(
                     output_excerpt_truncated=output_excerpt_truncated,
                     from_events=True if entry.get("from_events") else None,
                     from_metrics=True if entry.get("from_metrics") else None,
+                    same_run_command_context=same_run_context,
                 )
                 emitted += 1
 
@@ -1318,7 +1668,7 @@ def extract_backlog_atoms(
                     severity_hint="low",
                 )
 
-        report = record.get("report")
+        report = report_raw
         if isinstance(report, dict):
             confusion = report.get("confusion_points")
             if isinstance(confusion, list):

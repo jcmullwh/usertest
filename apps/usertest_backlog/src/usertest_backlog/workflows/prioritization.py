@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from backlog_core import provisional_same_cause_group_errors
 from backlog_miner.prompt_correction import (
     CorrectionRunResult,
     acquire_author_session,
@@ -12,6 +13,8 @@ from backlog_miner.prompt_correction import (
 from usertest_backlog.shared import *
 from usertest_backlog.workflows.downstream_hydration import (
     hydrate_retained_downstream_chain,
+    hydrate_retained_insufficient_evidence_disposition,
+    hydrate_retained_no_change_disposition,
 )
 from usertest_backlog.workflows.research_hydration import hydrate_retained_research_proof
 
@@ -25,7 +28,8 @@ _PRIORITY_FORBIDDEN_SOLUTION_FIELDS = frozenset(
     }
 )
 
-_RESEARCH_ROUTE_REVISION = "runner_research_route_v2"
+_RESEARCH_ROUTE_REVISION = "runner_research_route_v3"
+_PROVISIONAL_RESEARCH_UNIT_WAIT_ROUTE = "await_provisional_research_unit"
 _RESEARCH_DISPATCH_ROUTES = frozenset(
     {"research_new", "research_update", "resume_prior", "reassess_actionability"}
 )
@@ -38,8 +42,9 @@ _RESEARCH_ROUTE_ORDER = {
     "resume_prior": 2,
     "reassess_actionability": 3,
     "await_evidence": 4,
-    "continue_downstream": 5,
-    "await_outcome": 6,
+    _PROVISIONAL_RESEARCH_UNIT_WAIT_ROUTE: 5,
+    "continue_downstream": 6,
+    "await_outcome": 7,
 }
 _PRIORITY_BUCKET_ORDER = {"p0": 0, "p1": 1, "p2": 2, "p3": 3, "watch": 4}
 
@@ -198,6 +203,43 @@ def _runner_research_route(record: Mapping[str, Any]) -> dict[str, Any]:
         if external_wait:
             route = "resume_prior"
             reason = "A retained provider-wait frontier must resume rather than restart."
+        elif research_status == "insufficient_evidence":
+            wait_disposition, wait_errors = (
+                hydrate_retained_insufficient_evidence_disposition(record)
+            )
+            if wait_disposition is not None and not wait_errors:
+                route = "await_evidence"
+                reason = (
+                    "The exact current insufficient-evidence proof and its content-bound "
+                    "zero-option Stage-4 disposition agree that implementation is blocked "
+                    "on material evidence. The case waits without repeating research."
+                )
+                reconsider_when = (
+                    "A new source-evidence atom, changed case/source/research revision, or "
+                    "explicit blocker-recheck receipt changes the recorded frontier."
+                )
+            elif wait_errors and wait_errors[0] == (
+                "retained_insufficient_evidence_research_invalid"
+            ):
+                route = "research_update"
+                reason = (
+                    "The retained insufficient-evidence summary could not authenticate its "
+                    "Stage-3 proof and requires fresh revalidation. First hydration result: "
+                    + wait_errors[1]
+                    + "."
+                    if len(wait_errors) > 1
+                    else "The retained insufficient-evidence Stage-3 proof is invalid and "
+                    "requires fresh revalidation."
+                )
+            else:
+                route = "continue_downstream"
+                reason = (
+                    "The exact retained insufficient-evidence proof is current, but its "
+                    "zero-option Stage-4 disposition is absent, stale, or unverified and "
+                    "will be rebuilt deterministically. First result: "
+                    + (wait_errors[0] if wait_errors else "disposition_unavailable")
+                    + "."
+                )
         elif research_status in {"blocked", "partial"} or root_cause_status == "blocked":
             if reassessment_completed_without_frontier_change or stable_wait:
                 route = "await_evidence"
@@ -221,30 +263,56 @@ def _runner_research_route(record: Mapping[str, Any]) -> dict[str, Any]:
         else:
             hydrated, hydration_errors = hydrate_retained_research_proof(record)
             if hydrated is not None and not hydration_errors:
-                downstream_chain, downstream_errors = hydrate_retained_downstream_chain(
+                no_change, no_change_errors = hydrate_retained_no_change_disposition(
                     record,
                     research_dossier=hydrated,
                 )
-                if downstream_chain is not None and not downstream_errors:
-                    route = "await_outcome"
+                if no_change is not None and not no_change_errors:
+                    route = "await_evidence"
                     reason = (
-                        "The exact retained research, option, selection, and plan chain is "
-                        "content-bound, currently ready, and unchanged; no Stage 3-6 model "
-                        "work is needed until outcome or source evidence changes."
+                        "The exact current research proof and its content-bound zero-option "
+                        "Stage-4 disposition agree that no product change is currently "
+                        "required. The case remains nonterminal and waits without repeating "
+                        "Stages 3-6."
                     )
-                else:
+                    reconsider_when = (
+                        "A new source-evidence atom, changed case/source/research revision, "
+                        "or authenticated live-verification evidence changes the recorded "
+                        "frontier."
+                    )
+                elif no_change_errors:
                     route = "continue_downstream"
                     reason = (
-                        "The complete retained Stage-3 dossier is currently ready, but the "
-                        "full downstream chain is absent, stale, or unverified and will "
-                        "self-heal through the normal downstream path. First chain result: "
-                        + (
-                            downstream_errors[0]
-                            if downstream_errors
-                            else "downstream_chain_unavailable"
-                        )
-                        + "."
+                        "The current Stage-3 proof has a no-change actionability disposition, "
+                        "but its retained Stage-4 disposition is absent, stale, or unverified "
+                        "and will be rebuilt through the deterministic downstream path. First "
+                        "result: " + no_change_errors[0] + "."
                     )
+                else:
+                    downstream_chain, downstream_errors = hydrate_retained_downstream_chain(
+                        record,
+                        research_dossier=hydrated,
+                    )
+                    if downstream_chain is not None and not downstream_errors:
+                        route = "await_outcome"
+                        reason = (
+                            "The exact retained research, option, selection, and plan chain is "
+                            "content-bound, currently ready, and unchanged; no Stage 3-6 model "
+                            "work is needed until outcome or source evidence changes."
+                        )
+                    else:
+                        route = "continue_downstream"
+                        reason = (
+                            "The complete retained Stage-3 dossier is currently ready, but the "
+                            "full downstream chain is absent, stale, or unverified and will "
+                            "self-heal through the normal downstream path. First chain result: "
+                            + (
+                                downstream_errors[0]
+                                if downstream_errors
+                                else "downstream_chain_unavailable"
+                            )
+                            + "."
+                        )
             else:
                 route = "research_update"
                 reason = (
@@ -480,6 +548,230 @@ def _enforce_full_drain_research_policy(decisions: list[dict[str, Any]]) -> None
     _enforce_research_routing_policy(decisions)
 
 
+def _priority_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        )
+    )
+
+
+def _apply_provisional_research_unit_schedule(
+    *,
+    decisions: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+) -> list[str]:
+    """Dispatch one evidence-complete provisional group as one research unit.
+
+    Provisional grouping does not merge durable cases.  It only prevents Stage 3 from
+    researching the same hypothesized cause twice when relation review has nominated one
+    evidence-complete research unit.  Fail open to independent scheduling whenever the
+    packet is inconsistent or a non-unit member carries retained research state that
+    cannot safely be transferred to the nominated author assignment.
+    """
+
+    records_by_problem_id = {
+        str(record["problem_id"]): record
+        for record in problem_records
+        if isinstance(record, dict)
+        and isinstance(record.get("problem_id"), str)
+        and str(record["problem_id"]).strip()
+    }
+    decisions_by_problem_id: dict[str, list[dict[str, Any]]] = {}
+    for decision in decisions:
+        problem_id = _coerce_string(decision.get("problem_id"))
+        if problem_id is not None:
+            decisions_by_problem_id.setdefault(problem_id, []).append(decision)
+
+    grouped_records: dict[str, list[dict[str, Any]]] = {}
+    warnings: list[str] = []
+    for record in problem_records:
+        if record.get("case_identity_status") != "provisional_same_cause":
+            continue
+        group_raw = record.get("provisional_same_cause_group")
+        group = group_raw if isinstance(group_raw, Mapping) else {}
+        group_id = _coerce_string(group.get("group_id"))
+        if group_id is None:
+            problem_id = _coerce_string(record.get("problem_id")) or "(missing)"
+            warnings.append(
+                f"provisional_research_schedule_group_id_missing:{problem_id}"
+            )
+            continue
+        grouped_records.setdefault(group_id, []).append(record)
+
+    for group_id, observed_records in sorted(grouped_records.items()):
+        exemplar_raw = observed_records[0].get("provisional_same_cause_group")
+        exemplar = exemplar_raw if isinstance(exemplar_raw, Mapping) else {}
+        member_problem_ids = _priority_string_list(exemplar.get("member_problem_ids"))
+        member_case_ids = _priority_string_list(exemplar.get("member_case_ids"))
+        research_unit_case_id = _coerce_string(exemplar.get("research_unit_case_id"))
+        group_errors: list[str] = []
+        facet_source_atom_ids: list[str] = []
+
+        for record in observed_records:
+            record_problem_id = _coerce_string(record.get("problem_id")) or "(missing)"
+            record_case_id = _coerce_string(record.get("case_id"))
+            group_raw = record.get("provisional_same_cause_group")
+            group = group_raw if isinstance(group_raw, Mapping) else {}
+            group_errors.extend(
+                f"{record_problem_id}:{error}"
+                for error in provisional_same_cause_group_errors(
+                    group_raw,
+                    owning_case_id=record_case_id,
+                )
+            )
+            if _coerce_string(group.get("group_id")) != group_id:
+                group_errors.append(f"{record_problem_id}:group_id_mismatch")
+            if set(_priority_string_list(group.get("member_problem_ids"))) != set(
+                member_problem_ids
+            ):
+                group_errors.append(f"{record_problem_id}:member_problem_ids_mismatch")
+            if set(_priority_string_list(group.get("member_case_ids"))) != set(
+                member_case_ids
+            ):
+                group_errors.append(f"{record_problem_id}:member_case_ids_mismatch")
+            if _coerce_string(group.get("research_unit_case_id")) != research_unit_case_id:
+                group_errors.append(f"{record_problem_id}:research_unit_case_id_mismatch")
+            for facet in (
+                group.get("member_facets")
+                if isinstance(group.get("member_facets"), list)
+                else []
+            ):
+                if isinstance(facet, Mapping):
+                    facet_source_atom_ids.extend(
+                        _priority_string_list(facet.get("source_evidence_atom_ids"))
+                    )
+
+        member_records = [
+            records_by_problem_id[problem_id]
+            for problem_id in member_problem_ids
+            if problem_id in records_by_problem_id
+        ]
+        if len(member_records) != len(member_problem_ids):
+            group_errors.append("member_problem_record_missing")
+        if {
+            _coerce_string(record.get("case_id")) for record in member_records
+        } != set(member_case_ids):
+            group_errors.append("member_case_record_mismatch")
+        member_decisions = [
+            decisions_by_problem_id[problem_id][0]
+            for problem_id in member_problem_ids
+            if len(decisions_by_problem_id.get(problem_id, [])) == 1
+        ]
+        if len(member_decisions) != len(member_problem_ids):
+            group_errors.append("member_priority_decision_missing_or_duplicated")
+        unit_records = [
+            record
+            for record in member_records
+            if _coerce_string(record.get("case_id")) == research_unit_case_id
+        ]
+        if research_unit_case_id is None or len(unit_records) != 1:
+            group_errors.append("research_unit_record_invalid")
+
+        source_atom_ids = list(dict.fromkeys(facet_source_atom_ids))
+        unit_record = unit_records[0] if len(unit_records) == 1 else None
+        unit_problem_id = (
+            _coerce_string(unit_record.get("problem_id"))
+            if unit_record is not None
+            else None
+        )
+        unit_evidence = {
+            *_priority_string_list(
+                unit_record.get("source_evidence_atom_ids")
+                if unit_record is not None
+                else []
+            ),
+            *_priority_string_list(
+                unit_record.get("evidence_atom_ids") if unit_record is not None else []
+            ),
+        }
+        if not source_atom_ids or not set(source_atom_ids).issubset(unit_evidence):
+            group_errors.append("research_unit_source_evidence_incomplete")
+
+        unit_decision = (
+            decisions_by_problem_id.get(unit_problem_id or "", [None])[0]
+            if len(decisions_by_problem_id.get(unit_problem_id or "", [])) == 1
+            else None
+        )
+        if not isinstance(unit_decision, dict) or unit_decision.get(
+            "selected_for_research"
+        ) is not True:
+            group_errors.append("research_unit_not_selected")
+
+        for member_decision in member_decisions:
+            if member_decision is unit_decision:
+                continue
+            if member_decision.get("selected_for_research") is not True:
+                continue
+            member_route = _coerce_string(member_decision.get("research_route"))
+            if member_route != "research_new":
+                group_errors.append(
+                    "nonunit_retained_research_state_requires_independent_dispatch:"
+                    + (_coerce_string(member_decision.get("problem_id")) or "(missing)")
+                    + ":"
+                    + (member_route or "(missing)")
+                )
+
+        if group_errors:
+            warnings.extend(
+                f"provisional_research_schedule_not_collapsed:{group_id}:{error}"
+                for error in dict.fromkeys(group_errors)
+            )
+            continue
+
+        assert isinstance(unit_decision, dict)
+        assert unit_problem_id is not None
+        schedule_base = {
+            "schema_version": 1,
+            "group_id": group_id,
+            "research_unit_case_id": research_unit_case_id,
+            "research_unit_problem_id": unit_problem_id,
+            "member_case_ids": member_case_ids,
+            "member_problem_ids": member_problem_ids,
+            "source_evidence_atom_ids": source_atom_ids,
+        }
+        for member_decision in member_decisions:
+            member_problem_id = _coerce_string(member_decision.get("problem_id"))
+            member_decision.setdefault(
+                "individual_research_route", member_decision.get("research_route")
+            )
+            member_decision.setdefault(
+                "individual_selected_for_research",
+                member_decision.get("selected_for_research") is True,
+            )
+            if member_decision is unit_decision:
+                member_decision["provisional_research_schedule"] = {
+                    **schedule_base,
+                    "status": "research_unit",
+                }
+                continue
+            member_decision.update(
+                {
+                    "research_route": _PROVISIONAL_RESEARCH_UNIT_WAIT_ROUTE,
+                    "selected_for_research": False,
+                    "eligible_for_downstream": False,
+                    "route_reason": (
+                        "This provisional same-cause member is represented by the "
+                        f"evidence-complete research unit {unit_problem_id}; its durable "
+                        "identity and facet evidence remain attached to that assignment."
+                    ),
+                    "reconsider_when": (
+                        "The provisional relation is split or cleared, the nominated research "
+                        "unit changes, or new member evidence changes the group frontier."
+                    ),
+                    "provisional_research_schedule": {
+                        **schedule_base,
+                        "status": "represented_by_research_unit",
+                        "represented_problem_id": member_problem_id,
+                    },
+                }
+            )
+
+    return list(dict.fromkeys(warnings))
+
+
 def _server_normalize_priority_decisions(
     *,
     decisions: list[dict[str, Any]],
@@ -702,7 +994,37 @@ def _run_problem_prioritization_stage(
     correction_cost_since_progress = 0.0
     total_correction_cost = 0.0
 
-    if dry_run:
+    if not problem_records:
+        status = "completed_no_input"
+        correction_status = "not_required"
+        correction_metrics = {
+            "status": "not_required",
+            "reason": "no_problem_records",
+            "not_applicable": True,
+            "attempt_count": 0,
+            "correction_turn_count": 0,
+            "correction_invocation_failure_count": 0,
+            "correction_invocation_failure_cost_seconds": 0.0,
+            "accepted": None,
+            "accepted_good": None,
+            "accepted_bad": None,
+            "false_rejected": None,
+            "repaired": False,
+            "stalled": False,
+            "repairable_paused": False,
+            "initial_cost_seconds": 0.0,
+            "total_correction_cost_seconds": 0.0,
+            "total_elapsed_seconds": 0.0,
+            "best_error_count": 0,
+            "best_valid_item_count": 0,
+        }
+        (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
+        (run_out_dir / f"{tag}.response.txt").write_text(
+            "[skipped] stage-2 prioritizer received no problem records; "
+            "no model invocation was required.\n",
+            encoding="utf-8",
+        )
+    elif dry_run:
         status = "dry_run_heuristic"
         (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
         (run_out_dir / f"{tag}.response.txt").write_text(
@@ -1037,6 +1359,12 @@ def _run_problem_prioritization_stage(
     # research mission this cycle. Runner-owned routes retain every case and its explicit
     # retry trigger while selecting only new, updated, resumable, or one-time reassessment work.
     _enforce_research_routing_policy(decisions)
+    warnings_list.extend(
+        _apply_provisional_research_unit_schedule(
+            decisions=decisions,
+            problem_records=problem_records,
+        )
+    )
     decisions.sort(key=_research_dispatch_sort_key)
 
     # Guardrail: stage 2 must not contain solution fields.
@@ -1069,8 +1397,30 @@ def _run_problem_prioritization_stage(
             "prioritizer_attempt_history": correction_attempt_history,
             "prioritizer_correction_cost_since_progress": correction_cost_since_progress,
             "prioritizer_total_correction_cost": total_correction_cost,
+            **(
+                {
+                    "stage_status": "completed",
+                    "model_invocation_skipped": "no_problem_records",
+                }
+                if not problem_records
+                else {}
+            ),
             "prioritizer_fallback_decision_count": sum(
                 1 for decision in decisions if decision.get("model_priority_accepted") is not True
+            ),
+            "provisional_research_unit_count": sum(
+                1
+                for decision in decisions
+                if isinstance(decision.get("provisional_research_schedule"), Mapping)
+                and decision["provisional_research_schedule"].get("status")
+                == "research_unit"
+            ),
+            "provisional_research_member_wait_count": sum(
+                1
+                for decision in decisions
+                if isinstance(decision.get("provisional_research_schedule"), Mapping)
+                and decision["provisional_research_schedule"].get("status")
+                == "represented_by_research_unit"
             ),
             "neighborhood_count": len(neighborhoods),
         },

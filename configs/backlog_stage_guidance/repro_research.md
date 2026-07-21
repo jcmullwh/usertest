@@ -38,8 +38,8 @@ A harness proves a mechanism only when its production call determines the exact 
 An inconclusive command stopped by an external timeout/kill (exit 124/137) is a blocked attempt, not a replay experiment. Retain its artifact and material unknown outside `experiments`.
 If timeout is the assigned symptom, use a self-contained faithful replay whose `supports`/`refutes` outcome is the observed behavior, not the runner cutoff.
 
-`origin_evidence_bindings` may bind a structured symptom field with `observation_predicate` using any registered deterministic predicate. The runner evaluates it against the immutable atom value,
-then the adapter baseline, and retains both in one content-addressed source-root receipt. Do not stringify numbers, booleans, JSON objects, state, or events merely to fit a text assertion.
+`origin_evidence_bindings` may bind a structured symptom field with `observation_predicate` using any registered deterministic predicate. For `role="symptom"`, provide the exact `$.field` path and predicate; omit `value` when the runner should derive and hash a large immutable source value rather than copying it into model output. The runner evaluates the predicate against the immutable atom value,
+binds it to the adapter's baseline experiment, and retains both the source predicate and baseline observation in one content-addressed source-root receipt. The mechanism output may be a transformation of the source value; do not force the source predicate to describe the output. Do not stringify numbers, booleans, JSON objects, state, or events merely to fit a text assertion.
 
 For the primary hypothesis, attempt to falsify it. State the disproof condition before interpreting
 the result. A survived challenge must retain the baseline, intervention/challenge, observations,
@@ -88,6 +88,20 @@ acceptable operational behavior. Record desired behavior, known-safe constraints
 paths, and the live-runtime obligation for downstream use.
 Keep code/test confidence separate from live-runtime proof.
 
+For an exact wrong-output scenario whose current command exits zero, a research-only pytest harness may
+assert the source-grounded corrected behavior so the current revision fails first. The harness must call
+the inspected production entrypoint and let that production result determine the assertion; it must not
+reimplement the mechanism or hard-code a synthetic marker. Run the exact pytest node and declare
+`positive_outcome_contract={"contract_kind":"retained_harness_semantic_assertion",
+"binds_hypothesis_id":"the primary hypothesis ID","expected_value":<typed desired value>,
+"semantic_relation":"exact_expected_value | logical_correction_of_source_failure |
+required_operational_property | repository_contract_requirement","semantic_rationale":"why the value
+is required","semantic_basis":{"kind":"authenticated_semantic_citation","atom_id":"assigned atom",
+"field_path":"$.source-grounded field"}}`. The command must fail nonzero only because that semantic
+assertion is currently false. When the runner verifies its data flow to the selected mechanism, it
+content-addresses the `.usertest_research` harness as a staged replay asset for later stages. This is an
+optional portability aid for useful wrong-output cases, not a universal readiness gate.
+
 ## Verification boundary
 
 An experiment may declare `verification_boundary={boundary_kind,requires_live_verification,
@@ -130,6 +144,11 @@ Always emit `actionability_assessment`: `requires_change` for a current unaction
 the decision remains open. Cite declared experiment/artifact IDs. An evidence-sufficient negative
 is successful research: do not delete controls, invent an unknown, or downgrade merely to stop
 optioning. Stage 4 records the no-change outcome without a model call.
+
+Always emit `observed_problem_refinement` after reading the mandatory source-run context. Stage 1 is
+an evidence-bound mining hypothesis, not the final account of impact. Correct it when retained run
+evidence narrows the symptom; distinguish failed first attempt, successful recovery, partial mitigation,
+and blocked mission. Do not infer “no recovery” from a missing success atom. Account for every assigned atom in `evidence_atom_ids`; downstream stages use the refinement while preserving Stage-1 provenance.
 
 Always emit `case_relation_assessment`: `retain` for one causal work unit, `split` for at least two signed distinct causal/action boundaries, `keep_separate` for a relation hypothesis that remains separate, or `undetermined` when evidence cannot decide. Split is boundary research, not readiness; each child needs its own research.
 For `split`, partition `occurrence_evidence_atom_ids` exactly once across two or more facets, each with title, problem, user impact, and boundary. Citations use an RFC 6901 `field_path` into that occurrence's signed snapshot and copy `exact_value` verbatim. Distinguish causal/action boundaries, not run IDs, timestamps, or wording; otherwise use `undetermined` and preserve the unknown.
@@ -190,6 +209,7 @@ evidence uses the machine-checkable shapes below, not prose substitutes.
     "rationale": "evidence-based current actionability conclusion",
     "evidence_refs": ["experiment:verified-current-state-or-artifact:retained-history"]
   },
+  "observed_problem_refinement": {"problem": "source-run-grounded observed problem after causal research", "user_impact": "bounded impact, including whether the run recovered or remained blocked", "evidence_summary": "concise account of failure, follow-up outcome, and current mechanism evidence", "evidence_atom_ids": ["atom:every-assigned-id"]},
   "material_unknowns": [{"unknown": "what is unknown", "evidence_needed": "specific evidence", "affects": ["root_cause"], "hypothesis_id": "hypothesis:unique", "material": true}],
   "blocking_reasons": [],
   "evidence_boundaries": []
@@ -217,23 +237,23 @@ evidence uses the machine-checkable shapes below, not prose substitutes.
   observes it; an inconclusive challenge has `inconclusive`.
 - A proof adapter contains registered `adapter_id`, existing distinct baseline/challenge IDs,
   `hypothesis_id`, `intervention={kind,target,predicted_polarity,before?,after?}`, and
-  `positive_outcome={predicate,semantic_basis}`. This historically named field is the
-  source-bound causal predicate and does not require a future solution contract. Controlled replay
-  adapters require
-  `observations={baseline:{source,...},challenge:{source,...}}`; use the exact selector source names
-  listed above (JSON also uses `json_pointer`). State adapters use their adapter-specific state
-  input. Put connected inspected production paths under `implementation_touchpoints`; keep the
-  intervention locator separate.
-  To link that pair to a hypothesis, one hypothesis `mechanism_symbols` value must exactly equal its
-  touchpoint `causal_locator` or a touchpoint `symbols` entry. Use `symbols`, not `inspected_symbols`.
-  Touchpoints belong under `proof_adapter`, never in invented hypothesis-level link fields.
-  Semantic basis shapes are `origin_exact_value={atom_id,field_path}`,
-  `repository_fail_first_command={baseline_experiment_id,challenge_experiment_id}`,
-  `authenticated_semantic_citation={atom_id,field_path,semantic_rationale,semantic_relation}`, or
-  `repository_contract_quote={path,exact_quote,contract_type,...contract locator}`.
+  `positive_outcome={predicate,semantic_basis}` does not require a future solution contract.
+  Controlled replay uses `observations={baseline:{source,...},
+  challenge:{source,...}}` with the selector sources above; state adapters use their own state
+  input. Put inspected production paths under `implementation_touchpoints`, not the intervention.
+  To link the pair, a hypothesis `mechanism_symbols` value must equal touchpoint `causal_locator` or
+  `symbols`; use `symbols`, not `inspected_symbols`. Keep touchpoints under `proof_adapter`, never in invented hypothesis-level fields.
+  A semantic basis is a flat object with top-level `kind`, never `{kind_name:{...}}`: use
+  `{kind:"origin_exact_value",atom_id,field_path}`, `{kind:"repository_fail_first_command",
+  baseline_experiment_id,challenge_experiment_id}`, `{kind:"authenticated_semantic_citation",
+  atom_id,field_path,semantic_rationale,semantic_relation}`, or `{kind:"repository_contract_quote",
+  path,exact_quote,contract_type,...locator}`. Respectively these require a predicate-matching source
+  value; the same authorized command changing nonzero to zero with predicate zero; a cited source
+  field plus justified interpretation; or an inspected API/doc/schema contract. Preserve a challenge
+  selector and predicate that already match retained output.
 - A positive predicate is an object with a top-level discriminator: `{"kind":"equals",
   "expected":...}`, `{"kind":"membership","members":[...]}`, `{"kind":"range",
-  "minimum"?:...,"maximum"?:...}`, `{"kind":"schema","schema":{...}}`,
+  "minimum"?:...,"maximum"?:...}`, `{"kind":"contains","expected":"text"}`, `{"kind":"schema","schema":{...}}`,
   `{"kind":"existence","expected":true}`, `{"kind":"state_transition","from":...,"to":...}`,
   or `{"kind":"event_sequence","events":[...],"mode"?:"exact"|"ordered_subsequence"}`. It is
   not the experiment assertion shape `{source,operator,expected}`, and is not `{equals:{...}}`.

@@ -14,6 +14,7 @@ from backlog_core import BacklogPolicyConfig, assign_plan_revision_id
 from runner_core import find_repo_root
 
 import usertest_backlog.workflows.qualification as qualification_module
+import usertest_backlog.workflows.qualification_transaction as transaction_module
 import usertest_backlog.workflows.shadow_validation as shadow_module
 import usertest_backlog.workflows.staged as staged_module
 from usertest_backlog.cli import main
@@ -29,6 +30,11 @@ from usertest_backlog.workflows.qualification_repair_materialization import (
 from usertest_backlog.workflows.qualification_repair_runtime import (
     QualificationRepairRuntimeResult,
 )
+from usertest_backlog.workflows.qualification_run_manifest import (
+    SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND,
+    build_semantic_run_evidence_manifest,
+    extend_semantic_manifest_atom_closure,
+)
 from usertest_backlog.workflows.qualification_transaction import (
     build_qualification_adjudication_template,
     build_qualification_input_bundle,
@@ -36,6 +42,7 @@ from usertest_backlog.workflows.qualification_transaction import (
     capture_qualification_source_snapshot,
     current_pipeline_runtime_compatibility,
     finalize_qualification_adjudication,
+    load_qualification_input_bundle,
     qualification_input_bundle_errors,
     qualification_runtime_compatibility_errors,
     write_qualification_input_bundle,
@@ -62,6 +69,72 @@ def _git(repo: Path, *args: str) -> str:
         encoding="utf-8",
     )
     return completed.stdout.strip()
+
+
+def test_qualification_prepare_copies_live_atom_actions_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_ledger = tmp_path / "repo" / "configs" / "backlog_atom_actions.yaml"
+    live_ledger.parent.mkdir(parents=True)
+    live_ledger.write_text("version: 1\natoms: []\n", encoding="utf-8")
+    observed: list[object] = []
+
+    def fake_backlog(namespace: object) -> int:
+        observed.append(namespace)
+        return 0
+
+    monkeypatch.setattr(staged_module, "_cmd_reports_backlog", fake_backlog)
+    args = SimpleNamespace(
+        target="fixture",
+        repo_input=tmp_path / "target",
+        research_ref="a" * 40,
+        source_runs_dir=tmp_path / "runs" / "usertest",
+        work_dir=tmp_path / "qualification" / "work",
+        out_root=tmp_path / "qualification" / "bundles",
+        repo_root=tmp_path / "repo",
+        breadth_profile="internal_maintenance",
+        case_registry_seed=tmp_path / "case_registry_seed.json",
+        protected_path=[],
+        additional_evidence_runs_dir=[],
+        atom_actions_yaml=live_ledger,
+    )
+
+    assert transaction_module._cmd_reports_qualification_prepare(args) == 0
+    copied = args.work_dir / "backlog_atom_actions.seed.yaml"
+    assert copied.read_bytes() == live_ledger.read_bytes()
+    assert len(observed) == 1
+    assert observed[0].atom_actions_yaml == copied.resolve()
+
+    live_ledger.write_text("version: 1\natoms:\n- atom_id: changed\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="qualification_atom_actions_copy_conflict"):
+        transaction_module._cmd_reports_qualification_prepare(args)
+
+
+def test_qualification_git_uses_exact_command_local_safe_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "cross-volume-worktree"
+    repo.mkdir()
+    observed: list[str] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.extend(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="head\n", stderr="")
+
+    monkeypatch.setattr(transaction_module.subprocess, "run", run)
+
+    assert transaction_module._git_output(repo, "rev-parse", "HEAD") == "head"
+    assert observed == [
+        "git",
+        "-c",
+        f"safe.directory={repo.resolve().as_posix()}",
+        "-C",
+        str(repo),
+        "rev-parse",
+        "HEAD",
+    ]
 
 
 def _repo(tmp_path: Path, name: str = "repo") -> tuple[Path, str]:
@@ -174,8 +247,16 @@ def _bundle_inputs(tmp_path: Path) -> dict[str, object]:
     repo, revision = _repo(tmp_path)
     source_runs = tmp_path / "frozen" / "usertest"
     implementation_runs = tmp_path / "frozen" / "usertest_implement"
-    _write_json(source_runs / "run" / "report.json", {"status": "failed"})
-    _write_json(implementation_runs / "run" / "report.json", {"status": "failed"})
+    source_run = source_runs / "fixture" / "20260101T000000Z" / "codex" / "0"
+    implementation_run = (
+        implementation_runs / "fixture" / "20260102T000000Z" / "codex" / "0"
+    )
+    for run_dir in (source_run, implementation_run):
+        _write_json(
+            run_dir / "target_ref.json",
+            {"repo_input": str(repo), "mission_id": "fixture"},
+        )
+        _write_json(run_dir / "report.json", {"status": "failed"})
     ledger = tmp_path / "custody" / "atom_actions.yaml"
     ledger.parent.mkdir(parents=True)
     ledger.write_text("{}\n", encoding="utf-8")
@@ -242,11 +323,61 @@ def test_bundle_rejects_source_change_during_extraction(tmp_path: Path) -> None:
     inputs = _bundle_inputs(tmp_path)
     source_runs = inputs["source_runs_dir"]
     assert isinstance(source_runs, Path)
-    snapshot = capture_qualification_source_snapshot(source_runs)
-    _write_json(source_runs / "arrived-during-extraction" / "report.json", {"new": True})
+    snapshot = capture_qualification_source_snapshot(source_runs, target="fixture")
+    _write_json(
+        source_runs
+        / "fixture"
+        / "20260101T000000Z"
+        / "codex"
+        / "0"
+        / "report.json",
+        {"status": "changed"},
+    )
 
     with pytest.raises(ValueError, match="source_changed_during_extraction"):
         _build_bundle(inputs, source_input_snapshot=snapshot)
+
+
+def test_bundle_requires_exact_final_atom_closure_snapshot(tmp_path: Path) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    source_runs = inputs["source_runs_dir"]
+    repo = inputs["repo_root"]
+    ledger = inputs["atom_actions_path"]
+    seed = inputs["case_registry_seed_path"]
+    atoms = deepcopy(inputs["atoms"])
+    assert isinstance(source_runs, Path)
+    assert isinstance(repo, Path)
+    assert isinstance(ledger, Path)
+    assert isinstance(seed, Path)
+    assert isinstance(atoms, list)
+    run = source_runs / "fixture" / "20260101T000000Z" / "codex" / "0"
+    artifact = _write_json(run / "command_failures" / "failure.json", {"exit": 1})
+    atoms[0].update(
+        {
+            "run_dir": str(run),
+            "artifact_ref": {
+                "path": "command_failures/failure.json",
+            },
+        }
+    )
+    snapshot = capture_qualification_preparation_snapshot(
+        repo_root=repo,
+        repo_input=repo,
+        research_ref=str(inputs["research_ref"]),
+        source_runs_dir=source_runs,
+        atom_actions_path=ledger,
+        case_registry_seed_path=seed,
+        target="fixture",
+        atoms=atoms,
+    )
+    _write_json(artifact, {"exit": 2})
+
+    with pytest.raises(ValueError, match="changed_during_extraction"):
+        _build_bundle(
+            inputs,
+            atoms=atoms,
+            preparation_input_snapshot=snapshot,
+        )
 
 
 def test_source_snapshot_excludes_maintenance_virtualenv_copies(tmp_path: Path) -> None:
@@ -254,9 +385,11 @@ def test_source_snapshot_excludes_maintenance_virtualenv_copies(tmp_path: Path) 
     source_runs = inputs["source_runs_dir"]
     assert isinstance(source_runs, Path)
     implementation_runs = source_runs.parent / "usertest_implement"
+    implementation_run = (
+        implementation_runs / "fixture" / "20260102T000000Z" / "codex" / "0"
+    )
     cached_python = (
-        implementation_runs
-        / "run"
+        implementation_run
         / "sandbox"
         / "maintenance_venv_copies"
         / "agent_adapters"
@@ -268,13 +401,275 @@ def test_source_snapshot_excludes_maintenance_virtualenv_copies(tmp_path: Path) 
     cached_python.parent.mkdir(parents=True)
     cached_python.write_bytes(b"not evidence\n")
 
-    snapshot = capture_qualification_source_snapshot(source_runs)
+    snapshot = capture_qualification_source_snapshot(source_runs, target="fixture")
     implementation = snapshot["implementation_runs"]
-    paths = [entry["path"] for entry in implementation["entries"]]
+    paths = [entry["path"] for entry in implementation["static_entries"]]
 
-    assert implementation["ignored_directory_names"] == ["maintenance_venv_copies"]
-    assert "run/report.json" in paths
+    assert implementation["manifest_kind"] == SEMANTIC_RUN_EVIDENCE_MANIFEST_KIND
+    assert "fixture/20260102T000000Z/codex/0/report.json" in paths
     assert not any("maintenance_venv_copies" in path for path in paths)
+
+
+def test_bundle_seals_explicit_canonical_additional_evidence_root(
+    tmp_path: Path,
+) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    retained_root = tmp_path / "retained" / "stage_runs"
+    retained_run = (
+        retained_root / "fixture" / "20260103T000000Z" / "codex" / "0"
+    )
+    _write_json(
+        retained_run / "target_ref.json",
+        {
+            "repo_input": str(inputs["repo_input"]),
+            "mission_id": "backlog_repro_research",
+            "backlog_lineage": {
+                "evidence_role": "research",
+                "origin_stage": "repro_research",
+                "parent_case_id": "case:retained",
+            },
+        },
+    )
+    report_path = _write_json(
+        retained_run / "report.json",
+        {"kind": "troubleshoot_v1", "status": "success"},
+    )
+
+    bundle = _build_bundle(
+        inputs,
+        additional_evidence_runs_dirs=[retained_root.resolve()],
+    )
+
+    manifests = bundle["source_inputs"]["additional_evidence_runs"]
+    assert len(manifests) == 1
+    assert manifests[0]["root"] == str(retained_root.resolve())
+    assert qualification_input_bundle_errors(bundle, verify_files=True) == []
+    bundle_path = write_qualification_input_bundle(
+        bundle,
+        output_root=tmp_path / "sealed-bundles",
+    )
+    loaded = load_qualification_input_bundle(bundle_path, verify_files=True)
+    assert staged_module._qualification_additional_source_roots(
+        loaded["source_inputs"]
+    ) == (retained_root.resolve(),)
+    inferred_roots = {
+        Path(loaded["source_inputs"][key]["root"]).resolve()
+        for key in ("source_runs", "implementation_runs")
+    }
+    assert retained_root.resolve() not in inferred_roots
+
+    report_path.write_text(
+        '{"kind":"troubleshoot_v1","status":"partial"}\n',
+        encoding="utf-8",
+    )
+    assert "qualification_input_semantic_tree_changed:additional_evidence_runs:0" in (
+        qualification_input_bundle_errors(bundle, verify_files=True)
+    )
+
+
+def test_bundle_seals_single_different_target_additional_evidence_root(
+    tmp_path: Path,
+) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    retained_root = tmp_path / "retained-implementation" / "runs"
+    retained_run = (
+        retained_root
+        / "controller_repo"
+        / "20260103T000000Z"
+        / "codex"
+        / "0"
+    )
+    _write_json(
+        retained_run / "target_ref.json",
+        {
+            "repo_input": str(inputs["repo_input"]),
+            "mission_id": "usertest_implement",
+        },
+    )
+    _write_json(retained_run / "report.json", {"status": "success"})
+
+    bundle = _build_bundle(
+        inputs,
+        additional_evidence_runs_dirs=[retained_root.resolve()],
+    )
+
+    manifest = bundle["source_inputs"]["additional_evidence_runs"][0]
+    assert manifest["root"] == str(retained_root.resolve())
+    assert manifest["target_slug"] == "controller_repo"
+    assert [item["run_rel"] for item in manifest["inventory"]] == [
+        "controller_repo/20260103T000000Z/codex/0"
+    ]
+    assert qualification_input_bundle_errors(bundle, verify_files=True) == []
+
+
+def test_bundle_rejects_broad_or_relative_additional_evidence_root(
+    tmp_path: Path,
+) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    broad_archive = tmp_path / "retained-archive"
+    nested_run = (
+        broad_archive
+        / "one-validation"
+        / "stage_runs"
+        / "fixture"
+        / "20260103T000000Z"
+        / "codex"
+        / "0"
+    )
+    _write_json(nested_run / "target_ref.json", {"repo_input": "fixture"})
+
+    with pytest.raises(ValueError, match="additional_evidence_root_not_canonical"):
+        _build_bundle(
+            inputs,
+            additional_evidence_runs_dirs=[broad_archive.resolve()],
+        )
+
+    ambiguous = tmp_path / "ambiguous-runs"
+    for target_slug in ("controller_a", "controller_b"):
+        _write_json(
+            ambiguous
+            / target_slug
+            / "20260103T000000Z"
+            / "codex"
+            / "0"
+            / "target_ref.json",
+            {"repo_input": "fixture"},
+        )
+    with pytest.raises(ValueError, match="additional_evidence_root_target_ambiguous"):
+        _build_bundle(
+            inputs,
+            additional_evidence_runs_dirs=[ambiguous.resolve()],
+        )
+
+    with pytest.raises(ValueError, match="additional_evidence_root_not_absolute"):
+        _build_bundle(
+            inputs,
+            additional_evidence_runs_dirs=[Path("retained/stage_runs")],
+        )
+
+    source_runs = inputs["source_runs_dir"]
+    assert isinstance(source_runs, Path)
+    with pytest.raises(ValueError, match="additional_evidence_root_duplicates_inferred"):
+        _build_bundle(
+            inputs,
+            additional_evidence_runs_dirs=[source_runs.resolve()],
+        )
+
+
+def test_retained_record_identity_is_move_stable_and_run_content_bound(
+    tmp_path: Path,
+) -> None:
+    run_rel = "fixture/20260103T000000Z/codex/0"
+    record = {
+        "run_rel": run_rel,
+        "run_dir": str(tmp_path / "first" / run_rel),
+        "report": {"failure_point": "The same sealed run moved."},
+    }
+
+    def prepare(root: Path, report_sha256: str) -> dict[str, object]:
+        prepared = staged_module._prepare_qualification_retained_records(
+            [{**record, "run_dir": str(root / run_rel)}],
+            source_manifest={
+                "root": str(root.resolve()),
+                "entries_sha256": "a" * 64,
+                "entries": [
+                    {
+                        "path": f"{run_rel}/report.json",
+                        "kind": "file",
+                        "sha256": report_sha256,
+                        "size_bytes": 42,
+                    }
+                ],
+            },
+        )
+        assert len(prepared) == 1
+        return prepared[0]
+
+    first = prepare(tmp_path / "first", "b" * 64)
+    moved = prepare(tmp_path / "moved", "b" * 64)
+    changed = prepare(tmp_path / "changed", "c" * 64)
+
+    assert first["run_rel"] == moved["run_rel"]
+    assert (
+        first["retained_evidence_source_record_sha256"]
+        == moved["retained_evidence_source_record_sha256"]
+    )
+    assert (
+        first["retained_evidence_source_run_sha256"]
+        == moved["retained_evidence_source_run_sha256"]
+    )
+    assert (
+        first["retained_evidence_source_record_sha256"]
+        != changed["retained_evidence_source_record_sha256"]
+    )
+    assert first["retained_evidence_source_root"] != moved[
+        "retained_evidence_source_root"
+    ]
+
+
+def test_semantic_retained_identity_uses_final_atom_bound_run_receipt(
+    tmp_path: Path,
+) -> None:
+    run_rel = "fixture/20260103T000000Z/codex/0"
+
+    def prepare(root: Path, failure: str) -> tuple[dict[str, object], dict[str, object]]:
+        run = root / run_rel
+        _write_json(run / "target_ref.json", {"repo_input": "fixture"})
+        _write_json(run / "report.json", {"status": "failed"})
+        artifact = _write_json(run / "command_failures" / "failure.json", {"failure": failure})
+        base = build_semantic_run_evidence_manifest(
+            root,
+            name="retained",
+            target_slug="fixture",
+            root_role="retained",
+        )
+        atom = {
+            "run_dir": str(run),
+            "artifact_ref": {
+                "path": "command_failures/failure.json",
+                "sha256": sha256(artifact.read_bytes()).hexdigest(),
+                "size_bytes": artifact.stat().st_size,
+            },
+        }
+        sealed = extend_semantic_manifest_atom_closure(
+            base,
+            atoms=[atom],
+            repo_root=tmp_path / "repo",
+        )
+        prepared = staged_module._prepare_qualification_retained_records(
+            [{"run_rel": run_rel, "run_dir": str(run), "report": {}}],
+            source_manifest=sealed,
+        )[0]
+        return prepared, sealed
+
+    first, first_manifest = prepare(tmp_path / "first", "one")
+    moved, moved_manifest = prepare(tmp_path / "moved", "one")
+    changed, changed_manifest = prepare(tmp_path / "changed", "two")
+
+    first_receipt = first_manifest["run_receipts"][0]["receipt_sha256"]
+    assert first["retained_evidence_source_run_sha256"] == first_receipt
+    assert first_manifest["run_receipts"] == moved_manifest["run_receipts"]
+    assert first["run_rel"] == moved["run_rel"]
+    assert first["run_rel"] != changed["run_rel"]
+    assert first_manifest["run_receipts"] != changed_manifest["run_receipts"]
+
+
+def test_schema_one_full_tree_bundle_remains_verifiable(tmp_path: Path) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    legacy = deepcopy(_build_bundle(inputs))
+    source = legacy["source_inputs"]
+    assert isinstance(source, dict)
+    for key in ("source_runs", "implementation_runs"):
+        manifest = source[key]
+        assert isinstance(manifest, dict)
+        source[key] = transaction_module._tree_manifest(
+            Path(manifest["root"]),
+            name=key,
+        )
+    legacy["schema_version"] = 1
+    legacy["content_sha256"] = transaction_module._content_hash(legacy)
+
+    assert qualification_input_bundle_errors(legacy, verify_files=True) == []
 
 
 def test_bundle_detects_pipeline_ledger_and_full_plan_tree_mutation(
@@ -399,14 +794,29 @@ def test_preparation_snapshot_rejects_post_read_drift_across_all_input_classes(
             source_runs_dir=source_runs,
             atom_actions_path=ledger,
             case_registry_seed_path=seed,
+            target="fixture",
             owner_roots=[repo],
         )
 
         if mutation == "source_runs":
-            _write_json(source_runs / "late" / "report.json", {"late": True})
+            _write_json(
+                source_runs
+                / "fixture"
+                / "20260101T000000Z"
+                / "codex"
+                / "0"
+                / "report.json",
+                {"late": True},
+            )
         elif mutation == "implementation_runs":
             _write_json(
-                source_runs.parent / "usertest_implement" / "late" / "report.json",
+                source_runs.parent
+                / "usertest_implement"
+                / "fixture"
+                / "20260102T000000Z"
+                / "codex"
+                / "0"
+                / "report.json",
                 {"late": True},
             )
         elif mutation == "atom_actions":

@@ -154,6 +154,23 @@ def _item_evidence_ids(item: dict[str, Any]) -> list[str]:
     return []
 
 
+def _item_evidence_routing_keys(item: dict[str, Any]) -> list[str]:
+    """Return exact evidence-channel keys supplied by the owning workflow.
+
+    These keys are candidate-recall metadata, not causal identity. They let a later
+    cycle surface an identity-only historical case whose wording and regenerated atom
+    IDs no longer overlap a new observation. The reviewer still makes the relation
+    decision.
+    """
+
+    value = item.get("_relation_evidence_routing_keys")
+    if not isinstance(value, list):
+        return []
+    return sorted(
+        {entry.strip() for entry in value if isinstance(entry, str) and entry.strip()}
+    )
+
+
 def _item_focus_id(item: dict[str, Any]) -> str:
     """Return a stable focus ID for *item*."""
     for key in (
@@ -268,6 +285,7 @@ def _build_neighborhoods_no_embedder(
     from triage_engine.text import tokenize
 
     top_k_ev = int(cfg.get("top_k_by_evidence_overlap", 3))
+    top_k_routing = int(cfg.get("top_k_by_evidence_routing", 3))
     top_k_meta = int(cfg.get("top_k_by_metadata", 2))
     disjoint_frac = float(cfg.get("split_hint_min_disjoint_evidence_fraction", 0.70))
 
@@ -278,12 +296,16 @@ def _build_neighborhoods_no_embedder(
     evidence_sets: list[frozenset[str]] = [
         frozenset(_item_evidence_ids(it)) for it in items
     ]
+    routing_sets: list[frozenset[str]] = [
+        frozenset(_item_evidence_routing_keys(it)) for it in items
+    ]
 
     neighborhoods: list[dict[str, Any]] = []
 
     for i, item in enumerate(items):
         fid = _item_focus_id(item)
         ev_i = evidence_sets[i]
+        routing_i = routing_sets[i]
         tok_i = token_sets[i]
 
         # Evidence overlap neighbors.
@@ -304,6 +326,26 @@ def _build_neighborhoods_no_embedder(
                 "index": j,
             }
             for score, j in ev_scores[:top_k_ev]
+        ]
+
+        # Matching evidence provenance only routes a comparison to the reviewer;
+        # it remains separate from source-atom overlap and makes no relation decision.
+        routing_scores: list[tuple[float, int]] = []
+        for j, routing_j in enumerate(routing_sets):
+            if j == i or not routing_i or not routing_j:
+                continue
+            overlap = len(routing_i & routing_j)
+            if overlap > 0:
+                routing_scores.append((float(overlap), j))
+        routing_scores.sort(key=lambda x: (-x[0], x[1]))
+        routing_neighbors = [
+            {
+                "item_id": _item_focus_id(items[j]),
+                "routing_key_overlap": int(score),
+                "shared_routing_keys": sorted(routing_i & routing_sets[j]),
+                "index": j,
+            }
+            for score, j in routing_scores[:top_k_routing]
         ]
 
         # Metadata (title-token) neighbors.
@@ -336,6 +378,7 @@ def _build_neighborhoods_no_embedder(
                 "stage": stage,
                 "most_related_by_semantic": [],
                 "most_related_by_evidence_overlap": ev_neighbors,
+                "most_related_by_evidence_routing": routing_neighbors,
                 "most_related_by_metadata": meta_neighbors,
                 "most_related_by_path_anchor": [],
                 "split_hints": split_hints,
@@ -375,6 +418,7 @@ def _build_neighborhoods_with_embedder(
 
     top_k_sem = int(cfg.get("top_k_by_semantic", 3))
     top_k_ev = int(cfg.get("top_k_by_evidence_overlap", 3))
+    top_k_routing = int(cfg.get("top_k_by_evidence_routing", 3))
     top_k_meta = int(cfg.get("top_k_by_metadata", 2))
     top_k_anchor = int(cfg.get("top_k_by_path_anchor", 2))
     min_sem = float(cfg.get("min_semantic_similarity", 0.55))
@@ -389,6 +433,9 @@ def _build_neighborhoods_with_embedder(
     )
 
     n = len(items)
+    routing_sets: list[frozenset[str]] = [
+        frozenset(_item_evidence_routing_keys(it)) for it in items
+    ]
     neighborhoods: list[dict[str, Any]] = []
 
     for i, item in enumerate(items):
@@ -399,6 +446,7 @@ def _build_neighborhoods_with_embedder(
         ev_scores: list[tuple[float, int]] = []
         meta_scores: list[tuple[float, int]] = []
         anchor_scores: list[tuple[float, int]] = []
+        routing_scores: list[tuple[float, int]] = []
 
         for j in range(n):
             if j == i:
@@ -414,11 +462,15 @@ def _build_neighborhoods_with_embedder(
                 meta_scores.append((sim.title_jaccard, j))
             if sim.anchor_jaccard > 0.0:
                 anchor_scores.append((sim.anchor_jaccard, j))
+            routing_overlap = len(routing_sets[i] & routing_sets[j])
+            if routing_overlap > 0:
+                routing_scores.append((float(routing_overlap), j))
 
         sem_scores.sort(key=lambda x: (-x[0], x[1]))
         ev_scores.sort(key=lambda x: (-x[0], x[1]))
         meta_scores.sort(key=lambda x: (-x[0], x[1]))
         anchor_scores.sort(key=lambda x: (-x[0], x[1]))
+        routing_scores.sort(key=lambda x: (-x[0], x[1]))
 
         sem_neighbors = [
             {
@@ -435,6 +487,15 @@ def _build_neighborhoods_with_embedder(
                 "index": j,
             }
             for score, j in ev_scores[:top_k_ev]
+        ]
+        routing_neighbors = [
+            {
+                "item_id": _item_focus_id(items[j]),
+                "routing_key_overlap": int(score),
+                "shared_routing_keys": sorted(routing_sets[i] & routing_sets[j]),
+                "index": j,
+            }
+            for score, j in routing_scores[:top_k_routing]
         ]
         meta_neighbors = [
             {
@@ -461,6 +522,7 @@ def _build_neighborhoods_with_embedder(
                 "stage": stage,
                 "most_related_by_semantic": sem_neighbors,
                 "most_related_by_evidence_overlap": ev_neighbors,
+                "most_related_by_evidence_routing": routing_neighbors,
                 "most_related_by_metadata": meta_neighbors,
                 "most_related_by_path_anchor": anchor_neighbors,
                 "split_hints": split_hints,
@@ -928,13 +990,38 @@ def canonicalize_problem_cases(
                 return value.casefold()
             return None
 
+        def case_owned_identity_evidence(case_id: str) -> set[str]:
+            """Return evidence owned by one facet, excluding packet expansion.
+
+            A persisted provisional same-cause group is carried as one research
+            packet.  Upstream attachment may therefore place every member's atoms
+            on each active member record so the eventual packet is complete.  That
+            runner-created overlap is not independent evidence that the case
+            identities are already equivalent.  Prefer the immutable member facet
+            projection when it is available; genuine shared source evidence still
+            overlaps there.
+            """
+
+            item = by_case[case_id]
+            provisional_group = item.get("provisional_same_cause_group")
+            if isinstance(provisional_group, Mapping):
+                facets = provisional_group.get("member_facets")
+                if isinstance(facets, list):
+                    for raw_facet in facets:
+                        if not isinstance(raw_facet, Mapping):
+                            continue
+                        if _clean_relation_string(raw_facet.get("case_id")) != case_id:
+                            continue
+                        return set(
+                            _clean_relation_string_list(
+                                raw_facet.get("evidence_atom_ids")
+                            )
+                        )
+            return set(_clean_relation_string_list(item.get("evidence_atom_ids")))
+
         def objective_identity_edge(left: str, right: str, *, action: str) -> bool:
-            left_evidence = set(
-                _clean_relation_string_list(by_case[left].get("evidence_atom_ids"))
-            )
-            right_evidence = set(
-                _clean_relation_string_list(by_case[right].get("evidence_atom_ids"))
-            )
+            left_evidence = case_owned_identity_evidence(left)
+            right_evidence = case_owned_identity_evidence(right)
             if left_evidence.intersection(right_evidence):
                 return True
             relation_edge = tuple(sorted((left, right)))
@@ -1499,13 +1586,16 @@ def canonicalize_problem_cases(
                 _clean_relation_string_list(base.get("case_identity_candidate_ids"))
             )
             if (
-                base.get("case_identity_status") == "pending_relation"
+                base.get("case_identity_status")
+                in {"pending_relation", "provisional_same_cause"}
                 and pending_candidates
                 and pending_candidates.issubset(set(members))
                 and len(members) > 1
             ):
                 base["case_identity_status"] = "resolved"
                 base.pop("case_identity_candidate_ids", None)
+                base.pop("provisional_same_cause_group", None)
+                base.pop("provisional_same_cause_integrity_errors", None)
         canonical_records.append(base)
 
     _LOG.info(

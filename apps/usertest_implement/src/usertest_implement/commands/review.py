@@ -1,6 +1,7 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 
 from backlog_repo import extract_outcome_markdown, reconcile_outcome_records
@@ -50,6 +51,7 @@ from usertest_implement.selection import (
     _selected_ticket_provenance,
 )
 from usertest_implement.shared import *
+from usertest_implement.tickets import _PLAN_BUCKETS, repair_ticket_newline_expansion
 
 _LEGACY_READ_ONLY_EXEC_POLICY_CASCADE = frozenset(
     {
@@ -372,7 +374,13 @@ def _require_review_artifact_bindings(
     review_ticket_path = review_ref.get("ticket_path")
     if selected.idea_path is None or not isinstance(review_ticket_path, str):
         raise ValueError("Review reference is missing the selected ticket path")
-    if Path(review_ticket_path).resolve() != selected.idea_path.resolve():
+    recorded_ticket_path = Path(review_ticket_path).resolve()
+    selected_ticket_path = selected.idea_path.resolve()
+    if recorded_ticket_path != selected_ticket_path and not _is_same_queue_ticket_move(
+        owner_root=selected.owner_root,
+        recorded_path=recorded_ticket_path,
+        selected_path=selected_ticket_path,
+    ):
         raise ValueError("review_ref.json ticket path does not match the selected ticket")
 
     run_dir_raw = review_ref.get("implementation_run_dir")
@@ -421,6 +429,33 @@ def _require_review_artifact_bindings(
     return implementation_run_dir
 
 
+def _is_same_queue_ticket_move(
+    *,
+    owner_root: Path | None,
+    recorded_path: Path,
+    selected_path: Path,
+) -> bool:
+    """Accept only a bucket-only move of the same immutable ticket identity."""
+
+    if owner_root is None:
+        return False
+    plans_root = (owner_root / ".agents" / "plans").resolve()
+    try:
+        recorded_relative = recorded_path.resolve().relative_to(plans_root)
+        selected_relative = selected_path.resolve().relative_to(plans_root)
+    except (OSError, ValueError):
+        return False
+    if len(recorded_relative.parts) != 2 or len(selected_relative.parts) != 2:
+        return False
+    recorded_bucket, recorded_name = recorded_relative.parts
+    selected_bucket, selected_name = selected_relative.parts
+    return (
+        recorded_bucket in _PLAN_BUCKETS
+        and selected_bucket in _PLAN_BUCKETS
+        and recorded_name.casefold() == selected_name.casefold()
+    )
+
+
 def _require_unchanged_reviewed_head(
     *,
     fingerprint: str,
@@ -451,11 +486,14 @@ def _review_adoption_eligibility_errors(
     ledger_path: Path,
     allowed_lifecycles: frozenset[str],
 ) -> list[str]:
-    """Explain why a ready ticket is not backed by an adopted review handoff."""
+    """Explain why a pre-review ticket is not backed by an adopted handoff."""
 
     errors: list[str] = []
-    if selected.idea_path is None or "2 - ready" not in selected.idea_path.parts:
-        errors.append("ticket is not in 2 - ready")
+    if selected.idea_path is None or not any(
+        bucket in selected.idea_path.parts
+        for bucket in ("2 - ready", "3 - in_progress")
+    ):
+        errors.append("ticket is not in 2 - ready or 3 - in_progress")
         return errors
 
     run_dir = implementation_run_dir.resolve()
@@ -607,16 +645,12 @@ def _review_correction_context(
         raise SystemExit("Prior review fingerprint does not match the selected ticket.")
     if previous_summary.get("pr_url") != pr_url:
         raise SystemExit("Prior review PR does not match the current implementation PR.")
-    if previous_summary.get("reviewed_head_oid") != reviewed_head_oid:
-        raise SystemExit(
-            "Prior review is bound to a different PR head; run a fresh review for the new head."
-        )
+    previous_head_oid = str(previous_summary.get("reviewed_head_oid") or "").strip()
+    if not previous_head_oid:
+        raise SystemExit("Prior review is missing its reviewed PR head.")
     prior_implementation_run = previous_ref.get("implementation_run_dir")
-    if (
-        not isinstance(prior_implementation_run, str)
-        or Path(prior_implementation_run).resolve() != implementation_run_dir.resolve()
-    ):
-        raise SystemExit("Prior review is bound to a different implementation run.")
+    if not isinstance(prior_implementation_run, str) or not prior_implementation_run.strip():
+        raise SystemExit("Prior review is missing its implementation run binding.")
 
     continuity = implementation_author_continuity(previous_run_dir)
     if continuity.get("agent") != "codex" or continuity.get("exact_session_available") is not True:
@@ -628,14 +662,43 @@ def _review_correction_context(
     if not isinstance(session_id, str) or not session_id.strip():
         raise SystemExit("Prior review is missing its exact Codex session id.")
 
+    def _workspace_head(candidate: Path) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(candidate), "rev-parse", "HEAD"],
+                capture_output=True,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            return None
+        if proc.returncode != 0:
+            return None
+        value = (proc.stdout or "").strip()
+        return value if value else None
+
     resume_workspace_dir: Path | None = None
+    resume_workspace_source = "fresh_checkout"
     workspace_ref = _read_json(previous_run_dir / "workspace_ref.json")
     if isinstance(workspace_ref, dict):
         workspace_raw = workspace_ref.get("workspace_dir")
         if isinstance(workspace_raw, str) and workspace_raw.strip():
             candidate = Path(workspace_raw).resolve()
-            if candidate.is_dir():
+            if _workspace_head(candidate) == reviewed_head_oid:
                 resume_workspace_dir = candidate
+                resume_workspace_source = "prior_review"
+
+    if resume_workspace_dir is None:
+        current_workspace_ref = _read_json(implementation_run_dir / "workspace_ref.json")
+        if isinstance(current_workspace_ref, dict):
+            current_workspace_raw = current_workspace_ref.get("workspace_dir")
+            if isinstance(current_workspace_raw, str) and current_workspace_raw.strip():
+                candidate = Path(current_workspace_raw).resolve()
+                if _workspace_head(candidate) == reviewed_head_oid:
+                    resume_workspace_dir = candidate
+                    resume_workspace_source = "current_verified_implementation"
 
     target_ref = _read_json(previous_run_dir / "target_ref.json")
     prior_model = target_ref.get("model") if isinstance(target_ref, dict) else None
@@ -645,7 +708,12 @@ def _review_correction_context(
         "author_continuity": continuity,
         "codex_resume_session_id": session_id,
         "resume_workspace_dir": resume_workspace_dir,
+        "resume_workspace_source": resume_workspace_source,
         "prior_model": prior_model if isinstance(prior_model, str) else None,
+        "previous_reviewed_head_oid": previous_head_oid,
+        "current_reviewed_head_oid": reviewed_head_oid,
+        "previous_implementation_run_dir": Path(prior_implementation_run).resolve(),
+        "current_implementation_run_dir": implementation_run_dir.resolve(),
     }
 
 
@@ -667,7 +735,7 @@ def _build_review_correction_prompt(
         "This is a focused correction turn for your immediately preceding causal PR review. "
         "Preserve every valid observation from that review; do not restart or discard the "
         "frontier merely because one or more findings were wrong or incomplete. Re-inspect "
-        "the exact reviewed head and verify each correction below against repository and "
+        "the exact current verified head and verify each correction below against repository and "
         "artifact evidence. Then return one complete replacement `task_run_v1` report with "
         "a fully revised `extensions.review_summary`; do not return a patch or commentary.\n\n"
         "Do not modify repository files, merge the PR, invoke Docker, or require prohibited "
@@ -675,6 +743,9 @@ def _build_review_correction_prompt(
         "A stale planned path is not authoritative when retained evidence proves a "
         "dependency-correct relocation. Findings must identify a real correctness or causal "
         "gap, not merely disagreement with wording or layout.\n\n"
+        "The implementation run or PR head may have advanced because the implementation author "
+        "acted on the prior review. Treat that as the expected correction loop, inspect the full "
+        "current head, and retain or revise each prior finding according to current evidence.\n\n"
         "## Supervisor correction findings to verify\n\n"
         f"{correction_lines}\n\n"
         "## Previous review summary\n\n"
@@ -683,6 +754,49 @@ def _build_review_correction_prompt(
         f"```json\n{current_pr}\n```\n\n"
         "## Current checks\n\n"
         f"```json\n{current_checks}\n```\n"
+    )
+
+
+_MAX_REVIEW_SEMANTIC_CORRECTIONS = 3
+
+
+def _build_review_semantic_correction_request(
+    *,
+    request: RunRequest,
+    failed_run_dir: Path,
+    reviewed_head_oid: str,
+    validation_error: str,
+) -> RunRequest:
+    continuity = implementation_author_continuity(failed_run_dir)
+    session_id = continuity.get("session_id")
+    if (
+        continuity.get("agent") != "codex"
+        or continuity.get("exact_session_available") is not True
+        or not isinstance(session_id, str)
+        or not session_id.strip()
+    ):
+        raise SystemExit(
+            "Invalid review output has no exact resumable Codex session; "
+            "automatic semantic correction is unavailable."
+        )
+    prompt = (
+        "Your immediately preceding review report was retained, but deterministic semantic "
+        "validation rejected it for this exact reason:\n\n"
+        f"{validation_error}\n\n"
+        "Correct the inconsistency while preserving all valid evidence, findings, and bounded "
+        "outcome distinctions from your preceding turn. Reinspect the current verified head if "
+        "needed. Return one complete replacement `task_run_v1` JSON report with a fully revised "
+        "`extensions.review_summary`; do not return a patch or commentary. Do not modify files, "
+        "merge the PR, weaken a real blocking finding, or invent new evidence. A `closed` causal "
+        "assessment requires an empty `remaining_causal_paths`; use `residual` when explicit paths "
+        "remain, including bounded paths outside the selected mechanism.\n\n"
+        f"Current verified PR head: {reviewed_head_oid}"
+    )
+    return replace(
+        request,
+        agent_append_system_prompt_file=None,
+        agent_user_prompt=prompt,
+        codex_resume_session_id=session_id.strip(),
     )
 
 
@@ -1443,61 +1557,108 @@ def _run_review_for_selected_ticket(
             raise SystemExit(
                 f"Missing or invalid report.json in review run dir: {review_run_dir}"
             )
-    try:
-        agent_summary = _extract_agent_review_summary(report)
-        review_summary = _build_final_review_summary(
-            selected=selected,
-            review_run_dir=review_run_dir,
-            pr_url=pr_url,
-            pr_context=pr_context,
-            agent_summary=agent_summary,
-            report=report,
-        )
-        if correction_context is not None:
-            review_summary = {
-                **review_summary,
-                "correction_of_review_run_dir": str(
-                    correction_context["previous_review_run_dir"]
-                ),
-                "correction_count": len(review_corrections),
-                "review_author_session_id": correction_context[
-                    "codex_resume_session_id"
-                ],
-            }
-        if source_review_run_dir is not None:
-            review_summary = {
-                **review_summary,
-                "review_source": "retained_same_author_report_adoption",
-                "adopted_from_review_run_dir": str(source_review_run_dir),
-                "model_invoked_for_adoption": False,
-                "adoption_evidence_sha256": adoption_evidence[
-                    "adoption_evidence_sha256"
-                ],
-            }
-        ticket_provenance_for_review = {
-            key: selected_provenance[key]
-            for key in (
-                "schema_version",
-                "fingerprint",
-                "case_id",
-                "plan_revision_id",
-                "ticket_body_sha256",
-                "local_plan_sha256",
-                "local_plan_filename",
-                "verification_contract_sha256",
-                "target_contract_sha256",
+    semantic_corrections: list[dict[str, str]] = []
+    while True:
+        try:
+            agent_summary = _extract_agent_review_summary(report)
+            review_summary = _build_final_review_summary(
+                selected=selected,
+                review_run_dir=review_run_dir,
+                pr_url=pr_url,
+                pr_context=pr_context,
+                agent_summary=agent_summary,
+                report=report,
             )
-        }
-        implementation_ticket_ref_sha256 = sha256(
-            (implementation_run_dir / "ticket_ref.json").read_bytes()
-        ).hexdigest()
+            break
+        except ValueError as exc:
+            if (
+                source_review_run_dir is not None
+                or review_agent != "codex"
+                or len(semantic_corrections) >= _MAX_REVIEW_SEMANTIC_CORRECTIONS
+            ):
+                raise SystemExit(f"Invalid review output in {review_run_dir}: {exc}") from exc
+            failed_run_dir = review_run_dir
+            validation_error = str(exc)
+            semantic_corrections.append(
+                {
+                    "failed_run_dir": str(failed_run_dir),
+                    "validation_error": validation_error,
+                }
+            )
+            request = _build_review_semantic_correction_request(
+                request=request,
+                failed_run_dir=failed_run_dir,
+                reviewed_head_oid=reviewed_head_oid,
+                validation_error=validation_error,
+            )
+            result = run_once(cfg, request)
+            review_run_dir = result.run_dir
+            if int(result.exit_code or 0) != 0:
+                raise SystemExit(
+                    "Review semantic correction failed "
+                    f"(exit_code={result.exit_code}) in {review_run_dir}"
+                ) from None
+            if result.report_validation_errors:
+                raise SystemExit(
+                    "Review semantic correction produced an invalid report: "
+                    + "; ".join(str(err) for err in result.report_validation_errors)
+                ) from None
+            report = _read_json(review_run_dir / "report.json")
+            if not isinstance(report, dict):
+                raise SystemExit(
+                    "Missing or invalid semantic-correction report.json in review run dir: "
+                    f"{review_run_dir}"
+                ) from None
+
+    if correction_context is not None:
         review_summary = {
             **review_summary,
-            "ticket_provenance": ticket_provenance_for_review,
-            "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+            "correction_of_review_run_dir": str(
+                correction_context["previous_review_run_dir"]
+            ),
+            "correction_count": len(review_corrections),
+            "review_author_session_id": correction_context[
+                "codex_resume_session_id"
+            ],
         }
-    except ValueError as exc:
-        raise SystemExit(f"Invalid review output in {review_run_dir}: {exc}") from exc
+    if semantic_corrections:
+        review_summary = {
+            **review_summary,
+            "semantic_correction_count": len(semantic_corrections),
+            "semantic_corrections": semantic_corrections,
+        }
+    if source_review_run_dir is not None:
+        review_summary = {
+            **review_summary,
+            "review_source": "retained_same_author_report_adoption",
+            "adopted_from_review_run_dir": str(source_review_run_dir),
+            "model_invoked_for_adoption": False,
+            "adoption_evidence_sha256": adoption_evidence[
+                "adoption_evidence_sha256"
+            ],
+        }
+    ticket_provenance_for_review = {
+        key: selected_provenance[key]
+        for key in (
+            "schema_version",
+            "fingerprint",
+            "case_id",
+            "plan_revision_id",
+            "ticket_body_sha256",
+            "local_plan_sha256",
+            "local_plan_filename",
+            "verification_contract_sha256",
+            "target_contract_sha256",
+        )
+    }
+    implementation_ticket_ref_sha256 = sha256(
+        (implementation_run_dir / "ticket_ref.json").read_bytes()
+    ).hexdigest()
+    review_summary = {
+        **review_summary,
+        "ticket_provenance": ticket_provenance_for_review,
+        "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+    }
 
     _write_json(review_run_dir / "review_summary.json", review_summary)
     pr_review_ref = _submit_pr_review(
@@ -1549,6 +1710,8 @@ def _run_review_for_selected_ticket(
                 if correction_context is not None
                 else None
             ),
+            "semantic_correction_count": len(semantic_corrections),
+            "semantic_corrections": semantic_corrections,
         },
     )
     update_ledger_file(
@@ -1773,12 +1936,14 @@ def _recover_noncausal_premerge_rejection(
     failure = _read_json(failure_path)
     if not isinstance(failure, dict):
         return review_summary
-    if failure.get("role_artifact_path") not in {None, ""}:
+    role_artifact_path = failure.get("role_artifact_path")
+    role_failure = isinstance(role_artifact_path, str) and bool(role_artifact_path.strip())
+    prior_attempt_count = failure.get("attempt_count")
+    if not isinstance(prior_attempt_count, int) or prior_attempt_count < 1:
+        prior_attempt_count = 1
+    if role_failure and prior_attempt_count >= 2:
         return review_summary
-    if (
-        review_summary.get("review_decision") != "changes_requested"
-        or review_summary.get("causal_acceptance") is not True
-    ):
+    if review_summary.get("review_decision") != "changes_requested":
         return review_summary
     report = _read_json(review_run_dir / "report.json")
     if not isinstance(report, dict):
@@ -1865,21 +2030,42 @@ def _recover_noncausal_premerge_rejection(
         },
     }
     detail = str(failure.get("detail") or "").strip()
-    reclassification = {
-        "schema_version": 1,
-        "status": "blocked",
-        "classification": "premerge_infrastructure",
-        "causal_result": "not_run",
-        "ticket_fingerprint": selected.fingerprint,
-        "detail": detail,
-        "source_failure_path": str(failure_path),
-        "review_preserved": True,
-        "reclassified_at_utc": _utc_now_z(),
-    }
-    reclassification_path = (
-        review_run_dir / "premerge_original_scenario_infrastructure_reclassification.json"
-    )
-    _write_json(reclassification_path, reclassification)
+    if role_failure:
+        recovery_status = "retry_pending"
+        recovery_path = review_run_dir / "premerge_original_scenario_retry_pending.json"
+        recovery = {
+            "schema_version": 1,
+            "status": recovery_status,
+            "classification": "bounded_same_head_retry",
+            "causal_result": "pending_retry",
+            "ticket_fingerprint": selected.fingerprint,
+            "reviewed_head_oid": str(review_summary.get("reviewed_head_oid") or ""),
+            "detail": detail,
+            "source_failure_path": str(failure_path),
+            "source_role_artifact_path": role_artifact_path,
+            "prior_attempt_count": prior_attempt_count,
+            "maximum_attempt_count": 2,
+            "review_preserved": True,
+            "recorded_at_utc": _utc_now_z(),
+        }
+    else:
+        recovery_status = "blocked_infrastructure"
+        recovery_path = (
+            review_run_dir
+            / "premerge_original_scenario_infrastructure_reclassification.json"
+        )
+        recovery = {
+            "schema_version": 1,
+            "status": "blocked",
+            "classification": "premerge_infrastructure",
+            "causal_result": "not_run",
+            "ticket_fingerprint": selected.fingerprint,
+            "detail": detail,
+            "source_failure_path": str(failure_path),
+            "review_preserved": True,
+            "reclassified_at_utc": _utc_now_z(),
+        }
+    _write_json(recovery_path, recovery)
     _write_json(review_run_dir / "review_summary.json", restored)
     resume_state = write_ticket_resume_state(
         selected=selected,
@@ -1898,8 +2084,12 @@ def _recover_noncausal_premerge_rejection(
                 restored.get("causal_acceptance") is True
             ),
             "last_review_merge_ready": bool(restored["merge_ready"]),
-            "last_premerge_original_scenario_status": "blocked_infrastructure",
-            "last_premerge_original_scenario_block": str(reclassification_path),
+            "last_premerge_original_scenario_status": recovery_status,
+            (
+                "last_premerge_original_scenario_retry"
+                if role_failure
+                else "last_premerge_original_scenario_block"
+            ): str(recovery_path),
             "last_resume_state_path": str(
                 implementation_run_dir / RESUME_STATE_ARTIFACT_NAME
             ),
@@ -1924,6 +2114,26 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
         raise SystemExit(f"No review run recorded in ledger for ticket {selected.fingerprint!r}.")
     review_run_dir = Path(review_run_dir_raw)
     review_summary = _read_review_summary(review_run_dir=review_run_dir)
+    reviewed_ticket_provenance = review_summary.get("ticket_provenance")
+    if selected.idea_path is not None and isinstance(reviewed_ticket_provenance, dict):
+        expected_body_hash = reviewed_ticket_provenance.get("ticket_body_sha256")
+        expected_plan_hash = reviewed_ticket_provenance.get("local_plan_sha256")
+        if isinstance(expected_body_hash, str) and isinstance(expected_plan_hash, str):
+            repair_receipt = repair_ticket_newline_expansion(
+                path=selected.idea_path,
+                expected_ticket_body_sha256=expected_body_hash,
+                expected_local_plan_sha256=expected_plan_hash,
+            )
+            if repair_receipt is not None:
+                _write_json(
+                    review_run_dir / "ticket_newline_repair.json",
+                    {**repair_receipt, "recorded_at_utc": _utc_now_z()},
+                )
+                selected = _select_review_ticket(
+                    owner_root=owner_root,
+                    ticket_path=None,
+                    fingerprint=selected.fingerprint,
+                )
     pr_url = review_summary.get("pr_url")
     if not isinstance(pr_url, str) or not pr_url.strip():
         raise SystemExit(f"Review summary for {selected.fingerprint!r} is missing pr_url.")
@@ -2032,15 +2242,41 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
         proposed=preflight_outcome,
     )
     if selected_provenance.get("generated_ticket") is True and not already_merged:
+        retry_pending_path = review_run_dir / "premerge_original_scenario_retry_pending.json"
+        retry_pending = _read_json(retry_pending_path)
+        prior_role_attempt_count = 0
+        prior_role_artifact_paths: list[str] = []
+        if (
+            isinstance(retry_pending, dict)
+            and retry_pending.get("status") == "retry_pending"
+            and str(retry_pending.get("reviewed_head_oid") or "").strip().lower()
+            == reviewed_head_oid.lower()
+        ):
+            raw_prior_count = retry_pending.get("prior_attempt_count")
+            if isinstance(raw_prior_count, int) and raw_prior_count > 0:
+                prior_role_attempt_count = raw_prior_count
+            prior_path = retry_pending.get("source_role_artifact_path")
+            if isinstance(prior_path, str) and prior_path.strip():
+                prior_role_artifact_paths.append(prior_path)
+        remaining_role_attempts = max(1, 2 - prior_role_attempt_count)
+        role_failures: list[OutcomeRoleDidNotPass] = []
         try:
-            premerge_original_scenario = verify_premerge_original_scenario(
-                repo_root=repo_root,
-                owner_root=owner_root,
-                fingerprint=selected.fingerprint,
-                ticket_markdown=selected.ticket_markdown,
-                current=preflight_outcome,
-                selected_provenance=selected_provenance,
-            )
+            for attempt_number in range(1, remaining_role_attempts + 1):
+                try:
+                    premerge_original_scenario = verify_premerge_original_scenario(
+                        repo_root=repo_root,
+                        owner_root=owner_root,
+                        fingerprint=selected.fingerprint,
+                        ticket_markdown=selected.ticket_markdown,
+                        current=preflight_outcome,
+                        selected_provenance=selected_provenance,
+                    )
+                except OutcomeRoleDidNotPass as attempt_exc:
+                    role_failures.append(attempt_exc)
+                    if attempt_number < remaining_role_attempts:
+                        continue
+                    raise
+                break
         except OutcomeContractNotExecutable as exc:
             detail = str(exc)
             correction_path = (
@@ -2148,6 +2384,16 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
                 "role_artifact_path": (
                     str(artifact_path) if isinstance(artifact_path, Path) else None
                 ),
+                "role_artifact_paths": [
+                    *prior_role_artifact_paths,
+                    *[
+                        str(item.artifact_path)
+                        for item in role_failures
+                        if isinstance(item.artifact_path, Path)
+                    ],
+                ],
+                "attempt_count": prior_role_attempt_count + len(role_failures),
+                "maximum_attempt_count": 2,
                 "recorded_at_utc": _utc_now_z(),
             }
             _write_json(
@@ -2258,6 +2504,29 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
             )
             print(detail, file=sys.stderr)
             return 3
+        if prior_role_attempt_count or role_failures:
+            _write_json(
+                review_run_dir / "premerge_original_scenario_retry.json",
+                {
+                    "schema_version": 1,
+                    "status": "passed_after_retry",
+                    "classification": "self_healed_nondeterministic_or_infrastructure_failure",
+                    "causal_result": "passed",
+                    "ticket_fingerprint": selected.fingerprint,
+                    "reviewed_head_oid": reviewed_head_oid,
+                    "attempt_count": prior_role_attempt_count + len(role_failures) + 1,
+                    "prior_role_artifact_paths": [
+                        *prior_role_artifact_paths,
+                        *[
+                            str(item.artifact_path)
+                            for item in role_failures
+                            if isinstance(item.artifact_path, Path)
+                        ],
+                    ],
+                    "review_preserved": True,
+                    "recorded_at_utc": _utc_now_z(),
+                },
+            )
         _write_json(
             review_run_dir / "premerge_original_scenario.json",
             premerge_original_scenario,

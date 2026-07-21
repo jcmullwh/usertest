@@ -41,7 +41,11 @@ def observed_read_attestation(
 
     try:
         file_bytes = path.read_bytes()
-        file_text = _normalized_text(file_bytes.decode("utf-8", errors="replace"))
+        # Windows PowerShell 5 writes ``-Encoding UTF8`` files with a UTF-8 BOM,
+        # while Get-Content returns decoded text without that marker. Treat the
+        # BOM as source encoding metadata, as Python and PowerShell do, rather
+        # than as unobserved source content.
+        file_text = _normalized_text(file_bytes.decode("utf-8-sig", errors="replace"))
     except OSError:
         return result
 

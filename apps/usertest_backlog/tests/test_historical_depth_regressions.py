@@ -32,6 +32,7 @@ from runner_core.shell_capability import _resolve_shell_capability
 
 from usertest_backlog.workflows.depth_contracts import change_plan_quality_errors
 from usertest_backlog.workflows.prioritization import (
+    _apply_provisional_research_unit_schedule,
     _enforce_full_drain_research_policy,
     _priority_response_projection,
     _research_dispatch_sort_key,
@@ -354,6 +355,160 @@ def test_research_dispatch_order_uses_route_bucket_score_then_identity() -> None
         "problem:new-low",
         "problem:reassess",
     ]
+
+
+def _provisional_priority_group_records() -> list[dict[str, Any]]:
+    group = {
+        "schema_version": 1,
+        "status": "research_hypothesis",
+        "group_id": "provisional:shell-panic",
+        "member_case_ids": ["case:member", "case:unit"],
+        "member_problem_ids": ["problem:member", "problem:unit"],
+        "research_unit_case_id": "case:unit",
+        "member_facets": [
+            {
+                "case_id": "case:member",
+                "problem_id": "problem:member",
+                "evidence_atom_ids": ["atom:member"],
+                "source_evidence_atom_ids": ["atom:member"],
+            },
+            {
+                "case_id": "case:unit",
+                "problem_id": "problem:unit",
+                "evidence_atom_ids": ["atom:unit"],
+                "source_evidence_atom_ids": ["atom:unit"],
+            },
+        ],
+    }
+    return [
+        {
+            "problem_id": "problem:member",
+            "case_id": "case:member",
+            "case_identity_status": "provisional_same_cause",
+            "case_identity_candidate_ids": ["case:member", "case:unit"],
+            "case_member_problem_ids": ["problem:member", "problem:unit"],
+            "evidence_atom_ids": ["atom:member", "atom:unit"],
+            "source_evidence_atom_ids": ["atom:member", "atom:unit"],
+            "provisional_same_cause_group": group,
+        },
+        {
+            "problem_id": "problem:unit",
+            "case_id": "case:unit",
+            "case_identity_status": "provisional_same_cause",
+            "case_identity_candidate_ids": ["case:member", "case:unit"],
+            "case_member_problem_ids": ["problem:member", "problem:unit"],
+            "evidence_atom_ids": ["atom:unit", "atom:member"],
+            "source_evidence_atom_ids": ["atom:unit", "atom:member"],
+            "provisional_same_cause_group": group,
+        },
+    ]
+
+
+def test_provisional_same_cause_group_schedules_one_evidence_complete_unit() -> None:
+    records = _provisional_priority_group_records()
+    decisions = [
+        {
+            "problem_id": "problem:member",
+            "research_route": "research_new",
+            "selected_for_research": True,
+            "eligible_for_downstream": True,
+        },
+        {
+            "problem_id": "problem:unit",
+            "research_route": "research_update",
+            "selected_for_research": True,
+            "eligible_for_downstream": True,
+        },
+    ]
+
+    warnings = _apply_provisional_research_unit_schedule(
+        decisions=decisions,
+        problem_records=records,
+    )
+
+    assert warnings == []
+    by_id = {decision["problem_id"]: decision for decision in decisions}
+    unit = by_id["problem:unit"]
+    member = by_id["problem:member"]
+    assert unit["selected_for_research"] is True
+    assert unit["research_route"] == "research_update"
+    assert unit["provisional_research_schedule"] == {
+        "schema_version": 1,
+        "group_id": "provisional:shell-panic",
+        "research_unit_case_id": "case:unit",
+        "research_unit_problem_id": "problem:unit",
+        "member_case_ids": ["case:member", "case:unit"],
+        "member_problem_ids": ["problem:member", "problem:unit"],
+        "source_evidence_atom_ids": ["atom:member", "atom:unit"],
+        "status": "research_unit",
+    }
+    assert member["selected_for_research"] is False
+    assert member["eligible_for_downstream"] is False
+    assert member["research_route"] == "await_provisional_research_unit"
+    assert member["individual_research_route"] == "research_new"
+    assert member["individual_selected_for_research"] is True
+    assert member["provisional_research_schedule"]["status"] == (
+        "represented_by_research_unit"
+    )
+    assert set(unit["provisional_research_schedule"]["source_evidence_atom_ids"]) == {
+        "atom:member",
+        "atom:unit",
+    }
+
+
+def test_provisional_schedule_preserves_independent_work_when_unit_lacks_evidence() -> None:
+    records = _provisional_priority_group_records()
+    records[1]["evidence_atom_ids"] = ["atom:unit"]
+    records[1]["source_evidence_atom_ids"] = ["atom:unit"]
+    decisions = [
+        {
+            "problem_id": "problem:member",
+            "research_route": "research_new",
+            "selected_for_research": True,
+        },
+        {
+            "problem_id": "problem:unit",
+            "research_route": "research_update",
+            "selected_for_research": True,
+        },
+    ]
+
+    warnings = _apply_provisional_research_unit_schedule(
+        decisions=decisions,
+        problem_records=records,
+    )
+
+    assert any("research_unit_source_evidence_incomplete" in item for item in warnings)
+    assert all(decision["selected_for_research"] is True for decision in decisions)
+    assert all("provisional_research_schedule" not in decision for decision in decisions)
+
+
+def test_provisional_schedule_does_not_transfer_nonunit_retained_research() -> None:
+    records = _provisional_priority_group_records()
+    decisions = [
+        {
+            "problem_id": "problem:member",
+            "research_route": "research_update",
+            "selected_for_research": True,
+        },
+        {
+            "problem_id": "problem:unit",
+            "research_route": "research_update",
+            "selected_for_research": True,
+        },
+    ]
+
+    warnings = _apply_provisional_research_unit_schedule(
+        decisions=decisions,
+        problem_records=records,
+    )
+
+    assert any(
+        "nonunit_retained_research_state_requires_independent_dispatch" in item
+        for item in warnings
+    )
+    assert all(decision["selected_for_research"] is True for decision in decisions)
+    assert all("provisional_research_schedule" not in decision for decision in decisions)
 
 
 def test_retained_artifacts_replay_through_current_depth_gates() -> None:

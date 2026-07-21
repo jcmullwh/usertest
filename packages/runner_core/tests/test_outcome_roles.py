@@ -461,6 +461,76 @@ def test_role_executor_binds_commit_and_machine_predicates(tmp_path: Path) -> No
     )["passed"] is True
 
 
+def test_role_executor_imports_first_party_code_from_verified_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "verified-workspace"
+    workspace.mkdir()
+    _git(workspace, "init")
+    _git(workspace, "config", "user.email", "tests@example.com")
+    _git(workspace, "config", "user.name", "Tests")
+
+    workspace_src = workspace / "packages" / "sample" / "src"
+    workspace_src.mkdir(parents=True)
+    (workspace_src / "revision_probe.py").write_text(
+        "ORIGIN = 'verified-workspace'\n",
+        encoding="utf-8",
+    )
+    (workspace / "probe.py").write_text(
+        "from revision_probe import ORIGIN\nprint(ORIGIN)\n",
+        encoding="utf-8",
+    )
+    _git(workspace, "add", ".")
+    _git(workspace, "commit", "-m", "verified revision")
+    commit = _git(workspace, "rev-parse", "HEAD")
+
+    stale_src = tmp_path / "supervisor-worktree"
+    stale_src.mkdir()
+    (stale_src / "revision_probe.py").write_text(
+        "ORIGIN = 'stale-supervisor'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(stale_src))
+
+    unsigned_contract = {
+        "description": "Execute the proof against the exact verified checkout.",
+        "research_experiment_id": "experiment:workspace-binding",
+        "commands": ["python probe.py"],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0},
+            {
+                "type": "command_stdout_contains",
+                "command_index": 0,
+                "value": "verified-workspace",
+            },
+            {
+                "type": "command_stdout_not_contains",
+                "command_index": 0,
+                "value": "stale-supervisor",
+            },
+        ],
+    }
+    contract = {**unsigned_contract, "role_contract_sha256": _sha(unsigned_contract)}
+
+    artifact = run_outcome_evidence_role(
+        workspace=workspace,
+        output_path=tmp_path / "runs" / "workspace-binding" / "outcome_role.json",
+        role="original_scenario",
+        role_contract=contract,
+        case_id="case:workspace-binding",
+        plan_revision_id="plan:workspace-binding:v1",
+        merged_commit=commit,
+        verification_contract_sha256="a" * 64,
+        target_contract_sha256="b" * 64,
+        verified_implementation_head=commit,
+        timeout_seconds=None,
+    )
+
+    assert artifact["passed"] is True
+    assert artifact["commands"][0]["stdout"].strip() == "verified-workspace"
+
+
 def test_role_executor_retains_implementation_commit_at_amended_execution_commit(
     tmp_path: Path,
 ) -> None:

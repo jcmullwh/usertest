@@ -2,20 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from backlog_repo import render_verification_contract_markdown
-from runner_core.runner import RunResult
+from runner_core.runner import RunRequest, RunResult
 
 from usertest_implement.ci import _wait_for_ci_success
 from usertest_implement.commands.review import (
     _build_merge_outcome_record,
     _build_review_correction_prompt,
+    _build_review_semantic_correction_request,
     _cmd_review_merge,
     _cmd_review_run,
+    _is_same_queue_ticket_move,
     _parse_retained_review_correction_prompt,
     _recover_noncausal_premerge_rejection,
     _report_without_runner_added_extensions,
@@ -45,6 +48,7 @@ from usertest_implement.selection import (
     _case_plan_fingerprint,
     _select_ticket_from_path,
     _selected_ticket_provenance,
+    _write_pr_manifest,
 )
 from usertest_implement.shared import (
     SelectedTicket,
@@ -59,6 +63,89 @@ def _approved_causal_fields() -> dict[str, object]:
         "causal_path_assessment": "closed",
         "remaining_causal_paths": [],
     }
+
+
+def test_pr_manifest_projects_oversized_ticket_but_retains_full_local_source(
+    tmp_path: Path,
+) -> None:
+    oversized_research = "research evidence\n" * 100_000
+    ticket = "\n".join(
+        (
+            "## Problem",
+            "The cross-shell command is malformed.",
+            "## Research context",
+            oversized_research,
+            "## Success criteria",
+            "The original scenario passes without a retry.",
+            "## Implementation plan",
+            "### Implementation steps",
+            "1. Change the exact command producer.",
+            "### Verification steps",
+            "1. Replay the original shell boundary.",
+            "### Exact change targets",
+            "- `src/command.py`",
+            "### Original-scenario before / after proof",
+            "Before fails; after passes.",
+            "### Compatibility and failure modes",
+            "Keep direct PowerShell support.",
+            "### Outcome verification requirement",
+            "Replay the originating case.",
+            "### Rollback notes",
+            "Revert the command literal.",
+            "## Evidence atom ids",
+            "- `atom:1`",
+        )
+    )
+    selected = SelectedTicket(
+        fingerprint="1234567890abcdef",
+        title="Cross-shell command",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=tmp_path / "ticket.md",
+        ticket_markdown=ticket,
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    _title, body = _write_pr_manifest(
+        run_dir=tmp_path,
+        selected=selected,
+        branch="backlog/test",
+        agent="codex",
+        model="gpt-5.6-sol",
+    )
+
+    assert len(body) < 65_536
+    assert "The cross-shell command is malformed." in body
+    assert "The original scenario passes without a retry." in body
+    assert "src/command.py" in body
+    assert "Before fails; after passes." in body
+    assert sha256(ticket.encode("utf-8")).hexdigest() in body
+    manifest = (tmp_path / "pr_manifest.md").read_text(encoding="utf-8")
+    assert oversized_research in manifest
+
+
+def test_review_binding_accepts_only_bucket_move_of_same_ticket(tmp_path: Path) -> None:
+    plans_root = tmp_path / ".agents" / "plans"
+    recorded = plans_root / "4 - for_review" / "20260719_abc_ticket.md"
+    completed = plans_root / "5 - complete" / recorded.name
+
+    assert _is_same_queue_ticket_move(
+        owner_root=tmp_path,
+        recorded_path=recorded,
+        selected_path=completed,
+    )
+    assert not _is_same_queue_ticket_move(
+        owner_root=tmp_path,
+        recorded_path=recorded,
+        selected_path=completed.with_name("different.md"),
+    )
+    assert not _is_same_queue_ticket_move(
+        owner_root=tmp_path,
+        recorded_path=recorded,
+        selected_path=tmp_path / "outside" / recorded.name,
+    )
 
 
 def test_merge_outcome_does_not_convert_skipped_check_to_pass(tmp_path: Path) -> None:
@@ -624,7 +711,10 @@ def _prepare_premerge_failure_case(
         lambda **kwargs: kwargs["proposed"],
     )
 
+    premerge_calls: list[None] = []
+
     def _raise_premerge(**_kwargs):
+        premerge_calls.append(None)
         raise raised
 
     monkeypatch.setattr(
@@ -649,6 +739,7 @@ def _prepare_premerge_failure_case(
         "review_run_dir": review_run_dir,
         "ledger_path": ledger_path,
         "review_summary": review_summary,
+        "premerge_calls": premerge_calls,
     }
 
 
@@ -807,6 +898,9 @@ def test_review_merge_classifies_failed_outcome_role_as_causal_rejection(
     assert isinstance(failure, dict)
     assert failure["status"] == "changes_requested"
     assert failure["role_artifact_path"] == str(role_artifact)
+    assert failure["attempt_count"] == 2
+    assert failure["role_artifact_paths"] == [str(role_artifact), str(role_artifact)]
+    assert len(case["premerge_calls"]) == 2
     assert not (review_run_dir / "premerge_original_scenario_blocked.json").exists()
     summary = _read_json(review_run_dir / "review_summary.json")
     assert isinstance(summary, dict)
@@ -988,7 +1082,7 @@ def test_legacy_enospc_recovery_restores_approved_review_and_is_idempotent(
     assert {path: path.read_bytes() for path in stable_paths} == stable_bytes
 
 
-def test_legacy_premerge_recovery_does_not_reclassify_a_role_failure(
+def test_legacy_premerge_recovery_allows_one_bounded_same_head_role_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -998,9 +1092,10 @@ def test_legacy_premerge_recovery_does_not_reclassify_a_role_failure(
     assert isinstance(failure, dict)
     failure["role_artifact_path"] = str(tmp_path / "outcome_role.json")
     _write_json(failure_path, failure)
-    summary_path = case["review_run_dir"] / "review_summary.json"
-    summary_before = summary_path.read_bytes()
-    ledger_before = case["ledger_path"].read_bytes()
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.write_ticket_resume_state",
+        lambda **_: {"lifecycle_state": "awaiting_merge"},
+    )
 
     observed = _recover_noncausal_premerge_rejection(
         selected=case["selected"],
@@ -1012,13 +1107,24 @@ def test_legacy_premerge_recovery_does_not_reclassify_a_role_failure(
         implementation_run_dir=case["implementation_run_dir"],
     )
 
-    assert observed == case["overwritten_summary"]
-    assert summary_path.read_bytes() == summary_before
-    assert case["ledger_path"].read_bytes() == ledger_before
+    assert observed["review_decision"] == "approved"
+    assert observed["causal_acceptance"] is True
     assert not (
         case["review_run_dir"]
         / "premerge_original_scenario_infrastructure_reclassification.json"
     ).exists()
+    retry = _read_json(
+        case["review_run_dir"] / "premerge_original_scenario_retry_pending.json"
+    )
+    assert isinstance(retry, dict)
+    assert retry["status"] == "retry_pending"
+    assert retry["classification"] == "bounded_same_head_retry"
+    assert retry["causal_result"] == "pending_retry"
+    assert retry["prior_attempt_count"] == 1
+    assert retry["maximum_attempt_count"] == 2
+    ledger_text = case["ledger_path"].read_text(encoding="utf-8")
+    assert "last_premerge_original_scenario_status: retry_pending" in ledger_text
+    assert "last_review_causal_acceptance: true" in ledger_text
 
 
 @pytest.mark.parametrize(
@@ -1310,6 +1416,117 @@ def test_build_final_review_summary_rejects_shallow_causal_acceptance(
     assert summary[field] == value
 
 
+def test_bounded_residual_paths_limit_outcome_without_blocking_sound_code(
+    tmp_path: Path,
+) -> None:
+    summary = _build_final_review_summary(
+        selected=SimpleNamespace(
+            fingerprint="abc123abc123abcd",
+            idea_path=tmp_path / "ticket.md",
+        ),
+        review_run_dir=tmp_path / "review_run",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "pr": {
+                "number": 1,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "implementation_scope": {"status": "verified"},
+        },
+        agent_summary={
+            "review_decision": "approved",
+            "approach_alignment": "aligned",
+            "mechanism_assessment": "mechanism_addressed",
+            "original_scenario_oracle": "exercised",
+            "causal_path_assessment": "residual",
+            "remaining_causal_paths": [
+                "A different storage write can still exhaust the original run volume."
+            ],
+            "scope_assessment": "appropriate",
+            "rationale": (
+                "The selected checkout mechanism is closed under its bounded conditions; "
+                "the retained path limits the outcome to mitigated."
+            ),
+        },
+        report={
+            "issues": [
+                {
+                    "severity": "warn",
+                    "title": "Broader storage exhaustion remains possible",
+                    "details": "This path is outside the selected checkout mechanism.",
+                }
+            ]
+        },
+    )
+
+    assert summary["causal_path_assessment"] == "residual"
+    assert summary["remaining_causal_paths"]
+    assert summary["blocking_finding_count"] == 0
+    assert summary["causal_acceptance"] is True
+    assert summary["merge_ready"] is True
+
+
+def test_residual_path_inside_selected_mechanism_remains_blocking(
+    tmp_path: Path,
+) -> None:
+    summary = _build_final_review_summary(
+        selected=SimpleNamespace(
+            fingerprint="abc123abc123abcd",
+            idea_path=tmp_path / "ticket.md",
+        ),
+        review_run_dir=tmp_path / "review_run",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "pr": {
+                "number": 1,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "implementation_scope": {"status": "verified"},
+        },
+        agent_summary={
+            "review_decision": "changes_requested",
+            "approach_alignment": "aligned",
+            "mechanism_assessment": "mechanism_addressed",
+            "original_scenario_oracle": "exercised",
+            "causal_path_assessment": "residual",
+            "remaining_causal_paths": [
+                "The selected checkout fallback still returns the failed destination."
+            ],
+            "scope_assessment": "appropriate",
+            "rationale": "The selected mechanism is not complete.",
+        },
+        report={
+            "issues": [
+                {
+                    "severity": "error",
+                    "title": "Selected fallback path remains open",
+                    "details": "A repository correction is required.",
+                }
+            ]
+        },
+    )
+
+    assert summary["blocking_finding_count"] == 1
+    assert summary["causal_acceptance"] is False
+    assert summary["merge_ready"] is False
+
+
 def test_scope_label_is_advisory_without_a_concrete_blocking_finding(
     tmp_path: Path,
 ) -> None:
@@ -1384,11 +1601,85 @@ def test_review_prompt_centers_causal_acceptance_before_scope() -> None:
     assert "not the mutable merge gate" in prompt
     assert "bound original-scenario oracle" in prompt
     assert "which causal paths, if any, can still reproduce the problem" in prompt
+    assert "bounded residuals may coexist with approval" in prompt
+    assert "Missing external/live proof" in prompt
+    assert "A broken prescribed verification command is a code/test defect" in prompt
     assert "Scope is secondary to causal correctness" in prompt
     assert "hard-blocks only a missing planned production target" in prompt
 
 
-def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) -> None:
+def test_review_prompt_projects_large_research_history_without_losing_causal_evidence(
+    tmp_path: Path,
+) -> None:
+    proof = {
+        "case_id": "case:root-cause",
+        "experiments": [{"result": "causal intervention reproduced the symptom"}],
+        "root_cause_hypotheses": [
+            {"mechanism": "verification errors entered the report-schema channel"}
+        ],
+        "inspected_files": ["packages/runner_core/src/runner_core/runner.py"],
+        "evidence_assignment": {
+            "expected_atom_ids": ["atom:one"],
+            "atom_receipts": [
+                {
+                    "atom_id": "atom:one",
+                    "atom_sha256": "a" * 64,
+                    "atom_snapshot": {"raw": "z" * 120_000},
+                }
+            ],
+            "origin_attachment_evidence": {
+                "manifest_file": "origin_evidence/manifest.json",
+                "run_context": {"raw": "q" * 120_000},
+            },
+        },
+        "research_attempts": [{"transcript": "x" * 120_000}],
+        "evidence_verification": {"raw": "y" * 120_000},
+    }
+    ticket_markdown = (
+        "# Ticket\n\n"
+        "### Full verified research proof\n\n"
+        f"```json\n{json.dumps(proof, indent=2)}\n```\n\n"
+        "## Implementation plan\n\nChange the verified root mechanism.\n"
+    )
+    ticket_path = tmp_path / "ticket.md"
+    ticket_path.write_text(ticket_markdown, encoding="utf-8")
+
+    prompt = _build_review_append_prompt(
+        selected=SimpleNamespace(
+            ticket_markdown=ticket_markdown,
+            idea_path=ticket_path,
+        ),
+        handoff_summary=None,
+        pr_ref=None,
+        ci_gate=None,
+        pr_context={
+            "pr": {},
+            "checks": [],
+            "changed_files": ["packages/runner_core/src/runner_core/runner.py"],
+            "diff_excerpt": "diff --git a/runner.py b/runner.py",
+            "implementation_scope": {"status": "verified"},
+        },
+    )
+
+    assert len(prompt) < 25_000
+    assert "causal intervention reproduced the symptom" in prompt
+    assert "verification errors entered the report-schema channel" in prompt
+    assert "packages/runner_core/src/runner_core/runner.py" in prompt
+    assert "atom:one" in prompt
+    assert "origin_evidence/manifest.json" in prompt
+    assert "atom_snapshot_receipt" in prompt
+    assert "run_context_receipt" in prompt
+    assert "x" * 1000 not in prompt
+    assert "z" * 1000 not in prompt
+    assert "q" * 1000 not in prompt
+    assert "full_proof_sha256" in prompt
+    assert ticket_path.read_text(encoding="utf-8") == ticket_markdown
+
+
+def test_review_correction_reuses_exact_prior_reviewer_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fingerprint = "c0rrectc0rrect00"
     ticket_path = _make_ticket(
         tmp_path,
@@ -1438,6 +1729,11 @@ def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) 
         f"    last_review_run_dir: {json.dumps(str(previous_review_run_dir))}\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0,
+        stdout=head_oid + "\n",
+        stderr="",
+    ))
 
     context = _review_correction_context(
         selected=selected,
@@ -1449,6 +1745,7 @@ def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) 
 
     assert context["codex_resume_session_id"] == session_id
     assert context["resume_workspace_dir"] == workspace_dir.resolve()
+    assert context["resume_workspace_source"] == "prior_review"
     assert context["prior_model"] == "gpt-5.6-terra"
     prompt = _build_review_correction_prompt(
         corrections=["Verify that the planned test was dependency-correctly relocated."],
@@ -1460,7 +1757,10 @@ def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) 
     assert "dependency-correctly relocated" in prompt
 
 
-def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
+def test_review_correction_keeps_same_reviewer_for_a_corrected_pr_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fingerprint = "c0rrectc0rrect01"
     ticket_path = _make_ticket(
         tmp_path,
@@ -1471,6 +1771,8 @@ def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
     implementation_run_dir = tmp_path / "runs" / "implementation"
     implementation_run_dir.mkdir(parents=True)
     previous_review_run_dir = tmp_path / "runs" / "review" / "first"
+    previous_review_run_dir.mkdir(parents=True)
+    session_id = "019f6733-3afd-7270-839c-5e9d0ca4ff71"
     _write_json(
         previous_review_run_dir / "review_summary.json",
         {
@@ -1483,6 +1785,14 @@ def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
         previous_review_run_dir / "review_ref.json",
         {"implementation_run_dir": str(implementation_run_dir)},
     )
+    _write_json(
+        previous_review_run_dir / "target_ref.json",
+        {"agent": "codex", "model": "gpt-5.6-sol"},
+    )
+    (previous_review_run_dir / "raw_events.jsonl").write_text(
+        json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n",
+        encoding="utf-8",
+    )
     ledger_path = tmp_path / ".agents" / "state" / "actions.yaml"
     ledger_path.parent.mkdir(parents=True)
     ledger_path.write_text(
@@ -1492,14 +1802,83 @@ def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="different PR head"):
-        _review_correction_context(
-            selected=selected,
-            implementation_run_dir=implementation_run_dir,
-            ledger_path=ledger_path,
-            pr_url="https://example.invalid/pr/213",
-            reviewed_head_oid="b" * 40,
-        )
+    corrected_run_dir = tmp_path / "runs" / "implementation-correction"
+    corrected_run_dir.mkdir(parents=True)
+    corrected_workspace = tmp_path / "corrected-workspace"
+    corrected_workspace.mkdir()
+    _write_json(
+        corrected_run_dir / "workspace_ref.json",
+        {"workspace_dir": str(corrected_workspace)},
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: SimpleNamespace(
+            returncode=0 if Path(argv[2]).resolve() == corrected_workspace.resolve() else 1,
+            stdout=(
+                "b" * 40 + "\n"
+                if Path(argv[2]).resolve() == corrected_workspace.resolve()
+                else ""
+            ),
+            stderr="",
+        ),
+    )
+    context = _review_correction_context(
+        selected=selected,
+        implementation_run_dir=corrected_run_dir,
+        ledger_path=ledger_path,
+        pr_url="https://example.invalid/pr/213",
+        reviewed_head_oid="b" * 40,
+    )
+
+    assert context["codex_resume_session_id"] == session_id
+    assert context["previous_reviewed_head_oid"] == "a" * 40
+    assert context["current_reviewed_head_oid"] == "b" * 40
+    assert context["previous_implementation_run_dir"] == implementation_run_dir.resolve()
+    assert context["current_implementation_run_dir"] == corrected_run_dir.resolve()
+    assert context["resume_workspace_dir"] == corrected_workspace.resolve()
+    assert context["resume_workspace_source"] == "current_verified_implementation"
+
+
+def test_semantic_review_error_returns_to_exact_same_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed_run_dir = tmp_path / "failed-review"
+    failed_run_dir.mkdir()
+    session_id = "019f6733-3afd-7270-839c-5e9d0ca4ff72"
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.implementation_author_continuity",
+        lambda _run_dir: {
+            "agent": "codex",
+            "exact_session_available": True,
+            "session_id": session_id,
+        },
+    )
+    original = RunRequest(
+        repo="https://example.invalid/repo.git",
+        ref="b" * 40,
+        model="gpt-5.6-sol",
+        agent_append_system_prompt_file=tmp_path / "initial.md",
+        resume_workspace_dir=tmp_path / "current-workspace",
+    )
+
+    corrected = _build_review_semantic_correction_request(
+        request=original,
+        failed_run_dir=failed_run_dir,
+        reviewed_head_oid="b" * 40,
+        validation_error=(
+            "extensions.review_summary.remaining_causal_paths must be empty "
+            "when causal_path_assessment is closed"
+        ),
+    )
+
+    assert corrected.codex_resume_session_id == session_id
+    assert corrected.agent_append_system_prompt_file is None
+    assert corrected.resume_workspace_dir == original.resume_workspace_dir
+    assert corrected.ref == original.ref
+    assert "remaining_causal_paths must be empty" in str(corrected.agent_user_prompt)
+    assert "use `residual` when explicit paths remain" in str(corrected.agent_user_prompt)
 
 
 def test_retained_review_correction_prompt_preserves_order_and_prior_binding(
@@ -2163,6 +2542,10 @@ def test_run_defers_review_until_for_review_and_green_ci(
     def _fake_run_gh_text(*, cwd: Path, argv: list[str]) -> str:
         assert cwd == workspace_dir
         if argv[:3] == ["gh", "pr", "create"]:
+            assert "--body" not in argv
+            body_path = Path(argv[argv.index("--body-file") + 1])
+            assert body_path == impl_run_dir / "pr_body.md"
+            assert "## Ticket review projection" in body_path.read_text(encoding="utf-8")
             return "https://example.invalid/pr/55\n"
         raise AssertionError(f"unexpected gh call: {argv}")
 
@@ -2425,10 +2808,12 @@ def test_review_run_refuses_when_ticket_not_in_for_review(monkeypatch, tmp_path:
         raise AssertionError("Expected review run to refuse non-for_review tickets")
 
 
+@pytest.mark.parametrize("ticket_bucket", ["2 - ready", "3 - in_progress"])
 def test_review_run_accepts_bound_adopted_awaiting_review_ticket(
     monkeypatch,
     tmp_path: Path,
     capsys,
+    ticket_bucket: str,
 ) -> None:
     repo_root = tmp_path / "repo_root"
     owner_root = repo_root
@@ -2436,7 +2821,7 @@ def test_review_run_accepts_bound_adopted_awaiting_review_ticket(
     fingerprint = "ad0ptedad0pted00"
     ticket_path = _make_ticket(
         owner_root,
-        bucket="2 - ready",
+        bucket=ticket_bucket,
         fingerprint=fingerprint,
     )
     original_ticket_bytes = ticket_path.read_bytes()
@@ -2714,6 +3099,79 @@ def test_wait_for_ci_success_polls_view_until_completed_success(
     ci_gate = _read_json(run_dir / "ci_gate.json")
     assert isinstance(ci_gate, dict)
     assert ci_gate["finished_at_utc"] is not None
+
+
+def test_wait_for_ci_success_requires_requested_event_for_same_head(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(parents=True)
+    seen_run_ids: list[str] = []
+
+    def _fake_run(argv, **_kwargs):
+        if argv[:3] == ["gh", "run", "list"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "databaseId": 10,
+                            "headSha": "abc123",
+                            "event": "push",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "createdAt": "2026-07-21T08:05:31Z",
+                            "url": "https://example.invalid/runs/10",
+                        },
+                        {
+                            "databaseId": 11,
+                            "headSha": "abc123",
+                            "event": "pull_request",
+                            "status": "completed",
+                            "conclusion": "success",
+                            "createdAt": "2026-07-21T08:05:32Z",
+                            "url": "https://example.invalid/runs/11",
+                        },
+                    ]
+                ),
+                stderr="",
+            )
+        if argv[:3] == ["gh", "run", "view"]:
+            seen_run_ids.append(argv[3])
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "status": "completed",
+                        "conclusion": "success",
+                        "url": "https://example.invalid/runs/11",
+                    }
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr("usertest_implement.review_context.subprocess.run", _fake_run)
+    monkeypatch.setattr("usertest_implement.ci.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("usertest_implement.ci.time.monotonic", lambda: 0.0)
+
+    summary = _wait_for_ci_success(
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        branch="backlog/test",
+        head_sha="abc123",
+        workflow="CI",
+        timeout_seconds=60.0,
+        required_event="pull_request",
+    )
+
+    assert seen_run_ids == ["11"]
+    assert summary["required_event"] == "pull_request"
+    assert summary["run_id"] == 11
+    assert summary["passed"] is True
 
 
 def test_run_gh_text_returns_empty_string_when_stdout_missing(monkeypatch, tmp_path: Path) -> None:

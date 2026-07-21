@@ -73,13 +73,35 @@ class PositiveBasisRegistry:
 def _field_value(document: Any, field_path: str) -> tuple[bool, Any]:
     if field_path == "$":
         return True, document
-    if not field_path.startswith("$."):
-        return False, None
     current = document
-    for segment in field_path[2:].split("."):
-        if not isinstance(current, Mapping) or segment not in current:
+    cursor = 1
+    while cursor < len(field_path):
+        if field_path[cursor] == ".":
+            match = re.match(r"\.([A-Za-z_][A-Za-z0-9_]*)", field_path[cursor:])
+            if match is None or not isinstance(current, Mapping):
+                return False, None
+            key = match.group(1)
+            if key not in current:
+                return False, None
+            current = current[key]
+            cursor += len(match.group(0))
+            continue
+        if field_path[cursor] == "[":
+            match = re.match(r"\[(\d+)\]", field_path[cursor:])
+            if match is None or not isinstance(current, list):
+                return False, None
+            index = int(match.group(1))
+            if index >= len(current):
+                return False, None
+            current = current[index]
+            cursor += len(match.group(0))
+            continue
+        # Keep the citation grammar intentionally restricted to JSON-like object keys and
+        # non-negative list indexes. Wildcards, slices, negative indexes, and quoted-key
+        # expressions would make the content binding ambiguous.
+        if cursor == 1 and not field_path.startswith("$."):
             return False, None
-        current = current[segment]
+        return False, None
     return True, current
 
 

@@ -91,6 +91,44 @@ def _payload_records(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _qualification_research_objective_best_frontier(
+    document: Mapping[str, Any],
+    *,
+    problem_id: str,
+) -> dict[str, Any] | None:
+    """Recover the latest persisted runner-owned Stage-3 objective best for one problem."""
+
+    meta_raw = document.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+
+    def correction_frontier(value: Any) -> dict[str, Any] | None:
+        correction = value if isinstance(value, Mapping) else {}
+        frontier = correction.get("objective_best_frontier")
+        return dict(frontier) if isinstance(frontier, Mapping) else None
+
+    direct = correction_frontier(meta.get("qualification_research_correction"))
+    if direct is not None:
+        return direct
+    history_raw = meta.get("qualification_repair_history")
+    history = history_raw if isinstance(history_raw, list) else []
+    for entry_raw in reversed(history):
+        if not isinstance(entry_raw, Mapping):
+            continue
+        affected = {
+            str(value)
+            for value in entry_raw.get("affected_problem_ids", [])
+            if isinstance(value, str)
+        }
+        if problem_id not in affected:
+            continue
+        replacement_raw = entry_raw.get("replacement_author_input_meta")
+        replacement = replacement_raw if isinstance(replacement_raw, Mapping) else {}
+        retained = correction_frontier(replacement.get("qualification_research_correction"))
+        if retained is not None:
+            return retained
+    return None
+
+
 def _stage3_external_wait(document: Mapping[str, Any]) -> dict[str, Any] | None:
     meta_raw = document.get("input_meta")
     meta = meta_raw if isinstance(meta_raw, Mapping) else {}
@@ -1444,6 +1482,12 @@ def run_stage456_qualification_repairs(
                 "independent_qualification_finding:"
                 + str(route.get("rationale") or "semantic_research_failure")
             ]
+            route_key = str(route["route_sha256"])
+            retained_stage3 = candidate_docs.get(route_key, documents["repro_research"])
+            objective_best_frontier = _qualification_research_objective_best_frontier(
+                retained_stage3,
+                problem_id=str(pid),
+            )
             research_result = continue_research_dossier_from_independent_feedback(
                 dossier=source_dossier,
                 validation_errors=findings,
@@ -1457,6 +1501,7 @@ def run_stage456_qualification_repairs(
                 replay_executor=replay_executor,
                 artifacts_dir=route_dir,
                 independent_feedback=feedback,
+                objective_best_frontier=objective_best_frontier,
             )
             if research_result.get("status") == "parked_external_wait":
                 research_external_wait = research_result.get("external_wait")
@@ -1474,7 +1519,7 @@ def run_stage456_qualification_repairs(
                 if key != "dossier"
             }
             document["input_meta"] = meta
-            candidate_docs[str(route["route_sha256"])] = document
+            candidate_docs[route_key] = document
             errors = [
                 str(error)
                 for error in research_result.get("validation_errors", [])

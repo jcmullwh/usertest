@@ -26,6 +26,7 @@ from backlog_core.case_lineage import (
     attach_supporting_atoms_to_problem_cases,
     build_case_registry,
     build_source_evidence_snapshot,
+    derived_source_atom_id_aliases,
     downstream_chain_input_sha256,
     eligible_problem_mining_atoms,
     load_case_registry,
@@ -101,6 +102,7 @@ from backlog_core.ticket_readiness import (
     research_limitation_references,
     verified_mechanism_evidence,
     verified_outcome_oracles,
+    verified_research_overlay_command_asset_paths,
     verified_staged_replay_command_asset_paths,
 )
 
@@ -137,6 +139,7 @@ __all__ = [
     "build_case_registry",
     "build_source_evidence_snapshot",
     "downstream_chain_input_sha256",
+    "derived_source_atom_id_aliases",
     "build_stage_document",
     "evidence_assignment_sha256",
     "evidence_verification_sha256",
@@ -174,6 +177,7 @@ __all__ = [
     "research_evidence_references",
     "verified_mechanism_evidence",
     "verified_outcome_oracles",
+    "verified_research_overlay_command_asset_paths",
     "verified_staged_replay_command_asset_paths",
     "research_claims_sha256",
     "research_dossier_output_contract_errors",

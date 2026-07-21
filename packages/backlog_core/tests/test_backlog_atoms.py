@@ -915,6 +915,93 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
     assert trunc.get("omitted_count") == 3
 
 
+def test_command_failure_atom_retains_bounded_same_run_followup_context(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "claude" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "ts": "2026-01-01T00:00:01Z",
+            "type": "run_command",
+            "data": {
+                "command": "powershell -File .\\scripts\\check.ps1",
+                "exit_code": 1,
+                "output_excerpt": "The relative path was not found",
+            },
+        },
+        {
+            "ts": "2026-01-01T00:00:02Z",
+            "type": "run_command",
+            "data": {
+                "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                "exit_code": 0,
+                "output_excerpt": "Success",
+            },
+        },
+        {
+            "ts": "2026-01-01T00:00:03Z",
+            "type": "run_command",
+            "data": {"command": "python -m tool --help", "exit_code": 0},
+        },
+    ]
+    (run_dir / "normalized_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/claude/0",
+            "agent": "claude",
+            "status": "ok",
+            "report": {"kind": "smoke_v1", "status": "success"},
+            "metrics": {
+                "commands_executed": 3,
+                "commands_failed": 1,
+                "failed_commands": [
+                    {
+                        "command": "powershell -File .\\scripts\\check.ps1",
+                        "exit_code": 1,
+                        "output_excerpt": "The relative path was not found",
+                    }
+                ],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    [failure] = [atom for atom in atoms if atom.get("source") == "command_failure"]
+    context = failure["same_run_command_context"]
+
+    assert context == {
+        "source": "normalized_events.jsonl",
+        "failure_event_ordinal": 1,
+        "run_command_count": 3,
+        "later_command_count": 2,
+        "later_successful_command_count": 2,
+        "sampled_later_commands": [
+            {
+                "event_ordinal": 2,
+                "timestamp_utc": "2026-01-01T00:00:02Z",
+                "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                "exit_code": 0,
+                "output_excerpt": "Success",
+            },
+            {
+                "event_ordinal": 3,
+                "timestamp_utc": "2026-01-01T00:00:03Z",
+                "command": "python -m tool --help",
+                "exit_code": 0,
+            },
+        ],
+        "sample_truncated": False,
+        "run_lifecycle_status": "ok",
+        "report_status": "success",
+        "report_kind": "smoke_v1",
+    }
+
+
 def test_extract_backlog_atoms_retains_every_command_failure_by_default(
     tmp_path: Path,
 ) -> None:
@@ -1261,6 +1348,260 @@ def test_extract_backlog_atoms_emits_token_monitoring_error_atoms(tmp_path: Path
     assert error_atom["error_type"] == "RuntimeError"
     assert error_atom["non_fatal"] is True
     assert atoms_doc["totals"]["source_counts"]["token_monitoring_error"] == 1
+
+
+def test_extract_backlog_atoms_emits_bounded_maintenance_cleanup_observation(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    (run_dir / "sandbox").mkdir(parents=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"repo_input": "C:/repo/target_a"}) + "\n",
+        encoding="utf-8",
+    )
+    sidecar_path = run_dir / "sandbox" / "maintenance_image_cleanup.json"
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cleanup_enabled": True,
+                "dry_run": False,
+                "repos_scanned": ["local", "registry.example/maintenance"],
+                "protected_tags": ["dev-latest"],
+                "kept_tags": [
+                    "local:identity-a",
+                    "registry.example/maintenance:identity-a",
+                    "local:identity-b",
+                    "registry.example/maintenance:identity-b",
+                    "local:dev-latest",
+                ],
+                "deleted_tags": [],
+                "deleted_image_ids": [],
+                "errors": [],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = list(iter_report_history(runs_dir, embed="none"))
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    cleanup_atom = next(
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "maintenance_image_cleanup"
+    )
+
+    assert cleanup_atom["atom_id"].endswith(":maintenance_image_cleanup:1")
+    assert cleanup_atom["evidence_class"] == "observed"
+    assert cleanup_atom["cleanup_enabled"] is True
+    assert cleanup_atom["dry_run"] is False
+    assert cleanup_atom["repos_scanned_count"] == 2
+    assert cleanup_atom["kept_tag_count"] == 5
+    assert cleanup_atom["unique_retained_tag_suffix_count"] == 3
+    assert cleanup_atom["retained_identity_measurement_basis"] == (
+        "tag_suffix_proxy_only"
+    )
+    assert cleanup_atom["physical_retained_identity_count_known"] is False
+    assert "kept_image_id_count" not in cleanup_atom
+    assert cleanup_atom["deleted_tag_count"] == 0
+    assert cleanup_atom["deleted_image_id_count"] == 0
+    assert cleanup_atom["error_count"] == 0
+    assert cleanup_atom["artifact_ref"]["path"] == (
+        "sandbox/maintenance_image_cleanup.json"
+    )
+    assert cleanup_atom["artifact_ref"]["sha256"]
+    assert cleanup_atom["artifact_read"]["parse_ok"] is True
+    assert atoms_doc["totals"]["source_counts"]["maintenance_image_cleanup"] == 1
+
+
+def test_maintenance_cleanup_kept_image_ids_do_not_overclaim_ref_only_identity(
+    tmp_path: Path,
+) -> None:
+    records = [
+        {
+            "run_dir": str(tmp_path / "runs" / "target_a" / "run"),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "target_ref": {"repo_input": "C:/repo/target_a"},
+            "maintenance_image_cleanup": {
+                "schema_version": 1,
+                "cleanup_enabled": True,
+                "dry_run": False,
+                "repos_scanned": ["local", "registry.example/maintenance"],
+                "kept_image_ids": ["sha256:known"],
+                "kept_tags": [
+                    "local:known-tag",
+                    "registry.example/maintenance:known-tag",
+                    # The runner can retain a ref-only fallback identity while omitting
+                    # it from kept_image_ids because Docker supplied no image ID.
+                    "local:ref-only-tag",
+                ],
+                "deleted_tags": [],
+                "deleted_image_ids": [],
+                "errors": [],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    cleanup_atom = next(
+        atom for atom in atoms if atom["source"] == "maintenance_image_cleanup"
+    )
+
+    assert cleanup_atom["kept_tag_count"] == 3
+    assert cleanup_atom["unique_retained_tag_suffix_count"] == 2
+    assert cleanup_atom["kept_image_id_count"] == 1
+    assert cleanup_atom["retained_identity_measurement_basis"] == (
+        "kept_image_ids_and_tag_suffix_proxy"
+    )
+    assert cleanup_atom["physical_retained_identity_count_known"] is False
+    assert "kept_image_ids=1" in cleanup_atom["text"]
+    assert "physical_retained_identity_count=unknown" in cleanup_atom["text"]
+
+
+def test_maintenance_cleanup_sidecar_is_independent_of_derived_run_mission(
+    tmp_path: Path,
+) -> None:
+    sidecar = {
+        "schema_version": 1,
+        "cleanup_enabled": True,
+        "dry_run": False,
+        "repos_scanned": ["local", "registry.example/maintenance"],
+        "kept_tags": [
+            "local:identity-a",
+            "registry.example/maintenance:identity-a",
+        ],
+        "deleted_tags": [],
+        "deleted_image_ids": [],
+        "errors": [],
+    }
+    mission_expectations = (
+        ("implement_maintenance_backlog_ticket_v1", "implementation", "implementation"),
+        ("review_backlog_implementation_pr_v1", "verification", "verification"),
+    )
+    records: list[dict[str, object]] = []
+    for index, (mission_id, _origin_stage, _evidence_role) in enumerate(
+        mission_expectations,
+        start=1,
+    ):
+        run_rel = f"target_a/2026010{index}T000000Z/codex/0"
+        records.append(
+            {
+                "run_dir": str(tmp_path / "runs" / run_rel),
+                "run_rel": run_rel,
+                "agent": "codex",
+                "status": "ok",
+                "target_ref": {
+                    "repo_input": "C:/repo/target_a",
+                    "requested_mission_id": mission_id,
+                    "mission_id": mission_id,
+                },
+                "report": {
+                    "confusion_points": [
+                        {"summary": f"Agent-authored output for {mission_id}."}
+                    ]
+                },
+                "maintenance_image_cleanup": dict(sidecar),
+                "maintenance_image_cleanup_read": {
+                    "path": "sandbox/maintenance_image_cleanup.json",
+                    "exists": True,
+                    "decode_ok": True,
+                    "parse_ok": True,
+                },
+            }
+        )
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    eligible_ids = {
+        atom["atom_id"] for atom in eligible_problem_mining_atoms(atoms)
+    }
+
+    for record, (_mission_id, expected_stage, expected_role) in zip(
+        records,
+        mission_expectations,
+        strict=True,
+    ):
+        run_rel = str(record["run_rel"])
+        run_atoms = [atom for atom in atoms if atom["run_rel"] == run_rel]
+        cleanup_atom = next(
+            atom
+            for atom in run_atoms
+            if atom["source"] == "maintenance_image_cleanup"
+        )
+        report_atom = next(
+            atom for atom in run_atoms if atom["source"] == "confusion_point"
+        )
+
+        assert cleanup_atom["origin_stage"] == "runner_maintenance_image_cleanup"
+        assert cleanup_atom["evidence_role"] == "observation"
+        assert cleanup_atom["parent_case_id"] is None
+        assert cleanup_atom["disposition"] == "unresolved"
+        assert cleanup_atom["lineage_authorities"] == ["runner_operational_sidecar"]
+        assert cleanup_atom["atom_id"] in eligible_ids
+
+        assert report_atom["origin_stage"] == expected_stage
+        assert report_atom["evidence_role"] == expected_role
+        assert report_atom["atom_id"] not in eligible_ids
+
+
+def test_extract_backlog_atoms_does_not_fabricate_malformed_cleanup_counts(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    (run_dir / "sandbox").mkdir(parents=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps(
+            {
+                "repo_input": "C:/repo/target_a",
+                "requested_mission_id": "implement_maintenance_backlog_ticket_v1",
+                "mission_id": "implement_maintenance_backlog_ticket_v1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "sandbox" / "maintenance_image_cleanup.json").write_text(
+        "{not-json}\n",
+        encoding="utf-8",
+    )
+
+    records = list(iter_report_history(runs_dir, embed="none"))
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    assert not any(
+        atom.get("source") == "maintenance_image_cleanup"
+        for atom in atoms_doc["atoms"]
+    )
+    error_atom = next(
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "maintenance_image_cleanup_artifact_error"
+    )
+    assert error_atom["artifact_read"]["parse_ok"] is False
+    assert error_atom["artifact_read"]["error_type"] == "JSONDecodeError"
+    assert error_atom["artifact_ref"]["sha256"]
+    assert error_atom["origin_stage"] == "runner_maintenance_image_cleanup"
+    assert error_atom["evidence_role"] == "observation"
+    assert error_atom["atom_id"] in {
+        atom["atom_id"]
+        for atom in eligible_problem_mining_atoms(atoms_doc["atoms"])
+    }
+    for key in (
+        "repos_scanned_count",
+        "kept_tag_count",
+        "unique_retained_tag_suffix_count",
+        "kept_image_id_count",
+        "retained_identity_measurement_basis",
+        "physical_retained_identity_count_known",
+        "deleted_tag_count",
+        "deleted_image_id_count",
+        "error_count",
+    ):
+        assert key not in error_atom
 
 
 def test_parse_ticket_list_recovers_array_and_normalizes() -> None:

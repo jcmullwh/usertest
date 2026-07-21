@@ -270,6 +270,11 @@ def _builtin_predicate_contract(predicate: Mapping[str, Any]) -> list[str]:
         return ["predicate_expected_missing"]
     if kind == "membership" and not isinstance(predicate.get("members"), list):
         return ["predicate_members_invalid"]
+    if kind == "contains" and (
+        not isinstance(predicate.get("expected"), str)
+        or not str(predicate.get("expected")).strip()
+    ):
+        return ["predicate_contains_expected_invalid"]
     if kind == "range" and predicate.get("minimum") is None and predicate.get("maximum") is None:
         return ["predicate_range_unbounded"]
     if kind == "schema" and not isinstance(predicate.get("schema"), Mapping):
@@ -295,6 +300,10 @@ def _evaluate_builtin_predicate(
         return observed == predicate.get("expected"), []
     if kind == "membership":
         return observed in predicate.get("members", []), []
+    if kind == "contains":
+        if not isinstance(observed, str):
+            return False, ["predicate_contains_observation_invalid"]
+        return str(predicate.get("expected")) in observed, []
     if kind == "range":
         minimum = predicate.get("minimum")
         maximum = predicate.get("maximum")
@@ -344,6 +353,7 @@ def _evaluate_builtin_predicate(
 for _builtin_predicate_kind in (
     "equals",
     "membership",
+    "contains",
     "range",
     "schema",
     "existence",
@@ -589,10 +599,16 @@ def validate_causal_proof_receipt(receipt: Any) -> list[str]:
             predicate = binding.get("observation_predicate")
             atom_value = binding.get("origin_atom_value")
             atom_passed, atom_errors = evaluate_proof_predicate(predicate, atom_value)
-            baseline_passed, baseline_errors = evaluate_proof_predicate(
-                predicate,
-                baseline.get("observed"),
-            )
+            verification_method = binding.get("binding_verification_method")
+            baseline_passed = True
+            baseline_errors: list[str] = []
+            if verification_method is None:
+                # Backward-compatible identity binding: legacy receipts used one predicate
+                # for both the immutable source value and the baseline observation.
+                baseline_passed, baseline_errors = evaluate_proof_predicate(
+                    predicate,
+                    baseline.get("observed"),
+                )
             errors.extend(
                 f"causal_proof_atom_predicate_{error}"
                 for error in (*atom_errors, *baseline_errors)
@@ -611,6 +627,11 @@ def validate_causal_proof_receipt(receipt: Any) -> list[str]:
                 != baseline.get("observation_sha256")
                 or binding.get("adapter_id") != receipt.get("adapter_id")
                 or binding.get("adapter_version") != receipt.get("adapter_version")
+                or verification_method
+                not in {
+                    None,
+                    "runner_bound_source_predicate_with_baseline_experiment_v1",
+                }
                 or not atom_passed
                 or not baseline_passed
             ):

@@ -22,6 +22,10 @@ from backlog_core.causal_proof import (
     [
         ({"kind": "equals", "expected": {"status": "ready"}}, {"status": "ready"}),
         ({"kind": "membership", "members": ["linux", "windows"]}, "windows"),
+        (
+            {"kind": "contains", "expected": "windows-sandbox-rs"},
+            "retained stderr from windows-sandbox-rs worker panic",
+        ),
         ({"kind": "range", "minimum": 3, "maximum": 7}, 5),
         (
             {

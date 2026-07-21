@@ -297,6 +297,123 @@ def test_probe_agent_shell_launch_failure_is_structured(tmp_path: Path) -> None:
     assert result["reason"]
 
 
+def test_probe_agent_shell_launch_retries_codex_context_exhaustion(tmp_path: Path) -> None:
+    script = tmp_path / "context_then_marker.py"
+    counter = tmp_path / "attempt_count.txt"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "import sys",
+                "from pathlib import Path",
+                f"counter = Path({str(counter)!r})",
+                "attempt = int(counter.read_text() or '0') + 1 if counter.exists() else 1",
+                "counter.write_text(str(attempt))",
+                "sys.stdin.read()",
+                "if attempt == 1:",
+                (
+                    "    print(json.dumps({'type': 'error', 'message': \"Codex ran out "
+                    "of room in the model's context window. Start a new thread.\"}))"
+                ),
+                "    raise SystemExit(1)",
+                (
+                    "print(json.dumps({'item': {'type': 'command_execution', 'command': "
+                    "'powershell -Command echo shell_probe=ok', 'aggregated_output': "
+                    "'shell_probe=ok\\n', 'exit_code': 0}}))"
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    if os.name == "nt":
+        binary = tmp_path / "context_then_marker.cmd"
+        binary.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        binary = tmp_path / "context_then_marker.sh"
+        binary.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    payload = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "probe",
+        binary=str(binary),
+        codex_context_exhaustion_retries=1,
+    ).to_dict()
+
+    assert payload["ok"] is True
+    assert payload["attempt_count"] == 2
+    assert payload["retry_count"] == 1
+    assert [item["retryable_context_exhaustion"] for item in payload["attempt_history"]] == [
+        True,
+        False,
+    ]
+    assert all(Path(item["raw_events_path"]).is_file() for item in payload["attempt_history"])
+
+
+def test_probe_agent_shell_launch_bounds_persistent_context_exhaustion(tmp_path: Path) -> None:
+    script = tmp_path / "always_context_exhausted.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "import sys",
+                "sys.stdin.read()",
+                (
+                    "print(json.dumps({'type': 'error', 'message': \"Codex ran out of room "
+                    "in the model's context window.\"}))"
+                ),
+                "raise SystemExit(1)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    if os.name == "nt":
+        binary = tmp_path / "always_context_exhausted.cmd"
+        binary.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        binary = tmp_path / "always_context_exhausted.sh"
+        binary.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    payload = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "probe",
+        binary=str(binary),
+        codex_context_exhaustion_retries=1,
+    ).to_dict()
+
+    assert payload["ok"] is False
+    assert payload["attempt_count"] == 2
+    assert payload["retry_count"] == 1
+    assert all(
+        item["retryable_context_exhaustion"] for item in payload["attempt_history"]
+    )
+
+
 def test_probe_agent_shell_launch_does_not_accept_final_message_marker(tmp_path: Path) -> None:
     script = tmp_path / "final_only.py"
     script.write_text(

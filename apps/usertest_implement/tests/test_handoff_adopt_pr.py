@@ -484,6 +484,78 @@ def test_adopt_pr_rejects_arbitrary_descendant_before_capture(
     assert not fixture.runs_root.exists()
 
 
+def test_adopt_pr_reuses_verification_after_runner_owned_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixture = _fixture(tmp_path)
+    verification_path = fixture.source_run_dir / "verification.json"
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    verification["commands_configured"] = PLAN_COMMANDS
+    verification["commands"] = verification["commands"][: len(PLAN_COMMANDS)]
+    _write_json(verification_path, verification)
+    runtime_file = (
+        fixture.workspace
+        / ".usertest_outcome"
+        / "controlled"
+        / "report.json"
+    )
+    runtime_file.parent.mkdir(parents=True)
+    runtime_file.write_text('{"status":"mitigated"}\n', encoding="utf-8")
+    _git(fixture.workspace, "add", ".usertest_outcome")
+    _git(fixture.workspace, "commit", "-m", "historical runner output")
+    verified_runtime_head = _git(fixture.workspace, "rev-parse", "HEAD")
+
+    git_ref_path = fixture.source_run_dir / "git_ref.json"
+    git_ref = json.loads(git_ref_path.read_text(encoding="utf-8"))
+    git_ref["head_commit"] = verified_runtime_head
+    _write_json(git_ref_path, git_ref)
+    ticket_ref_path = fixture.source_run_dir / "ticket_ref.json"
+    ticket_ref = json.loads(ticket_ref_path.read_text(encoding="utf-8"))
+    ticket_ref.pop("implementation_provenance", None)
+    _write_json(ticket_ref_path, ticket_ref)
+    record_verified_implementation_head(
+        run_dir=fixture.source_run_dir,
+        require_exact_base=True,
+    )
+
+    _git(fixture.workspace, "rm", "-r", "--cached", ".usertest_outcome")
+    _git(fixture.workspace, "commit", "-m", "untrack runner output")
+    cleaned_head = _git(fixture.workspace, "rev-parse", "HEAD")
+    assert runtime_file.is_file()
+    assert "?? .usertest_outcome/" in _git(fixture.workspace, "status", "--short")
+
+    monkeypatch.setattr(
+        handoff_commands,
+        "_collect_pr_review_context",
+        lambda **_: _pr_context(fixture, head=cleaned_head),
+    )
+    monkeypatch.setattr(
+        handoff_commands,
+        "capture_local_verification",
+        lambda **_: pytest.fail("product-identical cleanup must reuse verification"),
+    )
+
+    assert handoff_commands._cmd_handoff_adopt_pr(_args(fixture)) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    derived_run = Path(payload["run_dir"])
+    ticket_ref = json.loads((derived_run / "ticket_ref.json").read_text(encoding="utf-8"))
+    assert payload["source_verification_reused"] is True
+    assert payload["exact_plan_verification_captured"] is False
+    assert payload["head_relation"] == {
+        "kind": "runner_owned_cleanup",
+        "source_head": verified_runtime_head,
+        "adopted_head": cleaned_head,
+        "pr_base_oid": fixture.planned_revision,
+        "paths": [".usertest_outcome/controlled/report.json"],
+        "verification_reuse_allowed": True,
+    }
+    assert ticket_ref["implementation_provenance"]["verified_implementation_head"] == cleaned_head
+    assert runtime_file.is_file()
+
+
 def test_adopt_pr_recaptures_exact_plan_verification_after_current_base_merge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

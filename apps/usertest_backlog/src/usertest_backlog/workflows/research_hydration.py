@@ -11,7 +11,10 @@ from backlog_core import (
     assess_research_readiness,
     source_evidence_snapshot_sha256,
 )
+from backlog_core.stage_contracts import research_evidence_role_partition
 from backlog_miner.research_evidence import verify_persisted_research_evidence
+
+from .depth_contracts import research_contract_view
 
 
 def _text(value: Any) -> str | None:
@@ -63,14 +66,18 @@ def _current_research_summary(record: Mapping[str, Any]) -> dict[str, Any] | Non
     return dict(current) if isinstance(current, Mapping) else None
 
 
-def hydrate_retained_research_proof(
+def _hydrate_retained_research_dossier(
     record: Mapping[str, Any],
+    *,
+    require_ready: bool,
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    """Load one exact retained Stage-3 dossier and re-run the current readiness gate.
+    """Load one exact retained Stage-3 dossier and authenticate its evidence.
 
     The compact case-registry summary is never itself accepted as research evidence.  It
     must point to the complete Stage-3 document, whose exact case/problem item is checked
-    against the retained digest and the current research contract before reuse.
+    against the retained digest and the current research contract before reuse.  Callers
+    that intend to implement from the proof additionally require the readiness gate;
+    callers authenticating an explicit insufficient-evidence disposition do not.
     """
 
     summary = _current_research_summary(record)
@@ -186,7 +193,21 @@ def hydrate_retained_research_proof(
             if isinstance(value, str) and value.strip()
         }
     )
-    if current_source_atom_ids != researched_source_atom_ids:
+    case_evidence_atom_ids, occurrence_evidence_atom_ids, partition_source = (
+        research_evidence_role_partition(assignment)
+    )
+    if partition_source == "unavailable":
+        # Older retained dossiers predate explicit evidence roles. Their complete
+        # assignment remains the only authenticated frontier available.
+        researched_case_source_atom_ids = researched_source_atom_ids
+    else:
+        # Operational aggregates are the durable case frontier and their expanded
+        # occurrences are supporting evidence. Ordinary cases have no aggregate,
+        # so their signed occurrence atoms are themselves the durable frontier.
+        researched_case_source_atom_ids = sorted(
+            set(case_evidence_atom_ids or occurrence_evidence_atom_ids)
+        )
+    if current_source_atom_ids != researched_case_source_atom_ids:
         return None, ["retained_research_source_evidence_frontier_mismatch"]
     receipts_raw = assignment.get("atom_receipts")
     receipts = receipts_raw if isinstance(receipts_raw, list) else []
@@ -205,7 +226,12 @@ def hydrate_retained_research_proof(
         ):
             return None, ["retained_research_source_evidence_receipts_invalid"]
         researched_hashes[atom_id] = atom_sha256.casefold()
-    if researched_hashes != current_hashes:
+    researched_case_hashes = {
+        atom_id: researched_hashes[atom_id]
+        for atom_id in researched_case_source_atom_ids
+        if atom_id in researched_hashes
+    }
+    if researched_case_hashes != current_hashes:
         return None, ["retained_research_source_evidence_content_mismatch"]
 
     summary_fields = (
@@ -218,13 +244,15 @@ def hydrate_retained_research_proof(
     if any(summary.get(field) != dossier.get(field) for field in summary_fields):
         return None, ["retained_research_summary_content_mismatch"]
 
-    ready, readiness_errors = assess_research_readiness(dossier)
-    if not ready:
-        return None, [
-            "retained_research_proof_not_ready",
-            *(f"retained_research_readiness:{error}" for error in readiness_errors),
-        ]
-    persisted_ready, persisted_errors = verify_persisted_research_evidence(dossier)
+    contract_dossier = research_contract_view(dossier)
+    if require_ready:
+        ready, readiness_errors = assess_research_readiness(contract_dossier)
+        if not ready:
+            return None, [
+                "retained_research_proof_not_ready",
+                *(f"retained_research_readiness:{error}" for error in readiness_errors),
+            ]
+    persisted_ready, persisted_errors = verify_persisted_research_evidence(contract_dossier)
     if not persisted_ready:
         return None, [
             "retained_research_evidence_not_persisted",
@@ -233,4 +261,20 @@ def hydrate_retained_research_proof(
     return dossier, []
 
 
-__all__ = ["hydrate_retained_research_proof"]
+def hydrate_retained_research_proof(
+    record: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Load an exact retained Stage-3 dossier that is currently implementation-ready."""
+
+    return _hydrate_retained_research_dossier(record, require_ready=True)
+
+
+def hydrate_retained_research_evidence(
+    record: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Load exact persisted Stage-3 evidence without claiming it is implementation-ready."""
+
+    return _hydrate_retained_research_dossier(record, require_ready=False)
+
+
+__all__ = ["hydrate_retained_research_evidence", "hydrate_retained_research_proof"]

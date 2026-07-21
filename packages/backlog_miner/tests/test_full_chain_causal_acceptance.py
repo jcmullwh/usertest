@@ -243,6 +243,14 @@ def _research_claims(revision: str) -> dict[str, object]:
             ),
             "evidence_refs": ["experiment:original", "experiment:control"],
         },
+        "observed_problem_refinement": {
+            "problem": "The default core.run path raises instead of returning its contract value.",
+            "user_impact": "Callers cannot complete the default-path operation.",
+            "evidence_summary": (
+                "The assigned atom and original replay fail while the guarded control succeeds."
+            ),
+            "evidence_atom_ids": ["atom:origin"],
+        },
         "material_unknowns": [],
         "blocking_reasons": [],
         "evidence_boundaries": [],

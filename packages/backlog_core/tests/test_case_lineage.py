@@ -1327,6 +1327,68 @@ def test_atom_dispositions_and_group_lineage_propagate() -> None:
     assert downstream[0]["same_cause_group_id"] == "cause:one"
 
 
+def test_provisional_member_lineage_prefers_each_direct_problem_record() -> None:
+    members = ["problem:member", "problem:unit"]
+    problem_cases = [
+        {
+            "problem_id": "problem:member",
+            "canonical_problem_id": "problem:member",
+            "case_id": "case:member",
+            "case_member_problem_ids": members,
+        },
+        {
+            "problem_id": "problem:unit",
+            "canonical_problem_id": "problem:unit",
+            "case_id": "case:unit",
+            "case_member_problem_ids": members,
+        },
+    ]
+
+    downstream = propagate_case_lineage(
+        [
+            {"problem_id": "problem:member", "case_id": "case:member"},
+            {"problem_id": "problem:unit", "case_id": "case:unit"},
+        ],
+        problem_cases,
+    )
+
+    assert downstream == [
+        {
+            "problem_id": "problem:member",
+            "case_id": "case:member",
+            "canonical_problem_id": "problem:member",
+            "case_member_problem_ids": members,
+        },
+        {
+            "problem_id": "problem:unit",
+            "case_id": "case:unit",
+            "canonical_problem_id": "problem:unit",
+            "case_member_problem_ids": members,
+        },
+    ]
+
+
+def test_canonical_member_alias_lineage_still_uses_canonical_record() -> None:
+    [downstream] = propagate_case_lineage(
+        [{"problem_id": "problem:alias"}],
+        [
+            {
+                "problem_id": "problem:canonical",
+                "canonical_problem_id": "problem:canonical",
+                "case_id": "case:canonical",
+                "case_member_problem_ids": ["problem:canonical", "problem:alias"],
+            }
+        ],
+    )
+
+    assert downstream["case_id"] == "case:canonical"
+    assert downstream["canonical_problem_id"] == "problem:canonical"
+    assert downstream["case_member_problem_ids"] == [
+        "problem:canonical",
+        "problem:alias",
+    ]
+
+
 def test_source_atom_can_support_distinct_canonical_facets_without_losing_evidence() -> None:
     atom_id = "target/run/agent/1:confusion_point:1"
     atoms = normalize_atom_lineage([_atom(atom_id)], strict_new_output=True)
@@ -1403,6 +1465,84 @@ def test_persisted_primary_for_multi_case_source_atom_survives_order_and_normali
     assert updated["atom_id_to_case_ids"][atom_id] == ["case:a", "case:z"]
 
 
+def test_content_addressed_reingested_atom_resolves_durable_source_registry_alias() -> None:
+    durable_atom_id = (
+        "usertest_implement/usertest/20260704T161642Z/codex/0:"
+        "maintenance_image_cleanup:1"
+    )
+    content_addressed_atom_id = (
+        "__derived__/usertest_implement/"
+        + "9cca0cb22f63f143b8049249083a669b47e02f17899c6bb162e8fc1eb7e23eef"
+        + ":maintenance_image_cleanup:1"
+    )
+    registry = {
+        "schema_version": 1,
+        "cases": {
+            "case:maintenance": {
+                "case_id": "case:maintenance",
+                "state": "mitigated",
+                "evidence_atom_ids": [durable_atom_id],
+            }
+        },
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {durable_atom_id: "case:maintenance"},
+        "atom_id_to_case_ids": {durable_atom_id: ["case:maintenance"]},
+        "ticket_fingerprint_to_case_id": {},
+    }
+    normalized = normalize_atom_lineage(
+        [
+            _atom(
+                content_addressed_atom_id,
+                source="maintenance_image_cleanup",
+                evidence_role="observation",
+                origin_stage="runner_maintenance_image_cleanup",
+                disposition="unresolved",
+                derived_source_root_kind="usertest_implement",
+                derived_source_run_rel="usertest/20260704T161642Z/codex/0",
+            )
+        ],
+        case_registry=registry,
+        strict_new_output=True,
+    )
+
+    assert normalized[0]["case_id"] == "case:maintenance"
+    assert normalized[0]["supporting_case_ids"] == ["case:maintenance"]
+    assert normalized[0]["disposition"] == "supports_case"
+    assert normalized[0]["disposition_receipt"]["source"] == "case_registry_membership"
+    assert eligible_problem_mining_atoms(normalized) == []
+
+    dispositioned = apply_atom_dispositions(normalized, [])
+    assert dispositioned[0]["disposition_receipt"] == normalized[0]["disposition_receipt"]
+
+
+def test_content_addressed_alias_requires_matching_structured_source_identity() -> None:
+    durable_atom_id = "usertest_implement/usertest/run/codex/0:confusion_point:1"
+    registry = {
+        "schema_version": 1,
+        "cases": {"case:known": {"case_id": "case:known", "state": "active"}},
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {durable_atom_id: "case:known"},
+        "atom_id_to_case_ids": {durable_atom_id: ["case:known"]},
+        "ticket_fingerprint_to_case_id": {},
+    }
+    normalized = normalize_atom_lineage(
+        [
+            _atom(
+                "__derived__/usertest_implement/" + "a" * 64 + ":confusion_point:1",
+                source="different_source",
+                derived_source_root_kind="usertest_implement",
+                derived_source_run_rel="usertest/run/codex/0",
+            )
+        ],
+        case_registry=registry,
+        strict_new_output=True,
+    )
+
+    assert normalized[0]["case_id"] is None
+    assert normalized[0]["disposition"] == "unresolved"
+    assert eligible_problem_mining_atoms(normalized) == normalized
+
+
 def test_derived_evidence_cannot_be_assigned_to_multiple_canonical_cases() -> None:
     atom_id = "target/research/agent/1:confusion_point:1"
     atoms = normalize_atom_lineage(
@@ -1449,6 +1589,78 @@ def _stage_doc(
             f"{stage}_md": f"compiled/case.{stage}.{suffix}.md",
         },
     }
+
+
+def test_zero_option_stage_persists_exact_auxiliary_outcome_identity() -> None:
+    registry = build_case_registry(
+        [
+            {
+                "problem_id": "problem:one",
+                "case_id": "case:one",
+                "evidence_atom_ids": ["atom:one"],
+                "source_evidence_atom_ids": ["atom:one"],
+            }
+        ]
+    )
+    research = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_schema_version": 3,
+        "repo_revision": "a" * 40,
+        "research_method": "static_diagnosis",
+        "reproduction_status": "not_reproduced",
+        "research_status": "evidence_sufficient",
+        "root_cause_confidence": 0.9,
+        "material_unknowns": [],
+        "blocking_reasons": [],
+        "actionability_assessment": {
+            "disposition": "already_addressed",
+            "rationale": "The exact pinned revision already contains the verified behavior.",
+            "evidence_refs": ["experiment:one"],
+        },
+    }
+    registry = update_case_registry_stage_lineage(
+        registry,
+        stage_doc=_stage_doc("repro_research", [research], suffix="1"),
+    )
+    outcome = {
+        "problem_id": "problem:one",
+        "optioning_status": "not_required",
+        "research_actionability_disposition": "already_addressed",
+        "decision_rationale": "The authenticated proof requires no product change.",
+        "evidence_refs": ["experiment:one"],
+        "research_readiness_blockers": [],
+        "option_count": 0,
+        "rejected_option_count": 0,
+    }
+    optioning = _stage_doc(
+        "solution_optioning",
+        [],
+        suffix="2",
+        input_meta={"optioning_outcomes": [outcome]},
+    )
+    optioning["artifacts"] = {"solution_options_json": "compiled/case.solution_options.2.json"}
+
+    registry = update_case_registry_stage_lineage(registry, stage_doc=optioning)
+
+    summary = registry["cases"]["case:one"]["current_option_set"]
+    expected_outcome_sha256 = sha256(
+        json.dumps(
+            outcome,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert summary["case_id"] == "case:one"
+    assert summary["problem_id"] == "problem:one"
+    assert summary["optioning_status"] == "not_required"
+    assert summary["option_ids"] == []
+    assert summary["family_ids"] == []
+    assert summary["optioning_outcome_count"] == 1
+    assert summary["optioning_outcome_sha256"] == expected_outcome_sha256
+    assert summary["research_actionability_disposition"] == "already_addressed"
+    assert summary["actionability_evidence_refs"] == ["experiment:one"]
 
 
 def test_stage_lineage_is_cumulative_and_carried_cases_reuse_proof_context() -> None:

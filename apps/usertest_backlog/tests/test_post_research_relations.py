@@ -16,7 +16,10 @@ from usertest_backlog.workflows.post_research_relations import (
     authenticated_split_child_occurrence_evidence,
     collapse_post_research_verified_mechanisms,
 )
-from usertest_backlog.workflows.problem_mining import _persist_canonical_relation_receipts
+from usertest_backlog.workflows.problem_mining import (
+    _bind_problem_mining_relation_split_receipts,
+    _persist_canonical_relation_receipts,
+)
 
 
 def _digest(value: object) -> str:
@@ -292,6 +295,92 @@ def test_verified_provisional_group_finalizes_only_after_all_member_evidence() -
     assert registry["cases"]["case:b"]["alias_of"] == "case:a"
     assert "provisional_same_cause_group" not in registry["cases"]["case:a"]
     assert "provisional_same_cause_group" not in registry["cases"]["case:b"]
+
+
+def test_verified_adapter_proof_can_finalize_provisional_same_cause_group() -> None:
+    inputs = _provisional_inputs()
+    provenance = {
+        **_provenance(),
+        "causal_control_ids": [],
+        "research_probe_control_points": [],
+        "intervention_targets": [
+            {
+                "intervention_id": "case-local-id",
+                "kind": "request_change",
+                "target": "router.dispatch",
+            }
+        ],
+        "support_connectivity": [
+            {
+                "mechanism_evidence_id": "mechanism:one",
+                "connection_kind": "causal_root",
+                "verified_causal_edges": [
+                    {
+                        "edge_kind": "adapter_intervention_to_shared_production_touchpoint",
+                        "caller_path": "src/router.py",
+                        "caller_symbol": "router.dispatch",
+                        "callee_path": "src/router.py",
+                        "callee_symbol": "router.send",
+                        "causal_edge_sha256": "case-local-hash",
+                    }
+                ],
+            }
+        ],
+    }
+    for entry in inputs["case_registry"]["cases"].values():
+        entry["verified_mechanism_provenance"] = provenance
+        entry["verified_mechanism_provenance_sha256"] = _digest(provenance)
+    dossier = inputs["research_dossiers"][0]
+    dossier["evidence_verification"]["verified_mechanism_provenance"] = provenance
+    dossier["evidence_verification"]["verified_mechanism_provenance_sha256"] = _digest(
+        provenance
+    )
+    dossier["evidence_verification"]["control_verifications"] = []
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {"case:b": "case:a"}
+    assert result["groups"][0]["relation_kind"] == "verified_provisional_same_cause"
+    assert result["problem_records"][0]["case_identity_status"] == "resolved"
+
+
+def test_incomplete_adapter_proof_does_not_finalize_provisional_group() -> None:
+    inputs = _provisional_inputs()
+    provenance = {
+        **_provenance(),
+        "causal_control_ids": [],
+        "research_probe_control_points": [],
+        "intervention_targets": [
+            {
+                "intervention_id": "case-local-id",
+                "kind": "request_change",
+                "target": "router.dispatch",
+            }
+        ],
+        "support_connectivity": [],
+    }
+    for entry in inputs["case_registry"]["cases"].values():
+        entry["verified_mechanism_provenance"] = provenance
+        entry["verified_mechanism_provenance_sha256"] = _digest(provenance)
+    dossier = inputs["research_dossiers"][0]
+    dossier["evidence_verification"]["verified_mechanism_provenance"] = provenance
+    dossier["evidence_verification"]["verified_mechanism_provenance_sha256"] = _digest(
+        provenance
+    )
+    dossier["evidence_verification"]["control_verifications"] = []
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {}
+    assert result["groups"] == []
 
 
 def test_partial_provisional_group_preserves_original_ids_and_blocks_alias() -> None:
@@ -750,6 +839,11 @@ def test_partial_research_split_creates_unresearched_children_and_immutable_rece
     }
     assert child_occurrences == {("atom:checkout",), ("atom:writer",)}
     assert all(
+        record["source_evidence_atom_ids"]
+        == record["occurrence_evidence_atom_ids"]
+        for record in result["problem_records"]
+    )
+    assert all(
         record["evidence_atom_ids"] != ["atom:aggregate"] for record in result["problem_records"]
     )
     facet_atoms = [
@@ -795,12 +889,24 @@ def test_partial_research_split_creates_unresearched_children_and_immutable_rece
     assert set(registry["cases"]["case:broad"]["child_case_ids"]) == {
         record["case_id"] for record in result["problem_records"]
     }
+    for child in result["problem_records"]:
+        entry = registry["cases"][child["case_id"]]
+        assert entry["source_evidence_atom_ids"] == child["occurrence_evidence_atom_ids"]
+        assert set(entry["source_evidence_atom_sha256_by_id"]) == set(
+            child["occurrence_evidence_atom_ids"]
+        )
+        assert entry["source_evidence_snapshot_complete"] is True
+        assert entry["source_evidence_snapshot_missing_atom_ids"] == []
+        assert len(entry["source_evidence_snapshot_sha256"]) == 64
     carried = problem_case_records_from_registry(registry)
     assert {record["case_id"] for record in carried} == {
         record["case_id"] for record in result["problem_records"]
     }
     assert all(
         record["occurrence_evidence_atom_ids"]
+        and record["source_evidence_atom_ids"]
+        == record["occurrence_evidence_atom_ids"]
+        and record["source_evidence_snapshot_complete"] is True
         and record["post_research_split_receipt"]
         == result["problem_records"][0]["post_research_split_receipt"]
         for record in carried
@@ -818,6 +924,106 @@ def test_partial_research_split_creates_unresearched_children_and_immutable_rece
     assert [record["case_id"] for record in repeated["problem_records"]] == [
         record["case_id"] for record in result["problem_records"]
     ]
+
+
+def test_problem_mining_split_receipt_authenticates_source_occurrences(
+    tmp_path: Path,
+) -> None:
+    decision = {
+        "focus_id": "problem:parent",
+        "action": "split",
+        "split_groups": [
+            {"evidence_atom_ids": ["atom:source"]},
+            {"evidence_atom_ids": ["atom:other"]},
+        ],
+        "rationale": "The source observations describe two distinct failures.",
+        "review_confidence": 0.9,
+    }
+    response_path = tmp_path / "relation.response.txt"
+    response_path.write_text(json.dumps([decision]), encoding="utf-8")
+    child = {
+        "problem_id": "problem:parent:split:1",
+        "case_id": "case:child",
+        "split_from_case_id": "case:parent",
+        "split_parent_problem_id": "problem:parent",
+        "evidence_atom_ids": ["atom:source"],
+        "source_evidence_atom_ids": ["atom:source"],
+        "derived_evidence_atom_ids": [],
+        "case_relation_actions": [{"action": "split"}],
+    }
+    registry = {"cases": {"case:child": {"case_id": "case:child"}}}
+    _, receipt_path = _persist_canonical_relation_receipts(
+        canonical_records=[child],
+        registry=registry,
+        review_response_path=response_path,
+        receipt_path=tmp_path / "relations.json",
+    )
+
+    _bind_problem_mining_relation_split_receipts(
+        canonical_records=[child],
+        registry=registry,
+        relation_decisions=[decision],
+        relation_receipt_path=receipt_path,
+    )
+
+    assert child["occurrence_evidence_atom_ids"] == ["atom:source"]
+    occurrence_ids, errors = authenticated_split_child_occurrence_evidence(
+        child,
+        atoms_by_id={"atom:source": {"atom_id": "atom:source"}},
+    )
+    assert errors == []
+    assert occurrence_ids == ["atom:source"]
+    assert (
+        registry["cases"]["case:child"]["problem_mining_relation_split_receipt"]
+        == child["problem_mining_relation_split_receipt"]
+    )
+
+    changed = deepcopy(child)
+    changed["occurrence_evidence_atom_ids"] = ["atom:other"]
+    occurrence_ids, errors = authenticated_split_child_occurrence_evidence(
+        changed,
+        atoms_by_id={"atom:other": {"atom_id": "atom:other"}},
+    )
+    assert occurrence_ids == []
+    assert "problem_mining_split_reference_record_mismatch" in errors
+
+    changed = deepcopy(child)
+    changed_ref = changed["problem_mining_relation_split_receipt"]
+    changed_ref["decision_sha256"] = "0" * 64
+    changed_ref["content_sha256"] = _digest(
+        {key: value for key, value in changed_ref.items() if key != "content_sha256"}
+    )
+    occurrence_ids, errors = authenticated_split_child_occurrence_evidence(
+        changed,
+        atoms_by_id={"atom:source": {"atom_id": "atom:source"}},
+    )
+    assert occurrence_ids == []
+    assert "problem_mining_split_decision_binding_invalid" in errors
+
+    relation_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    immutable_response_path = Path(relation_receipt["relation_review_response_path"])
+    immutable_response_bytes = immutable_response_path.read_bytes()
+    immutable_response_path.write_text(
+        json.dumps([{**decision, "rationale": "Changed after the receipt was written."}]),
+        encoding="utf-8",
+    )
+    occurrence_ids, errors = authenticated_split_child_occurrence_evidence(
+        child,
+        atoms_by_id={"atom:source": {"atom_id": "atom:source"}},
+    )
+    assert occurrence_ids == []
+    assert "problem_mining_split_response_sha256_mismatch" in errors
+    immutable_response_path.write_bytes(immutable_response_bytes)
+
+    changed_receipt = deepcopy(relation_receipt)
+    changed_receipt["unexpected"] = "changed after binding"
+    receipt_path.write_text(json.dumps(changed_receipt), encoding="utf-8")
+    occurrence_ids, errors = authenticated_split_child_occurrence_evidence(
+        child,
+        atoms_by_id={"atom:source": {"atom_id": "atom:source"}},
+    )
+    assert occurrence_ids == []
+    assert "problem_mining_split_relation_receipt_sha256_mismatch" in errors
 
 
 def test_revised_split_replaces_old_active_children_but_preserves_registry_history(

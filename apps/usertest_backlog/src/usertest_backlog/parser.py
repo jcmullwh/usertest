@@ -505,7 +505,26 @@ def build_parser() -> argparse.ArgumentParser:
     reports_qualification_prepare_p.add_argument("--repo-input", type=Path, required=True)
     reports_qualification_prepare_p.add_argument("--research-ref", required=True)
     reports_qualification_prepare_p.add_argument("--source-runs-dir", type=Path, required=True)
-    reports_qualification_prepare_p.add_argument("--atom-actions-yaml", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument(
+        "--additional-evidence-runs-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Additional absolute read-only runs root to ingest and content-seal. "
+            "Repeat for each explicitly selected canonical root; the selected target "
+            "must exist directly beneath the root. Broad archive discovery is not performed."
+        ),
+    )
+    reports_qualification_prepare_p.add_argument(
+        "--atom-actions-yaml",
+        type=Path,
+        required=True,
+        help=(
+            "Source lifecycle ledger. Preparation writes an immutable work-directory copy "
+            "before extraction and seals that copy into the qualification bundle."
+        ),
+    )
     reports_qualification_prepare_p.add_argument(
         "--case-registry-seed",
         type=Path,

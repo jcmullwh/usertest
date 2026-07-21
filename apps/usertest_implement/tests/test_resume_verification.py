@@ -229,6 +229,10 @@ def test_resume_dry_run_builds_focused_prompt_from_structured_artifacts(
         payload["run_request"]["codex_resume_session_id"] == "019f5000-0000-7000-8000-000000000002"
     )
     assert payload["implementation_author_continuity"]["status"] == "exact_author_session"
+    assert payload["run_request"]["verification_reuse_mode"] == "off"
+    assert payload["run_request"]["verification_reuse_forced_reason"] == (
+        "same_workspace_resume_fresh_gate"
+    )
     prompt = payload["prompt"]
     assert "Do not restart the original full ticket prompt from scratch" in prompt
     assert "verification.json" in prompt
@@ -505,6 +509,78 @@ def test_resume_carries_asset_and_constraints_then_commits_passing_verification(
     assert permission_correction in resumed_ticket["supervisor_instruction"]
 
 
+def test_resume_binds_passing_verification_to_existing_clean_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, workspace, _ = _make_resume_run(tmp_path)
+    _attach_retained_transport(run_dir, tmp_path)
+    resumed_run = tmp_path / "resumed_run"
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        resume_commands,
+        "_load_runner_config",
+        lambda repo_root, *, runs_dir=None: RunnerConfig(
+            repo_root=repo_root,
+            runs_dir=runs_dir or tmp_path / "runs",
+            agents={},
+            policies={},
+        ),
+    )
+
+    def fake_run_once(_cfg: RunnerConfig, _request: object) -> object:
+        _write_json(resumed_run / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        _write_json(resumed_run / "verification.json", {"passed": True, "commands": []})
+        _write_json(resumed_run / "target_ref.json", {"commit_sha": "b" * 40})
+        return SimpleNamespace(run_dir=resumed_run, exit_code=0, report_validation_errors=[])
+
+    def fake_finalize_commit(**kwargs: object) -> dict[str, object]:
+        receipt: dict[str, object] = {
+            "schema_version": 1,
+            "branch": kwargs["branch"],
+            "commit_attempted": True,
+            "commit_performed": False,
+            "commit_observed": True,
+            "head_commit": "c" * 40,
+            "base_commit": "c" * 40,
+            "error": None,
+        }
+        _write_json(Path(str(kwargs["run_dir"])) / "git_ref.json", receipt)
+        return receipt
+
+    monkeypatch.setattr(resume_commands, "run_once", fake_run_once)
+    monkeypatch.setattr(resume_commands, "finalize_commit", fake_finalize_commit)
+    monkeypatch.setattr(
+        resume_commands,
+        "record_verified_implementation_head",
+        lambda **_kwargs: pytest.fail("a new commit was not performed"),
+    )
+    monkeypatch.setattr(
+        resume_commands,
+        "record_existing_verified_implementation_head",
+        lambda **kwargs: seen.setdefault("existing_record_kwargs", kwargs),
+    )
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "resume",
+            "--run-dir",
+            str(run_dir),
+            "--no-docker",
+            "--commit",
+        ]
+    )
+
+    assert resume_commands._cmd_resume(args) == 0
+    assert seen["existing_record_kwargs"] == {"run_dir": resumed_run}
+    handoff = json.loads((resumed_run / "handoff_summary.json").read_text(encoding="utf-8"))
+    assert handoff["commit_requested"] is True
+    assert handoff["commit_performed"] is False
+
+
 def test_resume_uses_same_workspace_when_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -626,14 +702,25 @@ def _make_pr_resume_run(
     *,
     lifecycle_state: str = "review_changes_requested",
     review_decision: str = "changes_requested",
+    ticket_bucket: str = "4 - for_review",
 ) -> tuple[Path, Path, Path, Path]:
     run_dir = tmp_path / "original_pr_run"
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
     (workspace / ".git").mkdir()
-    ticket_path = tmp_path / ".agents" / "plans" / "4 - for_review" / "ticket.md"
+    ticket_name = "20260719_def456def456def0_PR-resume-ticket.md"
+    ticket_path = workspace / ".agents" / "plans" / ticket_bucket / ticket_name
     ticket_path.parent.mkdir(parents=True, exist_ok=True)
-    ticket_path.write_text("# PR Resume Ticket\n\nImplement the thing.\n", encoding="utf-8")
+    (workspace / ".agents" / "plans" / "4 - for_review").mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    ticket_path.write_text(
+        "# PR Resume Ticket\n\n"
+        "- Fingerprint: `def456def456def0`\n\n"
+        "Implement the thing.\n",
+        encoding="utf-8",
+    )
     review_run_dir = tmp_path / "review_run"
     _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
     _write_json(run_dir / "target_ref.json", {"agent": "codex"})
@@ -1158,8 +1245,14 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_dir, workspace, _, _ = _make_pr_resume_run(
-        tmp_path, lifecycle_state="ci_failed", review_decision="approved"
+        tmp_path,
+        lifecycle_state="ci_failed",
+        review_decision="approved",
+        ticket_bucket="3 - in_progress",
     )
+    ticket_ref = json.loads((run_dir / "ticket_ref.json").read_text(encoding="utf-8"))
+    ticket_ref["ticket_provenance"] = {"target_contract": {"schema_version": 1}}
+    _write_json(run_dir / "ticket_ref.json", ticket_ref)
     resumed_run = tmp_path / "resumed_pr_run"
     seen = {}
     monkeypatch.setattr(
@@ -1185,11 +1278,17 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
         seen["commit"] = kwargs
         _write_json(
             resumed_run / "git_ref.json",
-            {"branch": kwargs["branch"], "commit_performed": True, "head_commit": "abc"},
+            {
+                "branch": kwargs["branch"],
+                "commit_performed": False,
+                "commit_observed": True,
+                "head_commit": "abc",
+            },
         )
         return {
             "branch": kwargs["branch"],
-            "commit_performed": True,
+            "commit_performed": False,
+            "commit_observed": True,
             "head_commit": "abc",
             "error": None,
         }
@@ -1216,6 +1315,11 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     monkeypatch.setattr(resume_commands, "run_once", fake_run_once)
     monkeypatch.setattr(resume_commands, "finalize_commit", fake_commit)
     monkeypatch.setattr(resume_commands, "finalize_push", fake_push)
+    monkeypatch.setattr(
+        resume_commands,
+        "record_existing_verified_implementation_head",
+        lambda **kwargs: seen.setdefault("existing_verified_head", kwargs) or {},
+    )
     monkeypatch.setattr(resume_commands, "_git_head_sha", lambda _workspace: "abc")
     monkeypatch.setattr(
         resume_commands,
@@ -1253,6 +1357,7 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     assert request.exec_use_host_agent_login is True
     assert seen["commit"]["branch"] == "backlog/current-pr-branch"
     assert seen["push"]["branch"] == "backlog/current-pr-branch"
+    assert seen["existing_verified_head"]["run_dir"] == resumed_run
     pr_ref = json.loads((resumed_run / "pr_ref.json").read_text(encoding="utf-8"))
     assert pr_ref["existing_pr"] is True
     assert pr_ref["created"] is True
@@ -1260,5 +1365,19 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     handoff = json.loads((resumed_run / "handoff_summary.json").read_text(encoding="utf-8"))
     assert handoff["pr_created"] is True
     assert handoff["review_required"] is True
+    resumed_state = json.loads(
+        (resumed_run / "ticket_resume_state.json").read_text(encoding="utf-8")
+    )
+    resumed_ticket_path = Path(resumed_state["ticket"]["path"])
+    assert resumed_state["lifecycle_state"] == "awaiting_review"
+    assert resumed_ticket_path.parent.name == "4 - for_review"
+    assert resumed_ticket_path.is_file()
+    assert not (
+        workspace
+        / ".agents"
+        / "plans"
+        / "3 - in_progress"
+        / "20260719_def456def456def0_PR-resume-ticket.md"
+    ).exists()
     resume_ref = json.loads((resumed_run / "resume_ref.json").read_text(encoding="utf-8"))
     assert resume_ref["correction_origin"] == "system_self_correction"

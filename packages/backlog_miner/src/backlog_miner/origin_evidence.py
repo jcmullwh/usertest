@@ -35,6 +35,8 @@ RUN_CONTEXT_INDEX_MAX_BYTES = 256 * 1024
 ASSIGNED_EVIDENCE_SYMPTOM_EXCERPT_CHARS = 600
 RESEARCH_RUN_CONTEXT_FILES: dict[str, str] = {
     "preflight.json": "preflight",
+    "agent_shell_probe/raw_events.jsonl": "agent_shell_probe_events",
+    "raw_events.jsonl": "agent_events",
     "agent_attempts.json": "agent_attempts",
     "metrics.json": "metrics",
     "settings_ref.json": "settings",
@@ -43,6 +45,8 @@ RESEARCH_RUN_CONTEXT_FILES: dict[str, str] = {
     "workspace_ref.json": "workspace",
     "target_ref.json": "target",
     "run_meta.json": "run_meta",
+    "report.json": "report",
+    "normalized_events.jsonl": "normalized_events",
 }
 
 _PRINTABLE_BYTES = re.compile(rb"[\x20-\x7e]{4,}")
@@ -421,6 +425,147 @@ def _safe_context_text(value: Any, *, limit: int = 1000) -> str | None:
     return redacted[:limit]
 
 
+def _safe_context_path(value: Any, *, suffix_parts: int = 4) -> str | None:
+    """Retain a useful path suffix without exposing a host workspace location."""
+
+    text = _safe_context_text(value, limit=2_000)
+    if text is None:
+        return None
+    normalized = text.replace("\\", "/")
+    absolute = normalized.startswith("/") or bool(
+        re.match(r"^[A-Za-z]:/", normalized)
+    )
+    if not absolute:
+        return normalized
+    parts = [part for part in normalized.split("/") if part and not part.endswith(":")]
+    suffix = "/".join(parts[-max(1, suffix_parts) :])
+    return f"<absolute>/{suffix}"
+
+
+def _project_agent_events(raw: bytes) -> dict[str, Any]:
+    """Project provider tool order while excluding unbounded tool-result content.
+
+    The sequence is material evidence when a model reads a repository source and then
+    executes a command copied from it.  Raw provider streams can also contain prompts,
+    file contents, credentials, and long model messages, so only a small set of
+    redacted tool inputs and command-execution fields are retained.
+    """
+
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        return {
+            "projection_status": "invalid_jsonl",
+            "error_type": type(exc).__name__,
+        }
+
+    projected_events: list[dict[str, Any]] = []
+    invalid_line_count = 0
+    event_count = 0
+    claude_tool_use_count = 0
+    command_execution_count = 0
+    file_read_count = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            invalid_line_count += 1
+            continue
+        if not isinstance(event, Mapping):
+            invalid_line_count += 1
+            continue
+        event_count += 1
+        event_type = _safe_context_text(event.get("type"), limit=128)
+
+        # Claude emits assistant message blocks with typed tool_use records.
+        message_raw = event.get("message")
+        message = message_raw if isinstance(message_raw, Mapping) else {}
+        content_raw = message.get("content")
+        content = content_raw if isinstance(content_raw, list) else []
+        for block_raw in content:
+            block = block_raw if isinstance(block_raw, Mapping) else {}
+            if block.get("type") != "tool_use":
+                continue
+            tool_name = _safe_context_text(block.get("name"), limit=128)
+            tool_input_raw = block.get("input")
+            tool_input = tool_input_raw if isinstance(tool_input_raw, Mapping) else {}
+            projected: dict[str, Any] = {
+                "event_ordinal": event_count,
+                "provider_event_type": event_type,
+                "tool_use_id": _safe_context_text(block.get("id"), limit=128),
+                "tool_name": tool_name,
+            }
+            file_path = _safe_context_path(tool_input.get("file_path"))
+            path = _safe_context_path(tool_input.get("path"))
+            command = _safe_context_text(tool_input.get("command"), limit=2_000)
+            pattern = _safe_context_text(tool_input.get("pattern"), limit=500)
+            if file_path is not None:
+                projected["file_path"] = file_path
+            if path is not None:
+                projected["path"] = path
+            if command is not None:
+                projected["command"] = command
+            if pattern is not None:
+                projected["pattern"] = pattern
+            projected_events.append(
+                {key: value for key, value in projected.items() if value is not None}
+            )
+            claude_tool_use_count += 1
+            if str(tool_name or "").casefold() == "read" and (
+                file_path is not None or path is not None
+            ):
+                file_read_count += 1
+
+        # Codex emits command_execution items. Keep both lifecycle state and the
+        # sanitized command so ordering remains inspectable without model prose.
+        item_raw = event.get("item")
+        item = item_raw if isinstance(item_raw, Mapping) else {}
+        if item.get("type") == "command_execution":
+            command = _safe_context_text(item.get("command"), limit=2_000)
+            projected_events.append(
+                {
+                    key: value
+                    for key, value in {
+                        "event_ordinal": event_count,
+                        "provider_event_type": event_type,
+                        "item_id": _safe_context_text(item.get("id"), limit=128),
+                        "item_type": "command_execution",
+                        "command": command,
+                        "status": _safe_context_text(item.get("status"), limit=128),
+                        "exit_code": (
+                            item.get("exit_code")
+                            if item.get("exit_code") is None
+                            or isinstance(item.get("exit_code"), int)
+                            else None
+                        ),
+                    }.items()
+                    if value is not None
+                }
+            )
+            command_execution_count += 1
+
+    retained_events = projected_events
+    events_truncated = len(projected_events) > 128
+    if events_truncated:
+        retained_events = [*projected_events[:32], *projected_events[-96:]]
+    return {
+        "projection_status": "projected",
+        "content": {
+            "event_count": event_count,
+            "invalid_line_count": invalid_line_count,
+            "claude_tool_use_count": claude_tool_use_count,
+            "command_execution_count": command_execution_count,
+            "file_read_count": file_read_count,
+            "projected_tool_event_count": len(projected_events),
+            "retained_tool_event_count": len(retained_events),
+            "events_truncated": events_truncated,
+            "tool_events": retained_events,
+        },
+    }
+
+
 def _selected_fields(value: Any, fields: Sequence[str]) -> dict[str, Any]:
     source = value if isinstance(value, Mapping) else {}
     selected: dict[str, Any] = {}
@@ -469,6 +614,37 @@ def _scalar_tree(value: Any, *, depth: int = 0) -> Any:
         if projected is not None:
             result[key_text[:128]] = projected
         if len(result) >= 48:
+            break
+    return result
+
+
+def _bounded_context_tree(value: Any, *, depth: int = 0) -> Any:
+    """Project mixed report data without copying secrets or unbounded payloads."""
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _safe_context_text(value, limit=2_000)
+    if depth >= 4:
+        return None
+    if isinstance(value, list):
+        projected = [
+            item
+            for child in value[:16]
+            if (item := _bounded_context_tree(child, depth=depth + 1)) is not None
+        ]
+        return projected
+    if not isinstance(value, Mapping):
+        return None
+    result: dict[str, Any] = {}
+    for key, child in sorted(value.items(), key=lambda item: str(item[0])):
+        key_text = str(key)
+        if re.search(r"(?i)(key|token|secret|password|credential|authorization|cookie)", key_text):
+            continue
+        projected = _bounded_context_tree(child, depth=depth + 1)
+        if projected is not None:
+            result[key_text[:128]] = projected
+        if len(result) >= 32:
             break
     return result
 
@@ -569,10 +745,190 @@ def _project_context_json(role: str, value: Any) -> dict[str, Any]:
     if role == "metrics":
         projected = _scalar_tree(source)
         return projected if isinstance(projected, dict) else {}
+    if role == "report":
+        selected: dict[str, Any] = _selected_fields(
+            source,
+            ("schema_version", "kind", "status", "confidence", "summary", "failure_point"),
+        )
+        for field in (
+            "baseline",
+            "final_result",
+            "adoption_decision",
+            "issues",
+            "confidence_signals",
+            "verification",
+        ):
+            if field not in source:
+                continue
+            projected = _bounded_context_tree(source.get(field))
+            if projected is not None:
+                selected[field] = projected
+        return selected
     return {}
 
 
 def _context_projection(role: str, raw: bytes) -> dict[str, Any]:
+    if role == "agent_events":
+        return _project_agent_events(raw)
+    if role == "agent_shell_probe_events":
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            return {
+                "projection_status": "invalid_jsonl",
+                "error_type": type(exc).__name__,
+            }
+
+        projected_events: list[dict[str, Any]] = []
+        invalid_line_count = 0
+        event_count = 0
+        command_execution_count = 0
+        completed_command_count = 0
+        successful_command_count = 0
+        nonempty_command_output_count = 0
+        turn_completed_count = 0
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_line_count += 1
+                continue
+            if not isinstance(event, Mapping):
+                invalid_line_count += 1
+                continue
+            event_count += 1
+            event_type = _safe_context_text(event.get("type"), limit=128)
+            item_raw = event.get("item")
+            item = item_raw if isinstance(item_raw, Mapping) else {}
+            item_type = _safe_context_text(item.get("type"), limit=128)
+            if item_type == "command_execution":
+                command_execution_count += 1
+                status = _safe_context_text(item.get("status"), limit=128)
+                exit_code = item.get("exit_code")
+                if event_type == "item.completed" or status == "completed":
+                    completed_command_count += 1
+                if exit_code == 0 and status == "completed":
+                    successful_command_count += 1
+                outputs = {
+                    field: cleaned
+                    for field in ("aggregated_output", "stdout", "output", "stderr")
+                    if (cleaned := _safe_context_text(item.get(field), limit=2000))
+                    is not None
+                }
+                if outputs:
+                    nonempty_command_output_count += 1
+                projected_events.append(
+                    {
+                        "event_type": event_type,
+                        "item_id": _safe_context_text(item.get("id"), limit=128),
+                        "item_type": item_type,
+                        "command": _safe_context_text(item.get("command"), limit=1000),
+                        "status": status,
+                        "exit_code": exit_code
+                        if exit_code is None or isinstance(exit_code, int)
+                        else None,
+                        **outputs,
+                    }
+                )
+            elif item_type == "agent_message":
+                projected_events.append(
+                    {
+                        "event_type": event_type,
+                        "item_id": _safe_context_text(item.get("id"), limit=128),
+                        "item_type": item_type,
+                        "text": _safe_context_text(item.get("text"), limit=1000),
+                    }
+                )
+            elif event_type == "turn.completed":
+                turn_completed_count += 1
+                projected_events.append({"event_type": event_type})
+
+        retained_events = projected_events
+        events_truncated = len(projected_events) > 64
+        if events_truncated:
+            retained_events = [*projected_events[:16], *projected_events[-48:]]
+        return {
+            "projection_status": "projected",
+            "content": {
+                "event_count": event_count,
+                "invalid_line_count": invalid_line_count,
+                "command_execution_count": command_execution_count,
+                "completed_command_count": completed_command_count,
+                "successful_command_count": successful_command_count,
+                "nonempty_command_output_count": nonempty_command_output_count,
+                "turn_completed_count": turn_completed_count,
+                "projected_event_count": len(projected_events),
+                "retained_event_count": len(retained_events),
+                "events_truncated": events_truncated,
+                "events": retained_events,
+            },
+        }
+    if role == "normalized_events":
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            return {
+                "projection_status": "invalid_jsonl",
+                "error_type": type(exc).__name__,
+            }
+
+        commands: list[dict[str, Any]] = []
+        invalid_line_count = 0
+        event_count = 0
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_line_count += 1
+                continue
+            if not isinstance(event, Mapping):
+                invalid_line_count += 1
+                continue
+            event_count += 1
+            if _safe_context_text(event.get("type"), limit=128) != "run_command":
+                continue
+            data_raw = event.get("data")
+            data = data_raw if isinstance(data_raw, Mapping) else {}
+            command = _safe_context_text(data.get("command"), limit=2_000)
+            if command is None:
+                argv = data.get("argv")
+                if isinstance(argv, list) and all(isinstance(item, str) for item in argv):
+                    command = _safe_context_text(" ".join(argv), limit=2_000)
+            exit_code = data.get("exit_code")
+            if command is None or not isinstance(exit_code, int):
+                continue
+            projected: dict[str, Any] = {
+                "command_ordinal": len(commands) + 1,
+                "timestamp_utc": _safe_context_text(event.get("ts"), limit=128),
+                "command": command,
+                "exit_code": exit_code,
+            }
+            output_excerpt = _safe_context_text(data.get("output_excerpt"), limit=2_000)
+            if output_excerpt is not None:
+                projected["output_excerpt"] = output_excerpt
+            commands.append(projected)
+
+        retained_commands = commands
+        commands_truncated = len(commands) > 64
+        if commands_truncated:
+            retained_commands = [*commands[:16], *commands[-48:]]
+        return {
+            "projection_status": "projected",
+            "content": {
+                "event_count": event_count,
+                "invalid_line_count": invalid_line_count,
+                "command_count": len(commands),
+                "failed_command_count": sum(item["exit_code"] != 0 for item in commands),
+                "successful_command_count": sum(item["exit_code"] == 0 for item in commands),
+                "retained_command_count": len(retained_commands),
+                "commands_truncated": commands_truncated,
+                "commands": retained_commands,
+            },
+        }
     try:
         value = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -829,6 +1185,11 @@ def _materialize_assigned_evidence(
         "case_evidence_atom_count": len(case_ids),
         "occurrence_evidence_atom_ids": sorted(occurrence_ids),
         "occurrence_evidence_atom_count": len(occurrence_ids),
+        "provisional_same_cause_member_evidence_atom_ids": sorted(
+            _string_list(
+                assignment.get("provisional_same_cause_member_evidence_atom_ids")
+            )
+        ),
         "materialized_atom_count": len(entries),
         "materialized_receipt_count": sum("receipt_file" in entry for entry in entries),
         "atoms": entries,
@@ -908,8 +1269,7 @@ def _project_run_context(
                     source is None
                     or rel is None
                     or rel.is_absolute()
-                    or len(rel.parts) != 1
-                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.name) != role
+                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.as_posix()) != role
                     or not _path_within(source, run_dir)
                     or not source.is_file()
                     or source.relative_to(run_dir) != rel
@@ -932,7 +1292,7 @@ def _project_run_context(
                 }
             )
             source_record = {
-                "source_name": rel.name,
+                "source_name": rel.as_posix(),
                 "role": role,
                 "source_sha256": digest,
                 "source_size_bytes": size,
@@ -967,6 +1327,10 @@ def _project_run_context(
         # Preserve one mandatory context index rather than dropping all source-run
         # evidence. The original projection hashes remain bound to the raw receipts;
         # only verbose projected bodies are reduced to a structural inventory.
+        source_set_hashes = {
+            str(run["context_id"]): _canonical_sha256(run["sources"])
+            for run in payload["runs"]
+        }
         for run in payload["runs"]:
             for source in run["sources"]:
                 projection = source.get("projection")
@@ -982,6 +1346,33 @@ def _project_run_context(
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
             "utf-8"
         )
+        if len(encoded) > RUN_CONTEXT_INDEX_MAX_BYTES:
+            # A large assignment can contain dozens of independent source runs. Even
+            # the field-level projection inventory above then repeats enough
+            # per-source structure to exceed the bounded model-facing index. Keep a
+            # deterministic run inventory instead. The context and source-set hashes
+            # still bind every omitted source record, while the main attachment
+            # manifest retains the exact source receipts and raw artifact hashes.
+            payload["runs"] = [
+                {
+                    "atom_ids": list(run["atom_ids"]),
+                    "context_id": run["context_id"],
+                    "source_artifact_count": len(run["sources"]),
+                    "source_roles": sorted(
+                        {
+                            str(source["role"])
+                            for source in run["sources"]
+                            if isinstance(source, Mapping) and source.get("role")
+                        }
+                    ),
+                    "source_set_sha256": source_set_hashes[str(run["context_id"])],
+                }
+                for run in payload["runs"]
+            ]
+            payload["index_compaction"] = "run_inventory_v1"
+            encoded = (
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            ).encode("utf-8")
     if len(encoded) > RUN_CONTEXT_INDEX_MAX_BYTES:
         reject("multiple", "run_context_compact_index_exceeds_max_bytes")
         return None, errors
@@ -1578,6 +1969,11 @@ def _verify_materialized_assigned_evidence(
             ),
             "occurrence_evidence_atom_ids": sorted(
                 _string_list(assignment.get("occurrence_evidence_atom_ids"))
+            ),
+            "provisional_same_cause_member_evidence_atom_ids": sorted(
+                _string_list(
+                    assignment.get("provisional_same_cause_member_evidence_atom_ids")
+                )
             ),
         }
         assigned_projection = {

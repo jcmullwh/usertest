@@ -22,6 +22,7 @@ from backlog_core.stage_contracts import (
     assess_research_readiness,
     evidence_assignment_sha256,
     evidence_verification_sha256,
+    research_claims_sha256,
 )
 from runner_core import RunnerConfig, RunRequest, RunResult
 from runner_core.codex_execpolicy import (
@@ -540,6 +541,15 @@ def _research_extension(**overrides: object) -> dict[str, object]:
             ),
             "evidence_refs": evidence_refs if disposition != "undetermined" else [],
         }
+    if "observed_problem_refinement" not in overrides:
+        extension["observed_problem_refinement"] = {
+            "problem": "The assigned operation exhibits the retained failure.",
+            "user_impact": "The assigned operation cannot complete as intended.",
+            "evidence_summary": (
+                "The assigned source atom and retained investigation bound the observed failure."
+            ),
+            "evidence_atom_ids": ["atom:origin"],
+        }
     return extension
 
 
@@ -620,6 +630,8 @@ def test_output_retry_projection_and_field_hints_are_content_addressed() -> None
         "experiments[].control_relationship",
     ]
     assert "identical addressed source atoms" in hints[4]["required_change"]
+    assert "exact match only for disproved" in hints[4]["required_change"]
+    assert "same-source complement for survived" in hints[4]["required_change"]
 
 
 def test_repair_hints_give_exact_shapes_for_common_nondeterministic_errors() -> None:
@@ -659,12 +671,92 @@ def test_repair_hints_give_exact_shapes_for_common_nondeterministic_errors() -> 
     assert "do not invent artifact references" in hints[6]["required_change"]
     assert hints[7]["target_fields"] == [
         "root_cause_hypotheses[].mechanism_symbols",
+        "experiments[].artifact_refs",
+        "artifact_refs[]",
+        "inspected_files",
         "experiments[].proof_adapter.implementation_touchpoints",
     ]
+    assert "supporting experiment itself" in hints[7]["required_change"]
+    assert "experiment's artifact_refs" in hints[7]["required_change"]
+    assert "path is also listed in inspected_files" in hints[7]["required_change"]
+    assert "supporting_evidence does not link the experiment" in hints[7]["required_change"]
     assert "causal_locator or one of its symbols entries" in hints[7]["required_change"]
     assert "symbols, never inspected_symbols" in hints[7]["required_change"]
     assert "causal_locator must equal intervention.target" in hints[7]["required_change"]
     assert "do not invent hypothesis-level evidence_code_links" in hints[7]["required_change"]
+
+
+def test_repair_hint_explains_flat_tagged_proof_adapter_semantic_basis() -> None:
+    hint = mod._research_retry_remediation_hints(
+        ["research_dossier_proof_adapter_semantic_basis_invalid: problem:retry: index=2"]
+    )[0]
+
+    assert hint["target_fields"] == ["experiments[].proof_adapter.positive_outcome.semantic_basis"]
+    required_change = hint["required_change"]
+    assert "flat tagged semantic-basis object" in required_change
+    assert '"kind":"repository_contract_quote"' in required_change
+    assert "do not wrap them under repository_contract_quote" in required_change
+    assert "do not invent evidence" in required_change
+
+
+def test_repair_hint_exposes_deep_proof_adapter_rejection() -> None:
+    error = (
+        "proof_adapter_unverified:experiment:runtime-control:structured_replay.v1:"
+        "repository_contract_quote_positive_basis_unattested"
+    )
+
+    hint = mod._research_retry_remediation_hints([error])[0]
+
+    assert hint["target_fields"] == [
+        "experiments[].proof_adapter.positive_outcome.semantic_basis",
+        "experiments[].proof_adapter.positive_outcome.predicate",
+        "experiments[].proof_adapter.observations",
+        "experiments[].proof_adapter.implementation_touchpoints",
+    ]
+    assert "trailing diagnostic" in hint["required_change"]
+    assert "api_contract, documentation, or schema" in hint["required_change"]
+    assert "authenticated_semantic_citation" in hint["required_change"]
+
+
+def test_repair_hint_explains_shared_harness_dependency_touchpoint_shape() -> None:
+    hint = mod._research_retry_remediation_hints(
+        [
+            "proof_adapter_harness_dependency_unverified:"
+            "hypothesis:probe-gate:causal_proof:" + "a" * 64
+        ]
+    )[0]
+
+    assert hint["target_fields"] == [
+        "experiments[].proof_adapter.intervention.target",
+        "experiments[].proof_adapter.implementation_touchpoints",
+    ]
+    required_change = hint["required_change"]
+    assert "causal_locator must exactly equal" in required_change
+    assert "touchpoint.symbols" in required_change
+    assert "calls in both sides of the pair" in required_change
+    assert "controlled one-sided mechanism" in required_change
+    assert "Do not rerun or invent experiments" in required_change
+
+
+def test_repair_hint_preserves_code_symbol_for_field_level_causal_locator() -> None:
+    hint = mod._research_retry_remediation_hints(
+        [
+            "proof_adapter_mechanism_binding_unverified:"
+            "hypothesis:probe-gate:causal_proof:" + "b" * 64
+        ]
+    )[0]
+
+    assert hint["target_fields"] == [
+        "root_cause_hypotheses[].mechanism_symbols",
+        "experiments[].proof_adapter.intervention.target",
+        "experiments[].proof_adapter.implementation_touchpoints",
+    ]
+    required_change = hint["required_change"]
+    assert "field- or argument-level intervention.target" in required_change
+    assert "exact inspected code symbols" in required_change
+    assert "created only by a research harness" in required_change
+    assert "Do not append a synthetic field suffix" in required_change
+    assert "Multiple adapter proofs" in required_change
 
 
 def test_interrupted_inconclusive_hint_preserves_boundary_without_relabeling() -> None:
@@ -695,7 +787,7 @@ def test_verifier_hints_give_attestable_read_and_disposable_state_protocols() ->
         "inspected_symbol_unresolved:runner_core.runner.run_once",
         "inspected_symbol_unresolved:config:configs/agents.yaml#agents.codex.config_overrides",
         "inspected_file_unresolved:.usertest_research/state/observations.json",
-        "experiment_replay_workspace_mutated:experiment:repro",
+        "experiment_replay_workspace_mutated:experiment:repro:.usertest_research/output.json",
         "experiment_not_bound_to_atom:experiment:repro:atom:source",
         "experiment_atom_binding_invalid:experiment:repro:atom:source:0:snapshot_value",
         "temporary_harness_mechanism_call_missing:hypothesis:one:experiment:repro",
@@ -713,6 +805,7 @@ def test_verifier_hints_give_attestable_read_and_disposable_state_protocols() ->
     assert "does not contain a filename" in hints[2]["required_change"]
     assert "artifact_ref/experiment artifact" in hints[3]["required_change"]
     assert hints[4]["target_fields"] == ["experiments[].replay_setup.disposable_state_paths"]
+    assert "exact undeclared path" in hints[4]["required_change"]
     assert "Never declare tracked product paths" in hints[4]["required_change"]
     assert hints[5]["target_fields"] == [
         "experiments[].observable_assertion",
@@ -724,6 +817,8 @@ def test_verifier_hints_give_attestable_read_and_disposable_state_protocols() ->
     assert "restricted $.field[index] syntax" in hints[6]["required_change"]
     assert "never source_value" in hints[6]["required_change"]
     assert "candidate_field_paths" in hints[6]["required_change"]
+    assert "correct that aggregate binding in place" in hints[6]["required_change"]
+    assert "do not expand it" in hints[6]["required_change"]
     assert "context/corroborating" in hints[6]["required_change"]
     assert "retain insufficient_evidence" in hints[6]["required_change"]
     assert hints[7]["target_fields"] == [
@@ -753,12 +848,22 @@ def test_verifier_hints_narrow_fix_only_symbols_before_replacing_harness() -> No
     assert "current fix path" in hints[0]["required_change"]
     assert "concrete historical failure-producing mechanism" in hints[1]["required_change"]
     assert "actionability evidence or a fix touchpoint" in hints[1]["required_change"]
-    assert "smallest honest shared failure-producing mechanism subset" in hints[2][
-        "required_change"
-    ]
-    assert "Preserve and correct an already attested direct harness" in hints[2][
-        "required_change"
-    ]
+    assert (
+        "smallest honest shared failure-producing mechanism subset" in hints[2]["required_change"]
+    )
+    assert "Preserve and correct an already attested direct harness" in hints[2]["required_change"]
+
+
+def test_verifier_hint_preserves_scalar_harness_and_requests_shared_observable_flow() -> None:
+    hint = mod._research_retry_remediation_hints(
+        ["falsification_intervention_shared_mechanism_missing:hypothesis:one:falsification:one"]
+    )[0]
+
+    assert "runner verified the paired input change" in hint["required_change"]
+    assert "Preserve the existing commands and attested harness" in hint["required_change"]
+    assert "direct executed dataflow" in hint["required_change"]
+    assert "do not merely include it in a helper result" in hint["required_change"]
+    assert "Do not replace the harness with pytest" in hint["required_change"]
 
 
 def test_fresh_restart_retains_latest_safe_and_objective_best_frontiers() -> None:
@@ -1041,6 +1146,7 @@ def test_persisted_feedback_attempt_resumes_from_external_frontier() -> None:
         mod._continuation_initial_validation_frontier(
             source_attempt={"attempt_kind": "evidence_verification_feedback"},
             feedback_attempts=[],
+            validation_errors=[],
         )
         == "external_feedback"
     )
@@ -1063,9 +1169,7 @@ def test_model_owned_projection_strips_top_and_nested_runner_artifact_refs() -> 
 
     projection = mod._model_owned_dossier_projection(dossier)
 
-    assert projection["artifact_refs"] == [
-        {"artifact_id": "model:one", "path": "model.txt"}
-    ]
+    assert projection["artifact_refs"] == [{"artifact_id": "model:one", "path": "model.txt"}]
     assert projection["experiments"][0]["artifact_refs"] == ["model:one"]
     assert "evidence_verification" not in projection
 
@@ -1096,9 +1200,7 @@ def test_unverified_same_projection_retains_runner_artifact_enrichment() -> None
     assert retained == dossier
     assert retained is not dossier
     assert retained["artifact_refs"][1]["artifact_id"] == "runner:replay:one:stdout"
-    assert retained["experiments"][0]["artifact_refs"][1] == (
-        "runner:replay:one:stdout"
-    )
+    assert retained["experiments"][0]["artifact_refs"][1] == ("runner:replay:one:stdout")
     assert retained["evidence_verification"]["status"] == "verified"
 
 
@@ -1126,9 +1228,7 @@ def test_unverified_changed_projection_invalidates_stale_receipt() -> None:
     )
 
     assert retained["research_status"] == "evidence_sufficient"
-    assert retained["artifact_refs"] == [
-        {"artifact_id": "model:one", "path": "model.txt"}
-    ]
+    assert retained["artifact_refs"] == [{"artifact_id": "model:one", "path": "model.txt"}]
     assert retained["evidence_verification"]["status"] == "failed"
     assert retained["evidence_verification"]["errors"] == [
         "research_unverified_repair_changed_model_projection"
@@ -1139,10 +1239,59 @@ def test_unverified_changed_projection_invalidates_stale_receipt() -> None:
 def test_evidence_attempt_without_new_feedback_keeps_default_frontier() -> None:
     assert (
         mod._continuation_initial_validation_frontier(
-            source_attempt={
-                "attempt_kind": "evidence_verification_research_continuation"
-            },
+            source_attempt={"attempt_kind": "evidence_verification_research_continuation"},
             feedback_attempts=[],
+            validation_errors=[],
+        )
+        is None
+    )
+
+
+def test_continuation_restores_hash_bound_model_contract_frontier(
+    tmp_path: Path,
+) -> None:
+    errors = ["research_dossier_proof_adapter_semantic_basis_invalid: problem:test"]
+    run_dir = tmp_path / "retained-model-contract-attempt"
+    run_dir.mkdir()
+    report_path = run_dir / "report.json"
+    _write_json(report_path, {"status": "complete"})
+    source_attempt = mod._research_attempt_record(
+        attempt_number=12,
+        outcome="repair_contract_invalid",
+        run_dir=run_dir,
+        report_path=report_path,
+        validation_errors=errors,
+        attempted_dossier={"case_id": "case:test", "problem_id": "problem:test"},
+        attempt_kind="model_output_repair",
+        repair_progress={
+            "after_validation_frontier": "model_output_contract",
+            "after_error_count": 1,
+        },
+    )
+
+    assert (
+        mod._continuation_initial_validation_frontier(
+            source_attempt=source_attempt,
+            feedback_attempts=[],
+            validation_errors=errors,
+        )
+        == "model_output_contract"
+    )
+    assert (
+        mod._continuation_initial_validation_frontier(
+            source_attempt=source_attempt,
+            feedback_attempts=[],
+            validation_errors=["different:finding"],
+        )
+        is None
+    )
+    tampered = dict(source_attempt)
+    tampered["attempt_sha256"] = "f" * 64
+    assert (
+        mod._continuation_initial_validation_frontier(
+            source_attempt=tampered,
+            feedback_attempts=[],
+            validation_errors=errors,
         )
         is None
     )
@@ -1360,6 +1509,51 @@ def test_unseen_validator_error_is_generic_same_session_feedback() -> None:
     )
 
     assert paths == ["extensions.backlog_repro_research"]
+
+
+def test_next_attempt_number_uses_retained_maximum_not_history_length() -> None:
+    assert mod._next_research_attempt_number([]) == 1
+    assert (
+        mod._next_research_attempt_number(
+            [
+                {"attempt_number": 15},
+                {"attempt_number": 2},
+                {"attempt_number": "ignored"},
+            ]
+        )
+        == 16
+    )
+
+
+def test_repair_path_narrows_colon_delimited_experiment_and_hypothesis_ids() -> None:
+    dossier = {
+        "experiments": [
+            {"experiment_id": "experiment:assigned-context"},
+            {"experiment_id": "experiment:current-controlled-windows-route"},
+        ],
+        "root_cause_hypotheses": [
+            {"hypothesis_id": "hypothesis:historical-worker-panic"},
+        ],
+    }
+
+    assert (
+        mod._narrow_repair_path(
+            "experiments[].result",
+            error=(
+                "experiment_replay_exit_mismatch:experiment:current-controlled-windows-route:0:1"
+            ),
+            dossier=dossier,
+        )
+        == "experiments[1].result"
+    )
+    assert (
+        mod._narrow_repair_path(
+            "root_cause_hypotheses[].falsification_attempts[]",
+            error=("falsification_attempt_unbound:hypothesis:historical-worker-panic:attempt:one"),
+            dossier=dossier,
+        )
+        == "root_cause_hypotheses[0].falsification_attempts[]"
+    )
 
 
 def test_immutable_change_is_never_accepted_and_repetition_stalls() -> None:
@@ -1805,8 +1999,11 @@ def test_evidence_repair_does_not_promote_shallow_contract_error_over_deeper_fro
     assert first_progress["candidate_disposition"] == (
         "retained_as_progressing_correction_baseline"
     )
-    assert first_progress["reason"] == "error_count_decreased_before_deeper_revalidation"
-    assert first_progress["cost_clock_reset"] is True
+    assert first_progress["reason"] == "nonadvancing_correction_retained_for_same_author"
+    assert first_progress["consecutive_ordinary_nonadvancing_correction_count"] == 1
+    assert first_progress["immediate_prior_feedback_error_count_progress"] is True
+    assert first_progress["genuine_feedback_progress"] is False
+    assert first_progress["cost_clock_reset"] is False
     assert first_progress["before_validation_frontier"] == "evidence_verification"
     assert first_progress["after_validation_frontier"] == "model_output_contract"
     second_progress = result["attempts"][1]["repair_progress"]
@@ -2292,6 +2489,425 @@ def _mechanically_cleaner_substantive_regression(
     return candidate
 
 
+def _run_one_unsupported_downgrade(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    candidate_errors: list[str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
+    workspace = tmp_path / f"{name}-workspace"
+    revision = _init_workspace(workspace)
+    initial_run = tmp_path / f"{name}-initial"
+    initial_run.mkdir()
+    _write_json(initial_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=initial_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    baseline = _established_substantive_frontier()
+    candidate = _mechanically_cleaner_substantive_regression(
+        baseline,
+        phase="unsupported-downgrade",
+    )
+    candidate["research_status"] = "insufficient_evidence"
+    initial_errors = [f"attempt13:{index}" for index in range(14)]
+    source_attempt = mod._research_attempt_record(
+        attempt_number=13,
+        outcome="evidence_verification_invalid",
+        run_dir=initial_run,
+        report_path=initial_run / "report.json",
+        validation_errors=initial_errors,
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        attempt_wall_seconds=100.0,
+    )
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        del config
+        assert request.codex_resume_session_id == session_id
+        run_dir = tmp_path / f"{name}-attempt14"
+        run_dir.mkdir()
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        mod,
+        "_repair_candidate_from_run",
+        lambda **kwargs: (candidate, list(candidate_errors)),
+    )
+    result = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=initial_errors,
+        first_attempt_number=14,
+        candidate_validator=lambda candidate, run: [],
+        research_capabilities=True,
+        max_repair_turns=1,
+    )
+    return result, baseline, candidate, initial_errors
+
+
+def test_reducing_unsupported_downgrade_is_forward_but_not_objective_best(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_errors = [f"attempt14:{index}" for index in range(3)]
+    result, baseline, candidate, initial_errors = _run_one_unsupported_downgrade(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        name="reducing-unsupported-downgrade",
+        candidate_errors=candidate_errors,
+    )
+
+    assert result["status"] == "repairable_paused:repair_turn_limit_reached"
+    assert result["dossier"] == candidate
+    assert result["validation_errors"] == candidate_errors
+    assert result["best_dossier"] == baseline
+    assert result["best_validation_errors"] == initial_errors
+    assert result["source_attempt_sha256"] == result["attempts"][0]["attempt_sha256"]
+    progress = result["attempts"][0]["repair_progress"]
+    assert result["attempts"][0]["outcome"] == "repair_contract_invalid"
+    assert progress["decision"] == "continue"
+    assert progress["reason"] == (
+        "advancing_claim_downgrade_with_error_progress_requires_same_author_resolution"
+    )
+    assert progress["objective_progress"] is False
+    assert progress["error_count_progress"] is True
+    assert progress["immediate_prior_feedback_error_count_progress"] is True
+    assert progress["genuine_feedback_progress"] is True
+    assert progress["cost_clock_reset"] is True
+    assert progress["consecutive_genuine_nonprogress_count"] == 0
+    assert progress["consecutive_ordinary_nonadvancing_correction_count"] == 0
+    assert progress["consecutive_advancement_regression_count"] == 0
+    assert progress["advancement_regression"]["progressing_correction_baseline"] is True
+    assert progress["candidate_not_promoted_to_objective_best"] is True
+    assert progress["candidate_regressed_from_forward_frontier"] is False
+    assert progress["candidate_disposition"] == "retained_as_progressing_correction_baseline"
+    assert progress["next_baseline"] == "latest_safe_candidate"
+    assert "Continue from this latest candidate" in result["continuation_feedback"]["instruction"]
+    assert result["retained_frontier"]["latest_safe_dossier_sha256"] == (
+        mod._canonical_json_sha256(candidate)
+    )
+    assert result["retained_frontier"]["objective_best_dossier_sha256"] == (
+        mod._canonical_json_sha256(baseline)
+    )
+
+
+def test_nonreducing_unsupported_downgrade_stays_quarantined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_errors = [f"attempt14:{index}" for index in range(14)]
+    result, baseline, _, initial_errors = _run_one_unsupported_downgrade(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        name="nonreducing-unsupported-downgrade",
+        candidate_errors=candidate_errors,
+    )
+
+    assert result["dossier"] == baseline
+    assert result["validation_errors"] == initial_errors
+    progress = result["attempts"][0]["repair_progress"]
+    assert progress["genuine_feedback_progress"] is False
+    assert progress["cost_clock_reset"] is False
+    assert progress["candidate_regressed_from_forward_frontier"] is True
+    assert progress["candidate_disposition"] == "retained_as_nonbaseline_attempt"
+    assert progress["next_baseline"] == "forward_frontier"
+
+
+def test_integrity_failure_cannot_use_smaller_downgrade_as_forward_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_errors = [
+        "suspicious_implementation_diff:src/product.py",
+        "attempt14:remaining-a",
+        "attempt14:remaining-b",
+    ]
+    result, baseline, _, initial_errors = _run_one_unsupported_downgrade(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        name="integrity-unsupported-downgrade",
+        candidate_errors=candidate_errors,
+    )
+
+    assert result["status"] == "restart:integrity_or_new_investigation_required"
+    assert result["dossier"] == baseline
+    assert result["validation_errors"] == initial_errors
+    progress = result["attempts"][0]["repair_progress"]
+    assert progress["genuine_feedback_progress"] is False
+    assert progress["candidate_regressed_from_forward_frontier"] is True
+    assert progress["candidate_disposition"] == "retained_as_nonbaseline_attempt"
+
+
+def _run_unsupported_downgrade_across_restart(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restore_objective_status: bool,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    list[str],
+    list[str],
+]:
+    workspace = tmp_path / (
+        "restart-restore-workspace" if restore_objective_status else "restart-weaker-workspace"
+    )
+    revision = _init_workspace(workspace)
+    initial_run = tmp_path / (
+        "restart-restore-initial" if restore_objective_status else "restart-weaker-initial"
+    )
+    initial_run.mkdir()
+    _write_json(initial_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=initial_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    objective_best = _established_substantive_frontier()
+    initial_errors = [f"attempt13:{index}" for index in range(14)]
+    source_attempt = mod._research_attempt_record(
+        attempt_number=13,
+        outcome="evidence_verification_invalid",
+        run_dir=initial_run,
+        report_path=initial_run / "report.json",
+        validation_errors=initial_errors,
+        attempted_dossier=objective_best,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        attempt_wall_seconds=100.0,
+    )
+    weaker = _mechanically_cleaner_substantive_regression(
+        objective_best,
+        phase="attempt14-weaker-but-reducing",
+    )
+    weaker["research_status"] = "insufficient_evidence"
+    remaining_errors = [f"attempt14:{index}" for index in range(3)]
+    final_candidate = json.loads(json.dumps(objective_best if restore_objective_status else weaker))
+    final_candidate["phase"] = (
+        "attempt15-restored-objective-status"
+        if restore_objective_status
+        else "attempt15-clean-but-still-weaker"
+    )
+    candidates = [weaker, final_candidate]
+    verifier_errors = [remaining_errors, []]
+    prompts: list[str] = []
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        del config
+        prompts.append(request.agent_user_prompt or "")
+        assert request.codex_resume_session_id == session_id
+        run_dir = tmp_path / f"restart-correction-{restore_objective_status}-{len(prompts)}"
+        run_dir.mkdir()
+        _write_json(run_dir / "report.json", {"status": "complete"})
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=revision,
+            requested_codex_resume_session_id=session_id,
+        )
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        mod,
+        "_repair_candidate_from_run",
+        lambda **kwargs: (candidates.pop(0), []),
+    )
+    candidate_validator = lambda candidate, run: verifier_errors.pop(0)  # noqa: E731
+    first = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=initial_errors,
+        first_attempt_number=14,
+        candidate_validator=candidate_validator,
+        research_capabilities=True,
+        max_repair_turns=1,
+    )
+    attempt14 = first["attempts"][0]
+    assert attempt14["repair_progress"]["before_validation_frontier"] == ("evidence_verification")
+    assert attempt14["repair_progress"]["after_validation_frontier"] == ("evidence_verification")
+    objective_frontier = mod.build_research_objective_best_frontier(source_attempt=source_attempt)
+    assert first["objective_best_frontier"] == objective_frontier
+
+    second = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=attempt14,
+        validation_errors=remaining_errors,
+        first_attempt_number=15,
+        candidate_validator=candidate_validator,
+        research_capabilities=True,
+        evidence_attempt_history=[source_attempt, attempt14],
+        initial_validation_frontier="evidence_verification",
+        objective_best_frontier=objective_frontier,
+        max_repair_turns=1,
+    )
+    return first, second, objective_best, weaker, prompts, remaining_errors
+
+
+def test_restart_cannot_promote_clean_unsupported_weaker_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second, objective_best, weaker, prompts, remaining_errors = (
+        _run_unsupported_downgrade_across_restart(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            restore_objective_status=False,
+        )
+    )
+
+    assert first["status"] == "repairable_paused:repair_turn_limit_reached"
+    assert second["status"] == "repairable_paused:repair_turn_limit_reached"
+    assert second["dossier"] == weaker
+    assert second["validation_errors"] == remaining_errors
+    assert second["best_dossier"] == objective_best
+    assert second["best_validation_errors"] == [f"attempt13:{index}" for index in range(14)]
+    assert second["objective_best_frontier"] == first["objective_best_frontier"]
+    progress = second["attempts"][0]["repair_progress"]
+    assert progress["decision"] == "continue"
+    assert progress["objective_progress"] is False
+    assert progress["candidate_not_promoted_to_objective_best"] is True
+    assert progress["candidate_regressed_from_forward_frontier"] is True
+    assert progress["next_baseline"] == "forward_frontier"
+    first_contract = _evidence_repair_payload(prompts[0])
+    compact_objective = first_contract["objective_best_frontier"]
+    assert "dossier" not in compact_objective
+    assert compact_objective["dossier_reference"] == "baseline_dossier"
+    assert compact_objective["dossier_same_as_baseline"] is True
+    assert compact_objective["dossier_sha256"] == first_contract["baseline_dossier_sha256"]
+    second_contract = _evidence_repair_payload(prompts[1])
+    assert second_contract["baseline_dossier"] == weaker
+    assert second_contract["objective_best_frontier"] == first["objective_best_frontier"]
+    assert "dossier_reference" not in second_contract["objective_best_frontier"]
+    assert "dossier_same_as_baseline" not in second_contract["objective_best_frontier"]
+
+
+def test_restart_can_accept_restored_objective_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, second, objective_best, weaker, prompts, _ = _run_unsupported_downgrade_across_restart(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        restore_objective_status=True,
+    )
+
+    restored = json.loads(json.dumps(objective_best))
+    restored["phase"] = "attempt15-restored-objective-status"
+    assert second["status"] == "corrected"
+    assert second["dossier"] == restored
+    assert second["best_dossier"] == restored
+    assert second["validation_errors"] == []
+    assert second["attempts"][0]["repair_progress"]["decision"] == "accepted"
+    assert (
+        second["objective_best_frontier"]["source_attempt_sha256"]
+        == (second["attempts"][0]["attempt_sha256"])
+    )
+    second_contract = _evidence_repair_payload(prompts[1])
+    assert second_contract["baseline_dossier"] == weaker
+    assert second_contract["objective_best_frontier"]["dossier"] == objective_best
+
+
+def test_tampered_objective_best_frontier_pauses_before_author_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "tampered-objective-workspace"
+    revision = _init_workspace(workspace)
+    run_dir = tmp_path / "tampered-objective-source"
+    run_dir.mkdir()
+    _write_json(run_dir / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=run_dir,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    dossier = _established_substantive_frontier()
+    source = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="evidence_verification_invalid",
+        run_dir=run_dir,
+        report_path=run_dir / "report.json",
+        validation_errors=["evidence:error"],
+        attempted_dossier=dossier,
+        agent_session_id="019f2cca-9011-7e32-88ae-6c25af578b49",
+    )
+    frontier = mod.build_research_objective_best_frontier(source_attempt=source)
+    frontier["validation_errors"] = []
+    monkeypatch.setattr(
+        mod,
+        "run_once",
+        lambda **kwargs: pytest.fail("tampered frontier must pause before an author turn"),
+    )
+
+    result = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source,
+        validation_errors=["evidence:error"],
+        first_attempt_number=2,
+        candidate_validator=lambda candidate, run: [],
+        research_capabilities=True,
+        evidence_attempt_history=[source],
+        objective_best_frontier=frontier,
+        max_repair_turns=1,
+    )
+
+    assert result["status"] == ("repairable_paused:research_objective_best_frontier_invalid")
+    assert result["validation_errors"] == ["research_objective_best_frontier_binding_invalid"]
+    assert result["attempts"] == []
+
+
 def test_substantive_coverage_distinguishes_operational_contract_from_causal_contrast() -> None:
     baseline = _established_substantive_frontier()
     experiment = baseline["experiments"][0]
@@ -2326,13 +2942,97 @@ def test_substantive_coverage_distinguishes_operational_contract_from_causal_con
     assert unsupported_loss == [experiment_contract]
 
     legacy_adapter = json.loads(json.dumps(baseline))
-    legacy_adapter["experiments"][0]["proof_adapter"]["positive_outcome"].pop(
-        "contract_role"
-    )
+    legacy_adapter["experiments"][0]["proof_adapter"]["positive_outcome"].pop("contract_role")
     legacy_coverage = mod._substantive_research_coverage(legacy_adapter)
 
     assert adapter_contract in legacy_coverage
     assert experiment_contract in legacy_coverage
+
+
+def test_repair_preserves_only_omitted_unchanged_origin_bindings() -> None:
+    bindings = [
+        {"atom_id": "atom:one", "observed_value": "panic"},
+        {"atom_id": "atom:two", "observed_value": "panic"},
+    ]
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:assigned-context",
+                "scenario_kind": "assigned_evidence_audit",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python audit.py",
+                "result": "both atoms contain the same panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"kind": "json_equals", "expected": 2},
+                "origin_evidence_bindings": bindings,
+            }
+        ]
+    }
+    authored = deepcopy(baseline)
+    authored["experiments"][0].pop("origin_evidence_bindings")
+
+    resolved, resolution = mod._preserve_omitted_unchanged_origin_bindings(
+        baseline_dossier=baseline,
+        authored_dossier=authored,
+        authorized_paths=["experiments[]", "experiments[1].result"],
+    )
+
+    assert resolution is not None
+    assert resolution["authored_dossier"] == authored
+    assert resolution["authored_dossier"] is not authored
+    assert resolved["experiments"][0]["origin_evidence_bindings"] == bindings
+    assert resolution["preserved_bindings"] == [
+        {
+            "experiment_id": "experiment:assigned-context",
+            "path": "experiments[0].origin_evidence_bindings",
+            "authored_binding_count": 0,
+            "resolved_binding_count": 2,
+            "resolved_bindings_sha256": mod._canonical_json_sha256(bindings),
+        }
+    ]
+    unsigned = dict(resolution)
+    assert unsigned.pop("resolution_sha256") == mod._canonical_json_sha256(unsigned)
+
+
+@pytest.mark.parametrize("reason", ["binding_authorized", "experiment_changed"])
+def test_repair_does_not_restore_bindings_when_their_meaning_may_have_changed(
+    reason: str,
+) -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:one",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python replay.py",
+                "result": "panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"expected": "panic"},
+                "origin_evidence_bindings": [
+                    {"atom_id": "atom:one"},
+                    {"atom_id": "atom:two"},
+                ],
+            }
+        ]
+    }
+    authored = deepcopy(baseline)
+    authored["experiments"][0]["origin_evidence_bindings"] = [{"atom_id": "atom:one"}]
+    authorized_paths: list[str] = []
+    if reason == "binding_authorized":
+        authorized_paths = ["experiments[0].origin_evidence_bindings"]
+    else:
+        authored["experiments"][0]["result"] = "different observation"
+
+    resolved, resolution = mod._preserve_omitted_unchanged_origin_bindings(
+        baseline_dossier=baseline,
+        authored_dossier=authored,
+        authorized_paths=authorized_paths,
+    )
+
+    assert resolution is None
+    assert resolved == authored
 
 
 def _run_substantive_repair_sequence(
@@ -2421,10 +3121,17 @@ def test_substantive_coverage_loss_is_general_and_evidence_backed_revision_is_al
         "root_cause_hypotheses[hypothesis:secondary].supported",
     ]
 
-    candidate["artifact_refs"] = [
-        {"artifact_id": "artifact:new-counterevidence", "path": "counterevidence.json"}
-    ]
-    candidate["root_cause_hypotheses"][0]["counterevidence"] = ["artifact:new-counterevidence"]
+    candidate["experiments"].append(
+        {
+            "experiment_id": "experiment:new-counterevidence",
+            "scenario_kind": "control",
+            "outcome": "refutes",
+            "control_relationship": {
+                "supports_experiment_id": "experiment:primary",
+            },
+        }
+    )
+    candidate["root_cause_hypotheses"][0]["counterevidence"] = ["experiment:new-counterevidence"]
 
     supported_loss, supported_basis = mod._unsupported_substantive_coverage_loss(
         baseline,
@@ -2433,6 +3140,555 @@ def test_substantive_coverage_loss_is_general_and_evidence_backed_revision_is_al
 
     assert supported_loss == []
     assert supported_basis == ["hypothesis_counterevidence_added"]
+
+
+def test_terminal_disposition_can_remove_planning_only_proof_without_losing_symptoms() -> None:
+    baseline = _established_substantive_frontier()
+    baseline["research_status"] = "evidence_sufficient"
+    baseline["actionability_assessment"] = {
+        "disposition": "already_addressed",
+        "evidence_refs": ["experiment:primary"],
+    }
+    corrected = deepcopy(baseline)
+    corrected["root_cause_hypotheses"][0]["mechanism_symbols"] = []
+    corrected["root_cause_hypotheses"][0]["falsification_attempts"] = []
+    adapter = corrected["experiments"][0]["proof_adapter"]
+    for field in (
+        "adapter_id",
+        "baseline_experiment_id",
+        "challenge_experiment_id",
+        "implementation_touchpoints",
+    ):
+        adapter.pop(field)
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+    )
+
+    assert unsupported_loss == []
+    assert basis == ["terminal_disposition_removed_planning_only_proof"]
+
+    without_symptom_coverage = deepcopy(corrected)
+    without_symptom_coverage["experiments"][0]["addresses_atom_ids"] = []
+    without_symptom_coverage["experiments"][2]["addresses_atom_ids"] = []
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        without_symptom_coverage,
+    )
+    assert any(role.startswith("origin_atom[") for role in unsupported_loss)
+    assert basis == []
+
+
+def test_readiness_adjudicated_noncompeting_alternative_removal_is_progress() -> None:
+    baseline = _established_substantive_frontier()
+    baseline["research_status"] = "evidence_sufficient"
+    baseline["actionability_assessment"] = {
+        "disposition": "already_addressed",
+        "evidence_refs": ["experiment:primary"],
+    }
+    baseline["evidence_boundaries"] = ["No live runtime proof was performed."]
+    baseline["root_cause_hypotheses"][1]["disposition"] = "plausible"
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["evidence_boundaries"].append(
+        "The adjacent mechanism is retained as non-attribution context only."
+    )
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=["unresolved_alternative_hypothesis_not_materialized"],
+    )
+
+    assert unsupported_loss == []
+    assert basis == ["readiness_adjudicated_noncompeting_alternative_removed[hypothesis:secondary]"]
+
+
+def _verifier_rejected_refuted_diagnostic_frontier() -> dict[str, Any]:
+    dossier = _established_substantive_frontier()
+    diagnostic = dossier["root_cause_hypotheses"][1]
+    diagnostic["disposition"] = "refuted"
+    diagnostic["falsification_attempts"] = [
+        {
+            "attempt_id": "attempt:secondary",
+            "hypothesis_id": "hypothesis:secondary",
+            "baseline_experiment_id": "experiment:secondary",
+            "challenge_experiment_id": "experiment:challenge",
+            "outcome": "disproved",
+        }
+    ]
+    dossier["experiments"][1]["proof_adapter"] = {
+        "adapter_id": "structured_replay.v1",
+        "hypothesis_id": "hypothesis:secondary",
+        "baseline_experiment_id": "experiment:secondary",
+        "challenge_experiment_id": "experiment:challenge",
+        "implementation_touchpoints": [
+            {"path": "src/secondary.py", "causal_locator": "core.secondary"}
+        ],
+    }
+    return dossier
+
+
+def test_verifier_rejected_refuted_diagnostic_can_be_removed_without_losing_evidence() -> None:
+    baseline = _verifier_rejected_refuted_diagnostic_frontier()
+    corrected = deepcopy(baseline)
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["experiments"][1].pop("proof_adapter")
+    finding = (
+        "falsification_attempt_unbound:hypothesis:secondary:attempt:secondary:"
+        "causal_intervention_unverified"
+    )
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[finding],
+    )
+
+    assert unsupported_loss == []
+    assert basis == [
+        "validator_rejected_noncausal_refuted_hypothesis_removed[hypothesis:secondary]"
+    ]
+    assert corrected["experiments"][1]["experiment_id"] == "experiment:secondary"
+    assert corrected["experiments"][1]["outcome"] == "supports"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unrelated_finding",
+        "primary_changed",
+        "supporting_observation_changed",
+        "actionability_changed",
+        "diagnostic_not_refuted",
+    ],
+)
+def test_refuted_diagnostic_removal_does_not_excuse_material_research_loss(
+    mutation: str,
+) -> None:
+    baseline = _verifier_rejected_refuted_diagnostic_frontier()
+    corrected = deepcopy(baseline)
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["experiments"][1].pop("proof_adapter")
+    findings = [
+        "falsification_attempt_unbound:hypothesis:secondary:attempt:secondary:"
+        "causal_intervention_unverified"
+    ]
+    if mutation == "unrelated_finding":
+        findings = [
+            "falsification_attempt_unbound:hypothesis:other:attempt:other:"
+            "causal_intervention_unverified"
+        ]
+    elif mutation == "primary_changed":
+        corrected["root_cause_hypotheses"][0]["mechanism_symbols"] = ["core.changed"]
+    elif mutation == "supporting_observation_changed":
+        corrected["experiments"][1]["outcome"] = "inconclusive"
+    elif mutation == "actionability_changed":
+        corrected["actionability_assessment"] = {"disposition": "undetermined"}
+    else:
+        baseline["root_cause_hypotheses"][1]["disposition"] = "plausible"
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=findings,
+    )
+
+    assert unsupported_loss
+    assert any(
+        role != "root_cause_hypotheses[hypothesis:secondary].falsification"
+        for role in unsupported_loss
+    )
+    assert (
+        "validator_rejected_noncausal_refuted_hypothesis_removed[hypothesis:secondary]" not in basis
+    )
+
+
+def test_rejected_optional_refuted_diagnostic_authorizes_removal_not_fabrication() -> None:
+    dossier = _verifier_rejected_refuted_diagnostic_frontier()
+    paths = mod._targeted_repair_authorized_paths(
+        [
+            "falsification_attempt_unbound:hypothesis:secondary:attempt:secondary:"
+            "causal_intervention_unverified"
+        ],
+        dossier=dossier,
+    )
+
+    assert paths is not None
+    assert "root_cause_hypotheses[]" in paths
+    assert "experiments[1].proof_adapter" in paths
+
+
+def test_primary_or_unrelated_hypothesis_error_cannot_authorize_hypothesis_removal() -> None:
+    dossier = _verifier_rejected_refuted_diagnostic_frontier()
+    paths = mod._targeted_repair_authorized_paths(
+        [
+            "falsification_attempt_unbound:hypothesis:primary:attempt:primary:"
+            "causal_intervention_unverified"
+        ],
+        dossier=dossier,
+    )
+
+    assert paths is not None
+    assert "root_cause_hypotheses[]" not in paths
+    assert "experiments[1].proof_adapter" not in paths
+
+
+@pytest.mark.parametrize("mutation", ["no_boundary", "primary_changed", "support_removed"])
+def test_readiness_adjudication_does_not_excuse_silent_research_loss(mutation: str) -> None:
+    baseline = _established_substantive_frontier()
+    baseline["research_status"] = "evidence_sufficient"
+    baseline["actionability_assessment"] = {"disposition": "already_addressed"}
+    baseline["evidence_boundaries"] = ["Existing boundary"]
+    baseline["root_cause_hypotheses"][1]["disposition"] = "plausible"
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["evidence_boundaries"].append("Adjacent mechanism is non-competing.")
+    if mutation == "no_boundary":
+        corrected["evidence_boundaries"] = list(baseline["evidence_boundaries"])
+    elif mutation == "primary_changed":
+        corrected["root_cause_hypotheses"][0]["statement"] = "Changed primary"
+    else:
+        corrected["experiments"] = []
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=["unresolved_alternative_hypothesis_not_materialized"],
+    )
+
+    assert unsupported_loss
+    assert basis == []
+
+
+def test_verifier_rejected_direct_support_can_be_reclassified_without_false_regression() -> None:
+    aggregate_atom = "operational_failure:aggregate"
+    occurrence_atoms = ["run:one", "run:two"]
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:history-audit",
+                "scenario_kind": "repository_history_audit",
+                "outcome": "supports",
+                "addresses_atom_ids": [aggregate_atom, *occurrence_atoms],
+            },
+            {
+                "experiment_id": "experiment:causal-replay",
+                "scenario_kind": "direct_production_api_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": [aggregate_atom],
+            },
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["outcome"] = "inconclusive"
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[
+            "experiment_not_bound_to_atom:experiment:history-audit:" + aggregate_atom
+        ],
+    )
+
+    assert unsupported_loss == []
+    assert basis == ["validator_rejected_direct_support[experiment:history-audit]"]
+
+
+def test_keep_separate_aggregate_does_not_protect_redundant_occurrence_coverage() -> None:
+    aggregate_atom = "operational_failure:aggregate"
+    occurrence_atoms = ["run:one", "run:two"]
+    baseline = {
+        "case_relation_assessment": {
+            "disposition": "keep_separate",
+            "rationale": "Keep this signed aggregate separate from relation candidates.",
+            "facets": [],
+            "material_unknowns": [],
+        },
+        "evidence_assignment": {
+            "status": "complete",
+            "expected_atom_ids": [aggregate_atom, *occurrence_atoms],
+            "case_evidence_atom_ids": [aggregate_atom],
+            "occurrence_evidence_atom_ids": occurrence_atoms,
+        },
+        "experiments": [
+            {
+                "experiment_id": "experiment:aggregate-replay",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": [aggregate_atom, *occurrence_atoms],
+            }
+        ],
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = [aggregate_atom]
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+    )
+
+    assert unsupported_loss == []
+    assert basis == []
+
+
+def test_split_case_still_protects_occurrence_level_coverage() -> None:
+    aggregate_atom = "operational_failure:aggregate"
+    occurrence_atoms = ["run:one", "run:two"]
+    baseline = {
+        "case_relation_assessment": {
+            "disposition": "split",
+            "rationale": "The occurrences represent distinct causal units.",
+            "facets": [],
+            "material_unknowns": [],
+        },
+        "evidence_assignment": {
+            "status": "complete",
+            "expected_atom_ids": [aggregate_atom, *occurrence_atoms],
+            "case_evidence_atom_ids": [aggregate_atom],
+            "occurrence_evidence_atom_ids": occurrence_atoms,
+        },
+        "experiments": [
+            {
+                "experiment_id": "experiment:occurrence-replay",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": [aggregate_atom, *occurrence_atoms],
+            }
+        ],
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = [aggregate_atom]
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+    )
+
+    assert unsupported_loss == [
+        "origin_atom[run:one].direct_experimental_coverage",
+        "origin_atom[run:two].direct_experimental_coverage",
+    ]
+    assert basis == []
+
+
+def test_unrelated_binding_error_cannot_excuse_direct_support_loss() -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:history-audit",
+                "scenario_kind": "repository_history_audit",
+                "outcome": "supports",
+                "addresses_atom_ids": ["run:one", "run:two"],
+            },
+            {
+                "experiment_id": "experiment:unrelated",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": ["run:other"],
+            },
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["outcome"] = "inconclusive"
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=["experiment_not_bound_to_atom:experiment:unrelated:run:other"],
+    )
+
+    assert unsupported_loss == [
+        "origin_atom[run:one].direct_experimental_coverage",
+        "origin_atom[run:two].direct_experimental_coverage",
+    ]
+    assert basis == []
+
+
+def test_unknown_atom_finding_allows_only_that_invalid_coverage_role_to_be_removed() -> None:
+    valid_atom = "operational_failure:signature:occurrence"
+    unknown_atom = "operational_failure:signature:malformed-occurrence"
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:causal-control",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": [valid_atom, unknown_atom],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = [valid_atom]
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[
+            "research_dossier_experiment_addresses_unknown_atoms: "
+            "problem:case index=0 ids=['operational_failure:signature:malformed-occurrence']"
+        ],
+    )
+
+    assert unsupported_loss == []
+    assert basis == [
+        "validator_rejected_unknown_origin_atom[operational_failure:signature:malformed-occurrence]"
+    ]
+
+
+def test_unknown_atom_finding_cannot_excuse_removal_of_other_atom_coverage() -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:causal-control",
+                "scenario_kind": "faithful_replay",
+                "outcome": "supports",
+                "addresses_atom_ids": ["run:valid", "run:other"],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["addresses_atom_ids"] = []
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[
+            "research_dossier_experiment_addresses_unknown_atoms: "
+            "problem:case index=0 ids=['run:other']"
+        ],
+    )
+
+    assert unsupported_loss == ["origin_atom[run:valid].direct_experimental_coverage"]
+    assert basis == ["validator_rejected_unknown_origin_atom[run:other]"]
+
+
+def test_verifier_rejected_falsification_can_be_removed_without_false_regression() -> None:
+    hypothesis_id = "hypothesis:historical-worker-panic"
+    attempt_id = "falsification:current-control"
+    baseline = {
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": hypothesis_id,
+                "supporting_evidence": ["experiment:historical-classification"],
+                "mechanism_symbols": ["package.module.classify_panic"],
+                "falsification_attempts": [
+                    {
+                        "attempt_id": attempt_id,
+                        "outcome": "survived",
+                    }
+                ],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"][0]["falsification_attempts"] = []
+    exact_rejection = (
+        "research_dossier_falsification_source_atoms_mismatch: "
+        f"hypothesis={hypothesis_id} attempt={attempt_id}"
+    )
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[exact_rejection],
+    )
+
+    assert unsupported_loss == []
+    assert basis == [f"validator_rejected_falsification[{hypothesis_id}][{attempt_id}]"]
+
+
+def test_unrelated_falsification_error_cannot_excuse_falsification_loss() -> None:
+    hypothesis_id = "hypothesis:historical-worker-panic"
+    attempt_id = "falsification:current-control"
+    baseline = {
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": hypothesis_id,
+                "falsification_attempts": [
+                    {
+                        "attempt_id": attempt_id,
+                        "outcome": "survived",
+                    }
+                ],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"][0]["falsification_attempts"] = []
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[
+            "research_dossier_falsification_source_atoms_mismatch: "
+            "hypothesis=hypothesis:other attempt=falsification:other"
+        ],
+    )
+
+    assert unsupported_loss == [f"root_cause_hypotheses[{hypothesis_id}].falsification"]
+    assert basis == []
+
+
+def test_binding_error_does_not_excuse_silent_atom_removal_or_other_proof_loss() -> None:
+    baseline = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:history-audit",
+                "scenario_kind": "repository_history_audit",
+                "outcome": "supports",
+                "addresses_atom_ids": ["run:one", "run:two"],
+            }
+        ],
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": "hypothesis:root",
+                "supporting_evidence": ["experiment:history-audit"],
+                "mechanism_symbols": ["package.module.symbol"],
+            }
+        ],
+    }
+    silently_removed = json.loads(json.dumps(baseline))
+    silently_removed["experiments"][0]["addresses_atom_ids"] = ["run:one"]
+    lost_hypothesis = json.loads(json.dumps(baseline))
+    lost_hypothesis["experiments"][0]["outcome"] = "inconclusive"
+    lost_hypothesis["root_cause_hypotheses"] = []
+    binding_error = ["experiment_not_bound_to_atom:experiment:history-audit:run:one"]
+
+    silent_loss, silent_basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        silently_removed,
+        validation_errors=binding_error,
+    )
+    hypothesis_loss, hypothesis_basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        lost_hypothesis,
+        validation_errors=binding_error,
+    )
+
+    assert silent_loss == ["origin_atom[run:two].direct_experimental_coverage"]
+    assert silent_basis == []
+    assert hypothesis_loss == [
+        "root_cause_hypotheses[hypothesis:root].mechanism",
+        "root_cause_hypotheses[hypothesis:root].supported",
+    ]
+    assert hypothesis_basis == ["validator_rejected_direct_support[experiment:history-audit]"]
+
+
+def test_epistemic_downgrade_rejects_bare_artifact_and_support_relabeling() -> None:
+    baseline = _established_substantive_frontier()
+
+    bare_artifact = json.loads(json.dumps(baseline))
+    bare_artifact["artifact_refs"] = [
+        {"artifact_id": "artifact:new-counterevidence", "path": "counterevidence.json"}
+    ]
+    bare_artifact["root_cause_hypotheses"][0]["counterevidence"] = ["artifact:new-counterevidence"]
+    assert mod._epistemic_downgrade_basis(baseline, bare_artifact) == []
+
+    support_relabel = json.loads(json.dumps(baseline))
+    support_relabel["root_cause_hypotheses"][0]["counterevidence"] = ["experiment:primary"]
+    assert mod._epistemic_downgrade_basis(baseline, support_relabel) == []
 
 
 def test_evidence_backed_status_downgrade_remains_same_author_frontier(
@@ -2457,9 +3713,18 @@ def test_evidence_backed_status_downgrade_remains_same_author_frontier(
         "research_status": "evidence_sufficient",
         "material_unknowns": [],
         "artifact_refs": [],
+        "experiments": [
+            {
+                "experiment_id": "experiment:support",
+                "scenario_kind": "original_replay",
+                "outcome": "supports",
+            }
+        ],
         "root_cause_hypotheses": [
             {
                 "hypothesis_id": "hypothesis:test-1",
+                "supporting_evidence": ["experiment:support"],
+                "disposition_evidence": ["experiment:support"],
                 "counterevidence": [],
                 "disposition": "primary",
             }
@@ -2477,11 +3742,23 @@ def test_evidence_backed_status_downgrade_remains_same_author_frontier(
         **baseline,
         "research_status": "insufficient_evidence",
         "material_unknowns": [material_unknown],
-        "artifact_refs": [{"artifact_id": "artifact:new-counterevidence"}],
+        "experiments": [
+            *baseline["experiments"],
+            {
+                "experiment_id": "experiment:new-counterevidence",
+                "scenario_kind": "control",
+                "outcome": "refutes",
+                "control_relationship": {
+                    "supports_experiment_id": "experiment:support",
+                },
+            },
+        ],
         "root_cause_hypotheses": [
             {
                 "hypothesis_id": "hypothesis:test-1",
-                "counterevidence": ["artifact:new-counterevidence"],
+                "supporting_evidence": ["experiment:support"],
+                "disposition_evidence": ["experiment:support"],
+                "counterevidence": ["experiment:new-counterevidence"],
                 "disposition": "primary",
             }
         ],
@@ -2560,6 +3837,158 @@ def test_evidence_backed_status_downgrade_remains_same_author_frontier(
     }
 
 
+def _run_one_clean_status_downgrade(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    workspace = tmp_path / f"{name}-workspace"
+    revision = _init_workspace(workspace)
+    initial_run = tmp_path / f"{name}-initial"
+    initial_run.mkdir()
+    _write_json(initial_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=initial_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="evidence_verification_invalid",
+        run_dir=initial_run,
+        report_path=initial_run / "report.json",
+        validation_errors=["evidence:one"],
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        attempt_wall_seconds=5.0,
+    )
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        del config
+        assert request.codex_resume_session_id == session_id
+        run_dir = tmp_path / f"{name}-correction"
+        run_dir.mkdir()
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        mod,
+        "_repair_candidate_from_run",
+        lambda **kwargs: (candidate, []),
+    )
+    return mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=["evidence:one"],
+        first_attempt_number=2,
+        candidate_validator=lambda candidate, run: [],
+        research_capabilities=True,
+        max_repair_turns=1,
+    )
+
+
+@pytest.mark.parametrize("relabel_kind", ["bare_artifact", "existing_support"])
+def test_clean_unsupported_evidence_relabel_does_not_replace_objective_best(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relabel_kind: str,
+) -> None:
+    baseline = _established_substantive_frontier()
+    candidate = json.loads(json.dumps(baseline))
+    candidate["research_status"] = "insufficient_evidence"
+    if relabel_kind == "bare_artifact":
+        candidate["artifact_refs"] = [
+            {
+                "artifact_id": "artifact:new-counterevidence",
+                "path": "counterevidence.json",
+            }
+        ]
+        candidate["root_cause_hypotheses"][0]["counterevidence"] = ["artifact:new-counterevidence"]
+    else:
+        candidate["root_cause_hypotheses"][0]["counterevidence"] = ["experiment:primary"]
+
+    result = _run_one_clean_status_downgrade(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        name=f"unsupported-{relabel_kind}",
+        baseline=baseline,
+        candidate=candidate,
+    )
+
+    assert result["status"] == "repairable_paused:repair_turn_limit_reached"
+    assert result["dossier"] == baseline
+    assert result["best_dossier"] == baseline
+    progress = result["attempts"][0]["repair_progress"]
+    assert progress["decision"] == "continue"
+    assert progress["status_downgrade"]["supported"] is False
+    assert progress["candidate_not_promoted_to_objective_best"] is True
+
+
+def test_new_supported_alternative_can_replace_objective_best(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _established_substantive_frontier()
+    candidate = json.loads(json.dumps(baseline))
+    candidate["research_status"] = "insufficient_evidence"
+    candidate["experiments"].append(
+        {
+            "experiment_id": "experiment:new-alternative",
+            "scenario_kind": "targeted_probe",
+            "outcome": "supports",
+            "addresses_atom_ids": ["atom:primary"],
+        }
+    )
+    candidate["root_cause_hypotheses"].append(
+        {
+            "hypothesis_id": "hypothesis:new-alternative",
+            "disposition": "plausible",
+            "supporting_evidence": ["experiment:new-alternative"],
+            "disposition_evidence": ["experiment:new-alternative"],
+            "counterevidence": [],
+            "mechanism_symbols": ["core.alternative"],
+            "falsification_attempts": [],
+        }
+    )
+
+    result = _run_one_clean_status_downgrade(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        name="supported-new-alternative",
+        baseline=baseline,
+        candidate=candidate,
+    )
+
+    assert result["status"] == "corrected"
+    assert result["dossier"] == candidate
+    progress = result["attempts"][0]["repair_progress"]
+    assert progress["decision"] == "accepted"
+    assert progress["status_downgrade"] == {
+        "before_research_status": "evidence_sufficient",
+        "candidate_research_status": "insufficient_evidence",
+        "epistemic_basis": ["causal_alternative_became_unresolved"],
+        "supported": True,
+    }
+
+
 def test_repeated_nonadvancing_downgrade_pauses_for_adjudication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2634,16 +4063,15 @@ def test_repeated_nonadvancing_downgrade_pauses_for_adjudication(
         research_capabilities=True,
     )
 
-    assert result["status"] == (
-        "repairable_paused:advancing_claim_downgrade_requires_adjudication"
-    )
+    assert result["status"] == ("repairable_paused:advancing_claim_downgrade_requires_adjudication")
     assert result["dossier"] == baseline
     assert result["latest_nonadvancing_dossier"]["phase"] == 3
     assert calls == 3
     assert result["attempts"][-1]["repair_progress"]["decision"] == "paused"
-    assert result["attempts"][-1]["repair_progress"]["advancement_regression"][
-        "consecutive_count"
-    ] == 3
+    assert (
+        result["attempts"][-1]["repair_progress"]["advancement_regression"]["consecutive_count"]
+        == 3
+    )
 
 
 def test_changing_fewer_errors_cannot_spin_by_deleting_substantive_coverage(
@@ -2743,16 +4171,59 @@ def test_same_author_can_restore_coverage_and_resume_ordinary_error_progress(
     assert restored_progress["substantive_coverage_regressions"] == []
     assert restored_progress["immediate_prior_feedback_error_count_progress"] is False
     assert restored_progress["objective_progress"] is False
-    assert restored_progress["genuine_feedback_progress"] is True
-    assert restored_progress["cost_clock_reset"] is True
-    assert restored_progress["reason"] == "prior_errors_reworked_without_new_best"
-    assert restored_progress["feedback_advancement"]["substantive_coverage_added"] == [
+    assert restored_progress["genuine_feedback_progress"] is False
+    assert restored_progress["cost_clock_reset"] is False
+    assert restored_progress["reason"] == "nonadvancing_correction_retained_for_same_author"
+    assert restored_progress["substantive_coverage_added_since_immediate_feedback"] == [
         "positive_outcome.proof_adapter"
         "[experiment:primary][hypothesis:primary].operational_contract",
         "root_cause_hypotheses[hypothesis:secondary].mechanism",
         "root_cause_hypotheses[hypothesis:secondary].supported",
     ]
+    assert restored_progress["substantive_coverage_added_since_objective_best"] == []
     assert restored_progress.get("candidate_not_promoted_to_objective_best") is not True
+
+
+def test_restoring_an_already_achieved_best_does_not_reset_global_stall_streak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    objective_errors = [f"objective:{index}" for index in range(6)]
+    worse_errors = [*objective_errors, "adapter:a", "adapter:b"]
+
+    def candidates(baseline: dict[str, Any]) -> list[tuple[dict[str, Any], list[str]]]:
+        sequence: list[tuple[dict[str, Any], list[str]]] = []
+        for phase, errors in (
+            ("worse", worse_errors),
+            ("restored-existing-best", objective_errors),
+            ("worse-again", worse_errors),
+        ):
+            candidate = json.loads(json.dumps(baseline))
+            candidate["phase"] = phase
+            sequence.append((candidate, list(errors)))
+        return sequence
+
+    result, prompts, baseline, initial_errors = _run_substantive_repair_sequence(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        name="objective-best-restoration-loop",
+        candidate_builder=candidates,
+    )
+
+    assert initial_errors == objective_errors
+    assert result["status"] == (
+        "repairable_paused:consecutive_nonadvancing_corrections_require_adjudication"
+    )
+    assert len(prompts) == 3
+    assert result["best_dossier"] == baseline
+    progress = [attempt["repair_progress"] for attempt in result["attempts"]]
+    assert [
+        item["consecutive_ordinary_nonadvancing_correction_count"] for item in progress
+    ] == [1, 2, 3]
+    assert progress[1]["immediate_prior_feedback_error_count_progress"] is True
+    assert progress[1]["objective_progress"] is False
+    assert progress[1]["genuine_feedback_progress"] is False
+    assert progress[1]["cost_clock_reset"] is False
 
 
 def test_repeated_equal_count_identity_churn_pauses_with_all_work_retained(
@@ -2764,9 +4235,7 @@ def test_repeated_equal_count_identity_churn_pauses_with_all_work_retained(
         for attempt in range(3):
             candidate = json.loads(json.dumps(baseline))
             candidate["phase"] = f"lateral-{attempt}"
-            sequence.append(
-                (candidate, [f"lateral-{attempt}:{index}" for index in range(6)])
-            )
+            sequence.append((candidate, [f"lateral-{attempt}:{index}" for index in range(6)]))
         return sequence
 
     result, prompts, baseline, _ = _run_substantive_repair_sequence(
@@ -2828,9 +4297,7 @@ def test_alternating_identity_churn_and_same_error_rewrites_share_one_pause_stre
         candidate_builder=candidates,
     )
 
-    assert result["status"] == (
-        "repairable_paused:lateral_correction_churn_requires_adjudication"
-    )
+    assert result["status"] == ("repairable_paused:lateral_correction_churn_requires_adjudication")
     assert len(prompts) == 3
     assert len(result["attempts"]) == 3
     assert result["best_dossier"] == baseline
@@ -2841,9 +4308,11 @@ def test_alternating_identity_churn_and_same_error_rewrites_share_one_pause_stre
     assert result["retained_frontier"]["candidate_disposition"] == "retained_as_latest_safe"
 
     progress = [attempt["repair_progress"] for attempt in result["attempts"]]
-    assert [
-        item["consecutive_ordinary_nonadvancing_correction_count"] for item in progress
-    ] == [1, 2, 3]
+    assert [item["consecutive_ordinary_nonadvancing_correction_count"] for item in progress] == [
+        1,
+        2,
+        3,
+    ]
     assert [item["ordinary_nonadvancing_correction"]["consecutive_count"] for item in progress] == [
         1,
         2,
@@ -2852,9 +4321,10 @@ def test_alternating_identity_churn_and_same_error_rewrites_share_one_pause_stre
     assert "lateral_correction_churn" in progress[0]
     assert "lateral_correction_churn" not in progress[1]
     assert "lateral_correction_churn" in progress[2]
-    assert result["continuation_feedback"]["ordinary_nonadvancing_correction"][
-        "consecutive_count"
-    ] == 3
+    assert (
+        result["continuation_feedback"]["ordinary_nonadvancing_correction"]["consecutive_count"]
+        == 3
+    )
 
 
 def test_fewer_findings_reset_mixed_nonadvancing_streak_and_acceptance_keeps_it_reset(
@@ -2887,9 +4357,13 @@ def test_fewer_findings_reset_mixed_nonadvancing_streak_and_acceptance_keeps_it_
     assert result["status"] == "corrected"
     assert len(prompts) == 5
     progress = [attempt["repair_progress"] for attempt in result["attempts"]]
-    assert [
-        item["consecutive_ordinary_nonadvancing_correction_count"] for item in progress
-    ] == [1, 2, 0, 1, 0]
+    assert [item["consecutive_ordinary_nonadvancing_correction_count"] for item in progress] == [
+        1,
+        2,
+        0,
+        1,
+        0,
+    ]
     assert progress[2]["immediate_prior_feedback_error_count_progress"] is True
     assert progress[2]["genuine_feedback_progress"] is True
     assert progress[3]["reason"] == "nonadvancing_correction_retained_for_same_author"
@@ -2905,9 +4379,7 @@ def test_fewer_errors_after_lateral_rework_resets_churn_and_completes(
         for attempt in range(2):
             candidate = json.loads(json.dumps(baseline))
             candidate["phase"] = f"lateral-{attempt}"
-            sequence.append(
-                (candidate, [f"lateral-{attempt}:{index}" for index in range(6)])
-            )
+            sequence.append((candidate, [f"lateral-{attempt}:{index}" for index in range(6)]))
         improved = json.loads(json.dumps(baseline))
         improved["phase"] = "fewer-errors"
         corrected = json.loads(json.dumps(improved))
@@ -3379,8 +4851,9 @@ def test_supervised_repair_turn_limit_pauses_after_one_completed_author_turn(
     assert result["authored_work_disposition"] == "retained"
     assert result["retained_frontier"]["completed_repair_turns"] == 1
     assert result["retained_frontier"]["max_repair_turns"] == 1
-    assert result["continuation_feedback"]["source_attempt_sha256"] == (
-        result["attempts"][0]["attempt_sha256"]
+    assert (
+        result["continuation_feedback"]["source_attempt_sha256"]
+        == (result["attempts"][0]["attempt_sha256"])
     )
 
 
@@ -3560,13 +5033,16 @@ def test_public_resume_preserves_nonadvancing_streak_then_persists_two_to_one_re
     assert third_result["forward_dossier"]["phase"] == "third-nonadvancing-turn"
     assert third_result["forward_validation_errors"] == third_errors
     third_attempt = third_result["attempts"][-1]
-    assert third_attempt["repair_progress"][
-        "consecutive_ordinary_nonadvancing_correction_count"
-    ] == 3
-    assert mod._source_ordinary_nonadvancing_correction_count(
-        third_attempt,
-        current_errors=third_errors,
-    ) == 3
+    assert (
+        third_attempt["repair_progress"]["consecutive_ordinary_nonadvancing_correction_count"] == 3
+    )
+    assert (
+        mod._source_ordinary_nonadvancing_correction_count(
+            third_attempt,
+            current_errors=third_errors,
+        )
+        == 3
+    )
 
     resumable = json.loads(json.dumps(third_result["forward_dossier"]))
     resumable.update(
@@ -3596,15 +5072,17 @@ def test_public_resume_preserves_nonadvancing_streak_then_persists_two_to_one_re
     assert improved_result["forward_dossier"]["phase"] == "two-to-one-improvement"
     assert improved_result["forward_validation_errors"] == improved_errors
     improved_attempt = improved_result["attempts"][-1]
-    assert improved_attempt["repair_progress"][
-        "consecutive_ordinary_nonadvancing_correction_count"
-    ] == 0
-    assert improved_attempt["repair_progress"][
-        "immediate_prior_feedback_error_count_progress"
-    ] is True
-    assert improved_result["retained_frontier"][
-        "consecutive_ordinary_nonadvancing_correction_count"
-    ] == 0
+    assert (
+        improved_attempt["repair_progress"]["consecutive_ordinary_nonadvancing_correction_count"]
+        == 0
+    )
+    assert (
+        improved_attempt["repair_progress"]["immediate_prior_feedback_error_count_progress"] is True
+    )
+    assert (
+        improved_result["retained_frontier"]["consecutive_ordinary_nonadvancing_correction_count"]
+        == 0
+    )
 
 
 def test_public_resume_counts_quarantined_downgrades_and_pauses_on_third(
@@ -3725,9 +5203,7 @@ def test_public_resume_counts_quarantined_downgrades_and_pauses_on_third(
         "repairable_paused:repair_turn_limit_reached",
         "repairable_paused:advancing_claim_downgrade_requires_adjudication",
     ]
-    assert results[-1]["latest_nonadvancing_dossier"]["phase"] == (
-        "unsupported-downgrade-3"
-    )
+    assert results[-1]["latest_nonadvancing_dossier"]["phase"] == ("unsupported-downgrade-3")
     assert len(resumable["research_attempts"]) == 4
     assert run_count == 3
 
@@ -3813,10 +5289,13 @@ def test_independent_feedback_transition_carries_authenticated_nonadvancing_stre
         ],
     }
     assert transition["attempt_sha256"] == mod.research_attempt_sha256(transition)
-    assert mod._source_ordinary_nonadvancing_correction_count(
-        transition,
-        current_errors=[*source_errors, "independent:c"],
-    ) == 2
+    assert (
+        mod._source_ordinary_nonadvancing_correction_count(
+            transition,
+            current_errors=[*source_errors, "independent:c"],
+        )
+        == 2
+    )
     assert captured[0]["max_repair_turns"] == 1
 
 
@@ -3839,21 +5318,30 @@ def test_nonadvancing_streak_seed_rejects_mismatched_frontier_and_tampered_attem
         },
     )
 
-    assert mod._source_ordinary_nonadvancing_correction_count(
-        attempt,
-        current_errors=["current:a", "current:b"],
-    ) == 2
-    assert mod._source_ordinary_nonadvancing_correction_count(
-        attempt,
-        current_errors=["different:a", "different:b"],
-    ) == 0
+    assert (
+        mod._source_ordinary_nonadvancing_correction_count(
+            attempt,
+            current_errors=["current:a", "current:b"],
+        )
+        == 2
+    )
+    assert (
+        mod._source_ordinary_nonadvancing_correction_count(
+            attempt,
+            current_errors=["different:a", "different:b"],
+        )
+        == 0
+    )
 
     tampered = json.loads(json.dumps(attempt))
     tampered["repair_progress"]["consecutive_ordinary_nonadvancing_correction_count"] = 99
-    assert mod._source_ordinary_nonadvancing_correction_count(
-        tampered,
-        current_errors=["current:a", "current:b"],
-    ) == 0
+    assert (
+        mod._source_ordinary_nonadvancing_correction_count(
+            tampered,
+            current_errors=["current:a", "current:b"],
+        )
+        == 0
+    )
 
 
 def test_resumed_unverified_draft_can_normalize_malformed_evidence_shape(
@@ -4218,9 +5706,7 @@ def test_continuity_failure_persists_expected_and_observed_session_ids(
     assert repair_attempt["repair_progress"]["observed_session_id"] == observed_session
     assert repair_attempt["repair_progress"]["authored_work_disposition"] == "retained"
     retained = repair_attempt["repair_progress"]["retained_frontier"]
-    assert retained["candidate_disposition"] == (
-        "quarantined_while_forward_frontier_is_retained"
-    )
+    assert retained["candidate_disposition"] == ("quarantined_while_forward_frontier_is_retained")
     assert retained["latest_safe_dossier_sha256"] == mod._canonical_json_sha256(baseline)
 
 
@@ -4235,7 +5721,8 @@ def test_research_prompts_state_exact_causal_and_output_contract_rules() -> None
         "pinned repository revision",
         "direct argv",
         "tracked repository entrypoint",
-        "registered proof adapter",
+        "For `requires_change`",
+        "proof adapter",
         "runner-evaluated",
         "author session",
         "material unknown",
@@ -4281,9 +5768,7 @@ def _problem_payload(tmp_path: Path) -> dict[str, object]:
     evidence_atom = {
         "atom_id": "atom:origin",
         "text": "failure",
-        "command": (
-            "python -m pytest -q --tb=native tests/test_core.py::test_reported_failure"
-        ),
+        "command": ("python -m pytest -q --tb=native tests/test_core.py::test_reported_failure"),
         "exit_code": 1,
         "evidence_role": "observation",
         "origin_stage": "runtime",
@@ -4355,11 +5840,7 @@ def _assigned_evidence_read_events(workspace: Path | None) -> list[dict[str, obj
     if workspace is None:
         return []
     assigned_index = (
-        workspace
-        / ".usertest_research"
-        / "origin_evidence"
-        / "assigned"
-        / "index.json"
+        workspace / ".usertest_research" / "origin_evidence" / "assigned" / "index.json"
     )
     if not assigned_index.is_file():
         return []
@@ -4727,8 +6208,8 @@ def test_full_runner_preserves_verified_insufficient_research(
     assert {
         "research_status_insufficient_evidence",
         "material_unknown_blocks_implementation_decision",
-        "research_mechanism_evidence_missing",
     }.issubset(reasons)
+    assert "research_mechanism_evidence_missing" not in reasons
 
 
 def test_output_repair_continues_same_author_session_and_invalid_then_valid(
@@ -5002,6 +6483,169 @@ def test_sufficient_blocker_contradiction_returns_focused_feedback_to_same_autho
     assert "Do not delete a genuine blocker" in hint["required_change"]
     assert result["attempts"][0]["resumed_from_session_id"] == session_id
     assert result["attempts"][0]["repair_progress"]["decision"] == "accepted"
+
+
+def test_stage3_readiness_failure_returns_to_same_author_before_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    workspace = tmp_path / "readiness_workspace"
+    revision = _init_workspace(workspace)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    baseline = _research_extension(
+        actionability_assessment={
+            "disposition": "already_addressed",
+            "rationale": "The pinned revision already contains the provenance-sensitive fix.",
+            "evidence_refs": ["exp-1"],
+        }
+    )
+    baseline["root_cause_hypotheses"].append(
+        {
+            "hypothesis_id": "h2",
+            "statement": "The warning text alone always proves invalid configuration.",
+            "supporting_evidence": ["exp-1"],
+            "counterevidence": ["exp-control"],
+            "mechanism_symbols": ["core.run"],
+            "disposition": "plausible",
+            "disposition_evidence": [],
+            "falsification_attempts": [],
+        }
+    )
+    corrected = deepcopy(baseline)
+    corrected["root_cause_hypotheses"] = corrected["root_cause_hypotheses"][:1]
+    corrected["evidence_boundaries"].append(
+        "The warning-only theory is retained as non-attribution context, not a competing cause."
+    )
+    calls: list[RunRequest] = []
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        calls.append(request)
+        run_dir = tmp_path / f"readiness_run_{len(calls)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        extension = baseline if len(calls) == 1 else corrected
+        _write_json(
+            run_dir / "report.json",
+            {
+                "schema_version": 1,
+                "kind": "troubleshoot_v1",
+                "status": "success",
+                "goal": "Bound the already-addressed historical case",
+                "failure_point": "An adjacent theory was misclassified as competing",
+                "evidence": {"what_happened": "The retained evidence supports one mechanism"},
+                "attempted_fixes": [],
+                "recommended_fix_path": ["Do not open a new implementation ticket"],
+                "extensions": {"backlog_repro_research": extension},
+            },
+        )
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=request.resume_workspace_dir or workspace,
+            revision=revision,
+            ref=request.ref,
+            requested_codex_resume_session_id=request.codex_resume_session_id,
+            assigned_evidence_workspace=request.resume_workspace_dir,
+        )
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    def fake_verify(dossier: dict[str, Any], **_kwargs: object) -> dict[str, Any]:
+        return {
+            "status": "verified",
+            "errors": [],
+            "planning_workspace_dir": str(workspace),
+            "claims_sha256": research_claims_sha256(dossier),
+        }
+
+    def fake_readiness(dossier: dict[str, Any]) -> tuple[bool, list[str]]:
+        alternatives = dossier.get("root_cause_hypotheses", [])[1:]
+        if any(
+            isinstance(item, dict) and item.get("disposition") in {"plausible", "unresolved"}
+            for item in alternatives
+        ):
+            return False, ["unresolved_alternative_hypothesis_not_materialized"]
+        return True, []
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(mod, "verify_research_evidence", fake_verify)
+    monkeypatch.setattr(mod, "assess_research_readiness", fake_readiness)
+    monkeypatch.setattr(
+        mod,
+        "parse_research_dossier_list",
+        lambda payload: (json.loads(payload), []),
+    )
+
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model="gpt-5.6-sol",
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+    )
+
+    assert len(calls) == 2
+    assert calls[1].codex_resume_session_id == session_id
+    assert calls[1].resume_workspace_dir == calls[0].resume_workspace_dir
+    continuation_prompt = calls[1].agent_user_prompt or ""
+    marker = "## Verifier feedback payload (JSON)"
+    repair_payload, _ = json.JSONDecoder().raw_decode(
+        continuation_prompt.split(marker, maxsplit=1)[1].lstrip()
+    )
+    assert repair_payload["validation_errors"] == [
+        "unresolved_alternative_hypothesis_not_materialized"
+    ]
+    assert repair_payload["remediation_hints"][0]["target_fields"] == [
+        "root_cause_hypotheses[]",
+        "material_unknowns[]",
+        "research_status",
+        "evidence_boundaries",
+    ]
+    assert "retaining its experiments unchanged as context" in repair_payload[
+        "remediation_hints"
+    ][0]["required_change"]
+    dossier = document["items"][0]
+    assert dossier["research_status"] == "evidence_sufficient"
+    assert dossier["actionability_assessment"]["disposition"] == "already_addressed"
+    assert len(dossier["root_cause_hypotheses"]) == 1
+    assert dossier["blocking_reasons"] == []
+    assert document["input_meta"]["stage_status"] == "completed"
+    requests_path = (
+        tmp_path
+        / "compiled"
+        / "x.backlog_artifacts"
+        / "repro_research"
+        / "repro_research_requests.json"
+    )
+    request_ledger = json.loads(requests_path.read_text(encoding="utf-8"))
+    assert request_ledger["requests"][0]["evidence_verification_corrections"][
+        "correction_frontier"
+    ] == "research_readiness"
+
+
+def test_nonadvancing_research_status_does_not_require_optioning_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "assess_research_readiness",
+        lambda _dossier: (_ for _ in ()).throw(AssertionError("must not assess")),
+    )
+
+    assert mod._advancing_research_readiness_errors(
+        {"research_status": "insufficient_evidence"}
+    ) == []
+    assert mod._advancing_research_readiness_errors({"research_status": "blocked"}) == []
 
 
 def test_output_repair_parks_subscription_wait_and_retains_author_frontier(
@@ -5758,7 +7402,7 @@ def test_research_workspace_materializes_and_attests_large_origin_attachment(
     assert "observations={baseline:{source" in prompt
     assert "not the experiment assertion shape" in prompt
     assert "touchpoint `causal_locator`" in prompt
-    assert "Use `symbols`, not `inspected_symbols`" in prompt
+    assert "use `symbols`, not `inspected_symbols`" in prompt.lower()
     assert "never redirect TEMP/TMP" in prompt
     assert "rather than rerunning unchanged" in prompt
     assert "evidence_boundaries` is a string list" in prompt
@@ -6428,6 +8072,89 @@ def test_run_repro_research_stage_classifies_suspicious_diff(
     assert [attempt["outcome"] for attempt in items[0]["research_attempts"]] == [
         "runner_contract_invalid"
     ]
+
+
+def test_stage3_output_repair_pause_is_preserved_for_supervised_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    incomplete = _research_extension()
+    del incomplete["experiments"]
+    session_id = "019f6bde-844c-7190-ad84-0bf5af776e1a"
+    pause_status = "repairable_paused:consecutive_nonadvancing_corrections_require_adjudication"
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        del config
+        run_dir = tmp_path / "paused_output_repair"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            run_dir / "report.json",
+            {
+                "schema_version": 1,
+                "kind": "troubleshoot_v1",
+                "status": "success",
+                "goal": "x",
+                "failure_point": "y",
+                "evidence": {"what_happened": "z"},
+                "attempted_fixes": [],
+                "recommended_fix_path": ["investigate"],
+                "extensions": {"backlog_repro_research": incomplete},
+            },
+        )
+        _write_json(run_dir / "diff_numstat.json", [])
+        _write_json(run_dir / "target_ref.json", {"commit_sha": "canonical-sha"})
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    def pause_repair(**kwargs: object) -> dict[str, object]:
+        source_attempt = kwargs["source_attempt"]
+        validation_errors = kwargs["validation_errors"]
+        assert isinstance(source_attempt, dict)
+        assert isinstance(validation_errors, list)
+        attempted_dossier = source_attempt["attempted_dossier"]
+        return {
+            "status": pause_status,
+            "dossier": attempted_dossier,
+            "validation_errors": list(validation_errors),
+            "best_dossier": attempted_dossier,
+            "best_validation_errors": list(validation_errors),
+            "best_source_attempt_sha256": source_attempt["attempt_sha256"],
+            "attempts": [],
+            "repair_run_dirs": [],
+            "expected_session_id": session_id,
+            "observed_session_id": session_id,
+            "continuation_failure": None,
+        }
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", pause_repair)
+
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input="pip:agent-adapters",
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+    )
+
+    expected_blocker = "research_dossier_" + pause_status
+    dossier = document["items"][0]
+    assert dossier["research_status"] == "blocked"
+    assert dossier["blocking_reasons"] == [expected_blocker]
+    assert document["input_meta"]["repairable_paused_case_count"] == 1
+    requests = json.loads(Path(document["artifacts"]["requests_json"]).read_text(encoding="utf-8"))
+    assert requests["requests"][0]["targeted_dossier_repairs"]["status"] == pause_status
 
 
 def test_missing_author_session_starts_one_fresh_cycle_then_pauses_without_progress(
@@ -7677,6 +9404,16 @@ def test_independent_feedback_resumes_research_author_and_reverifies_candidate(
             "planning_workspace_dir": str(tmp_path / "planning"),
         },
     )
+    monkeypatch.setattr(
+        mod,
+        "verify_persisted_research_evidence",
+        lambda _dossier: (True, []),
+    )
+    monkeypatch.setattr(
+        mod,
+        "parse_research_dossier_list",
+        lambda text: ([json.loads(text)[0]], []),
+    )
     monkeypatch.setattr(mod, "_canonical_repo_revision", lambda _run_dir: "b" * 40)
     monkeypatch.setattr(mod, "_load_diff_numstat", lambda _path: [])
     monkeypatch.setattr(mod, "_runner_artifact_refs", lambda _path: [])
@@ -7736,6 +9473,933 @@ def test_independent_feedback_resumes_research_author_and_reverifies_candidate(
         source_attempt,
         feedback_attempt,
     ]
+
+    if not source_errors:
+        def reject_persisted_contract(_text: str) -> tuple[list[dict[str, object]], list[str]]:
+            raise ValueError("invalid retained attempt history")
+
+        monkeypatch.setattr(mod, "parse_research_dossier_list", reject_persisted_contract)
+        invalid = mod.continue_research_dossier_from_independent_feedback(
+            dossier=dossier,
+            validation_errors=["independent_qualification_finding:new_failure_mode"],
+            repo_input=str(tmp_path),
+            requested_repo_ref="dev",
+            resolved_repo_ref="dev",
+            agent="codex",
+            model=None,
+            cfg=object(),
+            replay_timeout_seconds=None,
+            replay_executor=None,
+            artifacts_dir=tmp_path / "artifacts-invalid-contract",
+            independent_feedback=independent_feedback,
+            retained_evidence_attempts=[retained_evidence_attempt],
+        )
+
+        assert invalid["status"] == (
+            "repairable_paused:research_persisted_contract_invalid"
+        )
+        assert invalid["validation_errors"] == [
+            "research_persisted_contract_invalid:invalid retained attempt history"
+        ]
+        assert invalid["authored_work_disposition"] == "retained"
+
+
+def test_authenticated_evaluator_rescore_replaces_obsolete_findings_without_feedback_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "11111111-1111-4111-8111-111111111111"
+    source_run = tmp_path / "source-run"
+    source_run.mkdir()
+    report_path = source_run / "report.json"
+    report_path.write_text("{}\n", encoding="utf-8")
+    baseline = {"case_id": "case:one", "problem_id": "problem:one"}
+    source_attempt = {
+        "attempt_number": 1,
+        "attempt_sha256": "a" * 64,
+        "agent_session_id": session_id,
+        "attempt_wall_seconds": 10.0,
+        "run_dir": str(source_run),
+        "report_path": str(report_path),
+        "validation_errors_after": ["obsolete_evaluator_finding"],
+        "attempted_dossier": baseline,
+        "attempted_dossier_sha256": mod._canonical_json_sha256(baseline),
+    }
+    dossier = {
+        **baseline,
+        "repo_revision": "b" * 40,
+        "evidence_assignment": {
+            "expected_atom_ids": ["atom:one"],
+            "status": "complete",
+        },
+        "research_attempts": [source_attempt],
+        "evidence_verification": {"status": "failed"},
+    }
+    rescore_receipt = tmp_path / "rescore.json"
+    rescore_receipt.write_text('{"state":"completed"}\n', encoding="utf-8")
+    replacement_errors = ["replacement_evidence_finding"]
+    rescore = {
+        "schema_version": 1,
+        "contract_kind": "research_validation_error_rescore",
+        "source_attempt_sha256": source_attempt["attempt_sha256"],
+        "source_attempted_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "source_validation_errors": ["obsolete_evaluator_finding"],
+        "replacement_validation_errors": replacement_errors,
+        "reason": "evaluator defect corrected and retained work reverified",
+        "evaluator_defect_ids": ["BDS-test"],
+        "rescore_receipt_path": str(rescore_receipt),
+        "rescore_receipt_sha256": sha256(rescore_receipt.read_bytes()).hexdigest(),
+    }
+    independent_feedback = {
+        "validation_error_rescore": rescore,
+        "validation_error_rescore_sha256": mod._canonical_json_sha256(rescore),
+    }
+    captured: list[dict[str, object]] = []
+
+    def targeted(**kwargs: object) -> dict[str, object]:
+        captured.append(kwargs)
+        return {
+            "status": "repairable_paused:repair_turn_limit_reached",
+            "dossier": baseline,
+            "validation_errors": replacement_errors,
+            "best_dossier": baseline,
+            "best_validation_errors": replacement_errors,
+            "attempts": [],
+            "repair_run_dirs": [],
+            "expected_session_id": session_id,
+            "observed_session_id": session_id,
+        }
+
+    monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
+
+    result = mod.continue_research_dossier_from_independent_feedback(
+        dossier=dossier,
+        validation_errors=replacement_errors,
+        repo_input=str(tmp_path),
+        requested_repo_ref="dev",
+        resolved_repo_ref="dev",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        replay_timeout_seconds=None,
+        replay_executor=None,
+        artifacts_dir=tmp_path / "artifacts",
+        independent_feedback=independent_feedback,
+        max_repair_turns=1,
+    )
+
+    assert captured[0]["source_attempt"] == source_attempt
+    assert captured[0]["validation_errors"] == replacement_errors
+    assert captured[0]["first_attempt_number"] == 2
+    assert captured[0]["evidence_attempt_history"] == [source_attempt]
+    assert captured[0]["validation_error_rescore"] == rescore
+    assert result["attempts"] == []
+    assert result["validation_error_rescore"] == rescore
+
+
+def test_authenticated_evaluator_rescore_accepts_empty_replacement_frontier(
+    tmp_path: Path,
+) -> None:
+    baseline = {"case_id": "case:one", "problem_id": "problem:one"}
+    source_attempt = {
+        "attempt_sha256": "a" * 64,
+        "attempted_dossier": baseline,
+        "attempted_dossier_sha256": mod._canonical_json_sha256(baseline),
+        "validation_errors_after": ["obsolete_evaluator_finding"],
+    }
+    receipt = tmp_path / "rescore-empty-frontier.json"
+    receipt.write_text('{"state":"completed"}\n', encoding="utf-8")
+    rescore = {
+        "schema_version": 1,
+        "contract_kind": "research_validation_error_rescore",
+        "source_attempt_sha256": source_attempt["attempt_sha256"],
+        "source_attempted_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "source_validation_errors": ["obsolete_evaluator_finding"],
+        "replacement_validation_errors": [],
+        "reason": "corrected evaluator clears the retained finding frontier",
+        "evaluator_defect_ids": ["BDS-test"],
+        "rescore_receipt_path": str(receipt),
+        "rescore_receipt_sha256": sha256(receipt.read_bytes()).hexdigest(),
+    }
+    feedback = {
+        "validation_error_rescore": rescore,
+        "validation_error_rescore_sha256": mod._canonical_json_sha256(rescore),
+    }
+
+    assert (
+        mod._authenticated_validation_error_rescore(
+            feedback,
+            source_attempt=source_attempt,
+            replacement_errors=[],
+        )
+        == rescore
+    )
+
+
+def test_rescore_lineage_is_materialized_on_next_attempt_and_terminal_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "rescore-workspace"
+    revision = _init_workspace(workspace)
+    session_id = "11111111-1111-4111-8111-111111111111"
+    source_run = tmp_path / "rescore-source"
+    source_run.mkdir()
+    _write_json(source_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=source_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    baseline = {"case_id": "case:one", "problem_id": "problem:one"}
+    source_errors = ["obsolete:evaluator-finding"]
+    replacement_errors = ["replacement:finding"]
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="output_contract_invalid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=source_errors,
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        attempt_wall_seconds=10.0,
+    )
+    rescore_receipt = tmp_path / "rescore-receipt.json"
+    rescore_receipt.write_text('{"status":"authenticated"}\n', encoding="utf-8")
+    rescore = {
+        "schema_version": 1,
+        "contract_kind": "research_validation_error_rescore",
+        "source_attempt_sha256": source_attempt["attempt_sha256"],
+        "source_attempted_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "source_validation_errors": source_errors,
+        "replacement_validation_errors": replacement_errors,
+        "reason": "authenticated evaluator defect correction",
+        "evaluator_defect_ids": ["BDS-test"],
+        "rescore_receipt_path": str(rescore_receipt),
+        "rescore_receipt_sha256": sha256(rescore_receipt.read_bytes()).hexdigest(),
+    }
+    monkeypatch.setattr(
+        mod,
+        "run_once",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated")),
+    )
+
+    repair = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:one",
+        problem_id="problem:one",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=replacement_errors,
+        first_attempt_number=2,
+        attempt_kind="evidence_verification_research_continuation",
+        research_capabilities=True,
+        max_repair_turns=1,
+        validation_error_rescore=rescore,
+    )
+
+    assert len(repair["attempts"]) == 1
+    materialized = repair["attempts"][0]
+    lineage = materialized["validation_error_rescore"]
+    assert lineage["source_attempt_sha256"] == source_attempt["attempt_sha256"]
+    assert lineage["source_validation_errors"] == source_errors
+    assert lineage["replacement_validation_errors"] == replacement_errors
+    assert lineage["authored_attempt_sha256"] != materialized["attempt_sha256"]
+    assert materialized["attempt_sha256"] == mod.research_attempt_sha256(materialized)
+
+    dossier = {
+        **baseline,
+        "research_attempts": [source_attempt, materialized],
+        "evidence_verification": {
+            "status": "verified",
+            "claims_sha256": "0" * 64,
+            "receipt_sha256": "0" * 64,
+        },
+    }
+    normalized = mod._materialize_terminal_research_validation_error_rescore(
+        {
+            **dossier,
+            "research_attempts": [
+                source_attempt,
+                {
+                    key: value
+                    for key, value in materialized.items()
+                    if key != "validation_error_rescore"
+                }
+                | {"attempt_sha256": lineage["authored_attempt_sha256"]},
+            ],
+        },
+        validation_error_rescore=rescore,
+    )
+    assert normalized["research_attempts"][-1] == materialized
+    verification = normalized["evidence_verification"]
+    assert verification["claims_sha256"] == mod.research_claims_sha256(normalized)
+    assert verification["receipt_sha256"] == evidence_verification_sha256(verification)
+
+    normalized_again = mod._materialize_terminal_research_validation_error_rescore(
+        normalized,
+        validation_error_rescore=rescore,
+    )
+    assert normalized_again == normalized
+
+    changed = json.loads(json.dumps(normalized, ensure_ascii=False))
+    changed_attempt = changed["research_attempts"][-1]
+    changed_lineage = changed_attempt["validation_error_rescore"]
+    changed_lineage["reason"] = "different evaluator correction"
+    changed_lineage_without_hash = {
+        key: value for key, value in changed_lineage.items() if key != "rescore_sha256"
+    }
+    changed_lineage["rescore_sha256"] = mod._canonical_json_sha256(changed_lineage_without_hash)
+    changed_attempt["attempt_sha256"] = mod.research_attempt_sha256(changed_attempt)
+    mod._set_research_attempts(changed, changed["research_attempts"])
+
+    with pytest.raises(
+        ValueError,
+        match="research_attempt_validation_error_rescore_materialized_lineage_changed",
+    ):
+        mod._materialize_terminal_research_validation_error_rescore(
+            changed,
+            validation_error_rescore=rescore,
+        )
+
+
+def test_verified_zero_error_rescore_completes_without_model_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    revision = _init_workspace(workspace)
+    source_run = tmp_path / "source-run"
+    copied_run = tmp_path / "copied-run"
+    for run_dir in (source_run, copied_run):
+        run_dir.mkdir()
+        _write_json(run_dir / "report.json", {"status": "complete"})
+        _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        _write_json(
+            run_dir / "target_ref.json",
+            {"agent": "codex", "ref": revision, "commit_sha": revision},
+        )
+        (run_dir / "normalized_events.jsonl").write_text("", encoding="utf-8")
+    session_id = "11111111-1111-4111-8111-111111111111"
+    candidate = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "evidence_sufficient",
+    }
+    source_errors = ["obsolete:evaluator-finding"]
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="repair_contract_invalid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=source_errors,
+        attempted_dossier=candidate,
+        attempt_kind="evidence_verification_research_continuation",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+    )
+    assignment = {"expected_atom_ids": ["atom:one"], "status": "complete"}
+    retained = {
+        **candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "research_attempts": [source_attempt],
+    }
+    prepared = {
+        **candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+    }
+    verification = {
+        "status": "verified",
+        "errors": [],
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "run_dir": str(copied_run),
+        "planning_workspace_dir": str(workspace),
+        "claims_sha256": research_claims_sha256(prepared),
+    }
+    verification["receipt_sha256"] = evidence_verification_sha256(verification)
+    prepared_path = tmp_path / "verified-prepared.json"
+    _write_json(prepared_path, prepared)
+    replay = {
+        "kind": "stage3_attempt1_model_free_evidence_replay",
+        "state": "completed",
+        "source_run_unchanged": True,
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "current_attempt_sha256": source_attempt["attempt_sha256"],
+        "candidate_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "copied_run": str(copied_run),
+        "errors": [],
+        "model_invocation_count": 0,
+        "stage1_or_stage2_invocation_count": 0,
+        "downstream_invocation_count": 0,
+        "docker_invocation_count": 0,
+        "verified_prepared_dossier": str(prepared_path),
+        "verified_prepared_dossier_sha256": sha256(prepared_path.read_bytes()).hexdigest(),
+        "verification": verification,
+    }
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    replay_path = tmp_path / "model-free-replay.json"
+    _write_json(replay_path, replay)
+    rescore = {
+        "schema_version": 1,
+        "contract_kind": "research_validation_error_rescore",
+        "source_attempt_sha256": source_attempt["attempt_sha256"],
+        "source_attempted_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "source_validation_errors": source_errors,
+        "replacement_validation_errors": [],
+        "reason": "authenticated evaluator correction",
+        "evaluator_defect_ids": ["BDS-test"],
+        "rescore_receipt_path": str(replay_path),
+        "rescore_receipt_sha256": sha256(replay_path.read_bytes()).hexdigest(),
+    }
+    persisted: list[dict[str, object]] = []
+
+    def verify_persisted(dossier: dict[str, object]) -> tuple[bool, list[str]]:
+        persisted.append(dossier)
+        return True, []
+
+    monkeypatch.setattr(mod, "verify_persisted_research_evidence", verify_persisted)
+
+    result = mod.materialize_verified_research_validation_error_rescore(
+        dossier=retained,
+        validation_error_rescore=rescore,
+    )
+
+    assert result["status"] == "corrected"
+    assert result["validation_errors"] == []
+    assert result["model_invocation_count"] == 0
+    terminal = result["dossier"]["research_attempts"][-1]
+    assert terminal["attempt_kind"] == "evidence_verification_rescore"
+    assert terminal["outcome"] == "evidence_verification_rescore_valid"
+    assert terminal["source_attempt_sha256"] == source_attempt["attempt_sha256"]
+    assert terminal["validation_errors_before"] == []
+    assert terminal["validation_errors_after"] == []
+    assert terminal["validation_error_rescore"]["source_validation_errors"] == source_errors
+    assert terminal["repair_progress"]["model_invocation_count"] == 0
+    assert len(persisted) == 1
+
+
+def test_verified_persistence_replay_completes_zero_error_author_without_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    revision = _init_workspace(workspace)
+    source_run = tmp_path / "source-run"
+    copied_run = tmp_path / "copied-run"
+    for run_dir in (source_run, copied_run):
+        run_dir.mkdir()
+        _write_json(run_dir / "report.json", {"status": "complete"})
+        _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        _write_json(
+            run_dir / "target_ref.json",
+            {"agent": "codex", "ref": revision, "commit_sha": revision},
+        )
+        (run_dir / "normalized_events.jsonl").write_text("", encoding="utf-8")
+    session_id = "11111111-1111-4111-8111-111111111111"
+    candidate = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "evidence_sufficient",
+    }
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="repair_contract_valid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=[],
+        attempted_dossier=candidate,
+        attempt_kind="evidence_verification_research_continuation",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+    )
+    assignment = {"expected_atom_ids": ["atom:one"], "status": "complete"}
+    retained = {
+        **candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "evidence_verification": {
+            "status": "failed",
+            "errors": ["research_evidence_event_source_attempt_unmatched:0"],
+        },
+        "research_attempts": [source_attempt],
+    }
+    prepared = {
+        **candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+    }
+    verification = {
+        "status": "verified",
+        "errors": [],
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "run_dir": str(copied_run),
+        "planning_workspace_dir": str(workspace),
+        "claims_sha256": research_claims_sha256(prepared),
+    }
+    verification["receipt_sha256"] = evidence_verification_sha256(verification)
+    prepared_path = tmp_path / "verified-prepared.json"
+    _write_json(prepared_path, prepared)
+    replay = {
+        "kind": "stage3_persistence_model_free_evidence_replay",
+        "state": "completed",
+        "source_run_unchanged": True,
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "current_attempt_sha256": source_attempt["attempt_sha256"],
+        "candidate_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "copied_run": str(copied_run),
+        "raw_error_count": 0,
+        "errors": [],
+        "model_invocation_count": 0,
+        "stage1_or_stage2_invocation_count": 0,
+        "downstream_invocation_count": 0,
+        "docker_invocation_count": 0,
+        "verified_prepared_dossier": str(prepared_path),
+        "verified_prepared_dossier_sha256": sha256(prepared_path.read_bytes()).hexdigest(),
+        "verification": verification,
+    }
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    replay_path = tmp_path / "model-free-replay.json"
+    _write_json(replay_path, replay)
+    persisted: list[dict[str, object]] = []
+
+    def verify_persisted(dossier: dict[str, object]) -> tuple[bool, list[str]]:
+        persisted.append(dossier)
+        return True, []
+
+    monkeypatch.setattr(mod, "verify_persisted_research_evidence", verify_persisted)
+
+    result = mod.materialize_verified_research_persistence_replay(
+        dossier=retained,
+        replay_receipt_path=replay_path,
+        persistence_defect_ids=["BDS-test"],
+        reason="persist the recovered evidence-source catalog",
+    )
+
+    assert result["status"] == "corrected"
+    assert result["validation_errors"] == []
+    assert result["model_invocation_count"] == 0
+    terminal = result["dossier"]["research_attempts"][-1]
+    assert terminal["attempt_kind"] == "evidence_verification_persistence_replay"
+    assert terminal["outcome"] == "evidence_verification_persistence_replay_valid"
+    assert terminal["source_attempt_sha256"] == source_attempt["attempt_sha256"]
+    assert terminal["validation_errors_before"] == []
+    assert terminal["validation_errors_after"] == []
+    assert terminal["repair_progress"]["persistence_defect_ids"] == ["BDS-test"]
+    assert terminal["repair_progress"]["model_invocation_count"] == 0
+    assert len(persisted) == 1
+
+
+def test_verified_authored_resolution_preserves_raw_report_without_another_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "f" * 40
+    session_id = "11111111-1111-4111-8111-111111111111"
+    source_run = tmp_path / "source-run"
+    authored_run = tmp_path / "authored-run"
+    copied_run = tmp_path / "copied-run"
+    workspace = tmp_path / "workspace"
+    for run_dir in (source_run, authored_run, copied_run):
+        run_dir.mkdir()
+        _write_json(run_dir / "report.json", {"status": "complete"})
+        _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        _write_json(
+            run_dir / "target_ref.json",
+            {
+                "agent": "codex",
+                "ref": revision,
+                "commit_sha": revision,
+                "requested_codex_resume_session_id": (
+                    session_id if run_dir == authored_run else None
+                ),
+            },
+        )
+        (run_dir / "normalized_events.jsonl").write_text("", encoding="utf-8")
+    workspace.mkdir()
+    bindings = [{"atom_id": "atom:one"}, {"atom_id": "atom:two"}]
+    baseline = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "evidence_sufficient",
+        "experiments": [
+            {
+                "experiment_id": "experiment:one",
+                "scenario_kind": "assigned_evidence_audit",
+                "addresses_atom_ids": ["atom:one", "atom:two"],
+                "command": "python audit.py",
+                "result": "panic",
+                "outcome": "supports",
+                "exit_code": 0,
+                "observable_assertion": {"expected": "panic"},
+                "origin_evidence_bindings": bindings,
+            }
+        ],
+    }
+    source_errors = ["inspected_file_unresolved:one.py"]
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="evidence_verification_invalid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=source_errors,
+        attempted_dossier=baseline,
+        attempt_kind="full_research",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+    )
+    authored_dossier = deepcopy(baseline)
+    authored_dossier["experiments"][0].pop("origin_evidence_bindings")
+    authored_attempt = mod._research_attempt_record(
+        attempt_number=2,
+        outcome="repair_contract_invalid",
+        run_dir=authored_run,
+        report_path=authored_run / "report.json",
+        validation_errors=["experiment_not_bound_to_atom:atom:one"],
+        attempted_dossier=authored_dossier,
+        attempt_kind="evidence_verification_research_continuation",
+        source_attempt_sha256=source_attempt["attempt_sha256"],
+        authorized_paths=["inspected_files"],
+        baseline_dossier_sha256=source_attempt["attempted_dossier_sha256"],
+        baseline_projection_sha256="a" * 64,
+        repair_contract_sha256="b" * 64,
+        validation_errors_before=source_errors,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+        repair_progress={"decision": "continue", "reason": "old_controller_rejected"},
+    )
+    raw_document_path = tmp_path / "raw-attempt.json"
+    _write_json(raw_document_path, {"attempts": [authored_attempt]})
+    resolved, resolution = mod._preserve_omitted_unchanged_origin_bindings(
+        baseline_dossier=baseline,
+        authored_dossier=authored_dossier,
+        authorized_paths=["inspected_files"],
+    )
+    assert resolution is not None
+    assignment = {"expected_atom_ids": ["atom:one", "atom:two"], "status": "complete"}
+    retained = {
+        **baseline,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "research_attempts": [source_attempt],
+    }
+    prepared = {**resolved, "repo_revision": revision, "evidence_assignment": assignment}
+    verification = {
+        "status": "verified",
+        "errors": [],
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "run_dir": str(copied_run),
+        "planning_workspace_dir": str(workspace),
+        "claims_sha256": research_claims_sha256(prepared),
+    }
+    verification["receipt_sha256"] = evidence_verification_sha256(verification)
+    prepared_path = tmp_path / "prepared.json"
+    _write_json(prepared_path, prepared)
+    replay = {
+        "kind": "authored_resolution_model_free_evidence_replay",
+        "state": "completed",
+        "source_run_unchanged": True,
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "current_attempt_sha256": source_attempt["attempt_sha256"],
+        "candidate_dossier_sha256": mod._canonical_json_sha256(resolved),
+        "raw_attempt_document_path": str(raw_document_path),
+        "raw_attempt_document_sha256": sha256(raw_document_path.read_bytes()).hexdigest(),
+        "binding_resolution": resolution,
+        "copied_run": str(copied_run),
+        "raw_error_count": 0,
+        "errors": [],
+        "model_invocation_count": 0,
+        "stage1_or_stage2_invocation_count": 0,
+        "downstream_invocation_count": 0,
+        "docker_invocation_count": 0,
+        "verified_prepared_dossier": str(prepared_path),
+        "verified_prepared_dossier_sha256": sha256(prepared_path.read_bytes()).hexdigest(),
+        "verification": verification,
+    }
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    replay_path = tmp_path / "replay.json"
+    _write_json(replay_path, replay)
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        mod,
+        "verify_persisted_research_evidence",
+        lambda dossier: (persisted.append(dossier) is None, []),
+    )
+
+    result = mod.materialize_verified_research_authored_resolution(
+        dossier=retained,
+        authored_attempt=authored_attempt,
+        replay_receipt_path=replay_path,
+        controller_defect_ids=["BDS-test"],
+        reason="preserve omitted unchanged bindings",
+    )
+
+    assert result["status"] == "corrected"
+    assert result["model_invocation_count"] == 0
+    terminal = result["dossier"]["research_attempts"][-1]
+    assert terminal["attempted_dossier"] == resolved
+    assert (
+        terminal["repair_progress"]["authored_dossier_resolution"]["authored_dossier"]
+        == authored_dossier
+    )
+    assert terminal["validation_errors_after"] == []
+    assert len(persisted) == 1
+
+
+def _promotion_materialization_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, object], Path, str]:
+    revision = "f" * 40
+    session_id = "11111111-1111-4111-8111-111111111111"
+    selected_candidate = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "complete",
+        "reproduction_status": "reproduced",
+        "phase": "selected",
+    }
+    selected_run = tmp_path / "selected-run"
+    selected_run.mkdir()
+    selected = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="repair_contract_invalid",
+        run_dir=selected_run,
+        report_path=selected_run / "report.json",
+        validation_errors=[],
+        attempted_dossier=selected_candidate,
+        attempt_kind="evidence_verification_research_continuation",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+    )
+    regression_candidate = {**selected_candidate, "phase": "regressed"}
+    regression_run = tmp_path / "regression-run"
+    regression_run.mkdir()
+    regression = mod._research_attempt_record(
+        attempt_number=2,
+        outcome="repair_contract_invalid",
+        run_dir=regression_run,
+        report_path=regression_run / "report.json",
+        validation_errors=["regression:finding"],
+        attempted_dossier=regression_candidate,
+        attempt_kind="evidence_verification_research_continuation",
+        source_attempt_sha256=selected["attempt_sha256"],
+        authorized_paths=["extensions.backlog_repro_research"],
+        baseline_dossier_sha256=selected["attempted_dossier_sha256"],
+        baseline_projection_sha256="a" * 64,
+        repair_contract_sha256="b" * 64,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+        repair_progress={"decision": "continue", "reason": "regressed"},
+    )
+    assignment = {"expected_atom_ids": ["atom:one"], "status": "complete"}
+    retained: dict[str, object] = {
+        **selected_candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "research_attempts": [selected, regression],
+    }
+    prepared: dict[str, object] = {
+        **selected_candidate,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+    }
+    copied_run = tmp_path / "copied-run"
+    copied_run.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    verification = {
+        "status": "verified",
+        "errors": [],
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "run_dir": str(copied_run),
+        "planning_workspace_dir": str(workspace),
+        "claims_sha256": research_claims_sha256(prepared),
+    }
+    verification["receipt_sha256"] = evidence_verification_sha256(verification)
+    prepared_path = tmp_path / "promotion-prepared.json"
+    _write_json(prepared_path, prepared)
+    replay = {
+        "kind": "stage3_selected_model_free_evidence_replay",
+        "state": "completed",
+        "source_run_unchanged": True,
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "attempt_count": 2,
+        "current_attempt_sha256": selected["attempt_sha256"],
+        "candidate_dossier_sha256": selected["attempted_dossier_sha256"],
+        "copied_run": str(copied_run),
+        "raw_error_count": 0,
+        "errors": [],
+        "model_invocation_count": 0,
+        "stage1_or_stage2_invocation_count": 0,
+        "downstream_invocation_count": 0,
+        "docker_invocation_count": 0,
+        "verified_prepared_dossier": str(prepared_path),
+        "verified_prepared_dossier_sha256": sha256(prepared_path.read_bytes()).hexdigest(),
+        "verification": verification,
+    }
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    replay_path = tmp_path / "promotion-replay.json"
+    _write_json(replay_path, replay)
+    return retained, replay_path, str(selected["attempt_sha256"])
+
+
+def test_materialize_verified_attempt_promotion_preserves_later_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained, replay_path, selected_sha256 = _promotion_materialization_fixture(tmp_path)
+    persisted: list[dict[str, object]] = []
+
+    def verify_persisted(dossier: dict[str, object]) -> tuple[bool, list[str]]:
+        persisted.append(dossier)
+        return True, []
+
+    monkeypatch.setattr(mod, "verify_persisted_research_evidence", verify_persisted)
+
+    result = mod.materialize_verified_research_attempt_promotion(
+        dossier=retained,
+        selected_attempt_sha256=selected_sha256,
+        replay_receipt_path=replay_path,
+        progression_defect_ids=["BDS-test"],
+        reason="verified_prior_author_result_after_progression_defect",
+    )
+
+    assert result["status"] == "corrected"
+    assert result["model_invocation_count"] == 0
+    attempts = result["dossier"]["research_attempts"]
+    assert len(attempts) == 3
+    terminal = attempts[-1]
+    assert terminal["attempt_kind"] == "evidence_verification_promotion"
+    assert terminal["source_attempt_sha256"] == selected_sha256
+    assert terminal["attempted_dossier"] == attempts[0]["attempted_dossier"]
+    assert terminal["repair_progress"]["superseded_attempt_sha256s"] == [
+        attempts[1]["attempt_sha256"]
+    ]
+    assert terminal["repair_progress"]["model_invocation_count"] == 0
+    assert len(persisted) == 1
+
+
+@pytest.mark.parametrize("mutation", ["model_call", "candidate_hash", "authored_claims"])
+def test_materialize_verified_attempt_promotion_rejects_changed_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    retained, replay_path, selected_sha256 = _promotion_materialization_fixture(tmp_path)
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    if mutation == "model_call":
+        replay["model_invocation_count"] = 1
+    elif mutation == "candidate_hash":
+        replay["candidate_dossier_sha256"] = "0" * 64
+    else:
+        prepared_path = Path(replay["verified_prepared_dossier"])
+        prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
+        prepared["phase"] = "different"
+        _write_json(prepared_path, prepared)
+        replay["verified_prepared_dossier_sha256"] = sha256(prepared_path.read_bytes()).hexdigest()
+        replay["verification"]["claims_sha256"] = research_claims_sha256(prepared)
+        replay["verification"]["receipt_sha256"] = evidence_verification_sha256(
+            replay["verification"]
+        )
+    replay.pop("receipt_sha256")
+    replay["receipt_sha256"] = mod._canonical_json_sha256(replay)
+    _write_json(replay_path, replay)
+    monkeypatch.setattr(mod, "verify_persisted_research_evidence", lambda dossier: (True, []))
+
+    expected = (
+        "authored_claims_changed" if mutation == "authored_claims" else "replay_custody_invalid"
+    )
+    with pytest.raises(ValueError, match=expected):
+        mod.materialize_verified_research_attempt_promotion(
+            dossier=retained,
+            selected_attempt_sha256=selected_sha256,
+            replay_receipt_path=replay_path,
+            progression_defect_ids=["BDS-test"],
+            reason="verified_prior_author_result_after_progression_defect",
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["contract_hash", "source_errors", "replacement_errors", "receipt_hash"],
+)
+def test_evaluator_rescore_fails_closed_when_any_custody_binding_changes(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    baseline = {"case_id": "case:one", "problem_id": "problem:one"}
+    source_attempt = {
+        "attempt_sha256": "a" * 64,
+        "attempted_dossier": baseline,
+        "attempted_dossier_sha256": mod._canonical_json_sha256(baseline),
+        "validation_errors_after": ["old"],
+    }
+    receipt = tmp_path / "rescore.json"
+    receipt.write_text('{"state":"completed"}\n', encoding="utf-8")
+    rescore = {
+        "schema_version": 1,
+        "contract_kind": "research_validation_error_rescore",
+        "source_attempt_sha256": source_attempt["attempt_sha256"],
+        "source_attempted_dossier_sha256": source_attempt["attempted_dossier_sha256"],
+        "source_validation_errors": ["old"],
+        "replacement_validation_errors": ["new"],
+        "reason": "verified evaluator correction",
+        "evaluator_defect_ids": ["BDS-test"],
+        "rescore_receipt_path": str(receipt),
+        "rescore_receipt_sha256": sha256(receipt.read_bytes()).hexdigest(),
+    }
+    feedback = {
+        "validation_error_rescore": rescore,
+        "validation_error_rescore_sha256": mod._canonical_json_sha256(rescore),
+    }
+    if mutation == "contract_hash":
+        feedback["validation_error_rescore_sha256"] = "0" * 64
+    elif mutation == "source_errors":
+        rescore["source_validation_errors"] = ["different"]
+        feedback["validation_error_rescore_sha256"] = mod._canonical_json_sha256(rescore)
+    elif mutation == "replacement_errors":
+        rescore["replacement_validation_errors"] = ["different"]
+        feedback["validation_error_rescore_sha256"] = mod._canonical_json_sha256(rescore)
+    else:
+        rescore["rescore_receipt_sha256"] = "0" * 64
+        feedback["validation_error_rescore_sha256"] = mod._canonical_json_sha256(rescore)
+
+    assert (
+        mod._authenticated_validation_error_rescore(
+            feedback,
+            source_attempt=source_attempt,
+            replacement_errors=["new"],
+        )
+        is None
+    )
 
 
 def test_independent_feedback_resumes_retained_best_frontier_with_original_budget(
@@ -7923,12 +10587,8 @@ def test_independent_feedback_pause_returns_objective_best_verified_frontier(
     assert result["forward_dossier"] == latest
     assert result["forward_validation_errors"] == ["latest:error:a", "latest:error:b"]
     assert result["latest_nonadvancing_dossier"] == latest
-    assert result["retained_frontier"] == {
-        "next_action": "resume_same_author_after_supervision"
-    }
-    assert result["continuation_feedback"] == {
-        "instruction": "repair the retained frontier"
-    }
+    assert result["retained_frontier"] == {"next_action": "resume_same_author_after_supervision"}
+    assert result["continuation_feedback"] == {"instruction": "repair the retained frontier"}
 
 
 def test_independent_feedback_pause_merges_unverified_best_model_draft(
@@ -7997,9 +10657,14 @@ def test_independent_feedback_pause_merges_unverified_best_model_draft(
     assert result["validation_errors"] == ["best:output-contract-error"]
 
 
-def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
+@pytest.mark.parametrize(
+    "persisted_errors",
+    [[], ["terminal_persisted_evidence_changed"]],
+)
+def test_independent_feedback_correction_rehydrates_origin_proof_from_assignment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    persisted_errors: list[str],
 ) -> None:
     from types import SimpleNamespace
 
@@ -8044,9 +10709,9 @@ def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
         "evidence_assignment": assignment,
         "research_attempts": [source_attempt],
         "evidence_verification": {
-            "status": "verified",
+            "status": "failed",
+            "errors": ["prior_runner_receipt_incomplete"],
             "workspace_dir": str(tmp_path / "untrusted-receipt-workspace"),
-            "origin_attachment_evidence": manifest,
         },
     }
     correction_run = tmp_path / "independent-origin-correction-run"
@@ -8122,6 +10787,34 @@ def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
         "verify_research_evidence",
         verify_with_lineage,
     )
+    persisted_calls: list[dict[str, object]] = []
+
+    def verify_persisted(dossier: dict[str, object]) -> tuple[bool, list[str]]:
+        persisted_calls.append(dossier)
+        assert len(dossier["research_attempts"]) == 3
+        receipt = dossier["evidence_verification"]
+        assert isinstance(receipt, dict)
+        assert receipt["origin_attachment_evidence"] == manifest
+        assert len(receipt["origin_attachment_read_attestations"]) == len(
+            mod.origin_attachment_requirements(manifest)
+        )
+        coverage = receipt["origin_attachment_read_coverage"]
+        assert isinstance(coverage, dict)
+        assert coverage["missing_required_files"] == []
+        assert receipt["claims_sha256"] == mod.research_claims_sha256(dossier)
+        assert receipt["receipt_sha256"] == evidence_verification_sha256(receipt)
+        return not persisted_errors, list(persisted_errors)
+
+    monkeypatch.setattr(
+        mod,
+        "verify_persisted_research_evidence",
+        verify_persisted,
+    )
+    monkeypatch.setattr(
+        mod,
+        "parse_research_dossier_list",
+        lambda text: ([json.loads(text)[0]], []),
+    )
 
     result = mod.continue_research_dossier_from_independent_feedback(
         dossier=dossier,
@@ -8138,12 +10831,21 @@ def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
         independent_feedback={"kind": "independent_qualification_feedback"},
     )
 
-    assert result["status"] == "corrected"
+    assert result["status"] == (
+        "repairable_paused:research_persisted_evidence_verification_failed"
+        if persisted_errors
+        else "corrected"
+    )
     receipt = result["dossier"]["evidence_verification"]
-    assert receipt["status"] == "verified"
+    assert receipt["status"] == ("failed" if persisted_errors else "verified")
+    assert result["validation_errors"] == persisted_errors
+    assert receipt["origin_attachment_evidence"] == manifest
     assert len(receipt["origin_attachment_read_attestations"]) == len(
         mod.origin_attachment_requirements(manifest)
     )
+    assert receipt["claims_sha256"] == mod.research_claims_sha256(result["dossier"])
+    assert receipt["receipt_sha256"] == evidence_verification_sha256(receipt)
+    assert len(persisted_calls) == 1
     assert "origin_attachment_workspace_unavailable" not in json.dumps(result)
     evidence_attempts = verification_calls[0]["evidence_attempts"]
     assert isinstance(evidence_attempts, list)
@@ -8154,6 +10856,60 @@ def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
     correction_attempt = result["dossier"]["research_attempts"][-1]
     assert mod._research_attempt_workspace_path(correction_attempt) == workspace.resolve()
     assert mod._persisted_research_attempt_errors(result["dossier"]) == []
+
+
+def test_independent_feedback_blocks_conflicting_prior_origin_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = {"case_id": "case:one", "problem_id": "problem:one"}
+    source_attempt = {
+        "outcome": "output_contract_invalid",
+        "attempted_dossier": baseline,
+        "validation_errors_after": ["source:error"],
+    }
+    canonical_manifest = {"materialization_sha256": "a" * 64}
+    conflicting_manifest = {"materialization_sha256": "b" * 64}
+    dossier = {
+        **baseline,
+        "repo_revision": "c" * 40,
+        "evidence_assignment": {
+            "expected_atom_ids": ["atom:one"],
+            "origin_attachment_evidence": canonical_manifest,
+        },
+        "research_attempts": [source_attempt],
+        "evidence_verification": {
+            "status": "failed",
+            "origin_attachment_evidence": conflicting_manifest,
+        },
+    }
+
+    def unexpected_repair(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("a conflicting runner receipt must block before author repair")
+
+    monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", unexpected_repair)
+
+    result = mod.continue_research_dossier_from_independent_feedback(
+        dossier=dossier,
+        validation_errors=["source:error"],
+        repo_input=str(tmp_path),
+        requested_repo_ref="dev",
+        resolved_repo_ref="dev",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        replay_timeout_seconds=None,
+        replay_executor=None,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert result == {
+        "status": "repairable_paused:research_origin_attachment_manifest_changed",
+        "dossier": dossier,
+        "validation_errors": ["research_origin_attachment_manifest_changed"],
+        "attempts": [],
+        "authored_work_disposition": "retained",
+    }
 
 
 def test_provider_wait_resume_reaches_origin_attachment_correction_path(
@@ -8292,7 +11048,7 @@ def test_provider_wait_resume_reaches_origin_attachment_correction_path(
     monkeypatch.setattr(
         mod,
         "parse_research_dossier_list",
-        lambda _raw: ([dossier], []),
+        lambda raw: ([json.loads(raw)[0]], []),
     )
     monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
     monkeypatch.setattr(
@@ -8303,6 +11059,11 @@ def test_provider_wait_resume_reaches_origin_attachment_correction_path(
             "errors": [],
             "planning_workspace_dir": str(workspace),
         },
+    )
+    monkeypatch.setattr(
+        mod,
+        "verify_persisted_research_evidence",
+        lambda _dossier: (True, []),
     )
 
     result = mod.resume_research_dossier_from_external_wait(
@@ -8381,6 +11142,48 @@ def test_independent_research_feedback_is_embedded_exactly_in_repair_contract() 
     assert feedback["source_adjudication_sha256"] in prompt
 
 
+def test_research_capable_repair_reuses_unchanged_attested_evidence() -> None:
+    source_attempt = {
+        "attempt_sha256": "a" * 64,
+        "attempt_number": 1,
+        "outcome": "evidence_verification_invalid",
+        "validation_errors": ["experiment_atom_binding_invalid:experiment:one:atom:one"],
+        "attempted_dossier": {
+            "case_id": "case:one",
+            "problem_id": "problem:one",
+            "experiments": [
+                {
+                    "experiment_id": "experiment:one",
+                    "command": "python retained_harness.py",
+                    "result": "retained result",
+                    "exit_code": 0,
+                },
+                {
+                    "experiment_id": "experiment:unaffected",
+                    "command": "python unaffected_harness.py",
+                    "result": "already attested",
+                    "exit_code": 0,
+                },
+            ],
+        },
+    }
+
+    contract = mod._repair_contract(
+        case_id="case:one",
+        problem_id="problem:one",
+        source_attempt=source_attempt,
+        validation_errors=source_attempt["validation_errors"],
+        authorized_paths=["experiments[0].origin_evidence_bindings"],
+        research_capabilities=True,
+    )
+
+    rule = contract["immutable_rule"]
+    assert "Preserve and reuse already-attested experiments" in rule
+    assert "Run only the additional or changed evidence needed" in rule
+    assert "do not rerun unaffected evidence" in rule
+    assert "Rerun every claimed experiment" not in rule
+
+
 def test_authenticated_prior_feedback_is_foregrounded_before_research_contract() -> None:
     prior = {
         "source_attempt_sha256": "c" * 64,
@@ -8397,9 +11200,7 @@ def test_authenticated_prior_feedback_is_foregrounded_before_research_contract()
         "prior_continuation_feedback": prior,
         "prior_continuation_feedback_sha256": mod._canonical_json_sha256(prior),
         "prior_continuation_feedback_reference": reference,
-        "prior_continuation_feedback_reference_sha256": mod._canonical_json_sha256(
-            reference
-        ),
+        "prior_continuation_feedback_reference_sha256": mod._canonical_json_sha256(reference),
         "supervisor_execution_notes": [
             "Older note that should remain in the full contract only.",
             "Use the direct production callable in the selected verification node.",
@@ -8440,9 +11241,7 @@ def test_authenticated_prior_feedback_is_foregrounded_before_research_contract()
 
     tampered = deepcopy(contract)
     tampered["independent_feedback"]["prior_continuation_feedback_sha256"] = "0" * 64
-    assert "## Priority correction feedback" not in mod._append_prompt_for_targeted_repair(
-        tampered
-    )
+    assert "## Priority correction feedback" not in mod._append_prompt_for_targeted_repair(tampered)
 
 
 def test_proof_adapter_root_diagnostics_are_embedded_as_nonblocking_feedback() -> None:
@@ -8474,9 +11273,7 @@ def test_proof_adapter_root_diagnostics_are_embedded_as_nonblocking_feedback() -
             "experiment_id": "experiment:fresh",
             "adapter_id": "pytest_controlled_difference.v1",
             "claim_sha256": "b" * 64,
-            "diagnostics": [
-                "proof_adapter_unavailable:pytest_controlled_difference.v1"
-            ],
+            "diagnostics": ["proof_adapter_unavailable:pytest_controlled_difference.v1"],
         }
     ]
     unsigned = dict(feedback)
@@ -8505,8 +11302,6 @@ def test_proof_adapter_root_diagnostics_are_embedded_as_nonblocking_feedback() -
     prompt = mod._append_prompt_for_targeted_repair(contract)
 
     assert contract["verifier_diagnostics"] == feedback
-    assert contract["verifier_diagnostics_sha256"] == mod._canonical_json_sha256(
-        feedback
-    )
+    assert contract["verifier_diagnostics_sha256"] == mod._canonical_json_sha256(feedback)
     assert "proof_adapter_unavailable:pytest_controlled_difference.v1" in prompt
     assert "not additional blockers" in prompt

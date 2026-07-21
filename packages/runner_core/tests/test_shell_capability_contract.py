@@ -14,6 +14,7 @@ from runner_core.runner import (
     _resolve_shell_capability,
     _shell_probe_result_from_preflight_meta,
 )
+from runner_core.shell_capability import _resolve_codex_sandbox_mode
 
 
 def _install_task_requires_shell_mission(target_repo: Path) -> None:
@@ -104,6 +105,31 @@ def test_shell_capability_resolver_available_blocked_and_unprobed() -> None:
     ).to_dict()
     assert unprobed["state"] == "unprobed"
     assert unprobed["reason_code"] == "codex_windows_shell_unprobed"
+
+
+def test_native_windows_local_codex_write_uses_functioning_unrestricted_sandbox() -> None:
+    write_request = SimpleNamespace(policy="write")
+    safe_request = SimpleNamespace(policy="safe")
+    policy = {"sandbox": "workspace-write"}
+
+    assert _resolve_codex_sandbox_mode(
+        request=write_request,
+        codex_policy=policy,
+        has_sandbox_backend=False,
+        platform_os_name="nt",
+    ) == "danger-full-access"
+    assert _resolve_codex_sandbox_mode(
+        request=write_request,
+        codex_policy=policy,
+        has_sandbox_backend=False,
+        platform_os_name="posix",
+    ) == "workspace-write"
+    assert _resolve_codex_sandbox_mode(
+        request=safe_request,
+        codex_policy={"sandbox": "read-only"},
+        has_sandbox_backend=False,
+        platform_os_name="nt",
+    ) == "read-only"
 
 
 def test_shell_capability_resolver_classifies_codex_windows_probe_failures() -> None:

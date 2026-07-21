@@ -457,6 +457,46 @@ def test_codex_windows_powershell_noprofile_event_attests_relative_backslash_rea
     assert read["data"]["transport_normalization"] == "single_terminal_newline"
 
 
+def test_codex_windows_powershell_read_attests_utf8_bom_file(tmp_path: Path) -> None:
+    source = tmp_path / "test_probe.py"
+    content = "def test_probe():\n    assert True\n"
+    source.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
+    raw = tmp_path / "raw.jsonl"
+    command = (
+        '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
+        '-Command "Get-Content -Raw -Encoding UTF8 -LiteralPath .\\test_probe.py"'
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "command": command,
+                    "aggregated_output": content.replace("\n", "\r\n"),
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = tmp_path / "normalized.jsonl"
+
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    read = next(event for event in iter_events_jsonl(normalized) if event["type"] == "read_file")
+    assert read["data"]["content_observed"] is True
+    assert read["data"]["whole_file_observed"] is True
+    assert read["data"]["observed_content"] == content
+
+
 @pytest.mark.parametrize("extra_output", [False, True])
 def test_codex_windows_powershell_relative_backslash_exact_line_range_attests_only_exact_output(
     tmp_path: Path,

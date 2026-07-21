@@ -8,6 +8,7 @@ from pathlib import Path
 from backlog_core.case_lineage import source_evidence_atom_projection
 from backlog_core.stage_contracts import evidence_assignment_sha256
 
+import backlog_miner.origin_evidence as origin_evidence
 import backlog_miner.research_runner as research_runner
 from backlog_miner.origin_evidence import (
     materialize_origin_attachments,
@@ -729,6 +730,22 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
+    shell_probe_events = run_dir / "agent_shell_probe" / "raw_events.jsonl"
+    shell_probe_events.parent.mkdir()
+    shell_probe_events.write_text(
+        "\n".join(
+            (
+                '{"type":"thread.started","thread_id":"thread:one"}',
+                '{"type":"item.completed","item":{"id":"item_0",'
+                '"type":"command_execution","command":"/bin/bash -lc probe",'
+                '"aggregated_output":"shell_probe=ok\\n","exit_code":0,'
+                '"status":"completed"}}',
+                '{"type":"turn.completed"}',
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     settings = run_dir / "settings_ref.json"
     settings.write_text(
         json.dumps(
@@ -745,6 +762,106 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
+    normalized_events = run_dir / "normalized_events.jsonl"
+    normalized_events.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "ts": "2026-01-01T00:00:01Z",
+                        "type": "run_command",
+                        "data": {
+                            "command": "powershell -File .\\scripts\\check.ps1",
+                            "exit_code": 1,
+                            "output_excerpt": "relative path missing",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-01-01T00:00:02Z",
+                        "type": "run_command",
+                        "data": {
+                            "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                            "exit_code": 0,
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    agent_events = run_dir / "raw_events.jsonl"
+    agent_events.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "tool:read-readme",
+                                    "name": "Read",
+                                    "input": {
+                                        "file_path": str(run_dir / "README.md"),
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "content": "MUST_NOT_COPY_TOOL_RESULT_SECRET",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "tool:run-quickstart",
+                                    "name": "Bash",
+                                    "input": {
+                                        "command": (
+                                            "powershell -NoProfile -ExecutionPolicy Bypass "
+                                            "-File .\\scripts\\offline_first_success.ps1"
+                                        ),
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = run_dir / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "smoke_v1",
+                "status": "success",
+                "final_result": {
+                    "summary": "The retried workflow completed.",
+                    "evidence": "Script exited 0.",
+                },
+                "token": "MUST_NOT_LEAK",
+            }
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "prompt.txt").write_text("DO_NOT_COPY_PROMPT_SECRET", encoding="utf-8")
     atom = {"atom_id": "atom:source-context", "run_dir": str(run_dir)}
 
@@ -754,7 +871,7 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
             "path": str(path),
             "sha256": sha256(raw).hexdigest(),
             "size_bytes": len(raw),
-            "source_relpath": path.name,
+            "source_relpath": path.relative_to(run_dir).as_posix(),
             "research_context_role": role,
         }
 
@@ -768,7 +885,11 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
                     "atom_snapshot": atom,
                 "artifact_receipts": [
                     artifact_receipt(preflight, "preflight"),
+                    artifact_receipt(shell_probe_events, "agent_shell_probe_events"),
                     artifact_receipt(settings, "settings"),
+                    artifact_receipt(agent_events, "agent_events"),
+                    artifact_receipt(normalized_events, "normalized_events"),
+                    artifact_receipt(report, "report"),
                 ],
             }
         ]
@@ -796,8 +917,27 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
     )
     index_text = (workspace / str(context_requirement["file"])).read_text(encoding="utf-8")
     assert "not enough disk space on C:" in index_text
+    assert '"source_name": "agent_shell_probe/raw_events.jsonl"' in index_text
+    assert '"aggregated_output": "shell_probe=ok"' in index_text
+    assert '"successful_command_count": 1' in index_text
+    assert '"turn_completed_count": 1' in index_text
     assert '"exec_backend": "local"' in index_text
+    assert '"source_name": "normalized_events.jsonl"' in index_text
+    assert '"failed_command_count": 1' in index_text
+    assert '"successful_command_count": 1' in index_text
+    assert '"command_ordinal": 2' in index_text
+    assert '"source_name": "raw_events.jsonl"' in index_text
+    assert '"tool_name": "Read"' in index_text
+    assert '"file_path": "<absolute>/' in index_text
+    assert '/README.md"' in index_text
+    assert '"tool_name": "Bash"' in index_text
+    assert ".\\\\scripts\\\\offline_first_success.ps1" in index_text
+    assert '"file_read_count": 1' in index_text
+    assert '"source_name": "report.json"' in index_text
+    assert '"status": "success"' in index_text
+    assert "The retried workflow completed." in index_text
     assert "MUST_NOT_LEAK" not in index_text
+    assert "MUST_NOT_COPY_TOOL_RESULT_SECRET" not in index_text
     assert "DO_NOT_COPY_PROMPT_SECRET" not in index_text
     assert str(run_dir) not in index_text
     prompt = research_runner._append_prompt_for_problem(
@@ -850,3 +990,84 @@ def test_materializes_bounded_hash_bound_source_run_context(tmp_path: Path) -> N
             evidence_assignment=assignment,
         )
     )
+
+
+def test_large_multi_run_context_falls_back_to_hash_bound_run_inventory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    atoms: list[dict[str, object]] = []
+    receipts: list[dict[str, object]] = []
+    for index in range(12):
+        run_dir = tmp_path / "runs" / f"source-{index:02d}"
+        run_dir.mkdir(parents=True)
+        metrics = run_dir / "metrics.json"
+        metrics.write_text(
+            json.dumps(
+                {
+                    f"diagnostic_field_{field:02d}_{'x' * 28}": field
+                    for field in range(48)
+                }
+            ),
+            encoding="utf-8",
+        )
+        atom = {
+            "atom_id": f"atom:source-context:{index:02d}",
+            "run_dir": str(run_dir),
+        }
+        raw = metrics.read_bytes()
+        atoms.append(atom)
+        receipts.append(
+            {
+                "atom_id": atom["atom_id"],
+                "atom_sha256": sha256(
+                    json.dumps(atom, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "atom_snapshot": atom,
+                "artifact_receipts": [
+                    {
+                        "path": str(metrics),
+                        "sha256": sha256(raw).hexdigest(),
+                        "size_bytes": len(raw),
+                        "source_relpath": "metrics.json",
+                        "research_context_role": "metrics",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(origin_evidence, "RUN_CONTEXT_INDEX_MAX_BYTES", 12 * 1024)
+    assignment = {"atom_receipts": receipts}
+    workspace = tmp_path / "workspace"
+    manifest = materialize_origin_attachments(
+        atoms=atoms,
+        workspace_dir=workspace,
+        source_root=tmp_path,
+        evidence_assignment=assignment,
+    )
+    assignment["origin_attachment_evidence"] = manifest
+
+    assert manifest["errors"] == []
+    context = manifest["run_context"]
+    assert context["index_compacted"] is True
+    assert context["index_compaction"] == "run_inventory_v1"
+    assert context["source_run_count"] == 12
+    assert context["source_artifact_count"] == 12
+    assert context["index_file_size_bytes"] <= 12 * 1024
+    assert all(
+        set(run) == {
+            "atom_ids",
+            "context_id",
+            "source_artifact_count",
+            "source_roles",
+            "source_set_sha256",
+        }
+        for run in context["runs"]
+    )
+    assert all(run["source_roles"] == ["metrics"] for run in context["runs"])
+    assert all(len(run["source_set_sha256"]) == 64 for run in context["runs"])
+    assert verify_materialized_origin_attachments(
+        workspace_dir=workspace,
+        manifest=manifest,
+        evidence_assignment=assignment,
+    ) == []

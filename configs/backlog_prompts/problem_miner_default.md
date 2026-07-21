@@ -30,11 +30,27 @@ Stage 1 only asks: what problem exists and what is the evidence?
 - Do not promote every nonzero command or stderr line into a problem. When same-run terminal
   context directly shows recovery and successful relevant verification with no residual impact,
   treat the failed probe or attempt as non-support. Conversely, overall success does not erase an
-  independently observed residual defect or degraded feature.
+  independently observed residual defect, degraded feature, or repeated deterministic failure
+  that requires a distinct workaround or retry before success. For that repeated pattern, record
+  the bounded retry/reliability impact and lower the severity; do not claim mission blockage.
+  Isolated exploratory probes and explicitly designed fallbacks working as intended remain
+  non-support.
 - Do not split one upstream failure into separate cases for each downstream thing that could not
   be inspected or verified unless the evidence establishes an independent mechanism or persistent
   impact after the blocker.
 - Ancillary warnings and optional-service failures require demonstrated task or user impact.
+- When multiple atoms describe the same structured observation at different timestamps, order
+  them chronologically and compare like-named fields that changed and stayed invariant before
+  choosing the problem. Put that comparison in `evidence_summary`; do not reason from each
+  occurrence as an isolated snapshot.
+- Treat an unknown, proxy-based, unavailable, or incomplete measurement as a limit on what the
+  evidence proves. It is not itself an actionable problem unless the evidence shows that the
+  missing measurement obstructed a task or user. Prefer a directly observed behavior or trend
+  over a metadata caveat when the former is the more material evidence.
+- Do not state a plausible user effect as observed fact. A record may remain researchable when
+  impact is not yet established, but `user_impact` must explicitly say that the impact is
+  unverified and identify what evidence is missing. Use a non-support disposition when that
+  missing evidence is material to whether any problem exists.
 - If terminal context is absent or does not settle the effect, remain `unresolved` or `deferred`;
   do not infer that the observation either recovered or persisted.
 - Output must be limited to the fields in the Output contract below.
@@ -99,6 +115,12 @@ Requirements:
   - `context_atom_ids` and `context_atom_count` (read-only terminal context; never decide or cite)
   - `decision_eligible_atom_ids` (identical to `assigned_atom_ids`)
   - `problem_record_limit` (`null`; distinct evidenced problems are not count-capped)
+- On the initial turn, immediately after `atoms.json`, resolve the origin manifest named by
+  `origin_attachment_evidence.manifest_file`. Before reading the atom evidence, read in full the
+  origin indexes named by that manifest in this exact order when present:
+  `run_context.index_file` first, then `assigned_evidence.index_file`. These context and assigned
+  index reads are mandatory even when `origin_attachment_evidence.atom_refs` is empty; do not wait
+  for validation feedback to request them.
 - Read the markdown index listed by `index_file` for routing context.
 - Read every markdown file listed in `chunks[*].text_file` in full. A verified complete
   chunk read covers every assigned and context atom listed in that chunk's `atom_ids`; normally

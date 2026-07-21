@@ -268,6 +268,22 @@ def test_activation_config_omits_mission_instructions_but_keeps_controlled_confi
     assert overlay.restore() == []
 
 
+def test_ordinary_shell_probe_config_omits_large_mission_instructions() -> None:
+    instruction_override = 'model_instructions_file="C:/run/6mb-ticket.md"'
+    mission = [
+        "model_reasoning_effort=high",
+        "features.apps=false",
+        instruction_override,
+    ]
+
+    activation = execpolicy_mod.build_codex_shell_probe_config_overrides(mission)
+
+    assert instruction_override not in activation
+    assert "model_reasoning_effort=high" not in activation
+    assert "model_reasoning_effort=low" in activation
+    assert "features.apps=false" in activation
+
+
 def test_retained_v2_config_contract_uses_historical_activation_rule(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

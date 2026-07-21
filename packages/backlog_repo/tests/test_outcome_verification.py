@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -16,6 +17,7 @@ from backlog_repo import (
     verify_outcome_record_provenance,
     write_case_relation_receipt,
 )
+from backlog_repo.plan_scope import render_plan_target_contract_markdown
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -27,6 +29,60 @@ def _git(repo: Path, *args: str) -> str:
         text=True,
     )
     return proc.stdout.strip()
+
+
+def test_verified_plan_target_contract_recovers_stable_case_identity(tmp_path: Path) -> None:
+    change = "Bound retention before image storage writes."
+    payload = {
+        "schema_version": 3,
+        "contract_source": "runner_stage6_target_intent_v3",
+        "case_id": "case:maintenance",
+        "problem_id": "problem:maintenance",
+        "selected_option_id": "option:bounded-retention",
+        "repo_revision": "a" * 40,
+        "targets": [
+            {
+                "action": "modify",
+                "path": "runner_core/execution_backend.py",
+                "destination_path": None,
+                "symbols": ["cleanup_local_maintenance_images"],
+                "change": change,
+                "change_sha256": hashlib.sha256(change.encode("utf-8")).hexdigest(),
+                "target_role": "production",
+            }
+        ],
+    }
+    contract = {
+        **payload,
+        "contract_sha256": verification_module._sha256_json(payload),
+    }
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text(render_plan_target_contract_markdown(contract), encoding="utf-8")
+    provenance = {
+        "case_id": "case:maintenance",
+        "plan_revision_id": "plan:maintenance:v1",
+        "fingerprint": "0123456789abcdef",
+        "target_contract_sha256": contract["contract_sha256"],
+    }
+
+    identity, errors = verification_module._case_identity_from_verified_plan(
+        plan_path,
+        provenance=provenance,
+    )
+
+    assert errors == []
+    assert identity is not None
+    assert identity["case_id"] == "case:maintenance"
+    assert identity["problem_id"] == "problem:maintenance"
+    assert identity["plan_revision_id"] == "plan:maintenance:v1"
+    assert identity["verified_plan_path"] == str(plan_path)
+
+    rejected, rejected_errors = verification_module._case_identity_from_verified_plan(
+        plan_path,
+        provenance={**provenance, "target_contract_sha256": "f" * 64},
+    )
+    assert rejected is None
+    assert rejected_errors == ["verified_case_identity_target_contract_hash_mismatch"]
 
 
 def _forged_receipt(
@@ -314,8 +370,14 @@ def test_review_provenance_allows_head_enrichment_but_binds_reviewed_head() -> N
     assert "outcome_review_ref_ticket_provenance_mismatch" in errors
 
 
+@pytest.mark.parametrize(
+    ("commit_attempted", "include_workspace_strategy"),
+    [(False, True), (True, False)],
+)
 def test_schema2_implementation_provenance_validates_receipt_and_artifacts(
     tmp_path: Path,
+    commit_attempted: bool,
+    include_workspace_strategy: bool,
 ) -> None:
     run_dir = tmp_path / "retained-run"
     run_dir.mkdir()
@@ -331,7 +393,7 @@ def test_schema2_implementation_provenance_validates_receipt_and_artifacts(
         "git_ref.json": {
             "schema_version": 1,
             "branch": "backlog/example",
-            "commit_attempted": False,
+            "commit_attempted": commit_attempted,
             "commit_performed": False,
             "commit_observed": True,
             "base_commit": head,
@@ -340,10 +402,11 @@ def test_schema2_implementation_provenance_validates_receipt_and_artifacts(
         "workspace_ref.json": {
             "schema_version": 1,
             "workspace_dir": str(tmp_path / "historical-workspace"),
-            "workspace_strategy": "existing_clean_head",
             "will_cleanup_workspace": False,
         },
     }
+    if include_workspace_strategy:
+        artifacts["workspace_ref.json"]["workspace_strategy"] = "existing_clean_head"
     for filename, payload in artifacts.items():
         (run_dir / filename).write_text(
             json.dumps(payload, sort_keys=True) + "\n",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 from backlog_repo.outcomes import (
@@ -17,11 +18,125 @@ from backlog_repo.plan_index import (
     dedupe_queued_plan_ticket_files_when_actioned_exists,
     scan_plan_ticket_index,
 )
+from backlog_repo.ticket_provenance import (
+    canonical_plan_sha256,
+    canonical_ticket_body_sha256,
+)
 
 _REQUIRED_STAGE_BY_KIND: dict[str, str] = {
     "implementation": "ready_for_ticket",
     "research": "research_required",
 }
+
+_PLAN_BUCKETS = frozenset(
+    {
+        "0.1 - deferred",
+        DISCARDED_PLAN_BUCKET,
+        "0.5 - to_triage",
+        "1 - ideas",
+        "1.5 - to_plan",
+        "2 - ready",
+        "3 - in_progress",
+        "4 - for_review",
+        "5 - complete",
+        "6 - archived",
+    }
+)
+
+
+def repair_ticket_newline_expansion(
+    *,
+    path: Path,
+    expected_ticket_body_sha256: str,
+    expected_local_plan_sha256: str,
+) -> dict[str, object] | None:
+    """Repair proven Windows newline multiplication without changing ticket meaning.
+
+    Historical outcome transitions decoded raw CRCRLF bytes and then wrote the
+    resulting text through Windows newline translation. That can double every
+    logical newline on each lifecycle write. Repair is intentionally narrow: every
+    normalized newline run must be even, halving those runs must reproduce both
+    immutable provenance hashes exactly, and the embedded outcome object must remain
+    equivalent after parsing.
+    """
+
+    before_bytes = path.read_bytes()
+    try:
+        before = before_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Ticket is not valid UTF-8: {path}") from exc
+    before_body = canonical_ticket_body_sha256(before)
+    before_plan = canonical_plan_sha256(before)
+    if (
+        before_body == expected_ticket_body_sha256
+        and before_plan == expected_local_plan_sha256
+    ):
+        return None
+
+    outcome_matches = list(
+        re.finditer(
+            r"\n?<!-- backlog-outcome:start -->.*?<!-- backlog-outcome:end -->\n?",
+            before,
+            flags=re.DOTALL,
+        )
+    )
+    if len(outcome_matches) > 1:
+        return None
+    outcome_match = outcome_matches[0] if outcome_matches else None
+    immutable = (
+        before[: outcome_match.start()] + before[outcome_match.end() :]
+        if outcome_match is not None
+        else before
+    )
+    normalized = re.sub(r"\r+\n", "\n", immutable).replace("\r", "\n")
+    runs = list(re.finditer(r"\n+", normalized))
+    if not runs or any(
+        len(match.group(0)) % 2
+        and match.start() != 0
+        and match.end() != len(normalized)
+        for match in runs
+    ):
+        return None
+    repaired = re.sub(
+        r"\n+",
+        lambda match: "\n" * (len(match.group(0)) // 2),
+        normalized,
+    )
+    if outcome_match is not None:
+        normalized_outcome = re.sub(
+            r"\r+\n", "\n", outcome_match.group(0)
+        ).replace("\r", "\n")
+        repaired = (
+            repaired.rstrip("\n")
+            + "\n\n"
+            + normalized_outcome.strip("\n")
+            + "\n"
+        )
+    repaired_body = canonical_ticket_body_sha256(repaired)
+    repaired_plan = canonical_plan_sha256(repaired)
+    if (
+        repaired_body != expected_ticket_body_sha256
+        or repaired_plan != expected_local_plan_sha256
+    ):
+        return None
+    if extract_outcome_markdown(before) != extract_outcome_markdown(repaired):
+        return None
+
+    repaired_bytes = repaired.encode("utf-8")
+    path.write_bytes(repaired_bytes)
+    return {
+        "schema_version": 1,
+        "status": "repaired",
+        "classification": "proven_windows_newline_multiplication",
+        "ticket_path": str(path.resolve()),
+        "before_file_sha256": sha256(before_bytes).hexdigest(),
+        "after_file_sha256": sha256(repaired_bytes).hexdigest(),
+        "before_ticket_body_sha256": before_body,
+        "before_local_plan_sha256": before_plan,
+        "ticket_body_sha256": repaired_body,
+        "local_plan_sha256": repaired_plan,
+        "newline_runs_repaired": len(runs),
+    }
 
 
 def _markdown_with_monotonic_outcome(
@@ -157,6 +272,8 @@ def move_ticket_file(
     dry_run: bool,
     outcome_record: dict[str, object] | None = None,
 ) -> Path:
+    if to_bucket not in _PLAN_BUCKETS:
+        raise ValueError(f"Unknown plan bucket: {to_bucket}")
     if not dry_run:
         dedupe_actioned_plan_ticket_files(owner_root=owner_root)
         dedupe_queued_plan_ticket_files_when_actioned_exists(owner_root=owner_root)
@@ -265,8 +382,6 @@ def move_ticket_file(
         src_path = candidates[0]
     plans_dir = owner_root / ".agents" / "plans"
     dest_dir = plans_dir / to_bucket
-    if not dest_dir.exists() or not dest_dir.is_dir():
-        raise ValueError(f"Bucket directory does not exist: {dest_dir}")
     dest_path = dest_dir / src_path.name
     if dry_run:
         return dest_path

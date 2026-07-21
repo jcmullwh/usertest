@@ -4,14 +4,24 @@ from __future__ import annotations
 import time as _time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from hashlib import sha256
 from uuid import uuid4
 
 from backlog_core.case_lineage import (
+    atom_disposition_receipt_errors,
+    provisional_same_cause_group_errors,
+    source_evidence_snapshot_sha256,
     verified_causal_identities_from_case_registry,
     verified_mechanism_identities_from_case_registry,
 )
-from backlog_miner.origin_evidence import materialize_origin_attachments
-from backlog_miner.pipeline import model_invocation_manifest_ref
+from backlog_miner.origin_evidence import (
+    materialize_origin_attachments,
+    verify_materialized_origin_attachments,
+)
+from backlog_miner.pipeline import (
+    model_invocation_manifest_ref,
+    verify_model_invocation_manifest,
+)
 from backlog_miner.prompt_correction import (
     CorrectionRunResult,
     acquire_author_session,
@@ -23,6 +33,7 @@ from usertest_backlog.shared import *
 from usertest_backlog.workflows.problem_mining_evidence import (
     ProblemMiningResponseContractError,
     apply_problem_mining_decision_partition,
+    bind_externally_corrected_attempt_history,
     build_dry_run_miner_receipt,
     build_failed_miner_receipt,
     build_live_miner_receipt,
@@ -32,6 +43,62 @@ from usertest_backlog.workflows.problem_mining_evidence import (
     parse_problem_mining_response_envelope,
     problem_mining_evidence_receipt_ref,
 )
+
+
+def _restore_historical_provisional_relation_context(
+    relation_item: dict[str, Any],
+    historical_context: Mapping[str, Any] | None,
+) -> None:
+    """Restore one authenticated provisional research unit onto a relation item.
+
+    Registry entries deliberately retain each provisional member as a separate durable
+    case, so an individual relation item continues to name only its own problem ID.
+    Membership is synchronized only after relation canonicalization has produced the
+    single research work unit; widening every input item would make aliases ambiguous.
+    """
+
+    if not isinstance(historical_context, Mapping):
+        return
+    historical_provisional = historical_context.get("provisional_same_cause_group")
+    if not isinstance(historical_provisional, Mapping):
+        return
+
+    provisional_group = deepcopy(dict(historical_provisional))
+    relation_item["provisional_same_cause_group"] = provisional_group
+    relation_item["case_identity_status"] = historical_context.get(
+        "case_identity_status"
+    )
+    relation_item["case_identity_candidate_ids"] = _coerce_string_list(
+        historical_context.get("case_identity_candidate_ids")
+    )
+    integrity_errors = _coerce_string_list(
+        historical_context.get("provisional_same_cause_integrity_errors")
+    )
+    if integrity_errors:
+        relation_item["provisional_same_cause_integrity_errors"] = integrity_errors
+
+
+
+def _synchronize_provisional_research_unit_membership(
+    candidate: dict[str, Any],
+) -> None:
+    """Bind a canonical provisional work unit to its authenticated member problems."""
+
+    if candidate.get("case_identity_status") != "provisional_same_cause":
+        return
+    provisional_raw = candidate.get("provisional_same_cause_group")
+    if not isinstance(provisional_raw, Mapping):
+        return
+    case_id = _coerce_string(candidate.get("case_id"))
+    group_errors = provisional_same_cause_group_errors(
+        provisional_raw,
+        owning_case_id=case_id,
+    )
+    member_problem_ids = _coerce_string_list(
+        provisional_raw.get("member_problem_ids")
+    )
+    if not group_errors and member_problem_ids:
+        candidate["case_member_problem_ids"] = member_problem_ids
 
 
 def _render_problem_records_markdown(
@@ -355,6 +422,12 @@ _PROBLEM_MINING_JOB_MAX_CHUNKS = 3
 _PROBLEM_MINING_JOB_MAX_ATOMS = 100
 _PROBLEM_MINING_JOB_MAX_BYTES = 150_000
 _PROBLEM_RELATION_REVIEW_MAX_FOCI = 16
+# Codex currently rejects a turn above 1,048,576 input characters.  Keep a
+# substantial allowance for the runner-owned system prompt and CLI envelope;
+# this budget applies only to the rendered relation-review user prompt.
+_PROBLEM_RELATION_REVIEW_MAX_PROMPT_CHARS = 900_000
+_PROBLEM_MINING_RELATION_SPLIT_RECEIPT_SCHEMA_VERSION = 1
+_PROBLEM_MINING_RELATION_SPLIT_RECEIPT_KIND = "problem_mining_relation_split"
 
 
 def _format_problem_mining_atom_markdown(atom: dict[str, Any]) -> str:
@@ -411,16 +484,64 @@ def _format_problem_mining_atom_markdown(atom: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _problem_mining_observation_timestamp(atom: Mapping[str, Any]) -> float | None:
+    """Return a comparable UTC timestamp for structured observation ordering."""
+
+    from datetime import UTC, datetime
+
+    raw = _coerce_string(atom.get("timestamp_utc"))
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _problem_mining_observation_series_key(
+    atom: Mapping[str, Any],
+) -> tuple[str, str, str] | None:
+    """Return a conservative key for comparable timestamped observations.
+
+    This is presentation ordering, not a claim that two atoms share a cause.  Source,
+    origin stage, and target surface must all agree before the workspace groups them as
+    a series.  The model still decides whether the values are meaningfully comparable.
+    """
+
+    source = _coerce_string(atom.get("source"))
+    origin_stage = _coerce_string(atom.get("origin_stage"))
+    surface = _coerce_string(atom.get("target_slug")) or _coerce_string(
+        atom.get("repo_input")
+    )
+    if (
+        source is None
+        or origin_stage is None
+        or surface is None
+        or _problem_mining_observation_timestamp(atom) is None
+    ):
+        return None
+    return (
+        source.casefold(),
+        origin_stage.casefold(),
+        surface.replace("\\", "/").casefold(),
+    )
+
+
 def _order_problem_mining_atoms_for_local_context(
     prompt_atoms: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep explicitly linked evidence together without changing corpus membership.
+    """Keep linked evidence local and comparable observations chronological.
 
     Linked atoms often contain the observation, command failure, and surrounding context for
     one incident.  Splitting those atoms across model calls makes the miner reason from a
     symptom fragment.  This stable connected-component ordering keeps linked evidence local
     when the bounded job limits allow it; oversized components are still split rather than
-    creating an unbounded prompt.
+    creating an unbounded prompt. Comparable timestamped components are also grouped at their
+    first appearance and ordered chronologically so repeated structured observations are not
+    presented as unrelated snapshots. This ordering does not assert a causal relationship.
     """
 
     atom_ids = [str(atom.get("atom_id") or "") for atom in prompt_atoms]
@@ -453,8 +574,61 @@ def _order_problem_mining_atoms_for_local_context(
     components: dict[int, list[int]] = {}
     for index in range(len(prompt_atoms)):
         components.setdefault(_find(index), []).append(index)
-    ordered_components = sorted(components.values(), key=lambda indexes: min(indexes))
-    return [prompt_atoms[index] for indexes in ordered_components for index in indexes]
+    original_components = sorted(components.values(), key=lambda indexes: min(indexes))
+    first_position_by_group: dict[tuple[str, ...], int] = {}
+    ordered_rows: list[
+        tuple[int, float, int, list[int]]
+    ] = []
+    for component_position, indexes in enumerate(original_components):
+        comparison_keys = {
+            key
+            for index in indexes
+            for key in [_problem_mining_observation_series_key(prompt_atoms[index])]
+            if key is not None
+        }
+        comparison_key = (
+            next(iter(comparison_keys))
+            if len(comparison_keys) == 1
+            and all(
+                _problem_mining_observation_series_key(prompt_atoms[index])
+                in comparison_keys
+                for index in indexes
+            )
+            else None
+        )
+        if comparison_key is None:
+            group: tuple[str, ...] = ("component", str(component_position))
+            ordered_indexes = list(indexes)
+            timestamp = float(component_position)
+        else:
+            group = ("series", *comparison_key)
+            ordered_indexes = sorted(
+                indexes,
+                key=lambda index: (
+                    _problem_mining_observation_timestamp(prompt_atoms[index])
+                    or 0.0,
+                    index,
+                ),
+            )
+            timestamp = min(
+                _problem_mining_observation_timestamp(prompt_atoms[index]) or 0.0
+                for index in ordered_indexes
+            )
+        first_position_by_group.setdefault(group, component_position)
+        ordered_rows.append(
+            (
+                first_position_by_group[group],
+                timestamp,
+                component_position,
+                ordered_indexes,
+            )
+        )
+    ordered_rows.sort(key=lambda row: row[:3])
+    return [
+        prompt_atoms[index]
+        for _group_position, _timestamp, _component_position, indexes in ordered_rows
+        for index in indexes
+    ]
 
 
 def _partition_problem_mining_chunks(
@@ -774,10 +948,12 @@ def _reconcile_problem_mining_reviews(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Conservatively reconcile a full independent coverage/depth review.
 
-    The second pass covers every assigned atom.  A primary ``supports_case``
-    decision is retained only when the reviewer emits the same problem record
-    and explicitly supports the same problem ID.  The reviewer may still recover
-    a problem missed by the primary pass under a new ID.
+    The second pass covers every assigned atom. A primary ``supports_case``
+    decision is retained when the reviewer emits the same problem record and
+    explicitly supports the same problem ID. The reviewer may refine the same
+    underlying observed problem under its existing ID, reject the primary claim,
+    or recover a different problem under a new ID. Both authored frontiers remain
+    in the composite receipt even when the reviewed claim replaces the primary.
     """
 
     import json as _json
@@ -825,6 +1001,7 @@ def _reconcile_problem_mining_reviews(
 
     review_id_map: dict[str, str] = {}
     independently_confirmed_primary_ids: set[str] = set()
+    refined_primary_ids: set[str] = set()
     normalized_review_records: list[dict[str, Any]] = []
     for record in review_records:
         normalized = dict(record)
@@ -838,6 +1015,12 @@ def _reconcile_problem_mining_reviews(
         ) == _claim_projection(primary_record)
         if confirms_primary:
             independently_confirmed_primary_ids.add(problem_id)
+        elif primary_record is not None and problem_id not in review_id_map:
+            # Reusing a primary ID means the reviewer is refining the same observed
+            # problem, not introducing a different case. Keep the stable identity and
+            # let the reviewed evidence-bound wording replace the primary projection.
+            # A genuinely different problem must use a different ID (prompt contract).
+            refined_primary_ids.add(problem_id)
         elif mapped_id in primary_problem_ids or mapped_id in review_id_map.values():
             digest = sha256(
                 _json.dumps(
@@ -887,10 +1070,10 @@ def _reconcile_problem_mining_reviews(
                     }
                 )
             elif review.get("disposition") == "supports_case" and review_ids:
-                # The primary claim was not reproduced verbatim, but the independent
-                # pass may have found a different evidence-grounded problem. Retain
-                # only that reviewed claim; the unconfirmed primary record falls out
-                # of ``referenced_ids`` below.
+                # The reviewer refined the primary problem or found a different
+                # evidence-grounded problem. Retain the reviewed claim; the primary
+                # record is either explicitly replaced by stable ID or falls out of
+                # ``referenced_ids`` below.
                 final_decisions.append(review)
             else:
                 final_decisions.append(
@@ -988,7 +1171,12 @@ def _reconcile_problem_mining_reviews(
     }
     records = [
         record
-        for record in [*primary_records, *normalized_review_records]
+        for record in primary_records
+        if _coerce_string(record.get("problem_id")) in referenced_ids
+        and _coerce_string(record.get("problem_id")) not in refined_primary_ids
+    ] + [
+        record
+        for record in normalized_review_records
         if _coerce_string(record.get("problem_id")) in referenced_ids
     ]
     return records, final_decisions
@@ -1027,15 +1215,22 @@ def _coverage_depth_review_prompt(
         "the primary pass if it ignored same-run terminal context showing recovery, "
         "verification, residual impact, or an upstream blocker. Context-only atoms must "
         "be read but must not receive decisions or citations. Do not treat overall success "
-        "as proof that every separately observed residual issue is noise. Do not trust "
-        "the primary pass merely because it cited an atom. For every primary "
-        "supports_case claim, decide whether the complete observed evidence directly "
-        "establishes that exact problem. To confirm it, emit the corresponding primary "
-        "problem record verbatim (including its problem_id and evidence_atom_ids) and "
-        "reference that same problem_id from the atom decision. Changed wording or a "
-        "different ID is a different claim, not confirmation. If a primary claim is "
-        "surface-level or unsupported, do not copy it; use unresolved or another "
-        "evidence-backed non-support disposition. Independently recover any concrete, "
+        "as proof that every separately observed residual issue is noise. In particular, "
+        "check whether multiple independent runs show the same intended action failing and "
+        "requiring a distinct workaround or retry; recovery bounds severity but does not erase "
+        "that observed extra work. Keep isolated probes and designed fallbacks distinct. Do not trust "
+        "the primary pass merely because it cited an atom. First construct an evidence-first "
+        "view of the assigned observations: compare repeated structured observations in "
+        "timestamp order, distinguish observed behavior from measurement caveats, and do not "
+        "state plausible user impact as observed fact. Then evaluate every primary "
+        "supports_case claim. Copy the primary record unchanged only when it is both directly "
+        "established and already the strongest evidence-bound statement of the problem. If it "
+        "describes the right underlying observed problem but is surface-level, overstates "
+        "impact, or misses more material temporal evidence, reuse its problem_id and emit a "
+        "refined complete record; the reviewed record will replace the primary claim. Use a "
+        "new problem_id only for a materially different problem. Reject an unsupported primary "
+        "with an evidence-backed non-support decision rather than copying it for agreement. "
+        "Independently recover any concrete, "
         "unactioned observed problem the primary pass missed. Consider behavior, "
         "infrastructure, schema/output, and usability without forcing a problem that "
         "the evidence does not establish. Return the same strict response contract "
@@ -1069,7 +1264,7 @@ def _build_composite_miner_receipt(
     review_records: Sequence[Mapping[str, Any]],
     review_decisions: Sequence[Mapping[str, Any]],
     review_receipt: Mapping[str, Any],
-    primary_normalized_events_path: Path,
+    primary_attested_events_path: Path,
     primary_workspace_dir: Path,
     primary_workspace_manifest: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1114,7 +1309,7 @@ def _build_composite_miner_receipt(
             sort_keys=True,
             separators=(",", ":"),
         ),
-        normalized_events_path=primary_normalized_events_path,
+        normalized_events_path=primary_attested_events_path,
         workspace_dir=primary_workspace_dir,
         workspace_manifest=primary_workspace_manifest,
     )
@@ -1133,6 +1328,9 @@ def _build_composite_miner_receipt(
     )
     composite["attempt_history"] = list(primary_receipt.get("attempt_history", []))
     composite["successful_attempt_tag"] = primary_receipt.get("successful_attempt_tag")
+    primary_selection = primary_receipt.get("successful_attempt_selection")
+    if isinstance(primary_selection, Mapping):
+        composite["successful_attempt_selection"] = dict(primary_selection)
     return composite, final_records, final_decisions
 
 
@@ -1528,6 +1726,299 @@ def _problem_mining_attempt_manifest_sha256(manifest: dict[str, Any]) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _verified_problem_mining_controller_manifest(
+    *,
+    workspace_dir: Path,
+    retained_attempt: Mapping[str, Any],
+    retained_component_receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reconstruct the controller manifest without trusting the agent projection.
+
+    ``_write_chunked_problem_mining_atoms_workspace`` deliberately writes a compact
+    origin-evidence summary to the agent-facing ``atoms.json`` while returning the
+    complete origin-evidence receipt to the controller.  Attempt continuity hashes
+    that complete controller object.  A continuation therefore cannot compare the
+    compact file directly to the retained controller hash; it must authenticate the
+    compact file, reload and verify the content-addressed origin manifest, and then
+    reconstruct the exact controller projection.
+    """
+
+    import json as _json
+
+    workspace = workspace_dir.resolve()
+
+    def _workspace_file(
+        relative: str,
+        *,
+        expected_sha256: str | None,
+        expected_bytes: int | None,
+        error_prefix: str,
+    ) -> Path:
+        relative_path = Path(relative)
+        if relative_path.is_absolute():
+            raise ValueError(f"{error_prefix}_outside_workspace")
+        path = (workspace / relative_path).resolve()
+        if path != workspace and workspace not in path.parents:
+            raise ValueError(f"{error_prefix}_outside_workspace")
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"{error_prefix}_missing")
+        raw = path.read_bytes()
+        if expected_sha256 is not None and sha256(raw).hexdigest() != expected_sha256:
+            raise ValueError(f"{error_prefix}_sha256_changed")
+        if expected_bytes is not None and len(raw) != expected_bytes:
+            raise ValueError(f"{error_prefix}_size_changed")
+        return path
+
+    artifacts = retained_attempt.get("artifacts")
+    workspace_ref = (
+        artifacts.get("workspace_manifest")
+        if isinstance(artifacts, Mapping)
+        else None
+    )
+    if not isinstance(workspace_ref, Mapping):
+        # Legacy attempt records predate raw workspace-manifest artifact refs and
+        # wrote the same controller object they hashed. Preserve that exact path;
+        # the caller still compares its canonical hash with the retained attempt.
+        legacy_path = workspace / "atoms.json"
+        try:
+            legacy_raw = _json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+            raise ValueError(
+                "stage1_workspace_manifest_artifact_ref_missing"
+            ) from exc
+        if not isinstance(legacy_raw, dict):
+            raise ValueError("stage1_workspace_manifest_artifact_ref_missing")
+        legacy_origin = legacy_raw.get("origin_attachment_evidence")
+        if isinstance(legacy_origin, Mapping) and legacy_origin.get("manifest_file"):
+            raise ValueError("stage1_workspace_manifest_artifact_ref_missing")
+        return dict(legacy_raw)
+    retained_path_raw = _coerce_string(workspace_ref.get("path"))
+    retained_sha256 = _coerce_string(workspace_ref.get("sha256"))
+    retained_bytes_raw = workspace_ref.get("bytes")
+    retained_bytes = (
+        int(retained_bytes_raw)
+        if isinstance(retained_bytes_raw, int)
+        and not isinstance(retained_bytes_raw, bool)
+        and retained_bytes_raw >= 0
+        else None
+    )
+    manifest_path = workspace / "atoms.json"
+    if (
+        retained_path_raw is None
+        or Path(retained_path_raw).resolve() != manifest_path.resolve()
+        or retained_sha256 is None
+        or retained_bytes is None
+    ):
+        raise ValueError("stage1_workspace_manifest_artifact_ref_invalid")
+    _workspace_file(
+        "atoms.json",
+        expected_sha256=retained_sha256,
+        expected_bytes=retained_bytes,
+        error_prefix="stage1_workspace_manifest_file",
+    )
+    try:
+        agent_manifest_raw = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError(
+            "stage1_workspace_manifest_invalid:" + type(exc).__name__
+        ) from exc
+    if not isinstance(agent_manifest_raw, dict):
+        raise ValueError("stage1_workspace_manifest_invalid")
+    agent_manifest = dict(agent_manifest_raw)
+
+    origin_summary = agent_manifest.get("origin_attachment_evidence")
+    if not isinstance(origin_summary, Mapping):
+        raise ValueError("stage1_workspace_origin_manifest_summary_missing")
+    origin_manifest_rel = _coerce_string(origin_summary.get("manifest_file"))
+    origin_manifest_sha256 = _coerce_string(
+        origin_summary.get("manifest_file_sha256")
+    )
+    if origin_manifest_rel is None or origin_manifest_sha256 is None:
+        raise ValueError("stage1_workspace_origin_manifest_ref_invalid")
+    origin_manifest_path = _workspace_file(
+        origin_manifest_rel,
+        expected_sha256=origin_manifest_sha256,
+        expected_bytes=None,
+        error_prefix="stage1_workspace_origin_manifest_file",
+    )
+    try:
+        origin_manifest_raw = _json.loads(
+            origin_manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError(
+            "stage1_workspace_origin_manifest_invalid:" + type(exc).__name__
+        ) from exc
+    if not isinstance(origin_manifest_raw, dict):
+        raise ValueError("stage1_workspace_origin_manifest_invalid")
+    origin_manifest = dict(origin_manifest_raw)
+    summary_projection = {
+        "schema_version": origin_manifest.get("schema_version"),
+        "format": origin_manifest.get("format"),
+        "manifest_file": origin_manifest_rel,
+        "manifest_file_sha256": origin_manifest_sha256,
+        "materialization_sha256": origin_manifest.get("materialization_sha256"),
+        "artifact_count": len(origin_manifest.get("artifacts") or []),
+        "atom_refs": origin_manifest.get("atom_refs") or [],
+        "errors": origin_manifest.get("errors") or [],
+    }
+    if dict(origin_summary) != summary_projection:
+        raise ValueError("stage1_workspace_origin_manifest_summary_changed")
+    origin_manifest["manifest_file"] = origin_manifest_rel
+    origin_manifest["manifest_file_sha256"] = origin_manifest_sha256
+    origin_errors = verify_materialized_origin_attachments(
+        workspace_dir=workspace,
+        manifest=origin_manifest,
+    )
+    if origin_errors:
+        raise ValueError(
+            "stage1_workspace_origin_evidence_invalid:" + ",".join(origin_errors)
+        )
+
+    for atom_ref in agent_manifest.get("atom_files") or []:
+        if not isinstance(atom_ref, Mapping):
+            raise ValueError("stage1_workspace_atom_file_ref_invalid")
+        relative = _coerce_string(atom_ref.get("file"))
+        expected_sha = _coerce_string(atom_ref.get("sha256"))
+        size_raw = atom_ref.get("bytes")
+        if (
+            relative is None
+            or expected_sha is None
+            or not isinstance(size_raw, int)
+            or isinstance(size_raw, bool)
+        ):
+            raise ValueError("stage1_workspace_atom_file_ref_invalid")
+        _workspace_file(
+            relative,
+            expected_sha256=expected_sha,
+            expected_bytes=size_raw,
+            error_prefix="stage1_workspace_atom_file",
+        )
+    for chunk_ref in agent_manifest.get("chunks") or []:
+        if not isinstance(chunk_ref, Mapping):
+            raise ValueError("stage1_workspace_chunk_ref_invalid")
+        for file_key, sha_key, bytes_key, label in (
+            ("file", "sha256", "bytes", "json"),
+            ("text_file", "text_sha256", "text_bytes", "markdown"),
+        ):
+            relative = _coerce_string(chunk_ref.get(file_key))
+            expected_sha = _coerce_string(chunk_ref.get(sha_key))
+            size_raw = chunk_ref.get(bytes_key)
+            if (
+                relative is None
+                or expected_sha is None
+                or not isinstance(size_raw, int)
+                or isinstance(size_raw, bool)
+            ):
+                raise ValueError("stage1_workspace_chunk_ref_invalid")
+            _workspace_file(
+                relative,
+                expected_sha256=expected_sha,
+                expected_bytes=size_raw,
+                error_prefix=f"stage1_workspace_{label}_chunk",
+            )
+
+    if isinstance(retained_component_receipt, Mapping):
+        attestations = retained_component_receipt.get(
+            "required_workspace_read_attestations"
+        )
+        for attestation in attestations if isinstance(attestations, list) else []:
+            if not isinstance(attestation, Mapping):
+                raise ValueError("stage1_workspace_read_attestation_invalid")
+            relative = _coerce_string(attestation.get("file"))
+            expected_sha = _coerce_string(attestation.get("file_sha256"))
+            size_raw = attestation.get("file_size_bytes")
+            if (
+                relative is None
+                or expected_sha is None
+                or not isinstance(size_raw, int)
+                or isinstance(size_raw, bool)
+            ):
+                raise ValueError("stage1_workspace_read_attestation_invalid")
+            _workspace_file(
+                relative,
+                expected_sha256=expected_sha,
+                expected_bytes=size_raw,
+                error_prefix="stage1_workspace_attested_file",
+            )
+
+    controller_manifest = dict(agent_manifest)
+    controller_manifest["origin_attachment_evidence"] = origin_manifest
+    return controller_manifest
+
+
+def _verified_problem_mining_prior_events_path(
+    *,
+    retained_attempt: Mapping[str, Any],
+    retained_component_receipt: Mapping[str, Any] | None,
+    workspace_dir: Path,
+    workspace_manifest_sha256: str,
+) -> Path | None:
+    """Return a hash-bound prior event stream for an exact-session continuation.
+
+    A correction resumes the same author in the same verified workspace.  Requiring
+    that author to mechanically re-read every unchanged evidence file on every turn
+    wastes model work and can reject an otherwise complete correction.  The retained
+    event stream is safe to carry forward only when the attempt artifact, component
+    receipt, workspace, and controller-manifest identity all agree.
+
+    Legacy attempt records did not retain event artifact references.  They keep the
+    previous behavior and simply require current-turn reads.
+    """
+
+    artifacts = retained_attempt.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        return None
+    event_ref = artifacts.get("cumulative_normalized_events")
+    if not isinstance(event_ref, Mapping):
+        event_ref = artifacts.get("normalized_events")
+    if not isinstance(event_ref, Mapping):
+        return None
+
+    path_raw = _coerce_string(event_ref.get("path"))
+    expected_sha256 = _coerce_string(event_ref.get("sha256"))
+    expected_bytes_raw = event_ref.get("bytes")
+    expected_bytes = (
+        int(expected_bytes_raw)
+        if isinstance(expected_bytes_raw, int)
+        and not isinstance(expected_bytes_raw, bool)
+        and expected_bytes_raw >= 0
+        else None
+    )
+    if path_raw is None or expected_sha256 is None or expected_bytes is None:
+        raise ValueError("stage1_prior_read_evidence_artifact_ref_invalid")
+    path = Path(path_raw).resolve()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("stage1_prior_read_evidence_artifact_missing")
+    content = path.read_bytes()
+    if len(content) != expected_bytes or sha256(content).hexdigest() != expected_sha256:
+        raise ValueError("stage1_prior_read_evidence_artifact_changed")
+
+    if isinstance(retained_component_receipt, Mapping):
+        receipt_path = _coerce_string(
+            retained_component_receipt.get("normalized_events_path")
+        )
+        receipt_sha256 = _coerce_string(
+            retained_component_receipt.get("normalized_events_sha256")
+        )
+        receipt_workspace = _coerce_string(
+            retained_component_receipt.get("workspace_dir")
+        )
+        receipt_manifest = _coerce_string(
+            retained_component_receipt.get("workspace_manifest_sha256")
+        )
+        if (
+            receipt_path is None
+            or Path(receipt_path).resolve() != path
+            or receipt_sha256 != expected_sha256
+            or receipt_workspace is None
+            or Path(receipt_workspace).resolve() != workspace_dir.resolve()
+            or receipt_manifest != workspace_manifest_sha256
+        ):
+            raise ValueError("stage1_prior_read_evidence_receipt_mismatch")
+    return path
 
 
 def _problem_mining_attempt_file_ref(path: Path) -> dict[str, Any] | None:
@@ -2084,6 +2575,7 @@ def _run_problem_mining_job_with_response_retry(
     initial_manifest: dict[str, Any],
     resume_session_id: str | None = None,
     attempt_number_base: int = 0,
+    initial_attempt_tag: str | None = None,
     prior_normalized_events_paths: tuple[Path, ...] = (),
     additional_record_validation: Callable[
         [Sequence[Mapping[str, Any]]], list[str]
@@ -2143,7 +2635,7 @@ def _run_problem_mining_job_with_response_retry(
         repo_root=repo_root,
         stage_artifacts_dir=stage_artifacts_dir,
         base_tag=base_tag,
-        attempt_tag=base_tag,
+        attempt_tag=initial_attempt_tag or base_tag,
         attempt_number=attempt_number_base + 1,
         prompt=prompt,
         prompt_atoms=prompt_atoms,
@@ -2833,7 +3325,12 @@ def _run_independently_reviewed_problem_pass(
         review_records=review_records,
         review_decisions=review_decisions,
         review_receipt=dict(review["receipt"]),
-        primary_normalized_events_path=Path(first["normalized_events_path"]),
+        # A corrected primary is verified against the cumulative stream. Rebuilding
+        # the composite from only its final turn would discard earlier full reads.
+        primary_attested_events_path=Path(
+            first.get("cumulative_normalized_events_path")
+            or first["normalized_events_path"]
+        ),
         primary_workspace_dir=Path(first["workspace_dir"]),
         primary_workspace_manifest=dict(first["manifest"]),
     )
@@ -3437,6 +3934,64 @@ def _run_cross_job_problem_synthesis(
     }
 
 
+def _response_retry_metrics(
+    run: Mapping[str, Any] | None,
+) -> dict[str, int]:
+    """Separate pre-author acquisition from same-author response correction.
+
+    The attempt history contains both kinds of work. Counting every record after
+    the first as a format retry makes a fresh Codex launch that never acquired an
+    author session look like a model-authored correction. The shared correction
+    controller already projects these phases separately, so stage telemetry should
+    retain that distinction.
+    """
+
+    correction_metrics = (
+        run.get("correction_metrics") if isinstance(run, Mapping) else None
+    )
+    if not isinstance(correction_metrics, Mapping):
+        return {
+            "format_retry_count": 0,
+            "same_session_correction_count": 0,
+            "session_acquisition_retry_count": 0,
+        }
+    completed_correction_turns = max(
+        0, int(correction_metrics.get("correction_turn_count") or 0)
+    )
+    failed_correction_invocations = max(
+        0,
+        int(
+            correction_metrics.get("correction_invocation_failure_count") or 0
+        ),
+    )
+    return {
+        "format_retry_count": completed_correction_turns,
+        "same_session_correction_count": (
+            completed_correction_turns + failed_correction_invocations
+        ),
+        "session_acquisition_retry_count": max(
+            0,
+            int(correction_metrics.get("session_acquisition_retry_count") or 0),
+        ),
+    }
+
+
+def _apply_response_retry_metrics(
+    meta: dict[str, Any],
+    run: Mapping[str, Any] | None,
+    *,
+    prefix: str = "",
+) -> None:
+    counts = _response_retry_metrics(run)
+    for key, value in counts.items():
+        meta[f"{prefix}{key}"] = value
+    correction_metrics = (
+        run.get("correction_metrics") if isinstance(run, Mapping) else None
+    )
+    if isinstance(correction_metrics, Mapping):
+        meta[f"{prefix}correction_metrics"] = dict(correction_metrics)
+
+
 def _run_problem_mining_stage(
     *,
     repo_root: Path,
@@ -3611,6 +4166,7 @@ def _run_problem_mining_stage(
             continue
 
         primary_attempt_history: list[dict[str, Any]] = []
+        primary_run: dict[str, Any] | None = None
         try:
             meta["prompt_chars"] = len(prompt)
             canonical_records_for_job = tuple(dict(record) for record in all_records)
@@ -3647,10 +4203,7 @@ def _run_problem_mining_stage(
             manifest = dict(primary_run["manifest"])
             meta["attempt_history"] = primary_attempt_history
             meta["successful_attempt_tag"] = primary_run.get("successful_attempt_tag")
-            meta["format_retry_count"] = max(0, len(primary_attempt_history) - 1)
-            meta["same_session_correction_count"] = max(
-                0, len(primary_attempt_history) - 1
-            )
+            _apply_response_retry_metrics(meta, primary_run)
             failure = primary_run.get("failure")
             if isinstance(failure, Exception):
                 raise failure
@@ -3658,6 +4211,10 @@ def _run_problem_mining_stage(
             records = list(primary_run["records"])
             warnings = list(primary_run["warnings"])
             normalized_events_path = Path(primary_run["normalized_events_path"])
+            primary_attested_events_path = Path(
+                primary_run.get("cumulative_normalized_events_path")
+                or primary_run["normalized_events_path"]
+            )
             primary_receipt = dict(primary_run["receipt"])
             meta["workspace_dir"] = str(workspace_dir)
             meta["atoms_json"] = str(workspace_dir / "atoms.json")
@@ -3703,6 +4260,7 @@ def _run_problem_mining_stage(
             review_failed = False
             review_failure: str | None = None
             review_attempt_history: list[dict[str, Any]] = []
+            review_run: dict[str, Any] | None = None
             try:
                 review_run = _run_problem_mining_job_with_response_retry(
                     repo_root=repo_root,
@@ -3750,7 +4308,7 @@ def _run_problem_mining_stage(
                         review_records=review_records,
                         review_decisions=review_decisions,
                         review_receipt=review_receipt,
-                        primary_normalized_events_path=normalized_events_path,
+                        primary_attested_events_path=primary_attested_events_path,
                         primary_workspace_dir=workspace_dir,
                         primary_workspace_manifest=manifest,
                     )
@@ -3789,16 +4347,12 @@ def _run_problem_mining_stage(
             non_support_ids = set(assigned_atom_ids) - support_ids
             meta["attempt_history"] = primary_attempt_history
             meta["successful_attempt_tag"] = primary_run.get("successful_attempt_tag")
-            meta["format_retry_count"] = max(0, len(primary_attempt_history) - 1)
-            meta["same_session_correction_count"] = max(
-                0, len(primary_attempt_history) - 1
-            )
+            _apply_response_retry_metrics(meta, primary_run)
             meta["coverage_depth_review_attempt_history"] = review_attempt_history
-            meta["coverage_depth_review_format_retry_count"] = max(
-                0, len(review_attempt_history) - 1
-            )
-            meta["coverage_depth_review_same_session_correction_count"] = max(
-                0, len(review_attempt_history) - 1
+            _apply_response_retry_metrics(
+                meta,
+                review_run,
+                prefix="coverage_depth_review_",
             )
             meta["status"] = "partial_review_failure" if review_failed else "ok"
             if review_failure is not None:
@@ -3826,10 +4380,7 @@ def _run_problem_mining_stage(
             meta["error"] = failure_text
             meta["attempt_history"] = primary_attempt_history
             meta["successful_attempt_tag"] = None
-            meta["format_retry_count"] = max(0, len(primary_attempt_history) - 1)
-            meta["same_session_correction_count"] = max(
-                0, len(primary_attempt_history) - 1
-            )
+            _apply_response_retry_metrics(meta, primary_run)
             live_failures.append(f"{tag}:{failure_text}")
             failed_receipt = build_failed_miner_receipt(
                 tag=tag,
@@ -4010,7 +4561,24 @@ def _run_problem_mining_stage(
 def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
     """Return the evidence-bearing case packet shown to the relation reviewer."""
 
-    return {
+    evidence_atom_ids = _coerce_string_list(item.get("evidence_atom_ids"))
+    case_id = _coerce_string(item.get("case_id"))
+    provisional_group = item.get("provisional_same_cause_group")
+    case_owned_evidence_atom_ids: list[str] | None = None
+    if case_id is not None and isinstance(provisional_group, Mapping):
+        facets = provisional_group.get("member_facets")
+        if isinstance(facets, list):
+            for raw_facet in facets:
+                if not isinstance(raw_facet, Mapping):
+                    continue
+                if _coerce_string(raw_facet.get("case_id")) != case_id:
+                    continue
+                case_owned_evidence_atom_ids = _coerce_string_list(
+                    raw_facet.get("evidence_atom_ids")
+                )
+                break
+
+    preview = {
         "problem_id": item.get("problem_id"),
         "case_id": item.get("case_id"),
         "title": item.get("title"),
@@ -4018,7 +4586,14 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
         "user_impact": item.get("user_impact"),
         "canonical_symptoms": item.get("canonical_symptoms") or [],
         "evidence_summary": item.get("evidence_summary"),
-        "evidence_atom_ids": item.get("evidence_atom_ids") or [],
+        "evidence_atom_ids": (
+            case_owned_evidence_atom_ids
+            if case_owned_evidence_atom_ids is not None
+            else evidence_atom_ids
+        ),
+        "evidence_routing_keys": item.get("_relation_evidence_routing_keys") or [],
+        "evidence_observed_at_min": item.get("_relation_evidence_observed_at_min"),
+        "evidence_observed_at_max": item.get("_relation_evidence_observed_at_max"),
         "root_cause_status": item.get("root_cause_status") or "unestablished",
         "verified_mechanism_sha256": item.get("verified_mechanism_sha256"),
         "verified_causal_signature_sha256": item.get(
@@ -4035,6 +4610,85 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
         "carried_forward": bool(item.get("_carried_forward_case")),
         "candidate_only": bool(item.get("_relation_candidate_only")),
     }
+    prior_stage_context = item.get("prior_stage_context")
+    if isinstance(prior_stage_context, Mapping):
+        lifecycle = prior_stage_context.get("lifecycle")
+        if isinstance(lifecycle, Mapping):
+            outcome_reference = lifecycle.get("outcome_reference")
+            preview["lifecycle_context"] = {
+                "state": _coerce_string(lifecycle.get("state"))
+                or _coerce_string(item.get("case_state"))
+                or "active",
+                "outcome_recorded_at": (
+                    _coerce_string(outcome_reference.get("recorded_at"))
+                    if isinstance(outcome_reference, Mapping)
+                    else None
+                ),
+                "outcome_validation_status": (
+                    _coerce_string(outcome_reference.get("validation_status"))
+                    if isinstance(outcome_reference, Mapping)
+                    else None
+                ),
+                "plan_revision_id": (
+                    _coerce_string(outcome_reference.get("plan_revision_id"))
+                    if isinstance(outcome_reference, Mapping)
+                    else None
+                ),
+            }
+    if (
+        case_owned_evidence_atom_ids is not None
+        and evidence_atom_ids != case_owned_evidence_atom_ids
+    ):
+        preview["research_packet_evidence_atom_ids"] = evidence_atom_ids
+        preview["evidence_scope"] = "case_owned_provisional_facet"
+    return preview
+
+
+def _problem_relation_evidence_context(
+    item: Mapping[str, Any],
+    *,
+    atoms_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project exact evidence-channel and time context for candidate discovery.
+
+    Regenerated operational atoms intentionally receive content-derived IDs, so two
+    observations from the same monitor can have no atom-ID overlap. A compact exact
+    channel key restores candidate recall without asserting causal identity.
+    """
+
+    routing_keys: set[str] = set()
+    observed_at: list[str] = []
+    for atom_id in _coerce_string_list(item.get("evidence_atom_ids")):
+        atom = atoms_by_id.get(atom_id)
+        if not isinstance(atom, Mapping):
+            continue
+        source = _coerce_string(atom.get("source"))
+        origin_stage = _coerce_string(atom.get("origin_stage"))
+        surface = _coerce_string(atom.get("target_slug")) or _coerce_string(
+            atom.get("repo_input")
+        )
+        if source is not None and origin_stage is not None and surface is not None:
+            normalized_surface = surface.replace("\\", "/").casefold()
+            channel = (
+                f"source={source.casefold()}|origin={origin_stage.casefold()}|"
+                f"surface={normalized_surface}"
+            )
+            routing_keys.add(channel)
+            discriminator = _coerce_string(atom.get("operational_signature"))
+            if discriminator is None:
+                discriminator = _coerce_string(atom.get("mission_id"))
+            if discriminator is not None:
+                routing_keys.add(f"{channel}|discriminator={discriminator.casefold()}")
+        timestamp = _coerce_string(atom.get("timestamp_utc"))
+        if timestamp is not None:
+            observed_at.append(timestamp)
+    context: dict[str, Any] = {
+        "_relation_evidence_routing_keys": sorted(routing_keys),
+    }
+    if observed_at:
+        context["_relation_evidence_observed_at_min"] = min(observed_at)
+        context["_relation_evidence_observed_at_max"] = max(observed_at)
+    return context
 
 
 def _verified_relation_edges_from_case_registry(
@@ -4135,6 +4789,7 @@ def _relation_review_payload(
     neighbor_keys = (
         "most_related_by_semantic",
         "most_related_by_evidence_overlap",
+        "most_related_by_evidence_routing",
         "most_related_by_metadata",
         "most_related_by_path_anchor",
     )
@@ -4182,6 +4837,231 @@ def _relation_review_payload(
     }
 
 
+def _relation_candidate_frontier_sha256(frontier: Sequence[Mapping[str, Any]]) -> str:
+    """Bind the exact candidate/evidence packet used to validate one relation batch."""
+
+    import json as _json
+
+    return sha256(
+        _json.dumps(
+            [dict(item) for item in frontier],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validated_relation_candidate_frontier(
+    raw_frontier: Any,
+    *,
+    focus_ids: set[str],
+    expected_count: int | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_frontier, list) or not raw_frontier:
+        raise ValueError("relation_review_candidate_frontier_invalid")
+    frontier = [dict(item) for item in raw_frontier if isinstance(item, Mapping)]
+    if len(frontier) != len(raw_frontier):
+        raise ValueError("relation_review_candidate_frontier_invalid")
+    if expected_count is not None and len(frontier) != expected_count:
+        raise ValueError("relation_review_candidate_frontier_count_changed")
+    problem_ids = [_coerce_string(item.get("problem_id")) for item in frontier]
+    if any(problem_id is None for problem_id in problem_ids) or len(problem_ids) != len(
+        set(problem_ids)
+    ):
+        raise ValueError("relation_review_candidate_frontier_problem_ids_invalid")
+    if not focus_ids <= {problem_id for problem_id in problem_ids if problem_id is not None}:
+        raise ValueError("relation_review_candidate_frontier_focus_missing")
+    for item in frontier:
+        evidence_ids = item.get("evidence_atom_ids")
+        if not isinstance(evidence_ids, list) or not all(
+            isinstance(atom_id, str) and atom_id.strip() for atom_id in evidence_ids
+        ):
+            raise ValueError("relation_review_candidate_frontier_evidence_invalid")
+    return frontier
+
+
+def _relation_candidate_frontier_for_correction(
+    batch: Mapping[str, Any],
+    *,
+    expected_session: str,
+    expected_workspace: Path,
+    focus_ids: set[str],
+) -> tuple[list[dict[str, Any]], str, str]:
+    """Recover a batch's exact candidate packet without widening correction authority."""
+
+    import json as _json
+
+    expected_count_raw = batch.get("case_index_count")
+    expected_count = (
+        expected_count_raw
+        if isinstance(expected_count_raw, int) and not isinstance(expected_count_raw, bool)
+        else None
+    )
+    stored_frontier = batch.get("candidate_frontier")
+    if stored_frontier is not None:
+        frontier = _validated_relation_candidate_frontier(
+            stored_frontier,
+            focus_ids=focus_ids,
+            expected_count=expected_count,
+        )
+        expected_sha256 = _coerce_string(batch.get("candidate_frontier_sha256"))
+        actual_sha256 = _relation_candidate_frontier_sha256(frontier)
+        if expected_sha256 is None or expected_sha256 != actual_sha256:
+            raise ValueError("relation_review_candidate_frontier_hash_changed")
+        return frontier, actual_sha256, "persisted_batch_frontier"
+
+    # Backward-compatible custody for retained batches created before the frontier
+    # was persisted explicitly. The original verified model invocation already
+    # content-binds the complete prompt, including the bounded case_index packet.
+    prompt_path_raw = _coerce_string(batch.get("prompt_path"))
+    batch_tag = _coerce_string(batch.get("tag"))
+    if prompt_path_raw is None or batch_tag is None:
+        raise ValueError("relation_review_candidate_frontier_unavailable")
+    prompt_path = Path(prompt_path_raw).resolve()
+    invocation_path = prompt_path.parent / f"{batch_tag}.model_invocation.json"
+    invocation_errors = verify_model_invocation_manifest(invocation_path)
+    if invocation_errors:
+        raise ValueError(
+            "relation_review_candidate_frontier_invocation_invalid:"
+            + ",".join(invocation_errors)
+        )
+    try:
+        invocation = _json.loads(invocation_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError(
+            "relation_review_candidate_frontier_invocation_unreadable"
+        ) from exc
+    if (
+        not isinstance(invocation, Mapping)
+        or _coerce_string(invocation.get("agent_session_id")) != expected_session
+        or Path(_coerce_string(invocation.get("workspace_dir")) or "").resolve()
+        != expected_workspace
+    ):
+        raise ValueError("relation_review_candidate_frontier_authority_changed")
+    prompt_artifact = (
+        invocation.get("artifacts", {}).get("prompt")
+        if isinstance(invocation.get("artifacts"), Mapping)
+        else None
+    )
+    if (
+        not isinstance(prompt_artifact, Mapping)
+        or Path(_coerce_string(prompt_artifact.get("path")) or "").resolve()
+        != prompt_path
+    ):
+        raise ValueError("relation_review_candidate_frontier_prompt_changed")
+    try:
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("relation_review_candidate_frontier_prompt_unreadable") from exc
+    marker = "## Focus items and candidate neighborhoods"
+    marker_index = prompt_text.find(marker)
+    if marker_index < 0:
+        raise ValueError("relation_review_candidate_frontier_payload_missing")
+    try:
+        payload = _json.loads(prompt_text[marker_index + len(marker) :].strip())
+    except _json.JSONDecodeError as exc:
+        raise ValueError("relation_review_candidate_frontier_payload_invalid") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("relation_review_candidate_frontier_payload_invalid")
+    frontier = _validated_relation_candidate_frontier(
+        payload.get("case_index"),
+        focus_ids=focus_ids,
+        expected_count=expected_count,
+    )
+    return (
+        frontier,
+        _relation_candidate_frontier_sha256(frontier),
+        "verified_legacy_prompt_frontier",
+    )
+
+
+def _retained_relation_correction_candidate(
+    invocation_path: Path,
+    *,
+    expected_agent: str,
+    expected_session: str,
+    expected_workspace: Path,
+    focus_ids: set[str],
+    known_problem_ids: set[str],
+    known_evidence_atom_ids: set[str],
+    evidence_atom_ids_by_problem_id: Mapping[str, set[str]],
+    durable_collapse_problem_pairs: set[tuple[str, str]],
+) -> dict[str, Any]:
+    """Revalidate already-authored relation bytes before spending another model turn."""
+
+    import json as _json
+
+    invocation_path = invocation_path.resolve()
+    invocation_errors = verify_model_invocation_manifest(invocation_path)
+    if invocation_errors:
+        raise ValueError(
+            "retained_relation_correction_invocation_invalid:"
+            + ",".join(invocation_errors)
+        )
+    try:
+        invocation = _json.loads(invocation_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError("retained_relation_correction_invocation_unreadable") from exc
+    if not isinstance(invocation, Mapping):
+        raise ValueError("retained_relation_correction_invocation_invalid")
+    if (
+        _coerce_string(invocation.get("stage")) != "problem_mining"
+        or _coerce_string(invocation.get("agent")) != expected_agent.strip().casefold()
+        or _coerce_string(invocation.get("agent_session_id")) != expected_session
+        or Path(_coerce_string(invocation.get("workspace_dir")) or "").resolve()
+        != expected_workspace
+    ):
+        raise ValueError("retained_relation_correction_authority_changed")
+    response_artifact = (
+        invocation.get("artifacts", {}).get("response")
+        if isinstance(invocation.get("artifacts"), Mapping)
+        else None
+    )
+    response_path_raw = (
+        _coerce_string(response_artifact.get("path"))
+        if isinstance(response_artifact, Mapping)
+        else None
+    )
+    if response_path_raw is None:
+        raise ValueError("retained_relation_correction_response_unavailable")
+    response_path = Path(response_path_raw).resolve()
+    try:
+        response = response_path.read_text(encoding="utf-8")
+        parsed = _json.loads(response)
+    except (OSError, UnicodeError, _json.JSONDecodeError) as exc:
+        raise ValueError("retained_relation_correction_response_unreadable") from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+        raise ValueError("retained_relation_correction_response_not_list")
+    decisions = [dict(item) for item in parsed]
+    validation_errors, valid_focus_ids = _relation_review_response_errors(
+        decisions,
+        focus_problem_ids=focus_ids,
+        known_problem_ids=known_problem_ids,
+        known_evidence_atom_ids=known_evidence_atom_ids,
+        evidence_atom_ids_by_problem_id=evidence_atom_ids_by_problem_id,
+        durable_collapse_problem_pairs=durable_collapse_problem_pairs,
+        allowed_actions={
+            "merge",
+            "alias",
+            "split",
+            "same_cause_group",
+            "keep_separate",
+        },
+    )
+    return {
+        "decisions": decisions,
+        "validation_errors": validation_errors,
+        "valid_focus_ids": sorted(valid_focus_ids),
+        "agent_session_id": expected_session,
+        "workspace_dir": str(expected_workspace),
+        "invocation_path": str(invocation_path),
+        "invocation_tag": invocation.get("tag"),
+        "response_path": str(response_path),
+        "response_sha256": invocation.get("response_sha256"),
+    }
+
+
 def _relation_decision_item_errors(
     decision: dict[str, Any],
     *,
@@ -4189,6 +5069,8 @@ def _relation_decision_item_errors(
     known_problem_ids: set[str],
     known_evidence_atom_ids: set[str],
     allowed_actions: set[str],
+    evidence_atom_ids_by_problem_id: Mapping[str, set[str]] | None = None,
+    durable_collapse_problem_pairs: set[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Return model-correctable structure/reference errors for one relation decision."""
 
@@ -4239,6 +5121,53 @@ def _relation_decision_item_errors(
     if collapse_action:
         if evidence_ids is None or not set(evidence_ids) <= known_evidence_atom_ids:
             errors.append("relation_decision_evidence_refs_invalid:" + str(focus_id))
+        elif evidence_atom_ids_by_problem_id is not None and focus_id is not None:
+            cited_evidence = set(evidence_ids)
+            focus_evidence = evidence_atom_ids_by_problem_id.get(focus_id, set())
+            if not cited_evidence.intersection(focus_evidence):
+                errors.append(
+                    "relation_decision_collapse_focus_evidence_missing:" + focus_id
+                )
+
+            peer_problem_ids: list[str] = []
+            if action == "merge":
+                peer_problem_ids = string_list("target_ids") or []
+            elif action == "alias":
+                alias_target = _coerce_string(decision.get("alias_target_id"))
+                if alias_target is not None:
+                    peer_problem_ids = [alias_target]
+            elif action == "same_cause_group":
+                peer_problem_ids = [
+                    problem_id
+                    for problem_id in (string_list("member_ids") or [])
+                    if problem_id != focus_id
+                ]
+            for peer_problem_id in peer_problem_ids:
+                peer_evidence = evidence_atom_ids_by_problem_id.get(
+                    peer_problem_id, set()
+                )
+                if (
+                    peer_problem_id in known_problem_ids
+                    and not cited_evidence.intersection(peer_evidence)
+                ):
+                    errors.append(
+                        "relation_decision_collapse_peer_evidence_missing:"
+                        f"{focus_id}:{peer_problem_id}"
+                    )
+                if (
+                    action in {"merge", "alias"}
+                    and peer_problem_id in known_problem_ids
+                    and bool(cited_evidence.intersection(focus_evidence))
+                    and bool(cited_evidence.intersection(peer_evidence))
+                    and not focus_evidence.intersection(peer_evidence)
+                    and tuple(sorted((focus_id, peer_problem_id)))
+                    not in (durable_collapse_problem_pairs or set())
+                ):
+                    errors.append(
+                        "relation_decision_durable_collapse_identity_missing:"
+                        f"{focus_id}:{peer_problem_id}:"
+                        "use_same_cause_group_or_keep_separate"
+                    )
 
     if action == "merge":
         target_ids = string_list("target_ids")
@@ -4290,30 +5219,44 @@ def _relation_review_response_errors(
     known_problem_ids: set[str],
     known_evidence_atom_ids: set[str],
     allowed_actions: set[str],
+    evidence_atom_ids_by_problem_id: Mapping[str, set[str]] | None = None,
+    durable_collapse_problem_pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[list[str], set[str]]:
     errors: list[str] = []
     valid_focus_ids: list[str] = []
+    present_focus_ids: list[str] = []
     for index, decision in enumerate(decisions):
         item_errors = _relation_decision_item_errors(
             decision,
             focus_problem_ids=focus_problem_ids,
             known_problem_ids=known_problem_ids,
             known_evidence_atom_ids=known_evidence_atom_ids,
+            evidence_atom_ids_by_problem_id=evidence_atom_ids_by_problem_id,
+            durable_collapse_problem_pairs=durable_collapse_problem_pairs,
             allowed_actions=allowed_actions,
         )
         errors.extend(f"relation_decision_index={index}:{error}" for error in item_errors)
         focus_id = _coerce_string(decision.get("focus_id"))
+        if focus_id in focus_problem_ids:
+            present_focus_ids.append(focus_id)
         if not item_errors and focus_id is not None:
             valid_focus_ids.append(focus_id)
-    counts = {focus_id: valid_focus_ids.count(focus_id) for focus_id in set(valid_focus_ids)}
-    duplicates = sorted(focus_id for focus_id, count in counts.items() if count != 1)
-    missing = sorted(focus_problem_ids - set(valid_focus_ids))
+    present_counts = {
+        focus_id: present_focus_ids.count(focus_id) for focus_id in set(present_focus_ids)
+    }
+    valid_counts = {
+        focus_id: valid_focus_ids.count(focus_id) for focus_id in set(valid_focus_ids)
+    }
+    duplicates = sorted(
+        focus_id for focus_id, count in present_counts.items() if count != 1
+    )
+    missing = sorted(focus_problem_ids - set(present_focus_ids))
     if duplicates:
         errors.append("problem_mining_relation_reviewer_duplicate_focus:" + ",".join(duplicates))
     if missing:
         errors.append("problem_mining_relation_reviewer_missing_focus:" + ",".join(missing))
     return list(dict.fromkeys(errors)), {
-        focus_id for focus_id, count in counts.items() if count == 1
+        focus_id for focus_id, count in valid_counts.items() if count == 1
     }
 
 
@@ -4362,6 +5305,79 @@ def _relation_review_focus_batches(
     return [ordered[index : index + max_foci] for index in range(0, len(ordered), max_foci)]
 
 
+def _render_relation_review_prompt(
+    *,
+    relation_items: list[dict[str, Any]],
+    neighborhoods: list[dict[str, Any]],
+    focus_problem_ids: Sequence[str],
+    template: str,
+    allowed_actions: list[str],
+    stage_guidance_text: str,
+) -> tuple[dict[str, Any], str]:
+    """Render one relation work unit so batching measures the actual provider input."""
+
+    import json as _json
+
+    payload = _relation_review_payload(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=set(focus_problem_ids),
+    )
+    prompt = (
+        template.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+        .replace(
+            "{{ALLOWED_ACTIONS}}",
+            _json.dumps(allowed_actions, ensure_ascii=False, indent=2),
+        )
+        .replace(
+            "{{NEIGHBORHOODS_JSON}}",
+            _json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+    )
+    return payload, prompt
+
+
+def _relation_review_prompt_batches(
+    *,
+    relation_items: list[dict[str, Any]],
+    neighborhoods: list[dict[str, Any]],
+    focus_problem_ids: list[str],
+    template: str,
+    allowed_actions: list[str],
+    stage_guidance_text: str,
+    max_foci: int = _PROBLEM_RELATION_REVIEW_MAX_FOCI,
+    max_prompt_chars: int = _PROBLEM_RELATION_REVIEW_MAX_PROMPT_CHARS,
+) -> list[list[str]]:
+    """Partition every focus exactly once under count and rendered-prompt budgets."""
+
+    if max_prompt_chars <= 0:
+        raise ValueError("problem_mining_relation_review_max_prompt_chars_must_be_positive")
+    batches: list[list[str]] = []
+    for count_bounded in _relation_review_focus_batches(
+        focus_problem_ids,
+        max_foci=max_foci,
+    ):
+        current: list[str] = []
+        for focus_id in count_bounded:
+            candidate = [*current, focus_id]
+            _payload, prompt = _render_relation_review_prompt(
+                relation_items=relation_items,
+                neighborhoods=neighborhoods,
+                focus_problem_ids=candidate,
+                template=template,
+                allowed_actions=allowed_actions,
+                stage_guidance_text=stage_guidance_text,
+            )
+            if current and len(prompt) > max_prompt_chars:
+                batches.append(current)
+                current = [focus_id]
+            else:
+                current = candidate
+        if current:
+            batches.append(current)
+    return batches
+
+
 def _failed_relation_review_batch_decisions(
     focus_problem_ids: list[str],
     *,
@@ -4400,6 +5416,227 @@ def _failed_relation_review_batch_count(batches: Sequence[Mapping[str, Any]]) ->
             "failed_partial_provisional_keep_separate",
         }
     )
+
+
+def _canonical_candidate_represents_work_unit(
+    candidate: Mapping[str, Any],
+    *,
+    work_unit_problem_ids: set[str],
+) -> bool:
+    """Return whether a canonical result descends from an active input work unit."""
+
+    represented_problem_ids = {
+        problem_id
+        for problem_id in [
+            _coerce_string(candidate.get("problem_id")),
+            *_coerce_string_list(candidate.get("case_member_problem_ids")),
+            _coerce_string(candidate.get("split_parent_problem_id")),
+            *_coerce_string_list(candidate.get("split_parent_problem_ids")),
+        ]
+        if problem_id is not None
+    }
+    return bool(represented_problem_ids.intersection(work_unit_problem_ids))
+
+
+def _persisted_identity_split_return(
+    candidate: Mapping[str, Any],
+    *,
+    atoms_by_id: Mapping[str, Mapping[str, Any]],
+    case_registry: Mapping[str, Any],
+    historical_records_by_case: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return one split group to the durable case identified by its evidence.
+
+    A newly aggregated operational candidate can span multiple known case signatures.
+    Stage 1 is allowed to propose one broad record and relation review can correctly
+    split it.  Those split groups are identity resolution, not novel child cases: when
+    every atom in a group maps unambiguously to the same pending durable candidate,
+    retain that case and attach the current evidence to it.
+    """
+
+    split_from_case_id = _coerce_string(candidate.get("split_from_case_id"))
+    evidence_atom_ids = _coerce_string_list(candidate.get("evidence_atom_ids"))
+    candidate_case_ids = set(
+        _coerce_string_list(candidate.get("case_identity_candidate_ids"))
+    )
+    if (
+        split_from_case_id is None
+        or not evidence_atom_ids
+        or len(candidate_case_ids) < 2
+    ):
+        return None
+
+    primary_raw = case_registry.get("atom_id_to_case_id")
+    primary = primary_raw if isinstance(primary_raw, Mapping) else {}
+    memberships_raw = case_registry.get("atom_id_to_case_ids")
+    memberships = memberships_raw if isinstance(memberships_raw, Mapping) else {}
+    signatures_raw = case_registry.get("operational_signature_to_case_id")
+    signatures = signatures_raw if isinstance(signatures_raw, Mapping) else {}
+
+    resolved_by_atom: dict[str, str] = {}
+    for atom_id in evidence_atom_ids:
+        atom = atoms_by_id.get(atom_id)
+        if not isinstance(atom, Mapping):
+            return None
+        mapped_case_ids = set(_coerce_string_list(memberships.get(atom_id)))
+        primary_case_id = _coerce_string(primary.get(atom_id))
+        if primary_case_id is not None:
+            mapped_case_ids.add(primary_case_id)
+        if _coerce_string(atom.get("source")) == "operational_failure_candidate":
+            signature = _coerce_string(atom.get("operational_candidate_signature"))
+            signature_case_id = _coerce_string(signatures.get(signature or ""))
+            if signature_case_id is not None:
+                mapped_case_ids.add(signature_case_id)
+        mapped_case_ids.intersection_update(candidate_case_ids)
+        if len(mapped_case_ids) != 1:
+            return None
+        resolved_by_atom[atom_id] = next(iter(mapped_case_ids))
+
+    resolved_case_ids = sorted(set(resolved_by_atom.values()))
+    if len(resolved_case_ids) != 1:
+        return None
+    resolved_case_id = resolved_case_ids[0]
+    historical = historical_records_by_case.get(resolved_case_id)
+    if not isinstance(historical, Mapping):
+        return None
+
+    returned = deepcopy(dict(historical))
+    derived_roles = {"research", "implementation", "verification"}
+    derived_atom_ids = [
+        atom_id
+        for atom_id in evidence_atom_ids
+        if _coerce_string((atoms_by_id.get(atom_id) or {}).get("evidence_role"))
+        in derived_roles
+    ]
+    returned["evidence_atom_ids"] = evidence_atom_ids
+    returned["derived_evidence_atom_ids"] = derived_atom_ids
+    returned["source_evidence_atom_ids"] = [
+        atom_id for atom_id in evidence_atom_ids if atom_id not in set(derived_atom_ids)
+    ]
+    returned["case_identity_status"] = "resolved"
+    returned.pop("case_identity_candidate_ids", None)
+    returned.pop("provisional_same_cause_group", None)
+    returned.pop("provisional_same_cause_integrity_errors", None)
+    relation_actions_raw = candidate.get("case_relation_actions")
+    relation_actions = (
+        [dict(item) for item in relation_actions_raw if isinstance(item, Mapping)]
+        if isinstance(relation_actions_raw, list)
+        else []
+    )
+    if relation_actions:
+        returned["case_relation_actions"] = relation_actions
+    returned["_relation_active_split_return"] = True
+
+    audit: dict[str, Any] = {
+        "schema_version": 1,
+        "return_kind": "persisted_case_identity_partition",
+        "split_from_case_id": split_from_case_id,
+        "returned_child_case_id": _coerce_string(candidate.get("case_id")),
+        "returned_child_problem_id": _coerce_string(candidate.get("problem_id")),
+        "resolved_case_id": resolved_case_id,
+        "evidence_atom_ids": evidence_atom_ids,
+        "resolved_case_id_by_atom_id": resolved_by_atom,
+    }
+    audit["content_sha256"] = sha256(
+        json.dumps(
+            audit,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return returned, audit
+
+
+def _derived_split_return_to_parent_lineage(
+    candidate: Mapping[str, Any],
+    *,
+    atoms_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Describe a derived-only split group that must update existing parent cases."""
+
+    split_from_case_id = _coerce_string(candidate.get("split_from_case_id"))
+    evidence_atom_ids = _coerce_string_list(candidate.get("evidence_atom_ids"))
+    if split_from_case_id is None or not evidence_atom_ids:
+        return None
+    atoms = [atoms_by_id.get(atom_id) for atom_id in evidence_atom_ids]
+    if any(not isinstance(atom, Mapping) for atom in atoms):
+        return None
+    derived_roles = {"research", "implementation", "verification"}
+    if any(_coerce_string(atom.get("evidence_role")) not in derived_roles for atom in atoms):
+        return None
+    if any(_coerce_string(atom.get("disposition")) == "novel_case" for atom in atoms):
+        return None
+    parent_case_ids = sorted(
+        {
+            parent_case_id
+            for atom in atoms
+            for parent_case_id in [_coerce_string(atom.get("parent_case_id"))]
+            if parent_case_id is not None
+        }
+    )
+    if len(parent_case_ids) == 0 or any(
+        _coerce_string(atom.get("parent_case_id")) is None for atom in atoms
+    ):
+        return None
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "return_kind": "derived_evidence_parent_lineage",
+        "split_from_case_id": split_from_case_id,
+        "split_parent_problem_ids": list(
+            dict.fromkeys(
+                [
+                    *_coerce_string_list(candidate.get("split_parent_problem_ids")),
+                    *(
+                        [_coerce_string(candidate.get("split_parent_problem_id"))]
+                        if _coerce_string(candidate.get("split_parent_problem_id")) is not None
+                        else []
+                    ),
+                ]
+            )
+        ),
+        "returned_child_case_id": _coerce_string(candidate.get("case_id")),
+        "returned_child_problem_id": _coerce_string(candidate.get("problem_id")),
+        "evidence_atom_ids": evidence_atom_ids,
+        "parent_case_ids": parent_case_ids,
+    }
+    record["content_sha256"] = sha256(
+        json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return record
+
+
+def _durable_collapse_problem_pairs(
+    relation_items: Sequence[Mapping[str, Any]],
+    verified_relation_edges: set[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Project runner-verified case edges into model-visible problem identities."""
+
+    problem_ids_by_case: dict[str, set[str]] = {}
+    for item in relation_items:
+        case_id = _coerce_string(item.get("case_id"))
+        if case_id is None:
+            continue
+        problem_ids_by_case.setdefault(case_id, set()).update(
+            problem_id
+            for problem_id in [
+                _coerce_string(item.get("problem_id")),
+                *_coerce_string_list(item.get("case_member_problem_ids")),
+            ]
+            if problem_id is not None
+        )
+    return {
+        tuple(sorted((left_problem_id, right_problem_id)))
+        for left_case_id, right_case_id in verified_relation_edges
+        for left_problem_id in problem_ids_by_case.get(left_case_id, set())
+        for right_problem_id in problem_ids_by_case.get(right_case_id, set())
+        if left_problem_id != right_problem_id
+    }
 
 
 def _write_relation_review_checkpoint(
@@ -4446,6 +5683,8 @@ def _run_relation_review_batches(
     model: str | None,
     cfg: RunnerConfig,
     max_foci: int = _PROBLEM_RELATION_REVIEW_MAX_FOCI,
+    max_prompt_chars: int = _PROBLEM_RELATION_REVIEW_MAX_PROMPT_CHARS,
+    durable_collapse_problem_pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run bounded relation batches and degrade only a failed batch to provisional review."""
 
@@ -4454,14 +5693,26 @@ def _run_relation_review_batches(
     decisions: list[dict[str, Any]] = []
     batch_meta: list[dict[str, Any]] = []
     for batch_index, batch_focus_ids in enumerate(
-        _relation_review_focus_batches(focus_problem_ids, max_foci=max_foci),
+        _relation_review_prompt_batches(
+            relation_items=relation_items,
+            neighborhoods=neighborhoods,
+            focus_problem_ids=focus_problem_ids,
+            template=template,
+            allowed_actions=allowed_actions,
+            stage_guidance_text=stage_guidance_text,
+            max_foci=max_foci,
+            max_prompt_chars=max_prompt_chars,
+        ),
         start=1,
     ):
         batch_tag = f"{tag}_batch_{batch_index:03d}"
-        batch_payload = _relation_review_payload(
+        batch_payload, prompt = _render_relation_review_prompt(
             relation_items=relation_items,
             neighborhoods=neighborhoods,
-            focus_problem_ids=set(batch_focus_ids),
+            focus_problem_ids=batch_focus_ids,
+            template=template,
+            allowed_actions=allowed_actions,
+            stage_guidance_text=stage_guidance_text,
         )
         known_problem_ids = {
             problem_id
@@ -4481,21 +5732,43 @@ def _run_relation_review_batches(
             )
             if isinstance(atom_id, str) and atom_id.strip()
         }
-        prompt = (
-            template.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
-            .replace(
-                "{{ALLOWED_ACTIONS}}",
-                _json.dumps(allowed_actions, ensure_ascii=False, indent=2),
-            )
-            .replace(
-                "{{NEIGHBORHOODS_JSON}}",
-                _json.dumps(batch_payload, ensure_ascii=False, indent=2),
-            )
-        )
+        evidence_atom_ids_by_problem_id = {
+            problem_id: {
+                atom_id
+                for atom_id in (
+                    item.get("evidence_atom_ids")
+                    if isinstance(item.get("evidence_atom_ids"), list)
+                    else []
+                )
+                if isinstance(atom_id, str) and atom_id.strip()
+            }
+            for item in batch_payload.get("case_index", [])
+            if isinstance(item, dict)
+            for problem_id in [_coerce_string(item.get("problem_id"))]
+            if problem_id is not None
+        }
         prompt_path = review_dir / f"{batch_tag}.prompt.txt"
         response_path = review_dir / f"{batch_tag}.response.txt"
+        provisional_path = review_dir / f"{batch_tag}.provisional.json"
         prompt_path.write_text(prompt, encoding="utf-8")
-        workspace_dir = review_dir / f"{batch_tag}.workspace"
+        # Keep the process working directory shallow.  Relation tags repeat the
+        # already descriptive artifact path and can push an otherwise valid Windows
+        # cwd to MAX_PATH, where process creation reports WinError 267 before Codex
+        # can even verify the host subscription.  Prompt, response, auth, and
+        # invocation artifacts remain in ``review_dir``; only the empty agent cwd is
+        # placed beside the stage artifact tree under a content-stable short name.
+        workspace_base = review_dir.parent
+        if (
+            workspace_base.name == "problem_mining"
+            and workspace_base.parent.name == "backlog_artifacts"
+        ):
+            workspace_base = workspace_base.parent.parent
+        workspace_token = sha256(
+            (str(review_dir.resolve()) + "\n" + batch_tag).encode("utf-8")
+        ).hexdigest()[:16]
+        workspace_dir = (
+            workspace_base / "_relation_workspaces" / f"workspace_{workspace_token}"
+        )
         workspace_dir.mkdir(parents=True, exist_ok=True)
         continuity_key = sha256(
             _json.dumps(
@@ -4515,6 +5788,12 @@ def _run_relation_review_batches(
             "focus_ids": list(batch_focus_ids),
             "focus_count": len(batch_focus_ids),
             "case_index_count": batch_payload["case_index_count"],
+            "candidate_frontier": deepcopy(batch_payload["case_index"]),
+            "candidate_frontier_sha256": _relation_candidate_frontier_sha256(
+                batch_payload["case_index"]
+            ),
+            "prompt_char_count": len(prompt),
+            "prompt_char_budget": max_prompt_chars,
             "prompt_path": str(prompt_path),
             "response_path": str(response_path),
         }
@@ -4529,7 +5808,18 @@ def _run_relation_review_batches(
             _batch_focus_ids: tuple[str, ...] = tuple(batch_focus_ids),
             _known_problem_ids: frozenset[str] = frozenset(known_problem_ids),
             _known_evidence_atom_ids: frozenset[str] = frozenset(known_evidence_atom_ids),
+            _evidence_atom_ids_by_problem_id: tuple[
+                tuple[str, frozenset[str]], ...
+            ] = tuple(
+                (problem_id, frozenset(atom_ids))
+                for problem_id, atom_ids in sorted(
+                    evidence_atom_ids_by_problem_id.items()
+                )
+            ),
             _continuity_key: str = continuity_key,
+            _durable_collapse_problem_pairs: frozenset[tuple[str, str]] = frozenset(
+                durable_collapse_problem_pairs or set()
+            ),
         ) -> CorrectionObservation[dict[str, Any]]:
             transport_error: str | None = None
             attempt_started = _time.monotonic()
@@ -4582,6 +5872,15 @@ def _run_relation_review_batches(
                     focus_problem_ids=set(_batch_focus_ids),
                     known_problem_ids=set(_known_problem_ids),
                     known_evidence_atom_ids=set(_known_evidence_atom_ids),
+                    evidence_atom_ids_by_problem_id={
+                        problem_id: set(atom_ids)
+                        for problem_id, atom_ids in (
+                            _evidence_atom_ids_by_problem_id
+                        )
+                    },
+                    durable_collapse_problem_pairs=set(
+                        _durable_collapse_problem_pairs
+                    ),
                     allowed_actions=set(allowed_actions),
                 )
             except Exception as exc:  # noqa: BLE001 - exact validator feedback
@@ -4621,6 +5920,11 @@ def _run_relation_review_batches(
 
         retained_observation: CorrectionObservation[dict[str, Any]] | None = None
         try:
+            if len(prompt) > max_prompt_chars:
+                raise ValueError(
+                    "problem_mining_relation_review_single_focus_prompt_exceeds_max_chars:"
+                    f"actual={len(prompt)}:max={max_prompt_chars}"
+                )
             initial = relation_attempt(
                 attempt_prompt=prompt,
                 attempt_tag=batch_tag,
@@ -4813,19 +6117,23 @@ def _run_relation_review_batches(
             meta["response_path"] = retained.payload.get("response_path")
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
-            if not response_path.exists():
-                response_path.write_text(
-                    _json.dumps(
-                        {
-                            "status": "failed_provisional_keep_separate",
-                            "error": error,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+            provisional_path.write_text(
+                _json.dumps(
+                    {
+                        "status": "failed_provisional_keep_separate",
+                        "error": error,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
                 )
+                + "\n",
+                encoding="utf-8",
+            )
+            # The model invocation owns ``*.response.txt``.  A failed invocation may
+            # legitimately leave that path absent; writing controller fallback bytes to
+            # it after the invocation manifest is sealed corrupts otherwise valid failure
+            # telemetry.  Keep the conservative controller disposition separate.
+            meta["response_path"] = str(provisional_path)
             partial: list[dict[str, Any]] = []
             if retained_observation is not None:
                 candidates = retained_observation.payload.get("decisions")
@@ -4835,6 +6143,7 @@ def _run_relation_review_batches(
                     focus_problem_ids=set(batch_focus_ids),
                     known_problem_ids=known_problem_ids,
                     known_evidence_atom_ids=known_evidence_atom_ids,
+                    evidence_atom_ids_by_problem_id=evidence_atom_ids_by_problem_id,
                     allowed_actions=set(allowed_actions),
                 )
                 partial = [
@@ -4997,6 +6306,498 @@ def _persist_canonical_relation_receipts(
     return relation_receipt_refs, immutable_receipt_path
 
 
+def _bind_problem_mining_relation_split_receipts(
+    *,
+    canonical_records: list[dict[str, Any]],
+    registry: dict[str, Any],
+    relation_decisions: Sequence[Mapping[str, Any]],
+    relation_receipt_path: Path,
+) -> None:
+    """Bind Stage-1 split children to the immutable relation response snapshot."""
+
+    receipt_bytes = relation_receipt_path.read_bytes()
+    receipt_raw = json.loads(receipt_bytes.decode("utf-8"))
+    if not isinstance(receipt_raw, Mapping):
+        raise ValueError("problem_mining_relation_split_receipt_invalid")
+    receipt = validate_case_relation_receipt(receipt_raw)
+    if receipt.get("stage") != "problem_mining":
+        raise ValueError("problem_mining_relation_split_receipt_stage_invalid")
+    receipt_sha256 = sha256(receipt_bytes).hexdigest()
+    registry_cases_raw = registry.get("cases")
+    registry_cases = registry_cases_raw if isinstance(registry_cases_raw, dict) else {}
+
+    for record in canonical_records:
+        parent_case_id = _coerce_string(record.get("split_from_case_id"))
+        parent_problem_id = _coerce_string(record.get("split_parent_problem_id"))
+        child_case_id = _coerce_string(record.get("case_id"))
+        child_problem_id = _coerce_string(record.get("problem_id"))
+        if parent_case_id is None and parent_problem_id is None:
+            continue
+        evidence_atom_ids = sorted(_coerce_string_list(record.get("evidence_atom_ids")))
+        occurrence_atom_ids = sorted(
+            _coerce_string_list(record.get("source_evidence_atom_ids"))
+        )
+        if (
+            parent_case_id is None
+            or parent_problem_id is None
+            or child_case_id is None
+            or child_problem_id is None
+            or not evidence_atom_ids
+            or not occurrence_atom_ids
+            or not set(occurrence_atom_ids).issubset(evidence_atom_ids)
+        ):
+            raise ValueError(
+                "problem_mining_relation_split_child_binding_invalid:"
+                + (child_problem_id or "unknown")
+            )
+
+        matches: list[tuple[int, int, Mapping[str, Any]]] = []
+        for decision_index, decision in enumerate(relation_decisions):
+            if (
+                decision.get("action") != "split"
+                or _coerce_string(decision.get("focus_id")) != parent_problem_id
+            ):
+                continue
+            groups_raw = decision.get("split_groups")
+            groups = groups_raw if isinstance(groups_raw, list) else []
+            for group_index, group in enumerate(groups):
+                if not isinstance(group, Mapping):
+                    continue
+                if sorted(_coerce_string_list(group.get("evidence_atom_ids"))) == (
+                    evidence_atom_ids
+                ):
+                    matches.append((decision_index, group_index, decision))
+        if len(matches) != 1:
+            raise ValueError(
+                "problem_mining_relation_split_decision_binding_invalid:"
+                + child_problem_id
+            )
+        decision_index, split_group_index, decision = matches[0]
+        split_ref: dict[str, Any] = {
+            "schema_version": _PROBLEM_MINING_RELATION_SPLIT_RECEIPT_SCHEMA_VERSION,
+            "producer": "usertest_backlog.problem_mining",
+            "receipt_kind": _PROBLEM_MINING_RELATION_SPLIT_RECEIPT_KIND,
+            "relation_receipt_path": str(relation_receipt_path.resolve()),
+            "relation_receipt_sha256": receipt_sha256,
+            "relation_receipt_content_sha256": receipt["content_sha256"],
+            "decision_index": decision_index,
+            "split_group_index": split_group_index,
+            "decision_sha256": sha256(
+                json.dumps(
+                    decision,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "parent_case_id": parent_case_id,
+            "parent_problem_id": parent_problem_id,
+            "child_case_id": child_case_id,
+            "child_problem_id": child_problem_id,
+            "evidence_atom_ids": evidence_atom_ids,
+            "occurrence_evidence_atom_ids": occurrence_atom_ids,
+        }
+        split_ref["content_sha256"] = sha256(
+            json.dumps(
+                split_ref,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        record["occurrence_evidence_atom_ids"] = occurrence_atom_ids
+        record["problem_mining_relation_split_receipt"] = split_ref
+        registry_entry = registry_cases.get(child_case_id)
+        if not isinstance(registry_entry, dict):
+            raise ValueError(
+                "problem_mining_relation_split_registry_child_missing:" + child_case_id
+            )
+        registry_entry["occurrence_evidence_atom_ids"] = occurrence_atom_ids
+        registry_entry["problem_mining_relation_split_receipt"] = deepcopy(split_ref)
+
+
+def _case_evidence_retraction_sha256(value: Any) -> str:
+    """Return the canonical hash used by embedded case-evidence receipts."""
+
+    import json as _json
+
+    return sha256(
+        _json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _required_case_evidence_retraction_sha256(value: Any, *, field: str) -> str:
+    clean = _coerce_string(value)
+    if (
+        clean is None
+        or len(clean) != 64
+        or any(character not in "0123456789abcdef" for character in clean.casefold())
+    ):
+        raise ValueError(
+            f"problem_mining_case_evidence_retraction_{field}_invalid"
+        )
+    return clean.casefold()
+
+
+def _atom_case_memberships(atom: Mapping[str, Any]) -> set[str]:
+    memberships = set(_coerce_string_list(atom.get("supporting_case_ids")))
+    case_id = _coerce_string(atom.get("case_id"))
+    if case_id is not None:
+        memberships.add(case_id)
+    return memberships
+
+
+def _apply_stage1_case_evidence_retractions(
+    *,
+    registry: Mapping[str, Any],
+    prior_atoms: Sequence[Mapping[str, Any]],
+    updated_atoms: Sequence[Mapping[str, Any]],
+    correction_meta: Mapping[str, Any] | None,
+    source_evidence_receipt_ref: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Retract durable case membership disproved by an author correction.
+
+    ``build_case_registry`` deliberately unions prior evidence membership so ordinary
+    reruns cannot erase history accidentally.  A verified same-author Stage-1
+    correction is the narrow exception: a decided non-support result must remove the
+    old edge or the registry will restore it on the next normalization cycle.  The
+    exception is provenance-bound, idempotent, and keeps the inactive case node for
+    audit history.
+    """
+
+    updated_registry = deepcopy(dict(registry))
+    if not isinstance(correction_meta, Mapping):
+        return updated_registry, []
+
+    target_atom_ids = set(_coerce_string_list(correction_meta.get("target_atom_ids")))
+    replaced_atom_ids = set(
+        _coerce_string_list(correction_meta.get("replaced_assignment_atom_ids"))
+    )
+    if not target_atom_ids:
+        return updated_registry, []
+
+    prior_by_id = {
+        atom_id: atom
+        for atom in prior_atoms
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
+    updated_by_id = {
+        atom_id: atom
+        for atom in updated_atoms
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
+    atom_memberships_raw = updated_registry.get("atom_id_to_case_ids")
+    atom_memberships = (
+        atom_memberships_raw if isinstance(atom_memberships_raw, Mapping) else {}
+    )
+    atom_primary_raw = updated_registry.get("atom_id_to_case_id")
+    atom_primary = atom_primary_raw if isinstance(atom_primary_raw, Mapping) else {}
+
+    retracted_by_case: dict[str, list[str]] = {}
+    receipt_sha256_by_atom_id: dict[str, str] = {}
+    for atom_id in sorted(target_atom_ids):
+        if atom_id not in replaced_atom_ids:
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_atom_not_in_replaced_assignment:"
+                + atom_id
+            )
+        prior_atom = prior_by_id.get(atom_id)
+        updated_atom = updated_by_id.get(atom_id)
+        if prior_atom is None or updated_atom is None:
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_atom_missing:" + atom_id
+            )
+        prior_memberships = _atom_case_memberships(prior_atom)
+        prior_memberships.update(
+            _coerce_string_list(atom_memberships.get(atom_id))
+        )
+        primary_case_id = _coerce_string(atom_primary.get(atom_id))
+        if primary_case_id is not None:
+            prior_memberships.add(primary_case_id)
+
+        disposition = _coerce_string(updated_atom.get("disposition"))
+        current_memberships = (
+            _atom_case_memberships(updated_atom)
+            if disposition == "supports_case"
+            else set()
+        )
+        removed_memberships = sorted(prior_memberships - current_memberships)
+        if not removed_memberships:
+            continue
+        if disposition == "supports_case":
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_requires_non_support:"
+                + atom_id
+            )
+        receipt_errors = atom_disposition_receipt_errors(
+            updated_atom,
+            require_decided=True,
+        )
+        if receipt_errors:
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_disposition_receipt_invalid:"
+                + atom_id
+                + ":"
+                + ",".join(receipt_errors)
+            )
+        disposition_receipt_raw = updated_atom.get("disposition_receipt")
+        if not isinstance(disposition_receipt_raw, Mapping):
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_disposition_receipt_missing:"
+                + atom_id
+            )
+        if (
+            _coerce_string(disposition_receipt_raw.get("source"))
+            != "problem_mining_evidence_partition"
+        ):
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_disposition_source_invalid:"
+                + atom_id
+            )
+        receipt_sha256_by_atom_id[atom_id] = (
+            _required_case_evidence_retraction_sha256(
+                disposition_receipt_raw.get("receipt_sha256"),
+                field="disposition_receipt_sha256",
+            )
+        )
+        for case_id in removed_memberships:
+            retracted_by_case.setdefault(case_id, []).append(atom_id)
+
+    if not retracted_by_case:
+        return updated_registry, []
+
+    feedback_sha256 = _required_case_evidence_retraction_sha256(
+        correction_meta.get("feedback_sha256"),
+        field="feedback_sha256",
+    )
+    attempt_raw = correction_meta.get("attempt_record")
+    attempt = dict(attempt_raw) if isinstance(attempt_raw, Mapping) else {}
+    artifacts_raw = attempt.get("artifacts")
+    artifacts = dict(artifacts_raw) if isinstance(artifacts_raw, Mapping) else {}
+    response_raw = artifacts.get("response")
+    response_ref = dict(response_raw) if isinstance(response_raw, Mapping) else {}
+    corrected_response_sha256 = _required_case_evidence_retraction_sha256(
+        response_ref.get("sha256"),
+        field="corrected_author_response_sha256",
+    )
+    workspace_manifest_sha256 = _required_case_evidence_retraction_sha256(
+        attempt.get("workspace_manifest_sha256"),
+        field="author_workspace_manifest_sha256",
+    )
+    source_ref = (
+        dict(source_evidence_receipt_ref)
+        if isinstance(source_evidence_receipt_ref, Mapping)
+        else {}
+    )
+    source_file_sha256 = _required_case_evidence_retraction_sha256(
+        source_ref.get("file_sha256"),
+        field="source_evidence_receipt_file_sha256",
+    )
+    source_receipt_sha256 = _required_case_evidence_retraction_sha256(
+        source_ref.get("receipt_sha256"),
+        field="source_evidence_receipt_sha256",
+    )
+
+    cases_raw = updated_registry.get("cases")
+    if not isinstance(cases_raw, dict):
+        raise ValueError("problem_mining_case_evidence_retraction_cases_invalid")
+    cases = cases_raw
+    emitted_receipts: list[dict[str, Any]] = []
+
+    def remove_case_from_atom_maps(
+        case_id: str,
+        *,
+        atom_ids: set[str] | None,
+    ) -> None:
+        membership_map_raw = updated_registry.get("atom_id_to_case_ids")
+        membership_map = (
+            membership_map_raw if isinstance(membership_map_raw, dict) else {}
+        )
+        primary_map_raw = updated_registry.get("atom_id_to_case_id")
+        primary_map = primary_map_raw if isinstance(primary_map_raw, dict) else {}
+        affected_ids = (
+            set(membership_map) | set(primary_map)
+            if atom_ids is None
+            else set(atom_ids)
+        )
+        for atom_id in sorted(affected_ids):
+            remaining = [
+                member_case_id
+                for member_case_id in _coerce_string_list(membership_map.get(atom_id))
+                if member_case_id != case_id
+            ]
+            if remaining:
+                membership_map[atom_id] = remaining
+            else:
+                membership_map.pop(atom_id, None)
+            if _coerce_string(primary_map.get(atom_id)) == case_id:
+                if remaining:
+                    primary_map[atom_id] = remaining[0]
+                else:
+                    primary_map.pop(atom_id, None)
+
+    for case_id, raw_atom_ids in sorted(retracted_by_case.items()):
+        entry_raw = cases.get(case_id)
+        if not isinstance(entry_raw, Mapping):
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_case_missing:" + case_id
+            )
+        entry = deepcopy(dict(entry_raw))
+        atom_ids = sorted(set(raw_atom_ids))
+        existing_raw = entry.get("evidence_retraction_receipts")
+        if existing_raw is None:
+            existing_receipts: list[dict[str, Any]] = []
+        elif isinstance(existing_raw, list):
+            existing_receipts = []
+            for item in existing_raw:
+                if not isinstance(item, Mapping):
+                    raise ValueError(
+                        "problem_mining_case_evidence_retraction_receipt_invalid:"
+                        + case_id
+                    )
+                existing = deepcopy(dict(item))
+                supplied_hash = _coerce_string(existing.get("content_sha256"))
+                expected_hash = _case_evidence_retraction_sha256(
+                    {
+                        key: value
+                        for key, value in existing.items()
+                        if key != "content_sha256"
+                    }
+                )
+                if supplied_hash is None or supplied_hash.casefold() != expected_hash:
+                    raise ValueError(
+                        "problem_mining_case_evidence_retraction_receipt_hash_mismatch:"
+                        + case_id
+                    )
+                existing_receipts.append(existing)
+        else:
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_receipts_invalid:" + case_id
+            )
+
+        matching_receipt = next(
+            (
+                receipt
+                for receipt in existing_receipts
+                if receipt.get("receipt_kind") == "case_evidence_retraction"
+                and _coerce_string(receipt.get("case_id")) == case_id
+                and _coerce_string(receipt.get("qualification_feedback_sha256"))
+                == feedback_sha256
+                and sorted(_coerce_string_list(receipt.get("retracted_atom_ids")))
+                == atom_ids
+            ),
+            None,
+        )
+        if matching_receipt is not None:
+            emitted_receipts.append(deepcopy(matching_receipt))
+            continue
+
+        for field in (
+            "evidence_atom_ids",
+            "source_evidence_atom_ids",
+            "derived_evidence_atom_ids",
+            "occurrence_evidence_atom_ids",
+        ):
+            entry[field] = [
+                atom_id
+                for atom_id in _coerce_string_list(entry.get(field))
+                if atom_id not in set(atom_ids)
+            ]
+        remaining_source_ids = sorted(
+            set(_coerce_string_list(entry.get("source_evidence_atom_ids")))
+        )
+        hashes_raw = entry.get("source_evidence_atom_sha256_by_id")
+        hashes = dict(hashes_raw) if isinstance(hashes_raw, Mapping) else {}
+        remaining_hashes = {
+            atom_id: str(hashes[atom_id]).casefold()
+            for atom_id in remaining_source_ids
+            if atom_id in hashes
+            and isinstance(hashes[atom_id], str)
+            and len(str(hashes[atom_id])) == 64
+            and all(
+                character in "0123456789abcdef"
+                for character in str(hashes[atom_id]).casefold()
+            )
+        }
+        missing_source_ids = [
+            atom_id for atom_id in remaining_source_ids if atom_id not in remaining_hashes
+        ]
+        source_snapshot_complete = bool(remaining_source_ids) and not missing_source_ids
+        entry["source_evidence_atom_sha256_by_id"] = remaining_hashes
+        entry["source_evidence_snapshot_missing_atom_ids"] = missing_source_ids
+        entry["source_evidence_snapshot_complete"] = source_snapshot_complete
+        entry["source_evidence_snapshot_sha256"] = (
+            source_evidence_snapshot_sha256(remaining_hashes)
+            if source_snapshot_complete
+            else None
+        )
+
+        try:
+            prior_revision = max(0, int(entry.get("case_revision") or 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "problem_mining_case_evidence_retraction_case_revision_invalid:"
+                + case_id
+            ) from exc
+        prior_state = _coerce_string(entry.get("state")) or "active"
+        resulting_revision = max(1, prior_revision + 1)
+        entry["case_revision"] = resulting_revision
+        fully_retracted = not remaining_source_ids
+        if fully_retracted:
+            entry["state"] = "superseded"
+            entry["superseded_reason"] = "qualification_evidence_retracted"
+            remove_case_from_atom_maps(case_id, atom_ids=None)
+            for map_name in (
+                "problem_id_to_case_id",
+                "ticket_fingerprint_to_case_id",
+                "operational_signature_to_case_id",
+            ):
+                mapping_raw = updated_registry.get(map_name)
+                if not isinstance(mapping_raw, dict):
+                    continue
+                for key, mapped_case_id in list(mapping_raw.items()):
+                    if _coerce_string(mapped_case_id) == case_id:
+                        mapping_raw.pop(key, None)
+        else:
+            remove_case_from_atom_maps(case_id, atom_ids=set(atom_ids))
+
+        receipt: dict[str, Any] = {
+            "schema_version": 1,
+            "producer": "usertest_backlog.problem_mining",
+            "receipt_kind": "case_evidence_retraction",
+            "case_id": case_id,
+            "prior_case_revision": prior_revision,
+            "prior_state": prior_state,
+            "retracted_atom_ids": atom_ids,
+            "remaining_source_evidence_atom_ids": remaining_source_ids,
+            "disposition_receipt_sha256_by_atom_id": {
+                atom_id: receipt_sha256_by_atom_id[atom_id]
+                for atom_id in atom_ids
+            },
+            "qualification_feedback_sha256": feedback_sha256,
+            "corrected_author_response_sha256": corrected_response_sha256,
+            "author_workspace_manifest_sha256": workspace_manifest_sha256,
+            "source_problem_mining_evidence_receipt_file_sha256": source_file_sha256,
+            "source_problem_mining_evidence_receipt_sha256": source_receipt_sha256,
+            "resulting_state": _coerce_string(entry.get("state")) or prior_state,
+            "resulting_case_revision": resulting_revision,
+        }
+        receipt["content_sha256"] = _case_evidence_retraction_sha256(receipt)
+        existing_receipts.append(receipt)
+        entry["evidence_retraction_receipts"] = existing_receipts
+        cases[case_id] = entry
+        emitted_receipts.append(deepcopy(receipt))
+
+    return updated_registry, emitted_receipts
+
+
 def _run_problem_case_relation_review(
     *,
     stage_doc: dict[str, Any],
@@ -5078,26 +6879,10 @@ def _run_problem_case_relation_review(
                 "runner_verified_causal_signature_v1"
             )
         historical_context = historical_context_by_case.get(case_id or "")
-        historical_provisional = (
-            historical_context.get("provisional_same_cause_group")
-            if isinstance(historical_context, Mapping)
-            else None
+        _restore_historical_provisional_relation_context(
+            relation_item,
+            historical_context,
         )
-        if isinstance(historical_provisional, Mapping):
-            relation_item["provisional_same_cause_group"] = deepcopy(
-                dict(historical_provisional)
-            )
-            relation_item["case_identity_status"] = historical_context.get(
-                "case_identity_status"
-            )
-            relation_item["case_identity_candidate_ids"] = _coerce_string_list(
-                historical_context.get("case_identity_candidate_ids")
-            )
-            integrity_errors = _coerce_string_list(
-                historical_context.get("provisional_same_cause_integrity_errors")
-            )
-            if integrity_errors:
-                relation_item["provisional_same_cause_integrity_errors"] = integrity_errors
     represented_case_ids = {
         case_id
         for record in relation_items
@@ -5130,6 +6915,21 @@ def _run_problem_case_relation_review(
         candidate = dict(historical_case)
         candidate["_relation_candidate_only"] = True
         relation_items.append(candidate)
+
+    atoms_by_id = {
+        atom_id: atom
+        for atom in atoms
+        if isinstance(atom, Mapping)
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
+    for relation_item in relation_items:
+        relation_item.update(
+            _problem_relation_evidence_context(
+                relation_item,
+                atoms_by_id=atoms_by_id,
+            )
+        )
 
     neighborhoods = rank_stage_related_items(
         relation_items,
@@ -5206,6 +7006,10 @@ def _run_problem_case_relation_review(
             agent=agent,
             model=model,
             cfg=cfg,
+            durable_collapse_problem_pairs=_durable_collapse_problem_pairs(
+                relation_items,
+                verified_relation_edges,
+            ),
         )
 
     canonical_candidates = canonicalize_problem_cases(
@@ -5219,17 +7023,36 @@ def _run_problem_case_relation_review(
         ),
         verified_relation_edges=verified_relation_edges,
     )
-    canonical_records: list[dict[str, Any]] = []
     for candidate in canonical_candidates:
-        member_problem_ids = {
-            problem_id
-            for problem_id in [
-                _coerce_string(candidate.get("problem_id")),
-                *_coerce_string_list(candidate.get("case_member_problem_ids")),
-            ]
-            if problem_id is not None
-        }
-        if not member_problem_ids.intersection(work_unit_problem_ids):
+        _synchronize_provisional_research_unit_membership(candidate)
+    canonical_records: list[dict[str, Any]] = []
+    persisted_identity_split_returns: list[dict[str, Any]] = []
+    derived_split_returns: list[dict[str, Any]] = []
+    for candidate in canonical_candidates:
+        persisted_return = _persisted_identity_split_return(
+            candidate,
+            atoms_by_id=atoms_by_id,
+            case_registry=previous_case_registry,
+            historical_records_by_case=historical_context_by_case,
+        )
+        if persisted_return is not None:
+            candidate, return_audit = persisted_return
+            persisted_identity_split_returns.append(return_audit)
+        derived_split_return = _derived_split_return_to_parent_lineage(
+            candidate,
+            atoms_by_id=atoms_by_id,
+        )
+        if derived_split_return is not None:
+            derived_split_returns.append(derived_split_return)
+            continue
+        active_split_return = candidate.pop(
+            "_relation_active_split_return",
+            False,
+        ) is True
+        if not active_split_return and not _canonical_candidate_represents_work_unit(
+            candidate,
+            work_unit_problem_ids=work_unit_problem_ids,
+        ):
             continue
         state = _coerce_string(candidate.get("case_state")) or "active"
         if state in TERMINAL_CASE_STATES:
@@ -5387,6 +7210,25 @@ def _run_problem_case_relation_review(
         previous=previous_case_registry,
         supporting_atoms=updated_atoms,
     )
+    correction_meta_raw = stage_input_meta.get("qualification_stage1_correction")
+    source_evidence_receipt_ref_raw = stage_input_meta.get(
+        "problem_mining_evidence_receipt"
+    )
+    registry, evidence_retraction_receipts = _apply_stage1_case_evidence_retractions(
+        registry=registry,
+        prior_atoms=atoms,
+        updated_atoms=updated_atoms,
+        correction_meta=(
+            correction_meta_raw
+            if isinstance(correction_meta_raw, Mapping)
+            else None
+        ),
+        source_evidence_receipt_ref=(
+            source_evidence_receipt_ref_raw
+            if isinstance(source_evidence_receipt_ref_raw, Mapping)
+            else None
+        ),
+    )
     registry_cases_raw = registry.get("cases")
     registry_cases = registry_cases_raw if isinstance(registry_cases_raw, dict) else {}
     for candidate in canonical_records:
@@ -5423,7 +7265,12 @@ def _run_problem_case_relation_review(
         review_response_path=review_dir / f"{tag}.response.txt",
         receipt_path=relation_receipt_path,
     )
-    write_case_registry(case_registry_path, registry)
+    _bind_problem_mining_relation_split_receipts(
+        canonical_records=canonical_records,
+        registry=registry,
+        relation_decisions=decisions,
+        relation_receipt_path=immutable_relation_receipt_path,
+    )
 
     evidence_receipt_path = out_json.with_name(f"{out_json.stem}.evidence_receipt.json")
     evidence_receipt = finalize_problem_mining_evidence_receipt(
@@ -5435,6 +7282,7 @@ def _run_problem_case_relation_review(
         receipt=evidence_receipt,
         receipt_path=evidence_receipt_path,
     )
+    write_case_registry(case_registry_path, registry)
 
     updated_doc = dict(stage_doc)
     updated_doc["items"] = canonical_records
@@ -5452,9 +7300,14 @@ def _run_problem_case_relation_review(
             ),
             "relation_review_batches": relation_review_batches,
             "relation_review_decisions": decisions,
+            "relation_review_persisted_identity_split_returns": (
+                persisted_identity_split_returns
+            ),
+            "relation_review_derived_split_returns": derived_split_returns,
             "pre_relation_problem_records": problem_records,
             "atom_dispositions": atom_disposition_summary(updated_atoms),
             "problem_mining_evidence_receipt": evidence_receipt_ref,
+            "case_evidence_retraction_receipts": evidence_retraction_receipts,
         }
     )
     updated_doc["input_meta"] = input_meta
@@ -5514,6 +7367,7 @@ def continue_problem_relation_review_from_independent_feedback(
     prior_correction_attempts: list[dict[str, Any]] | None = None,
     prior_correction_errors: list[str] | None = None,
     correction_attempt_number: int = 1,
+    retained_correction_invocation_path: Path | None = None,
 ) -> dict[str, Any]:
     """Resume the exact relation-review batch and rematerialize its case graph."""
 
@@ -5572,9 +7426,25 @@ def continue_problem_relation_review_from_independent_feedback(
         }
     expected_workspace = Path(expected_workspace_raw).resolve()
     focus_ids = set(_coerce_string_list(batch.get("focus_ids")))
+    try:
+        candidate_frontier, candidate_frontier_sha256, candidate_frontier_source = (
+            _relation_candidate_frontier_for_correction(
+                batch,
+                expected_session=expected_session,
+                expected_workspace=expected_workspace,
+                focus_ids=focus_ids,
+            )
+        )
+    except ValueError as exc:
+        return {
+            "status": "repairable_paused:relation_review_candidate_frontier_invalid",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": [str(exc)],
+        }
     known_problem_ids = {
         value
-        for record in pre_relation_records
+        for record in candidate_frontier
         for value in [
             _coerce_string(record.get("problem_id")),
             *_coerce_string_list(record.get("case_member_problem_ids")),
@@ -5583,9 +7453,22 @@ def continue_problem_relation_review_from_independent_feedback(
     }
     known_evidence_ids = {
         value
-        for record in pre_relation_records
+        for record in candidate_frontier
         for value in _coerce_string_list(record.get("evidence_atom_ids"))
     }
+    evidence_ids_by_problem_id = {
+        problem_id: set(_coerce_string_list(record.get("evidence_atom_ids")))
+        for record in candidate_frontier
+        for problem_id in [
+            _coerce_string(record.get("problem_id")),
+            *_coerce_string_list(record.get("case_member_problem_ids")),
+        ]
+        if problem_id is not None
+    }
+    durable_collapse_problem_pairs = _durable_collapse_problem_pairs(
+        candidate_frontier,
+        _verified_relation_edges_from_case_registry(previous_case_registry),
+    )
     existing_decisions_raw = meta.get("relation_review_decisions")
     existing_decisions = (
         [dict(item) for item in existing_decisions_raw if isinstance(item, Mapping)]
@@ -5608,6 +7491,39 @@ def continue_problem_relation_review_from_independent_feedback(
             existing_decisions = [
                 dict(item) for item in response_loaded if isinstance(item, Mapping)
             ]
+    retained_candidate: dict[str, Any] | None = None
+    if retained_correction_invocation_path is not None:
+        try:
+            retained_candidate = _retained_relation_correction_candidate(
+                retained_correction_invocation_path,
+                expected_agent=agent,
+                expected_session=expected_session,
+                expected_workspace=expected_workspace,
+                focus_ids=focus_ids,
+                known_problem_ids=known_problem_ids,
+                known_evidence_atom_ids=known_evidence_ids,
+                evidence_atom_ids_by_problem_id=evidence_ids_by_problem_id,
+                durable_collapse_problem_pairs=durable_collapse_problem_pairs,
+            )
+        except ValueError as exc:
+            return {
+                "status": "repairable_paused:retained_relation_correction_invalid",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": [str(exc)],
+            }
+        retained_focus_decisions = [
+            dict(item)
+            for item in retained_candidate["decisions"]
+            if _coerce_string(item.get("focus_id")) in focus_ids
+        ]
+        existing_decisions = [
+            item
+            for item in existing_decisions
+            if _coerce_string(item.get("focus_id")) not in focus_ids
+        ] + retained_focus_decisions
+        if retained_candidate["validation_errors"]:
+            prior_correction_errors = list(retained_candidate["validation_errors"])
     prompt = (
         "INDEPENDENT QUALIFICATION CORRECTION FOR STAGE-1 RELATION REVIEW\n\n"
         "Continue the exact relation-review author session and workspace. Revise the "
@@ -5618,6 +7534,10 @@ def continue_problem_relation_review_from_independent_feedback(
         + json.dumps(feedback, ensure_ascii=False, indent=2, sort_keys=True)
         + "\n\nBATCH FOCUS IDS:\n"
         + json.dumps(sorted(focus_ids), ensure_ascii=False, indent=2)
+        + "\n\nCONTENT-BOUND ORIGINAL CANDIDATE/EVIDENCE FRONTIER:\n"
+        + json.dumps(candidate_frontier, ensure_ascii=False, indent=2)
+        + "\nFrontier SHA-256: "
+        + candidate_frontier_sha256
         + "\n\nCURRENT BATCH DECISIONS:\n"
         + json.dumps(
             [
@@ -5636,68 +7556,98 @@ def continue_problem_relation_review_from_independent_feedback(
         + sha256(str(feedback.get("content_sha256")).encode()).hexdigest()[:12]
         + f"_{max(1, correction_attempt_number):03d}"
     )
-    run = run_stage_prompt_json(
-        stage="problem_mining",
-        prompt=prompt,
-        out_dir=artifacts_dir,
-        tag=tag,
-        agent=agent,
-        model=model,
-        cfg=cfg,
-        workspace_dir=expected_workspace,
-        resume_session_id=expected_session,
-        allow_empty=True,
-        structured=True,
+    reused_retained_candidate = bool(
+        retained_candidate is not None
+        and not retained_candidate.get("validation_errors")
     )
-    if isinstance(run, str):
-        response = run
-        actual_session = None
+    if reused_retained_candidate:
+        decisions = [dict(item) for item in retained_candidate["decisions"]]
+        errors: list[str] = []
+        actual_session = expected_session
         actual_workspace = expected_workspace
         elapsed = 0.0
-        invocation_path = None
+        invocation_path = Path(retained_candidate["invocation_path"])
     else:
-        response = str(run.response)
-        actual_session = _coerce_string(run.agent_session_id)
-        actual_workspace = Path(run.workspace_dir or expected_workspace).resolve()
-        elapsed = max(0.0, float(run.elapsed_seconds))
-        invocation_path = Path(run.invocation_manifest_path)
-    errors: list[str] = []
-    decisions: list[dict[str, Any]] = []
-    try:
-        parsed = json.loads(response)
-        if not isinstance(parsed, list) or not all(
-            isinstance(item, dict) for item in parsed
-        ):
-            raise ValueError("relation_correction_response_not_list")
-        decisions = [dict(item) for item in parsed]
-        validation_errors, _ = _relation_review_response_errors(
-            decisions,
-            focus_problem_ids=focus_ids,
-            known_problem_ids=known_problem_ids,
-            known_evidence_atom_ids=known_evidence_ids,
-            allowed_actions={
-                "merge",
-                "alias",
-                "split",
-                "same_cause_group",
-                "keep_separate",
-            },
+        run = run_stage_prompt_json(
+            stage="problem_mining",
+            prompt=prompt,
+            out_dir=artifacts_dir,
+            tag=tag,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            workspace_dir=expected_workspace,
+            resume_session_id=expected_session,
+            allow_empty=True,
+            structured=True,
         )
-        errors.extend(validation_errors)
-    except Exception as exc:  # noqa: BLE001 - exact validator feedback
-        errors.append(f"{type(exc).__name__}: {exc}")
+        if isinstance(run, str):
+            response = run
+            actual_session = None
+            actual_workspace = expected_workspace
+            elapsed = 0.0
+            invocation_path = None
+        else:
+            response = str(run.response)
+            actual_session = _coerce_string(run.agent_session_id)
+            actual_workspace = Path(run.workspace_dir or expected_workspace).resolve()
+            elapsed = max(0.0, float(run.elapsed_seconds))
+            invocation_path = Path(run.invocation_manifest_path)
+        errors = []
+        decisions = []
+        try:
+            parsed = json.loads(response)
+            if not isinstance(parsed, list) or not all(
+                isinstance(item, dict) for item in parsed
+            ):
+                raise ValueError("relation_correction_response_not_list")
+            decisions = [dict(item) for item in parsed]
+            validation_errors, _ = _relation_review_response_errors(
+                decisions,
+                focus_problem_ids=focus_ids,
+                known_problem_ids=known_problem_ids,
+                known_evidence_atom_ids=known_evidence_ids,
+                evidence_atom_ids_by_problem_id=evidence_ids_by_problem_id,
+                durable_collapse_problem_pairs=durable_collapse_problem_pairs,
+                allowed_actions={
+                    "merge",
+                    "alias",
+                    "split",
+                    "same_cause_group",
+                    "keep_separate",
+                },
+            )
+            errors.extend(validation_errors)
+        except Exception as exc:  # noqa: BLE001 - exact validator feedback
+            errors.append(f"{type(exc).__name__}: {exc}")
     if actual_session != expected_session:
         errors.append("stage1_relation_review_exact_session_changed")
     if actual_workspace != expected_workspace:
         errors.append("stage1_relation_review_workspace_changed")
     attempt_record = {
-        "attempt_number": len(attempts) + len(prior_correction_attempts or []) + 1,
-        "tag": tag,
+        "record_kind": (
+            "retained_candidate_revalidation"
+            if reused_retained_candidate
+            else "author_correction_attempt"
+        ),
+        "attempt_number": (
+            None
+            if reused_retained_candidate
+            else len(attempts) + len(prior_correction_attempts or []) + 1
+        ),
+        "tag": (
+            retained_candidate.get("invocation_tag")
+            if reused_retained_candidate and retained_candidate is not None
+            else tag
+        ),
         "status": "verified" if not errors else "invalid",
+        "model_invoked": not reused_retained_candidate,
         "agent_session_id": actual_session,
         "workspace_dir": str(actual_workspace),
         "elapsed_seconds": elapsed,
         "validation_errors": list(errors),
+        "candidate_frontier_sha256": candidate_frontier_sha256,
+        "candidate_frontier_source": candidate_frontier_source,
     }
     if errors:
         return {
@@ -5724,11 +7674,16 @@ def continue_problem_relation_review_from_independent_feedback(
         if _coerce_string(corrected_batch.get("tag")) != batch_tag:
             continue
         corrected_batch["status"] = "qualification_corrected"
+        corrected_batch["candidate_frontier"] = deepcopy(candidate_frontier)
+        corrected_batch["candidate_frontier_sha256"] = candidate_frontier_sha256
+        corrected_batch["candidate_frontier_source"] = candidate_frontier_source
         corrected_batch["attempt_history"] = [
             *attempts,
             *[dict(item) for item in (prior_correction_attempts or [])],
-            attempt_record,
+            *([] if reused_retained_candidate else [attempt_record]),
         ]
+        if reused_retained_candidate:
+            corrected_batch["retained_correction_revalidation"] = attempt_record
     draft_raw = meta.get("problem_mining_evidence_draft")
     if not isinstance(draft_raw, dict):
         receipt_ref = meta.get("problem_mining_evidence_receipt")
@@ -5793,6 +7748,7 @@ def continue_problem_relation_review_from_independent_feedback(
         "case_registry": registry,
         "validation_errors": [],
         "attempt_record": attempt_record,
+        "reused_retained_candidate": reused_retained_candidate,
         "agent_session_id": actual_session,
         "workspace_dir": str(actual_workspace),
     }
@@ -6000,25 +7956,31 @@ def continue_problem_mining_from_independent_feedback(
             "workspace_dir": workspace_raw,
         }
     workspace = Path(workspace_raw).resolve()
-    manifest_path = workspace / "atoms.json"
-    try:
-        manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return {
-            "status": "repairable_paused:stage1_workspace_manifest_unavailable",
-            "stage_doc": stage_doc,
-            "atoms": atoms,
-            "validation_errors": [
-                f"stage1_workspace_manifest_unavailable:{type(exc).__name__}"
-            ],
-        }
-    if not isinstance(manifest_raw, dict):
-        raise ValueError("stage1_workspace_manifest_invalid")
-    manifest = dict(manifest_raw)
+    retained_component_raw = source_composite_receipt.get(
+        "primary_pass"
+        if attempts_raw is primary_attempts_raw
+        else "non_support_review"
+    )
+    retained_component = (
+        retained_component_raw
+        if isinstance(retained_component_raw, Mapping)
+        else None
+    )
+    manifest = _verified_problem_mining_controller_manifest(
+        workspace_dir=workspace,
+        retained_attempt=retained,
+        retained_component_receipt=retained_component,
+    )
     expected_manifest = _coerce_string(retained.get("workspace_manifest_sha256"))
     observed_manifest = _problem_mining_attempt_manifest_sha256(manifest)
     if expected_manifest is not None and observed_manifest != expected_manifest:
         raise ValueError("stage1_workspace_manifest_changed_before_qualification_repair")
+    prior_events_path = _verified_problem_mining_prior_events_path(
+        retained_attempt=retained,
+        retained_component_receipt=retained_component,
+        workspace_dir=workspace,
+        workspace_manifest_sha256=observed_manifest,
+    )
     atoms_by_id = {
         str(atom["atom_id"]): atom
         for atom in atoms
@@ -6083,6 +8045,9 @@ def continue_problem_mining_from_independent_feedback(
         initial_manifest=manifest,
         expected_manifest_sha256=observed_manifest,
         resume_session_id=session_id,
+        prior_normalized_events_paths=(
+            (prior_events_path,) if prior_events_path is not None else ()
+        ),
     )
     failure = result.get("failure")
     if isinstance(failure, Exception):
@@ -6139,16 +8104,21 @@ def continue_problem_mining_from_independent_feedback(
     direct_records = [
         dict(item) for item in result.get("records", []) if isinstance(item, dict)
     ]
-    direct_receipt = dict(result["receipt"])
-    direct_decisions = [
-        dict(item)
-        for item in direct_receipt.get("atom_decisions", [])
-        if isinstance(item, Mapping)
-    ]
     complete_attempt_history = [
         *attempts,
         *correction_attempts,
         dict(result["attempt_record"]),
+    ]
+    direct_receipt = bind_externally_corrected_attempt_history(
+        receipt=dict(result["receipt"]),
+        attempt_history=complete_attempt_history,
+        feedback_sha256=str(feedback.get("content_sha256") or ""),
+        feedback_kind=feedback_kind or "independent_quality_feedback",
+    )
+    direct_decisions = [
+        dict(item)
+        for item in direct_receipt.get("atom_decisions", [])
+        if isinstance(item, Mapping)
     ]
     eligible_atom_ids = _coerce_string_list(draft_raw.get("eligible_atom_ids"))
     primary_attempt_history = [
@@ -6163,7 +8133,6 @@ def continue_problem_mining_from_independent_feedback(
         primary_records = direct_records
         primary_decisions = direct_decisions
         primary_receipt = direct_receipt
-        primary_receipt["attempt_history"] = complete_attempt_history
         primary_normalized_raw = _coerce_string(
             primary_receipt.get("normalized_events_path")
         )
@@ -6276,6 +8245,11 @@ def continue_problem_mining_from_independent_feedback(
             initial_manifest=dict(review_manifest_raw),
             resume_session_id=review_session,
             attempt_number_base=len(review_attempt_history),
+            initial_attempt_tag=(
+                f"{original_tag}_coverage_depth_review_external_correction_"
+                f"{len(review_attempt_history) + 1:03d}_"
+                f"{str(feedback.get('content_sha256') or '')[:12]}"
+            ),
         )
         dependent_failure = dependent_review_run.get("failure")
         if isinstance(dependent_failure, Exception):
@@ -6308,7 +8282,12 @@ def continue_problem_mining_from_independent_feedback(
             if isinstance(item, Mapping)
         ]
         review_attempt_history = [*review_attempt_history, *new_review_attempts]
-        review_receipt["attempt_history"] = review_attempt_history
+        review_receipt = bind_externally_corrected_attempt_history(
+            receipt=review_receipt,
+            attempt_history=review_attempt_history,
+            feedback_sha256=str(feedback.get("content_sha256") or ""),
+            feedback_kind=feedback_kind or "independent_quality_feedback",
+        )
         review_decisions = [
             dict(item)
             for item in review_receipt.get("atom_decisions", [])
@@ -6365,30 +8344,60 @@ def continue_problem_mining_from_independent_feedback(
             }
         primary_workspace = Path(primary_workspace_raw).resolve()
         primary_normalized_path = Path(primary_normalized_raw)
-        try:
-            primary_manifest_raw = json.loads(
-                (primary_workspace / "atoms.json").read_text(encoding="utf-8")
+        retained_primary = next(
+            (
+                item
+                for item in reversed(primary_attempt_history)
+                if item.get("status") == "verified"
+            ),
+            primary_attempt_history[-1] if primary_attempt_history else None,
+        )
+        if retained_primary is None:
+            # Compatibility for schema-1 composite fixtures and retained records:
+            # they did not keep primary attempt history and wrote the same manifest
+            # projection they consumed. Modern origin-evidence workspaces must retain
+            # the attempt artifact and take the fully verified path below.
+            try:
+                legacy_primary_raw = json.loads(
+                    (primary_workspace / "atoms.json").read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "stage1_coverage_correction_primary_manifest_unavailable"
+                ) from exc
+            if not isinstance(legacy_primary_raw, dict):
+                raise ValueError("stage1_primary_component_manifest_invalid")
+            legacy_origin = legacy_primary_raw.get("origin_attachment_evidence")
+            if isinstance(legacy_origin, Mapping) and legacy_origin.get(
+                "manifest_file"
+            ):
+                raise ValueError(
+                    "stage1_coverage_correction_primary_attempt_unavailable"
+                )
+            primary_manifest = dict(legacy_primary_raw)
+            expected_primary_manifest = _coerce_string(
+                primary_receipt.get("workspace_manifest_sha256")
             )
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            return {
-                "status": "repairable_paused:stage1_primary_frontier_unavailable",
-                "stage_doc": stage_doc,
-                "atoms": atoms,
-                "validation_errors": [
-                    "stage1_coverage_correction_primary_manifest_unavailable:"
-                    + type(exc).__name__
-                ],
-                "attempt_record": result.get("attempt_record"),
-                "agent_session_id": session_id,
-                "workspace_dir": str(workspace),
-            }
-        if not isinstance(primary_manifest_raw, dict):
-            raise ValueError("stage1_primary_component_manifest_invalid")
-        primary_manifest = dict(primary_manifest_raw)
+        else:
+            primary_manifest = _verified_problem_mining_controller_manifest(
+                workspace_dir=primary_workspace,
+                retained_attempt=retained_primary,
+                retained_component_receipt=primary_receipt,
+            )
+            expected_primary_manifest = _coerce_string(
+                retained_primary.get("workspace_manifest_sha256")
+            )
+        if (
+            expected_primary_manifest is not None
+            and _problem_mining_attempt_manifest_sha256(primary_manifest)
+            != expected_primary_manifest
+        ):
+            raise ValueError(
+                "stage1_primary_workspace_manifest_changed_before_qualification_repair"
+            )
         review_records = direct_records
         review_decisions = direct_decisions
         review_receipt = direct_receipt
-        review_receipt["attempt_history"] = complete_attempt_history
         review_attempt_history = complete_attempt_history
 
     replacement, candidate_records, candidate_decisions = (
@@ -6405,7 +8414,7 @@ def continue_problem_mining_from_independent_feedback(
             review_records=review_records,
             review_decisions=review_decisions,
             review_receipt=review_receipt,
-            primary_normalized_events_path=primary_normalized_path,
+            primary_attested_events_path=primary_normalized_path,
             primary_workspace_dir=primary_workspace,
             primary_workspace_manifest=primary_manifest,
         )

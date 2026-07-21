@@ -63,6 +63,7 @@ from runner_core.codex_execpolicy import (
     CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
     CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE,
     ControlledCodexExecpolicyOverlay,
+    build_codex_shell_probe_config_overrides,
     capture_probe_workspace_state,
     controlled_codex_execpolicy_receipt_errors,
     install_controlled_codex_execpolicy,
@@ -944,22 +945,28 @@ def _format_preflight_summary_md(
             for cmd in verification_commands:
                 lines.append(f"    - `{cmd}`")
 
-    if (
-        agent == "codex"
-        and isinstance(codex_sandbox_mode, str)
-        and codex_sandbox_mode.strip().lower().startswith("workspace-")
-    ):
+    if agent == "codex" and isinstance(codex_sandbox_mode, str):
         sandbox_label = codex_sandbox_mode.strip()
-        lines.append(
-            "- Note: Codex workspace sandbox is enabled "
-            f"(sandbox={sandbox_label}); commands/files outside the workspace may be unavailable. "
-            "If you need a consistent toolchain, consider `--exec-backend docker`."
-        )
-        lines.append(
-            "- Do not treat a blocked shell command as proof that the workspace is read-only. "
-            "When `allow_edits=true` and the sandbox is workspace-write, retry with simpler "
-            "sandbox-compatible commands or file-edit tools before reporting an edit blocker."
-        )
+        if sandbox_label.lower().startswith("workspace-"):
+            lines.append(
+                "- Note: Codex workspace sandbox is enabled "
+                f"(sandbox={sandbox_label}); commands/files outside the workspace may be "
+                "unavailable. If you need a consistent toolchain, consider "
+                "`--exec-backend docker`."
+            )
+            lines.append(
+                "- Do not treat a blocked shell command as proof that the workspace is read-only. "
+                "When `allow_edits=true` and the sandbox is workspace-write, retry with simpler "
+                "sandbox-compatible commands or file-edit tools before reporting an edit blocker."
+            )
+        elif sandbox_label.lower() == "danger-full-access":
+            lines.append(
+                "- Note: Codex unrestricted local sandbox mode is enabled "
+                f"(sandbox={sandbox_label}) because native Windows workspace-write cannot perform "
+                "write missions reliably. Keep all mission changes within the acquired target "
+                "workspace; runner-owned branch, diff, verification, review, and PR gates still "
+                "apply."
+            )
 
     return "\n".join(lines)
 
@@ -4956,7 +4963,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     if request.agent == "codex"
                     and codex_execpolicy_overlay is not None
                     and controlled_codex_activation_overrides is not None
-                    else codex_overrides
+                    else (
+                        build_codex_shell_probe_config_overrides(codex_overrides)
+                        if request.agent == "codex"
+                        else codex_overrides
+                    )
                 )
                 codex_probe_commands = (
                     list(controlled_codex_probe_commands)

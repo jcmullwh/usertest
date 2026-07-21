@@ -1,0 +1,173 @@
+{
+  "schema_version": 3,
+  "as_of": "2026-07-21T12:01:01Z",
+  "current_run_id": "qualification-cycle-bc70b15b-20260720",
+  "summary_cards": [
+    {
+      "label": "Current pipeline state",
+      "value": "1 merged; 1 mitigated; 0 resolved",
+      "detail": "The checkout-ENOSPC case completed the automated chain from authenticated source evidence through causal research, optioning, adversarial selection, code-grounded planning, export, implementation, same-author correction, same-reviewer correction, PR merge, original-scenario replay, and controlled mitigation proof. It is deliberately recorded as mitigated, not resolved, because natural live disk-exhaustion proof was unavailable.",
+      "tone": "good"
+    },
+    {
+      "label": "Current bounded throughput",
+      "value": "95 calls; 61 continuations; 0 restarts",
+      "detail": "The retained invocation manifests reconcile 32 calls after the prior checkpoint, 17 of them exact-session continuations, on top of the prior 63/44 totals. The checkout case used same-author repair in research, optioning, falsification, and implementation and same-reviewer repair for a semantic output inconsistency. No authored frontier was discarded or restarted.",
+      "tone": "good"
+    },
+    {
+      "label": "Full qualification",
+      "value": "0 / 2 cycles",
+      "detail": "One real case has now completed end to end, but this is still the first baseline cycle and not one of the required two consecutive full shadow cycles. The remaining active corpus has not been processed on the corrected controller revision.",
+      "tone": "bad"
+    },
+    {
+      "label": "Next delivery gate",
+      "value": "Validate and land controller PR #217",
+      "detail": "PR #220 is merged at `2b132e20...` and its case is terminally mitigated. The controller is reconciled with current `dev` at local merge head `b3df410`; the complete 2,208-test affected matrix and all four Ruff scopes pass. PR #217 must now be pushed and pass its PR-event CI before backlog regeneration continues.",
+      "tone": "warn"
+    }
+  ],
+  "run": {
+    "run_id": "qualification-cycle-bc70b15b-20260720",
+    "entry_kind": "lifecycle_run",
+    "lifecycle_id": "pipeline-cycle:bc70b15b:20260720",
+    "lifecycle_kind": "pipeline_cycle",
+    "rework": {
+      "author_invocations": 95,
+      "continuation_launches": 61,
+      "stage_reruns": null,
+      "full_restarts": 0,
+      "summary": "Ninety-five signed-in Sol/high calls and 61 exact-session continuations are reconciled from retained invocation manifests. The 32 calls since the prior checkpoint include 17 continuations across storage research, checkout research, optioning, falsification, implementation, and review. No author dossier or full pipeline was restarted. A cumulative stage-rerun count is intentionally left unknown because deterministic rematerializations, same-stage corrections, handoff adoption, and outcome-role replays are not yet represented by one comparable lifecycle unit."
+    },
+    "label": "Fresh merged-dev qualification cycle through the first complete implementation and outcome chain",
+    "scope": "Non-IDEA qualification cycle prepared from merged origin/dev commit bc70b15b with 2,854 sealed atoms and explicit cross-volume evidence roots. Work began with narrow Stage-1/2 slices and retained Stage-3/4 frontiers, then advanced the authenticated checkout-ENOSPC case through Stages 3-6, ticket export, implementation, review, PR #220 merge, and outcome progression. Signed-in host Codex subscription was required throughout; API fallback and Docker use were disabled. No image, container, source input, or retained evidence artifact was removed.",
+    "timing": {
+      "start_at": "2026-07-20T17:50:50Z",
+      "end_at": null,
+      "elapsed_seconds": 65411,
+      "coverage": "active",
+      "display": "18 h 10 m active",
+      "note": "Wall time from fresh qualification preparation through the first completed implementation/outcome chain and post-merge controller verification. Checkout Stage 4 took 228.7 seconds, Stage 5 took 416.5 seconds, and Stage 6 took 844.1 seconds. Handoff adoption reran the five exact plan commands in 1,013.7 seconds. The pre-merge 1,714-test controller matrix passed in 392.3 seconds; after integrating current `dev`, the complete 2,208-test affected matrix passed in 1,666.7 seconds. Long model, test, and CI work is observed at roughly ten-minute intervals; no test timeout was shortened."
+    },
+    "furthest_stage": "Merged implementation with terminal, evidence-bounded outcome",
+    "current_state": "PR #220 merged into `dev` at `2b132e20f6d822bf517b55f847875a84b2d420e3`. The checkout-ENOSPC ticket is complete with outcome `mitigated`: original-scenario and faithful controlled mitigation-effect evidence passed, natural live disk exhaustion was not manufactured, and the absence of live proof remains explicit. Controller head `b3df410` now includes current `dev`; its full affected matrix and Ruff scopes pass. The qualification queue contains three ready tickets, one historical in-progress plan, one completed ticket, and no real discarded ticket. PR #217 push/CI is the remaining controller gate.",
+    "outcome": "One automated case reached merged PR and terminal mitigated disposition; zero cases claimed resolved; three tickets remain ready; zero bad-ready escape established; full-cycle qualification still 0/2",
+    "errors": {
+      "count": 29,
+      "count_kind": "deduplicated_clusters",
+      "summary": "Twenty-nine deduplicated system clusters have been observed in this fresh cycle. Eight added by the first complete delivery and integration chain are closed locally: split-child lineage, bounded-residual review acceptance, runner-output tracking, exact CI event selection, same-reviewer head continuity, semantic review self-correction, honest mitigated outcome progression, and preservation of both exact local refs and ENOSPC fallback diagnostics. Individual validation messages and repeated symptoms are not counted as separate defects.",
+      "cluster_ids": [
+        "BDS-178",
+        "BDS-179",
+        "BDS-180",
+        "BDS-181",
+        "BDS-182",
+        "BDS-183",
+        "BDS-184",
+        "BDS-185",
+        "BDS-186",
+        "BDS-187",
+        "BDS-188",
+        "BDS-189",
+        "BDS-190",
+        "BDS-191",
+        "BDS-192",
+        "BDS-193",
+        "BDS-194",
+        "BDS-195",
+        "BDS-196",
+        "BDS-197",
+        "BDS-198",
+        "BDS-199",
+        "BDS-200",
+        "BDS-201",
+        "BDS-202",
+        "BDS-203",
+        "BDS-204",
+        "BDS-205",
+        "BDS-206"
+      ]
+    },
+    "automatic_self_corrections": {
+      "count": 23,
+      "count_kind": "deduplicated_clusters",
+      "summary": "The checkout case adds three lifecycle-level self-repair clusters: the Stage-3 researcher corrected its own proof, the implementation author corrected the reviewed defect on the same session, and the reviewer corrected its internally inconsistent semantic report on the same session. Earlier Stage-1/3 repairs remain retained. No dossier, plan, implementation, or review was discarded because it made a new correctable error.",
+      "cluster_ids": [
+        "AUTHOR-STAGE1-MAINTENANCE-DISAGREEMENT-01",
+        "AUTHOR-STAGE3-CODEX-MESSAGES-OUTPUT-01",
+        "AUTHOR-STAGE3-CODEX-MESSAGES-EVIDENCE-01",
+        "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-OUTPUT-01",
+        "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-EVIDENCE-01",
+        "AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01",
+        "AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01",
+        "AUTHOR-STAGE3-WINDOWS-OUTPUT-01",
+        "AUTHOR-STAGE3-WINDOWS-EVIDENCE-01",
+        "AUTHOR-STAGE3-WINDOWS-RELATION-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-OUTPUT-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-EVIDENCE-01",
+        "AUTHOR-STAGE3-DOCKER-OUTPUT-01",
+        "AUTHOR-STAGE3-DOCKER-EVIDENCE-01",
+        "AUTHOR-STAGE3-DOCKER-ACTIONABILITY-01",
+        "AUTHOR-STAGE3-FIRST-RUN-OUTPUT-01",
+        "AUTHOR-STAGE3-FIRST-RUN-EVIDENCE-01",
+        "AUTHOR-STAGE3-FIRST-RUN-ADJUDICATION-01",
+        "AUTHOR-STAGE1-OPERATIONAL-PRIMARY-01",
+        "AUTHOR-STAGE1-OPERATIONAL-COVERAGE-01",
+        "AUTHOR-STAGE3-CHECKOUT-ENOSPC-01",
+        "AUTHOR-IMPLEMENT-CHECKOUT-ENOSPC-01",
+        "AUTHOR-REVIEW-CHECKOUT-ENOSPC-01"
+      ]
+    },
+    "supervisor_interventions": {
+      "count": 37,
+      "count_kind": "deduplicated_clusters",
+      "summary": "Supervision advanced one authenticated case through the full chain, returned exact findings to the responsible author/reviewer, and implemented seven general controller corrections exposed by that chain. Two run-level interventions bounded Stage 3-6 and implementation/review/outcome progression. The system authored the research, mechanisms, selection, plan, code change, review, and outcome evidence; supervision fixed pipeline mechanics and rejected overclaiming without replacing the substantive work.",
+      "cluster_ids": [
+        "BDS-178",
+        "BDS-179",
+        "BDS-180",
+        "BDS-181",
+        "BDS-182",
+        "BDS-183",
+        "BDS-184",
+        "BDS-185",
+        "BDS-186",
+        "BDS-187",
+        "BDS-188",
+        "BDS-189",
+        "BDS-190",
+        "BDS-191",
+        "BDS-192",
+        "BDS-193",
+        "BDS-194",
+        "BDS-195",
+        "BDS-196",
+        "BDS-197",
+        "BDS-198",
+        "SUPERVISOR-STAGE2-4-MAINTENANCE-01",
+        "SUPERVISOR-STAGE2-4-WINDOWS-GROUP-01",
+        "SUPERVISOR-STAGE2-4-WINDOWS-SHELL-01",
+        "SUPERVISOR-STAGE2-4-DOCKER-01",
+        "SUPERVISOR-STAGE2-4-FIRST-RUN-POLICY-01",
+        "SUPERVISOR-STAGE1-2-OPERATIONAL-RECURRENCE-01",
+        "BDS-199",
+        "BDS-200",
+        "BDS-201",
+        "BDS-202",
+        "BDS-203",
+        "BDS-204",
+        "BDS-205",
+        "BDS-206",
+        "SUPERVISOR-STAGE3-6-CHECKOUT-ENOSPC-01",
+        "SUPERVISOR-IMPLEMENT-REVIEW-OUTCOME-CHECKOUT-ENOSPC-01"
+      ]
+    },
+    "next_action": "Push reconciled controller head `b3df410` to PR #217, pass its PR-event CI, merge the controller, then regenerate from the landed revision and supervise the next ready ticket through its correct final disposition.",
+    "tone": "warn",
+    "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. The retained manifests reconcile 95 signed-in Sol/high calls and 61 continuations through this checkpoint. PR #220 is merged at exact commit `2b132e20f6d822bf517b55f847875a84b2d420e3`; its reviewed implementation head was `86e7aee79818332fbbd3924aa56e143709939a6b`. Original-scenario and mitigation-effect roles pass, while `live_evidence` remains empty and the outcome remains mitigated. Post-merge controller head `b3df410` passed 2,202 tests with six expected skips out of 2,208 collected in 1,666.7 seconds: `runner_core` 489+4 skips, `usertest_implement` 337, `usertest_backlog` 841+2 skips, and `backlog_core` 535. All four complete Ruff scopes pass. Strict full-project mypy is not a green repository contract and still reports extensive pre-existing typing debt, so it is not represented as passing evidence. No source input, ticket, workspace, image, container, or retained evidence artifact was removed.",
+    "source_ids": [
+      "backlog_depth_supervision_issue_ledger"
+    ]
+  }
+}

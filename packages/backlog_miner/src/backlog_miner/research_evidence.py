@@ -821,6 +821,22 @@ def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
     """Normalize repository-local paths without changing selectors or non-path options."""
 
     portable = list(argv)
+
+    # Codex command_execution events on Windows can retain the JSON/PowerShell spelling of
+    # an absolute path, so an executable that ran as ``C:\\Users\\...`` is observed with two
+    # literal separators while the report quite reasonably declares ``C:\Users\...``.  Windows
+    # resolves both spellings to the same path.  Canonicalize only tokens that are unambiguously
+    # drive-absolute paths; applying separator folding to arbitrary arguments could change a
+    # regex, selector, or domain-specific value.
+    for index, token in enumerate(portable):
+        option, separator, value = token.partition("=")
+        candidate = value if separator else token
+        if re.match(r"^[A-Za-z]:[\\/]+", candidate):
+            normalized_candidate = re.sub(r"[\\/]+", "/", candidate)
+            portable[index] = (
+                option + separator + normalized_candidate if separator else normalized_candidate
+            )
+
     normalized = tuple(token.casefold() for token in portable)
     path_indexes: list[int] = []
     pytest_paths = False
@@ -2282,8 +2298,25 @@ def _clean_replay_receipts(
                 "git_index_flags_sha256",
             )
         )
-        if undeclared_mutations or index_or_head_changed:
-            errors.append(f"experiment_replay_workspace_mutated:{experiment_id}")
+        if undeclared_mutations:
+            # A generic mutation identity gives the author no actionable feedback and makes
+            # one repaired path followed by a different path look like zero progress. Keep
+            # findings bounded for pathological commands, but identify ordinary mutations
+            # exactly so same-session repair can converge.
+            mutation_limit = 20
+            errors.extend(
+                f"experiment_replay_workspace_mutated:{experiment_id}:{path}"
+                for path in undeclared_mutations[:mutation_limit]
+            )
+            if len(undeclared_mutations) > mutation_limit:
+                errors.append(
+                    f"experiment_replay_workspace_mutated:{experiment_id}:"
+                    f"additional_paths_omitted={len(undeclared_mutations) - mutation_limit}"
+                )
+        if index_or_head_changed:
+            errors.append(
+                f"experiment_replay_workspace_mutated:{experiment_id}:git_index_or_head_changed"
+            )
         metadata_errors = _execution_metadata_errors(
             completed.execution_metadata,
             isolation=isolation,
@@ -2915,6 +2948,76 @@ def _load_evidence_event_stream(
         }
     )
     return events, sources, _canonical_json_sha256(sources)
+
+
+def _evidence_source_attempt_catalog(
+    evidence_attempts: Sequence[Mapping[str, Any]],
+    evidence_event_sources: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retain the attempt records needed to reauthenticate prior event sources.
+
+    Recovered attempts can supply evidence after a process restart without belonging
+    to the dossier's current authoring history. The persisted receipt must retain
+    those records separately; otherwise its prior-attempt event bindings become
+    unverifiable as soon as the in-memory recovery catalog is gone.
+    """
+
+    attempts_by_sha: dict[str, dict[str, Any]] = {}
+    for attempt in evidence_attempts:
+        attempt_sha = _text(attempt.get("attempt_sha256"))
+        if attempt_sha is not None and attempt_sha not in attempts_by_sha:
+            attempts_by_sha[attempt_sha] = dict(attempt)
+
+    retained: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in evidence_event_sources:
+        if _text(source.get("source_kind")) != "prior_attempt":
+            continue
+        attempt_sha = _text(source.get("attempt_sha256"))
+        attempt = attempts_by_sha.get(attempt_sha or "")
+        if attempt_sha is None or attempt is None or attempt_sha in seen:
+            continue
+        retained.append(attempt)
+        seen.add(attempt_sha)
+    return retained
+
+
+def _persisted_evidence_attempt_catalog(
+    receipt: Mapping[str, Any],
+    research_attempts: Sequence[Mapping[str, Any]],
+    *,
+    errors: list[str],
+) -> list[Mapping[str, Any]]:
+    """Return one conflict-free catalog for persisted event-source verification."""
+
+    source_attempts_raw = receipt.get("evidence_source_attempts")
+    source_attempts: list[Mapping[str, Any]] = []
+    if source_attempts_raw is not None:
+        if not isinstance(source_attempts_raw, list) or any(
+            not isinstance(attempt, Mapping) for attempt in source_attempts_raw
+        ):
+            errors.append("research_evidence_source_attempts_invalid")
+        else:
+            source_attempts = list(source_attempts_raw)
+            if receipt.get("evidence_source_attempts_sha256") != _canonical_json_sha256(
+                source_attempts_raw
+            ):
+                errors.append("research_evidence_source_attempts_hash_changed")
+
+    combined: list[Mapping[str, Any]] = []
+    by_sha: dict[str, Mapping[str, Any]] = {}
+    for attempt in [*source_attempts, *research_attempts]:
+        attempt_sha = _text(attempt.get("attempt_sha256"))
+        if attempt_sha is None:
+            combined.append(attempt)
+            continue
+        prior = by_sha.get(attempt_sha)
+        if prior is None:
+            by_sha[attempt_sha] = attempt
+            combined.append(attempt)
+        elif _canonical_json_sha256(prior) != _canonical_json_sha256(attempt):
+            errors.append(f"research_evidence_source_attempt_conflict:{attempt_sha}")
+    return combined
 
 
 def _load_persisted_evidence_event_stream(
@@ -4128,12 +4231,23 @@ def _research_harness_relative_path(executed_argv: Any) -> str | None:
     ):
         return None
     normalized = [argument.casefold() for argument in executed_argv]
-    index: int | None = None
-    if normalized[:3] == ["pdm", "run", "python"]:
-        index = 3
-    elif normalized[:1] == ["python"]:
-        index = 1
-    if index is None or index >= len(executed_argv):
+    executable_index: int | None = None
+    if normalized[:2] == ["pdm", "run"]:
+        executable_index = 2
+    elif normalized:
+        executable_index = 0
+    if executable_index is None or executable_index >= len(executed_argv):
+        return None
+    executable = PureWindowsPath(executed_argv[executable_index]).name.casefold()
+    if executable not in {"python", "python3", "python.exe", "py", "py.exe"}:
+        return None
+    index = executable_index + 1
+    while (
+        index < len(executed_argv)
+        and executed_argv[index] in _PYTHON_PYTEST_SAFE_PREFIX_FLAGS
+    ):
+        index += 1
+    if index >= len(executed_argv):
         return None
     candidate = executed_argv[index].replace("\\", "/")
     path = PurePosixPath(candidate)
@@ -4206,7 +4320,7 @@ def _harness_mechanism_touches(
     if not _within(path, workspace) or not path.is_file() or path.is_symlink():
         return relative, [], None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return relative, [], None
@@ -4223,12 +4337,6 @@ def _harness_mechanism_touches(
         visitor = _FunctionScopeVisitor(candidate)
         visitor.visit(candidate)
         function_scopes[candidate] = visitor
-    function_definitions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
     assertion_source = str(observable_assertion.get("source") or "")
 
     def sink_matches_assertion_source(sink: str | None) -> bool:
@@ -4310,6 +4418,25 @@ def _harness_mechanism_touches(
             cursor = parents.get(cursor)
         return None
 
+    def enclosing_function(
+        node: ast.AST,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        cursor = parents.get(node)
+        while cursor is not None:
+            if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cursor
+            cursor = parents.get(cursor)
+        return None
+
+    function_definitions: dict[
+        tuple[ast.FunctionDef | ast.AsyncFunctionDef | None, str],
+        list[ast.FunctionDef | ast.AsyncFunctionDef],
+    ] = {}
+    for definition in function_scopes:
+        function_definitions.setdefault(
+            (enclosing_function(definition), definition.name), []
+        ).append(definition)
+
     def import_aliases_at(node: ast.AST) -> dict[str, str]:
         """Resolve imports visible at *node*, including function-local imports.
 
@@ -4355,7 +4482,16 @@ def _harness_mechanism_touches(
 
     def local_function(call: ast.Call) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         expression = _dotted_expression(call.func)
-        return function_definitions.get(expression or "")
+        if expression is None or "." in expression:
+            return None
+        scope = containing_function(call)
+        while True:
+            matches = function_definitions.get((scope, expression), [])
+            if len(matches) == 1:
+                return matches[0]
+            if matches or scope is None:
+                return None
+            scope = enclosing_function(scope)
 
     def expression_is_tainted(
         node: ast.AST,
@@ -4498,8 +4634,7 @@ def _harness_mechanism_touches(
         if assertion_field is not None:
             field_name, _field_value = assertion_field
             field_names: set[tuple[ast.AST | None, str]] = set()
-            for assignment in assignments:
-                value = assignment.value
+            for value in ast.walk(tree):
                 if not isinstance(value, ast.Dict):
                     continue
                 matching_values = [
@@ -4515,6 +4650,13 @@ def _harness_mechanism_touches(
                     )
                     for child in matching_values
                 ):
+                    continue
+                direct_sink = observable_sink(value)
+                if sink_matches_assertion_source(direct_sink):
+                    assert direct_sink is not None
+                    return direct_sink, value
+                assignment = parents.get(value)
+                if not isinstance(assignment, (ast.Assign, ast.AnnAssign)):
                     continue
                 targets = (
                     assignment.targets
@@ -4656,7 +4798,7 @@ def _verified_declared_mechanism_link(
         ):
             return None
         try:
-            content = caller_path.read_text(encoding="utf-8", errors="strict")
+            content = caller_path.read_text(encoding="utf-8-sig", errors="strict")
             tree = ast.parse(content)
         except (OSError, UnicodeDecodeError, SyntaxError):
             return None
@@ -5292,7 +5434,7 @@ def _pytest_test_selection_receipt(
         )
         return None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
     except (OSError, UnicodeDecodeError):
         errors.append(
             f"causal_control_test_file_unreadable:{hypothesis_id}:{experiment_id}:{test_path}"
@@ -6228,7 +6370,7 @@ def _retained_harness_scalar_argv_difference(
             if baseline_seal is None or baseline_seal != challenge_seal:
                 return None
     try:
-        content = baseline_harness_path.read_text(encoding="utf-8", errors="strict")
+        content = baseline_harness_path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
@@ -6453,6 +6595,7 @@ def _falsification_intervention_receipts(
                 if isinstance(challenge_selection, dict)
                 else None
             )
+            fallback_errors: list[str] = []
             if structural is None:
                 structural = _structured_argv_intervention_difference(
                     baseline_replay=baseline_replay,
@@ -6487,6 +6630,7 @@ def _falsification_intervention_receipts(
                             else "shared_mechanism_missing"
                         )
                         errors.append(f"falsification_intervention_{reason}:{label}")
+                        fallback_errors.append(f"runner_argv_{reason}")
                         structural = None
                     else:
                         verification_method = "runner_argv_falsification_intervention_v2"
@@ -6528,7 +6672,21 @@ def _falsification_intervention_receipts(
                 )
             )
             if structural is None or not assertions_verified:
-                detail = ",".join(dict.fromkeys(selection_errors)) or "causal_delta_missing"
+                if structural is not None and not assertions_verified:
+                    fallback_errors.append("falsification_assertion_relation_unverified")
+                baseline_argv = baseline_replay.get("executed_argv")
+                challenge_argv = challenge_replay.get("executed_argv")
+                pytest_pair = (
+                    isinstance(baseline_argv, list)
+                    and isinstance(challenge_argv, list)
+                    and _pytest_args(baseline_argv) is not None
+                    and _pytest_args(challenge_argv) is not None
+                )
+                if not fallback_errors and not pytest_pair:
+                    fallback_errors.append("runner_argv_causal_delta_unresolved")
+                detail = ",".join(
+                    dict.fromkeys(fallback_errors or selection_errors)
+                ) or "causal_delta_missing"
                 errors.append(f"falsification_intervention_unverified:{label}:{detail}")
                 continue
             observation = {
@@ -6580,6 +6738,45 @@ def _falsification_intervention_receipts(
             receipts.append(receipt)
     receipts.sort(key=lambda item: str(item.get("intervention_receipt_id")))
     return receipts
+
+
+def _falsification_interventions_without_adapter_proof(
+    interventions: Sequence[dict[str, Any]],
+    *,
+    proof_adapter_receipts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop legacy intervention receipts superseded by an accepted adapter proof.
+
+    The stage contract treats a verified proof adapter for the same hypothesis and
+    experiment pair as the falsification intervention.  Retaining the independently
+    derived argv/AST receipt as well makes an otherwise verified dossier internally
+    contradictory: the pair is removed from the expected legacy set, but the extra
+    receipt remains.  Keep legacy receipts for every uncovered pair.
+    """
+
+    covered_pairs = {
+        (
+            str(proof.get("hypothesis_id")),
+            str(intervention.get("baseline_experiment_id")),
+            str(intervention.get("challenge_experiment_id")),
+        )
+        for proof in proof_adapter_receipts
+        if isinstance(proof, Mapping)
+        and _text(proof.get("hypothesis_id")) is not None
+        and isinstance((intervention := proof.get("intervention")), Mapping)
+        and _text(intervention.get("baseline_experiment_id")) is not None
+        and _text(intervention.get("challenge_experiment_id")) is not None
+    }
+    return [
+        receipt
+        for receipt in interventions
+        if (
+            str(receipt.get("hypothesis_id")),
+            str(receipt.get("baseline_experiment_id")),
+            str(receipt.get("challenge_experiment_id")),
+        )
+        not in covered_pairs
+    ]
 
 
 def _causal_control_receipts(
@@ -7569,7 +7766,7 @@ def _research_harness_dependency_edges(
         if not _within(path, workspace) or not path.is_file() or path.is_symlink():
             continue
         try:
-            content = path.read_text(encoding="utf-8", errors="strict")
+            content = path.read_text(encoding="utf-8-sig", errors="strict")
             tree = ast.parse(content)
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
@@ -7751,12 +7948,19 @@ def _adapter_executed_consumer_receipt(
             # never disguise the temporary entrypoint that actually executed.
             return None
         if research_harness and isinstance(current_identity, dict):
+            # The authorization receipt intentionally hashes the model-authored
+            # repository-binding relationship prose.  That protects each arm's
+            # receipt, but the prose is not executable consumer identity: two
+            # arms of one controlled harness may describe the same authenticated
+            # dependency differently.  Pair the arms by their immutable executed
+            # entrypoint here; the content-bound AST dependency edges below still
+            # have to agree exactly before the consumer is accepted.
             current_identity = {
-                **current_identity,
+                "identity_kind": "research_harness_entrypoint",
+                "source_authorization_kind": current_identity.get("identity_kind"),
                 "research_harness_entrypoint": {
-                    "entrypoint_path": entrypoint_path,
+                    "entrypoint_path": entrypoint_path.replace("\\", "/"),
                     "entrypoint_sha256": authorization.get("entrypoint_sha256"),
-                    "artifact_id": authorization.get("artifact_id"),
                 },
             }
         current_kind = (
@@ -7888,12 +8092,112 @@ def _adapter_executed_consumer_receipt(
     )
 
 
+def _adapter_mechanism_symbol_bindings(
+    proof: Mapping[str, Any],
+    *,
+    hypothesis_symbols: Sequence[str],
+    inspected_symbols: Sequence[str] = (),
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map causal locators to the inspected code symbols they actually exercise.
+
+    Proof-adapter interventions may target a value within a production symbol (for example,
+    ``resolve:probe_result``) while hypotheses correctly retain the inspected function symbol.
+    Treating those two identifiers as interchangeable loses the distinction; requiring literal
+    equality makes valid field-level causal controls impossible.  A non-exact locator is accepted
+    only through a runner-attested implementation touchpoint whose causal locator is exact and
+    whose inspected symbol belongs to the hypothesis.
+    """
+
+    graph = proof.get("mechanism_graph")
+    nodes_raw = graph.get("nodes") if isinstance(graph, Mapping) else None
+    root_node_id = graph.get("root_node_id") if isinstance(graph, Mapping) else None
+    outcome_node_id = graph.get("outcome_node_id") if isinstance(graph, Mapping) else None
+    mechanism_nodes = [
+        dict(node)
+        for node in (nodes_raw if isinstance(nodes_raw, list) else [])
+        if isinstance(node, Mapping)
+        and node.get("node_id") not in {root_node_id, outcome_node_id}
+        and _text(node.get("locator")) is not None
+    ]
+    adapter_evidence = proof.get("adapter_evidence")
+    touchpoints_raw = (
+        adapter_evidence.get("implementation_touchpoints")
+        if isinstance(adapter_evidence, Mapping)
+        and isinstance(adapter_evidence.get("implementation_touchpoints"), list)
+        else []
+    )
+    touchpoints = [dict(value) for value in touchpoints_raw if isinstance(value, Mapping)]
+    declared = list(dict.fromkeys(hypothesis_symbols))
+    inspected = set(inspected_symbols)
+    bindings: list[dict[str, Any]] = []
+    covered: set[str] = set()
+    for node in mechanism_nodes:
+        locator = str(node["locator"])
+        matching_touchpoints = [
+            touchpoint
+            for touchpoint in touchpoints
+            if touchpoint.get("runner_attested") is True
+            and _text(touchpoint.get("causal_locator")) == locator
+            and isinstance(touchpoint.get("symbols"), list)
+            and touchpoint.get("symbols")
+        ]
+        touchpoint_symbols = [
+            symbol
+            for symbol in declared
+            if any(
+                symbol
+                in {
+                    str(value)
+                    for value in touchpoint.get("symbols", [])
+                    if _text(value) is not None
+                }
+                for touchpoint in matching_touchpoints
+            )
+        ]
+        # A field/argument/value locator is allowed to be more specific than
+        # the production symbol it controls, but it must not masquerade as an
+        # inspected symbol.  When an authenticated touchpoint maps the locator
+        # to concrete symbols, the hypothesis must name those symbols.  Direct
+        # locators remain valid for non-code mechanisms without symbol-bearing
+        # touchpoints (for example an environment or filesystem condition).
+        touchpoint_declares_locator = any(
+            locator
+            in {
+                str(value)
+                for value in touchpoint.get("symbols", [])
+                if _text(value) is not None
+            }
+            for touchpoint in matching_touchpoints
+        )
+        non_code_locator = locator.startswith(("env:", "fs:", "config:/"))
+        direct = [
+            symbol
+            for symbol in declared
+            if symbol == locator
+            and (symbol in inspected or touchpoint_declares_locator or non_code_locator)
+        ]
+        mapped = list(dict.fromkeys([*direct, *touchpoint_symbols]))
+        if not mapped:
+            return [], [], touchpoints
+        covered.update(mapped)
+        bindings.append(
+            {
+                "causal_locator": locator,
+                "mechanism_symbols": mapped,
+                "runner_attested": True,
+            }
+        )
+    verified_symbols = [symbol for symbol in declared if symbol in covered]
+    return verified_symbols, bindings, touchpoints
+
+
 def _adapter_mechanism_evidence_receipt(
     proof: Mapping[str, Any],
     *,
     hypothesis_symbols: list[str],
     atom_bindings: Sequence[Mapping[str, Any]],
     clean_replays: Mapping[str, Mapping[str, Any]],
+    inspected_symbols: Sequence[str] = (),
 ) -> dict[str, Any] | None:
     graph = proof.get("mechanism_graph")
     nodes_raw = graph.get("nodes") if isinstance(graph, Mapping) else None
@@ -7908,7 +8212,14 @@ def _adapter_mechanism_evidence_receipt(
         and _text(node.get("locator")) is not None
     ]
     locators = [str(node["locator"]) for node in mechanism_nodes]
-    if not locators or set(locators) != set(hypothesis_symbols):
+    verified_symbols, locator_bindings, implementation_touchpoints = (
+        _adapter_mechanism_symbol_bindings(
+            proof,
+            hypothesis_symbols=hypothesis_symbols,
+            inspected_symbols=inspected_symbols,
+        )
+    )
+    if not locators or not verified_symbols or len(locator_bindings) != len(locators):
         return None
     locator_by_node = {
         str(node["node_id"]): str(node["locator"])
@@ -7928,6 +8239,88 @@ def _adapter_mechanism_evidence_receipt(
         and str(edge.get("from_node_id")) in locator_by_node
         and str(edge.get("to_node_id")) in locator_by_node
     ]
+    for binding in locator_bindings:
+        locator = str(binding["causal_locator"])
+        if locator not in verified_symbols:
+            continue
+        for symbol in binding["mechanism_symbols"]:
+            if symbol == locator:
+                continue
+            touchpoint_ids = sorted(
+                str(touchpoint["touchpoint_id"])
+                for touchpoint in implementation_touchpoints
+                if touchpoint.get("runner_attested") is True
+                and touchpoint.get("causal_locator") == locator
+                and symbol
+                in (
+                    touchpoint.get("symbols")
+                    if isinstance(touchpoint.get("symbols"), list)
+                    else []
+                )
+                and _text(touchpoint.get("touchpoint_id")) is not None
+            )
+            if not touchpoint_ids:
+                continue
+            edge_basis = {
+                "proof_receipt_id": proof.get("proof_receipt_id"),
+                "intervention_id": proof.get("intervention_id"),
+                "causal_locator": locator,
+                "mapped_mechanism_symbol": symbol,
+                "implementation_touchpoint_ids": touchpoint_ids,
+                "positive_outcome": proof.get("positive_outcome"),
+            }
+            directed_edges.append(
+                {
+                    "from_locator": locator,
+                    "to_locator": symbol,
+                    "kind": "adapter_intervention_to_shared_production_touchpoint",
+                    "runner_attested": True,
+                    "evidence_sha256": _canonical_json_sha256(edge_basis),
+                }
+            )
+    touchpoint_code_paths = {
+        symbol: {
+            "symbol": symbol,
+            "path": str(touchpoint["path"]),
+            "node_id": next(
+                (
+                    str(node.get("node_id"))
+                    for node in mechanism_nodes
+                    if node.get("locator") == touchpoint.get("causal_locator")
+                ),
+                None,
+            ),
+            "node_kind": "implementation_touchpoint",
+            "evidence_sha256": touchpoint.get("evidence_sha256"),
+        }
+        for touchpoint in implementation_touchpoints
+        if _text(touchpoint.get("path")) is not None
+        for symbol in (
+            touchpoint.get("symbols")
+            if isinstance(touchpoint.get("symbols"), list)
+            else []
+        )
+        if symbol in verified_symbols
+    }
+    direct_code_paths = {
+        str(node["locator"]): {
+            "symbol": str(node["locator"]),
+            "path": str(node["locator"]),
+            "node_id": node.get("node_id"),
+            "node_kind": node.get("kind"),
+            "evidence_sha256": node.get("evidence_sha256"),
+        }
+        for node in mechanism_nodes
+        if str(node["locator"]) in verified_symbols
+    }
+    code_paths = [
+        (touchpoint_code_paths | direct_code_paths).get(symbol)
+        if symbol not in touchpoint_code_paths
+        else touchpoint_code_paths[symbol]
+        for symbol in verified_symbols
+    ]
+    if any(not isinstance(value, Mapping) for value in code_paths):
+        return None
     link: dict[str, Any] = {
         "verification_method": "runner_causal_proof_adapter_v1",
         "adapter_id": proof.get("adapter_id"),
@@ -7935,17 +8328,9 @@ def _adapter_mechanism_evidence_receipt(
         "proof_receipt_id": proof.get("proof_receipt_id"),
         "intervention_id": proof.get("intervention_id"),
         "entrypoint": locators[0],
-        "code_path": [
-            {
-                "symbol": str(node["locator"]),
-                "path": str(node["locator"]),
-                "node_id": node.get("node_id"),
-                "node_kind": node.get("kind"),
-                "evidence_sha256": node.get("evidence_sha256"),
-            }
-            for node in mechanism_nodes
-        ],
+        "code_path": [dict(value) for value in code_paths if isinstance(value, Mapping)],
         "verified_directed_edges": directed_edges,
+        "causal_locator_mappings": locator_bindings,
     }
     link["mechanism_link_sha256"] = _canonical_json_sha256(link)
     observations = proof.get("observations")
@@ -8003,13 +8388,6 @@ def _adapter_mechanism_evidence_receipt(
     target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
     if target is None:
         return None
-    adapter_evidence = proof.get("adapter_evidence")
-    implementation_touchpoints = (
-        adapter_evidence.get("implementation_touchpoints")
-        if isinstance(adapter_evidence, Mapping)
-        and isinstance(adapter_evidence.get("implementation_touchpoints"), list)
-        else []
-    )
     executed_consumer = _adapter_executed_consumer_receipt(
         proof,
         clean_replays=clean_replays,
@@ -8027,7 +8405,7 @@ def _adapter_mechanism_evidence_receipt(
     receipt: dict[str, Any] = {
         "evidence_type": "adapter_proof",
         "hypothesis_id": proof.get("hypothesis_id"),
-        "mechanism_symbols": locators,
+        "mechanism_symbols": verified_symbols,
         "mechanism_targets": mechanism_nodes,
         "code_paths": link["code_path"],
         "experiment_ids": experiment_ids,
@@ -8049,7 +8427,14 @@ def _adapter_mechanism_evidence_receipt(
                 "kind": source_root.get("root_kind"),
                 "origin_atom_ids": sorted(set(origin_atom_ids)),
                 "source_root_sha256": source_root.get("source_root_sha256"),
-                "root_mechanism_symbol": locators[0],
+                "root_mechanism_symbol": next(
+                    (
+                        symbol
+                        for symbol in verified_symbols
+                        if symbol in locators
+                    ),
+                    verified_symbols[0],
+                ),
                 "runner_attested": True,
             }
         ],
@@ -8264,6 +8649,11 @@ def _typed_mechanism_evidence_receipts(
                 hypothesis_symbols=mechanism_symbols,
                 atom_bindings=atom_bindings,
                 clean_replays=clean_replays,
+                inspected_symbols=[
+                    str(receipt["symbol"])
+                    for receipt in symbol_receipts
+                    if isinstance(receipt, Mapping) and _text(receipt.get("symbol")) is not None
+                ],
             )
             observations = proof.get("observations")
             proof_experiment_ids = [
@@ -8280,12 +8670,14 @@ def _typed_mechanism_evidence_receipts(
                 if experiment_id is not None
                 and isinstance((replay := clean_replays.get(experiment_id)), Mapping)
             )
-            if (
-                uses_research_harness
-                and (
-                    not isinstance(adapter_receipt, Mapping)
-                    or not isinstance(adapter_receipt.get("executed_consumer"), Mapping)
+            if uses_research_harness and not isinstance(adapter_receipt, Mapping):
+                errors.append(
+                    "proof_adapter_mechanism_binding_unverified:"
+                    f"{hypothesis_id}:{proof.get('proof_receipt_id') or 'unknown'}"
                 )
+                continue
+            if uses_research_harness and not isinstance(
+                adapter_receipt.get("executed_consumer"), Mapping
             ):
                 errors.append(
                     "proof_adapter_harness_dependency_unverified:"
@@ -8827,18 +9219,29 @@ def _partition_mechanism_validation_errors(
 ) -> tuple[list[str], list[str]]:
     """Separate claim-integrity failure from an honestly incomplete research boundary.
 
-    A sufficient dossier promises a planning-grade *primary* mechanism, so defects bound to that
-    hypothesis (and integrity defects that cannot be bound to any declared alternative) remain
-    fatal.  An incomplete secondary hypothesis is retained as a diagnostic instead: readiness
-    separately requires every plausible/unresolved alternative to be materialized as an unknown,
-    so quarantining its projection cannot silently erase the open question.
+    A sufficient ``requires_change`` dossier promises a planning-grade *primary* mechanism, so
+    defects bound to that hypothesis (and integrity defects that cannot be bound to any declared
+    alternative) remain fatal. A complete ``already_addressed`` or ``non_actionable`` result
+    instead promises evidence for its terminal disposition; it must not be forced to invent an
+    implementation path through inaccessible or irrelevant internals. Its optional mechanism
+    projection is retained as diagnostic evidence, just like mechanism evidence in a blocked or
+    insufficient dossier.
 
     Blocked/insufficient dossiers preserve all diagnostics but cannot advance; their lack of a
     verified mechanism is the reported outcome rather than a malformed report.
     """
 
     normalized = list(dict.fromkeys(str(error) for error in mechanism_errors))
-    if dossier.get("research_status") != "evidence_sufficient":
+    actionability_raw = dossier.get("actionability_assessment")
+    actionability = (
+        actionability_raw.get("disposition")
+        if isinstance(actionability_raw, Mapping)
+        else "requires_change"
+    )
+    if (
+        dossier.get("research_status") != "evidence_sufficient"
+        or actionability != "requires_change"
+    ):
         return [], normalized
 
     hypotheses_raw = dossier.get("root_cause_hypotheses")
@@ -10003,7 +10406,7 @@ def _restricted_outcome_assertion_dataflow(
     if not _within(path, workspace) or not path.is_file() or path.is_symlink():
         return None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
@@ -10731,7 +11134,7 @@ def _retained_harness_positive_contract(
     if not _within(path, workspace) or not path.is_file() or path.is_symlink():
         return None
     try:
-        content = path.read_text(encoding="utf-8", errors="strict")
+        content = path.read_text(encoding="utf-8-sig", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
@@ -12351,12 +12754,18 @@ def _falsification_attempt_receipts(
                 if isinstance(intervention_receipt, dict)
                 else None
             )
-            proof_symbols = (
-                list(mechanism_symbols)
-                if isinstance(proof_receipt, Mapping)
+            proof_symbols = None
+            if (
+                isinstance(proof_receipt, Mapping)
                 and proof_receipt.get("hypothesis_id") == hypothesis_id
-                else None
-            )
+            ):
+                verified_proof_symbols, _locator_bindings, _touchpoints = (
+                    _adapter_mechanism_symbol_bindings(
+                        proof_receipt,
+                        hypothesis_symbols=mechanism_symbols,
+                    )
+                )
+                proof_symbols = verified_proof_symbols or None
             verified_intervention_symbols = intervention_symbols or proof_symbols
             required_relationship_symbols = relationship_symbols or verified_intervention_symbols
             intervention_covers_pair = bool(
@@ -12433,9 +12842,15 @@ def _falsification_attempt_receipts(
                     ),
                 }
             )
+        actionability_raw = dossier.get("actionability_assessment")
+        requires_change = (
+            isinstance(actionability_raw, Mapping)
+            and actionability_raw.get("disposition") == "requires_change"
+        )
         if (
             hypothesis_index == 0
             and dossier.get("research_status") == "evidence_sufficient"
+            and requires_change
             and not any(receipt.get("outcome") == "survived" for receipt in bound)
             and hypothesis_id not in deterministic_hypotheses
         ):
@@ -12616,11 +13031,9 @@ def _verify_assignment_files(
                     context_role not in set(RESEARCH_RUN_CONTEXT_FILES.values())
                     or rel is None
                     or rel.is_absolute()
-                    or len(rel.parts) != 1
-                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.name) != context_role
+                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.as_posix()) != context_role
                     or path is None
                     or path.is_symlink()
-                    or path.name != rel.name
                     or run_dir is None
                     or not run_dir.is_absolute()
                 )
@@ -12807,6 +13220,13 @@ def _explicit_atom_binding_receipts(
         has_value = "value" in declaration
         has_source_value = "source_value" in declaration
         expected_value = declaration.get("value")
+        observation_predicate = declaration.get("observation_predicate")
+        generic_predicate_binding = role == "symptom" and isinstance(
+            observation_predicate, Mapping
+        )
+        runner_bound_predicate_value = (
+            generic_predicate_binding and not has_value and not has_source_value
+        )
         diagnostic_value = (
             declaration.get("source_value")
             if has_source_value and not has_value
@@ -12832,7 +13252,7 @@ def _explicit_atom_binding_receipts(
         }:
             errors.append(f"{prefix}:role")
             continue
-        if not has_value or has_source_value:
+        if (not has_value and not runner_bound_predicate_value) or has_source_value:
             errors.append(
                 _atom_binding_error_with_path_candidates(
                     prefix=prefix,
@@ -12852,15 +13272,29 @@ def _explicit_atom_binding_receipts(
                     snapshot=snapshot,
                     declared_value=expected_value,
                     declared_value_key=declared_value_key,
+                    search_candidates=has_value,
                 )
             )
             continue
-        expected_hash = _canonical_json_sha256(expected_value)
+        found, actual_value = _atom_field_path_value(snapshot, field_path)
+        if not found:
+            errors.append(
+                _atom_binding_error_with_path_candidates(
+                    prefix=prefix,
+                    reason="snapshot_value",
+                    snapshot=snapshot,
+                    declared_value=expected_value,
+                    declared_value_key=declared_value_key,
+                    search_candidates=has_value,
+                )
+            )
+            continue
+        bound_value = actual_value if runner_bound_predicate_value else expected_value
+        expected_hash = _canonical_json_sha256(bound_value)
         if declared_hash is not None and declared_hash != expected_hash:
             errors.append(f"{prefix}:value_hash")
             continue
-        found, actual_value = _atom_field_path_value(snapshot, field_path)
-        if not found or _canonical_json_sha256(actual_value) != expected_hash:
+        if has_value and _canonical_json_sha256(actual_value) != expected_hash:
             errors.append(
                 _atom_binding_error_with_path_candidates(
                     prefix=prefix,
@@ -12872,8 +13306,6 @@ def _explicit_atom_binding_receipts(
             )
             continue
         binding_is_direct = False
-        observation_predicate = declaration.get("observation_predicate")
-        generic_predicate_binding = role == "symptom" and isinstance(observation_predicate, Mapping)
         if observation_predicate is not None and not generic_predicate_binding:
             errors.append(f"{prefix}:observation_predicate_role")
             continue
@@ -13291,6 +13723,32 @@ def _resolved_proof_adapter_semantic_basis(
     if semantic_basis.get("kind") != "repository_contract_quote":
         return resolved
 
+    intervention = claim.get("intervention")
+    target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
+    locator = _text(semantic_basis.get("locator"))
+    touchpoints_raw = claim.get("implementation_touchpoints")
+    if (
+        semantic_basis.get("contract_type") == "api_contract"
+        and _text(semantic_basis.get("symbol")) is None
+        and locator is not None
+        and locator == target
+    ):
+        locator_candidates = {
+            str(symbol).strip()
+            for touchpoint in (touchpoints_raw if isinstance(touchpoints_raw, list) else [])
+            if isinstance(touchpoint, Mapping)
+            and _text(touchpoint.get("path")) == _text(semantic_basis.get("path"))
+            and _text(touchpoint.get("causal_locator")) == locator
+            for symbol in (
+                touchpoint.get("symbols")
+                if isinstance(touchpoint.get("symbols"), list)
+                else []
+            )
+            if _text(symbol) is not None
+        }
+        if len(locator_candidates) == 1:
+            resolved["symbol"] = next(iter(locator_candidates))
+
     positive_contract = experiment.get("positive_outcome_contract")
     retained_basis = (
         positive_contract.get("semantic_basis") if isinstance(positive_contract, Mapping) else None
@@ -13318,9 +13776,6 @@ def _resolved_proof_adapter_semantic_basis(
     if resolved.get("contract_type") != "api_contract" or _text(resolved.get("symbol")):
         return resolved
 
-    intervention = claim.get("intervention")
-    target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
-    touchpoints_raw = claim.get("implementation_touchpoints")
     candidates = {
         str(symbol).strip()
         for touchpoint in (touchpoints_raw if isinstance(touchpoints_raw, list) else [])
@@ -13553,31 +14008,32 @@ def _proof_adapter_receipts(
                     key: value for key, value in binding.items() if key != "declared_binding_sha256"
                 }
                 predicate_contract = binding.get("observation_predicate")
-                baseline_value = (
-                    baseline_observation.get("observed")
-                    if isinstance(baseline_observation, Mapping)
-                    else None
-                )
+                source_value = binding.get("origin_atom_value")
                 predicate_passed, predicate_errors = evaluate_proof_predicate(
                     predicate_contract,
-                    baseline_value,
+                    source_value,
                 )
                 if (
                     binding.get("experiment_id") != baseline_id
                     or binding.get("declared_binding_sha256")
                     != _canonical_json_sha256(declared_projection)
+                    or binding.get("observation_predicate_sha256")
+                    != _canonical_json_sha256(predicate_contract)
                     or not isinstance(baseline_observation, Mapping)
                     or predicate_errors
                     or not predicate_passed
                 ):
                     unit_errors.append(
-                        "proof_adapter_atom_predicate_not_bound_to_baseline:"
+                        "proof_adapter_atom_predicate_binding_invalid:"
                         f"{binding.get('atom_id')}"
                     )
                     continue
                 attested_predicate_bindings.append(
                     content_bound_payload(
                         {
+                            "declared_binding_sha256": binding.get(
+                                "declared_binding_sha256"
+                            ),
                             "atom_id": binding.get("atom_id"),
                             "origin_atom_sha256": binding.get("origin_atom_sha256"),
                             "origin_atom_field_path": binding.get("origin_atom_field_path"),
@@ -13590,6 +14046,9 @@ def _proof_adapter_receipts(
                             "baseline_experiment_id": baseline_id,
                             "baseline_observation_sha256": baseline_observation.get(
                                 "observation_sha256"
+                            ),
+                            "binding_verification_method": (
+                                "runner_bound_source_predicate_with_baseline_experiment_v1"
                             ),
                             "adapter_id": provisional_proof.get("adapter_id"),
                             "adapter_version": provisional_proof.get("adapter_version"),
@@ -13664,6 +14123,46 @@ def _proof_adapter_receipts(
         receipts.extend(bound_receipts)
     by_id = {str(receipt["proof_receipt_id"]): receipt for receipt in receipts}
     return [by_id[key] for key in sorted(by_id)], diagnostics
+
+
+def _proof_adapter_failure_diagnostics(
+    *,
+    diagnostics: Sequence[Mapping[str, Any]],
+    fatal_mechanism_errors: Sequence[str],
+) -> list[str]:
+    """Expose adapter rejection reasons only when mechanism verification already failed.
+
+    Proof adapters are optional evidence paths, so an adapter diagnostic must not make an
+    otherwise verified dossier fail. When the declared mechanism is already unverifiable,
+    however, hiding the adapter's exact rejection behind generic causal-root errors prevents
+    the same author from repairing the proof it supplied.
+    """
+
+    if not fatal_mechanism_errors:
+        return []
+    errors: list[str] = []
+    for item in diagnostics:
+        experiment_id = _text(item.get("experiment_id"))
+        adapter_id = _text(item.get("adapter_id"))
+        diagnostic_values = item.get("diagnostics")
+        unit = [
+            str(value).strip()
+            for value in (
+                diagnostic_values if isinstance(diagnostic_values, list) else []
+            )
+            if isinstance(value, str) and value.strip()
+        ]
+        if experiment_id is None or adapter_id is None or not unit:
+            continue
+        errors.append(
+            "proof_adapter_unverified:"
+            + experiment_id
+            + ":"
+            + adapter_id
+            + ":"
+            + ",".join(dict.fromkeys(unit))
+        )
+    return errors
 
 
 def _clear_failed_receipt_success_projections(receipt: dict[str, Any]) -> None:
@@ -13793,6 +14292,10 @@ def verify_research_evidence(
         current_run_lineage=current_run_lineage,
         errors=errors,
     )
+    evidence_source_attempts = _evidence_source_attempt_catalog(
+        evidence_attempts,
+        evidence_event_sources,
+    )
     clean_replays: dict[str, dict[str, Any]] = {}
     executor: ReplayExecutor = replay_executor or BlockedReplayExecutor()
     replay_isolation = executor.isolation_receipt(
@@ -13897,6 +14400,10 @@ def verify_research_evidence(
             symbol_receipts=symbol_receipts,
             errors=optional_falsification_intervention_errors,
         )
+        falsification_interventions = _falsification_interventions_without_adapter_proof(
+            falsification_interventions,
+            proof_adapter_receipts=proof_adapter_receipts,
+        )
         if optional_falsification_intervention_errors and not proof_adapter_receipts:
             errors.extend(optional_falsification_intervention_errors)
     preliminary_mechanism_errors: list[str] = []
@@ -13934,6 +14441,12 @@ def verify_research_evidence(
         dossier, mechanism_errors
     )
     errors.extend(fatal_mechanism_errors)
+    errors.extend(
+        _proof_adapter_failure_diagnostics(
+            diagnostics=proof_adapter_diagnostics,
+            fatal_mechanism_errors=fatal_mechanism_errors,
+        )
+    )
     (
         verified_mechanism,
         verified_mechanism_sha256,
@@ -14053,6 +14566,10 @@ def verify_research_evidence(
         ),
         "evidence_event_sources": evidence_event_sources,
         "evidence_event_sources_sha256": evidence_event_sources_sha256,
+        "evidence_source_attempts": evidence_source_attempts,
+        "evidence_source_attempts_sha256": _canonical_json_sha256(
+            evidence_source_attempts
+        ),
         "run_report_sha256": (
             _sha256_path(report_path) if report_path.exists() and report_path.is_file() else None
         ),
@@ -14223,6 +14740,40 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
     for attempt_index, attempt in enumerate(attempts):
         if not isinstance(attempt, dict):
             continue
+        if attempt.get("attempt_kind") == "evidence_verification_persistence_replay":
+            progress_raw = attempt.get("repair_progress")
+            progress = progress_raw if isinstance(progress_raw, Mapping) else {}
+            replay_path_raw = _text(progress.get("replay_receipt_path"))
+            replay_path = Path(replay_path_raw) if replay_path_raw is not None else None
+            replay_sha256 = _text(progress.get("replay_receipt_sha256"))
+            if replay_path is None or not replay_path.is_file():
+                errors.append(
+                    f"research_attempt_persistence_replay_receipt_missing:{attempt_index}"
+                )
+            elif replay_sha256 is None or _sha256_path(replay_path) != replay_sha256:
+                errors.append(
+                    f"research_attempt_persistence_replay_receipt_changed:{attempt_index}"
+                )
+        if attempt.get("attempt_kind") == "evidence_verification_promotion":
+            progress_raw = attempt.get("repair_progress")
+            progress = progress_raw if isinstance(progress_raw, Mapping) else {}
+            replay_path_raw = _text(progress.get("replay_receipt_path"))
+            replay_path = Path(replay_path_raw) if replay_path_raw is not None else None
+            replay_sha256 = _text(progress.get("replay_receipt_sha256"))
+            if replay_path is None or not replay_path.is_file():
+                errors.append(f"research_attempt_promotion_receipt_missing:{attempt_index}")
+            elif replay_sha256 is None or _sha256_path(replay_path) != replay_sha256:
+                errors.append(f"research_attempt_promotion_receipt_changed:{attempt_index}")
+        rescore_raw = attempt.get("validation_error_rescore")
+        if rescore_raw is not None:
+            rescore = rescore_raw if isinstance(rescore_raw, Mapping) else {}
+            receipt_path_raw = _text(rescore.get("rescore_receipt_path"))
+            receipt_path = Path(receipt_path_raw) if receipt_path_raw is not None else None
+            receipt_sha256 = _text(rescore.get("rescore_receipt_sha256"))
+            if receipt_path is None or not receipt_path.is_file():
+                errors.append(f"research_attempt_rescore_receipt_missing:{attempt_index}")
+            elif receipt_sha256 is None or _sha256_path(receipt_path) != receipt_sha256:
+                errors.append(f"research_attempt_rescore_receipt_changed:{attempt_index}")
         if attempt.get("outcome") == "invocation_failed":
             continue
         run_dir_raw = _text(attempt.get("run_dir"))
@@ -14450,10 +15001,15 @@ def verify_persisted_research_evidence(
         if isinstance(attempts_raw, list)
         else []
     )
+    persisted_evidence_attempts = _persisted_evidence_attempt_catalog(
+        receipt,
+        research_attempts,
+        errors=errors,
+    )
     persisted_events = _load_persisted_evidence_event_stream(
         receipt,
         current_run_dir=run_dir,
-        research_attempts=research_attempts,
+        research_attempts=persisted_evidence_attempts,
         errors=errors,
     )
     errors.extend(
@@ -14922,8 +15478,6 @@ def verify_persisted_research_evidence(
             symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
             errors=intervention_errors,
         )
-        if receipt.get("falsification_interventions") != recomputed_falsification_interventions:
-            errors.append("research_falsification_interventions_changed")
         declared_experiments_raw = dossier.get("experiments")
         declared_experiments = {
             str(experiment.get("experiment_id")): experiment
@@ -14953,6 +15507,14 @@ def verify_persisted_research_evidence(
             errors.append("research_proof_adapter_receipts_changed")
         if receipt.get("proof_adapter_diagnostics", []) != recomputed_adapter_diagnostics:
             errors.append("research_proof_adapter_diagnostics_changed")
+        recomputed_falsification_interventions = (
+            _falsification_interventions_without_adapter_proof(
+                recomputed_falsification_interventions,
+                proof_adapter_receipts=recomputed_adapter_receipts,
+            )
+        )
+        if receipt.get("falsification_interventions") != recomputed_falsification_interventions:
+            errors.append("research_falsification_interventions_changed")
         if intervention_errors and not recomputed_adapter_receipts:
             errors.extend(intervention_errors)
         preliminary_mechanism_errors: list[str] = []

@@ -784,3 +784,6 @@ def test_change_planner_prompt_defines_grounded_research_return_contract() -> No
     assert 'evidence_phase="pre_change_decision_evidence"' in prompt
     assert 'binding_kind": "stage6_planned_post_change"' in prompt
     assert 'execution_status": "planned_unverified"' in prompt
+    assert "content-addressed input" in prompt
+    assert "intentionally allowed to be absent from the clean Git revision" in prompt
+    assert "return to research solely because its path is absent" in prompt

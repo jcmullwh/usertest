@@ -947,6 +947,50 @@ def _registry_atom_case_memberships(
     return {atom_id: sorted(case_ids) for atom_id, case_ids in memberships.items() if case_ids}
 
 
+def derived_source_atom_id_aliases(atom: Mapping[str, Any]) -> list[str]:
+    """Return durable pre-content-addressing identities for a re-ingested atom.
+
+    Derived-run ingestion uses a content-addressed record identity so the same run
+    discovered through more than one evidence root is suppressed deterministically.
+    Older plan and outcome records identify those atoms by the durable source-root
+    kind plus the run-relative path.  Both names refer to the same runner-owned
+    artifact; resolving the latter as a registry alias prevents an already-known
+    observation from being mined as a new problem after re-ingestion.
+
+    The alias is reconstructed only from runner-authored structured fields and only
+    when the atom's source and ordinal agree with its content-addressed ID.  Free-form
+    evidence text and generated ticket wording never participate in identity.
+    """
+
+    atom_id = _clean_string(atom.get("atom_id"))
+    root_kind = _clean_string(atom.get("derived_source_root_kind"))
+    run_rel = _clean_string(atom.get("derived_source_run_rel"))
+    source = _clean_string(atom.get("source"))
+    if (
+        atom_id is None
+        or root_kind is None
+        or run_rel is None
+        or source is None
+        or not atom_id.startswith("__derived__/")
+    ):
+        return []
+    root_kind = root_kind.replace("\\", "/").strip("/")
+    run_rel = run_rel.replace("\\", "/").strip("/")
+    if not root_kind or not run_rel or root_kind in {".", ".."}:
+        return []
+    if any(part in {"", ".", ".."} for part in run_rel.split("/")):
+        return []
+    parts = atom_id.rsplit(":", 2)
+    if (
+        len(parts) != 3
+        or parts[1] != source
+        or not parts[2].isdigit()
+        or not parts[0].startswith(f"__derived__/{root_kind}/")
+    ):
+        return []
+    return [f"{root_kind}/{run_rel}:{source}:{parts[2]}"]
+
+
 def _atom_supporting_case_ids(atom: Mapping[str, Any]) -> list[str]:
     """Return deterministic complete memberships for one dispositioned atom."""
 
@@ -975,6 +1019,20 @@ def _operational_candidate_signature(atom: Mapping[str, Any]) -> str | None:
         return None
     signature = _clean_string(atom.get("operational_candidate_signature"))
     return signature if _valid_sha256(signature) else None
+
+
+def _operational_candidate_signature_from_atom_id(atom_id: str) -> str | None:
+    """Return the stable signature encoded by a synthetic candidate atom ID."""
+
+    parts = atom_id.split(":")
+    if (
+        len(parts) != 3
+        or parts[0] != "operational_failure"
+        or not _valid_sha256(parts[1])
+        or not _valid_sha256(parts[2])
+    ):
+        return None
+    return parts[1].casefold()
 
 
 def normalize_atom_lineage(
@@ -1025,8 +1083,35 @@ def normalize_atom_lineage(
             parent_case_id = by_fingerprint.get(parent_fingerprint)
 
         case_id = _clean_string(atom.get("case_id"))
-        persisted_atom_case_id = by_atom.get(atom_id) if atom_id is not None else None
-        persisted_memberships = atom_memberships.get(atom_id, []) if atom_id is not None else []
+        registry_identities = list(
+            dict.fromkeys(
+                [
+                    *([atom_id] if atom_id is not None else []),
+                    *derived_source_atom_id_aliases(atom),
+                ]
+            )
+        )
+        persisted_primary_case_ids = list(
+            dict.fromkeys(
+                by_atom[identity]
+                for identity in registry_identities
+                if identity in by_atom
+            )
+        )
+        persisted_memberships = sorted(
+            {
+                case_id
+                for identity in registry_identities
+                for case_id in atom_memberships.get(identity, [])
+            }
+        )
+        persisted_atom_case_id = (
+            persisted_primary_case_ids[0]
+            if len(persisted_primary_case_ids) == 1
+            else persisted_memberships[0]
+            if not persisted_primary_case_ids and len(persisted_memberships) == 1
+            else None
+        )
         if (
             evidence_role in _DERIVED_EVIDENCE_ROLES
             and parent_case_id is None
@@ -1707,16 +1792,41 @@ def apply_atom_dispositions(
 
         final_disposition = _clean_string(atom.get("disposition")) or "unresolved"
         if final_disposition == "supports_case":
-            atom = apply_atom_disposition_decision(
-                atom,
-                disposition=final_disposition,
-                source=("canonical_problem_evidence" if cited_cases else "runner_parent_lineage"),
-                rationale=(
-                    "Canonical problem mining cited this atom for case membership."
-                    if cited_cases
-                    else f"Runner-owned lineage attaches this derived atom to {parent_case}."
-                ),
-            )
+            if cited_cases:
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source="canonical_problem_evidence",
+                    rationale="Canonical problem mining cited this atom for case membership.",
+                )
+            elif prior_receipt_valid:
+                assert prior_receipt is not None
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source=str(prior_receipt["source"]),
+                    rationale=str(prior_receipt["rationale"]),
+                )
+            elif role in _DERIVED_EVIDENCE_ROLES and parent_case is not None:
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source="runner_parent_lineage",
+                    rationale=(
+                        f"Runner-owned lineage attaches this derived atom to {parent_case}."
+                    ),
+                )
+            else:
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition=final_disposition,
+                    source="canonical_case_membership",
+                    rationale=(
+                        "Canonical case membership assigns this atom to "
+                        + ", ".join(sorted(supporting_case_ids))
+                        + "."
+                    ),
+                )
         elif prior_receipt_valid:
             assert prior_receipt is not None
             atom = apply_atom_disposition_decision(
@@ -1893,7 +2003,36 @@ def build_case_registry(
             )
         )
         current_evidence = _clean_string_list(record.get("evidence_atom_ids"))
-        previous_evidence_list = _clean_string_list(previous_entry.get("evidence_atom_ids"))
+        current_operational_atom_ids_by_signature: dict[str, set[str]] = {}
+        for atom_id in current_evidence:
+            signature = _operational_candidate_signature(
+                supporting_atoms_by_id.get(atom_id) or {}
+            )
+            if signature is not None:
+                current_operational_atom_ids_by_signature.setdefault(
+                    signature,
+                    set(),
+                ).add(atom_id)
+        previous_evidence_all = _clean_string_list(
+            previous_entry.get("evidence_atom_ids")
+        )
+        superseded_operational_atom_ids = sorted(
+            {
+                atom_id
+                for atom_id in previous_evidence_all
+                for signature in [
+                    _operational_candidate_signature_from_atom_id(atom_id)
+                ]
+                if signature in current_operational_atom_ids_by_signature
+                and atom_id
+                not in current_operational_atom_ids_by_signature.get(signature, set())
+            }
+        )
+        previous_evidence_list = [
+            atom_id
+            for atom_id in previous_evidence_all
+            if atom_id not in set(superseded_operational_atom_ids)
+        ]
         evidence_ids = list(dict.fromkeys(previous_evidence_list + current_evidence))
         derived_evidence_ids = list(
             dict.fromkeys(
@@ -1903,7 +2042,13 @@ def build_case_registry(
         )
         source_evidence_ids = list(
             dict.fromkeys(
-                _clean_string_list(previous_entry.get("source_evidence_atom_ids"))
+                [
+                    atom_id
+                    for atom_id in _clean_string_list(
+                        previous_entry.get("source_evidence_atom_ids")
+                    )
+                    if atom_id not in set(superseded_operational_atom_ids)
+                ]
                 + _clean_string_list(record.get("source_evidence_atom_ids"))
                 + [atom_id for atom_id in evidence_ids if atom_id not in set(derived_evidence_ids)]
             )
@@ -1961,6 +2106,16 @@ def build_case_registry(
             "source_evidence_snapshot_complete": source_snapshot["complete"],
             "source_evidence_snapshot_missing_atom_ids": source_snapshot["missing_atom_ids"],
             "source_evidence_snapshot_sha256": source_snapshot["snapshot_sha256"],
+            "superseded_operational_evidence_atom_ids": list(
+                dict.fromkeys(
+                    _clean_string_list(
+                        previous_entry.get(
+                            "superseded_operational_evidence_atom_ids"
+                        )
+                    )
+                    + superseded_operational_atom_ids
+                )
+            ),
             "case_revision": case_revision,
             "same_cause_group_id": _clean_string(record.get("same_cause_group_id"))
             or _clean_string(previous_entry.get("same_cause_group_id")),
@@ -3097,7 +3252,12 @@ def _update_optioning_stage_summary(
             ),
             research_dossier_sha256=_clean_string(current_research.get("full_dossier_sha256")),
         ),
-        "problem_id": _clean_string(records[0].get("problem_id")) if records else None,
+        "case_id": _clean_string(entry.get("case_id")),
+        "problem_id": (
+            _clean_string(records[0].get("problem_id"))
+            if records
+            else _clean_string(outcome.get("problem_id"))
+        ),
         "optioning_status": status,
         "option_ids": [
             option_id
@@ -3114,6 +3274,12 @@ def _update_optioning_stage_summary(
             )
         ),
     }
+    summary["optioning_outcome_count"] = len(auxiliary_records)
+    if len(auxiliary_records) == 1:
+        # A zero-option outcome is a real Stage-4 disposition, not an option record.
+        # Retain its exact identity so later cycles can authenticate the full artifact
+        # rather than treating every empty option set as a cache miss.
+        summary["optioning_outcome_sha256"] = _canonical_content_sha256(outcome)
     actionability_disposition = _clean_string(
         outcome.get("research_actionability_disposition")
     )
@@ -3764,23 +3930,25 @@ def propagate_case_lineage(
 ) -> list[dict[str, Any]]:
     """Copy canonical case fields from problem work units onto downstream stage items."""
 
-    by_problem: dict[str, dict[str, Any]] = {}
+    direct_by_problem: dict[str, dict[str, Any]] = {}
+    member_by_problem: dict[str, dict[str, Any]] = {}
     for case in problem_cases:
-        problem_ids = list(
-            dict.fromkeys(
-                [_clean_string(case.get("problem_id")) or ""]
-                + _clean_string_list(case.get("case_member_problem_ids"))
-            )
-        )
-        for problem_id in problem_ids:
-            if problem_id:
-                by_problem[problem_id] = case
+        direct_problem_id = _clean_string(case.get("problem_id"))
+        if direct_problem_id is not None:
+            direct_by_problem[direct_problem_id] = case
+        for problem_id in _clean_string_list(case.get("case_member_problem_ids")):
+            member_by_problem[problem_id] = case
 
     propagated: list[dict[str, Any]] = []
     for index, raw_item in enumerate(items):
         item = dict(raw_item)
         item_problem_id = _clean_string(item.get("problem_id"))
-        matching_case = by_problem.get(item_problem_id or "")
+        # A provisional group keeps each durable problem/case record while exposing the
+        # full member set on both records.  Prefer the record whose own problem_id matches;
+        # use member aliases only when no direct record exists (the canonical-merge case).
+        matching_case = direct_by_problem.get(item_problem_id or "") or member_by_problem.get(
+            item_problem_id or ""
+        )
         if matching_case is None:
             if strict_new_output:
                 raise ValueError(

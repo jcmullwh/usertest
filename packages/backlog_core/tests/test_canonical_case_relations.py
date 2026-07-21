@@ -402,6 +402,32 @@ def test_reciprocal_disjoint_same_cause_is_one_provisional_research_unit() -> No
     assert "same_cause_group_id" not in unit
 
 
+def test_provisional_packet_expansion_does_not_self_verify_case_identity() -> None:
+    prior_unit = _provisional_same_cause_unit()
+    provisional_group = prior_unit["provisional_same_cause_group"]
+    items = [
+        _case("problem:a", "case:a", ["atom:a", "atom:b"]),
+        _case("problem:b", "case:b", ["atom:b", "atom:a"]),
+    ]
+    for item in items:
+        item["case_identity_status"] = "provisional_same_cause"
+        item["case_identity_candidate_ids"] = ["case:a", "case:b"]
+        item["provisional_same_cause_group"] = provisional_group
+
+    result = canonicalize_problem_cases(
+        items,
+        _reciprocal_same_cause_decisions(),
+        strict_review=True,
+    )
+
+    assert len(result) == 1
+    unit = result[0]
+    assert unit["case_identity_status"] == "provisional_same_cause"
+    assert unit["case_identity_candidate_ids"] == ["case:a", "case:b"]
+    assert "absorbed_case_ids" not in unit
+    assert "same_cause_group_id" not in unit
+
+
 def test_reciprocal_provisional_group_normalizes_nondeterministic_group_names() -> None:
     """Equivalent members survive different names from independent model batches."""
 
@@ -661,6 +687,68 @@ def test_evidence_complete_keep_separate_clears_prior_provisional_group() -> Non
         "case:a",
         "case:b",
     ]
+
+
+def test_objective_merge_alias_clears_prior_provisional_group() -> None:
+    provisional_group = {
+        "schema_version": 1,
+        "status": "research_hypothesis",
+        "group_id": "cause:provisional:shared-source",
+        "member_case_ids": ["case:a", "case:b"],
+        "member_problem_ids": ["problem:a", "problem:b"],
+        "member_facets": [
+            {
+                "case_id": "case:a",
+                "problem_id": "problem:a",
+                "evidence_atom_ids": ["atom:shared"],
+                "source_evidence_atom_ids": ["atom:shared"],
+            },
+            {
+                "case_id": "case:b",
+                "problem_id": "problem:b",
+                "evidence_atom_ids": ["atom:shared"],
+                "source_evidence_atom_ids": ["atom:shared"],
+            },
+        ],
+    }
+    items = [
+        _case("problem:a", "case:a", ["atom:shared"]),
+        _case("problem:b", "case:b", ["atom:shared"]),
+    ]
+    for item in items:
+        item["case_identity_status"] = "provisional_same_cause"
+        item["case_identity_candidate_ids"] = ["case:a", "case:b"]
+        item["provisional_same_cause_group"] = provisional_group
+
+    result = canonicalize_problem_cases(
+        items,
+        [
+            {
+                "focus_id": "problem:a",
+                "action": "merge",
+                "target_ids": ["problem:b"],
+                "evidence_atom_ids": ["atom:shared"],
+                "rationale": "Both records own the same source observation.",
+                "review_confidence": 0.99,
+            },
+            {
+                "focus_id": "problem:b",
+                "action": "alias",
+                "alias_target_id": "problem:a",
+                "evidence_atom_ids": ["atom:shared"],
+                "rationale": "The second wording aliases the first source identity.",
+                "review_confidence": 0.99,
+            },
+        ],
+        strict_review=True,
+    )
+
+    assert len(result) == 1
+    assert result[0]["case_id"] == "case:a"
+    assert result[0]["absorbed_case_ids"] == ["case:b"]
+    assert result[0]["case_identity_status"] == "resolved"
+    assert "case_identity_candidate_ids" not in result[0]
+    assert "provisional_same_cause_group" not in result[0]
 
 
 def test_incomplete_provisional_group_blocks_locally_instead_of_clearing() -> None:
