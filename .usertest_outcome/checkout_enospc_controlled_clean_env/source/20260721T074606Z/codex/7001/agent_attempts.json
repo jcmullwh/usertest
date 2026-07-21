@@ -1,0 +1,71 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "attempt_started_utc": "2026-07-21T07:46:23Z",
+      "attempt_finished_utc": "2026-07-21T07:46:23Z",
+      "attempt_wall_seconds": 0.7365105000790209,
+      "agent_exec_wall_seconds": 0.7292206999845803,
+      "exit_code": 0,
+      "argv": [
+        "C:\\Users\\jason\\AppData\\Local\\Temp\\ut_checkout_enospc_probe_pi3nkx19\\runner_root\\dummy_codex.cmd",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--ignore-user-config",
+        "--json",
+        "--cd",
+        "C:\\Users\\jason\\AppData\\Local\\Temp\\ut_checkout_enospc_probe_pi3nkx19\\temp\\usertest_workspaces\\source_20260721T074606Z_codex_7001",
+        "--sandbox",
+        "read-only",
+        "--ignore-rules",
+        "--output-last-message",
+        "U:\\ubq\\implementation\\_workspaces\\bc70b15b_20260721T052958Z_codex_0\\.usertest_outcome\\checkout_enospc_controlled_clean_env\\source\\20260721T074606Z\\codex\\7001\\agent_last_message.attempt1.txt",
+        "-"
+      ],
+      "agent_session_id": "019f2cca-9011-7e32-88ae-6c25af578b49",
+      "continued_session": false,
+      "failure_subtype": null,
+      "report_validation_errors": [],
+      "json_syntax_repair": null,
+      "warnings": [],
+      "verification": {
+        "status": "disabled",
+        "terminal_reason": null,
+        "source": "disabled",
+        "passed": null,
+        "failure_reason": null,
+        "rejected_sentinel": null,
+        "rejected_command": null,
+        "broker_requested": false,
+        "broker_request_id": null,
+        "broker_response_status": null,
+        "broker_response_failure_reason": null,
+        "broker_missing_required_artifacts": [],
+        "broker_response_contract_error": null,
+        "reuse_candidate": false,
+        "reuse_selected": false,
+        "summary_path": null
+      },
+      "raw_events_path": "raw_events.attempt1.jsonl",
+      "last_message_path": "agent_last_message.attempt1.txt",
+      "stderr_path": "agent_stderr.attempt1.txt",
+      "codex_metadata_capture": {
+        "shell_snapshot": {
+          "warning_code": "shell_snapshot_powershell_unsupported",
+          "warning_occurrences": 0,
+          "missing": false
+        },
+        "turn_metadata_header": {
+          "warning_code": "turn_metadata_header_timeout",
+          "warning_occurrences": 0,
+          "missing": false
+        }
+      }
+    }
+  ],
+  "rate_limit_retries_configured": 0,
+  "rate_limit_retries_used": 0,
+  "followup_attempts_configured": 0,
+  "followup_attempts_used": 0
+}

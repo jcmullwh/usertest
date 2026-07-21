@@ -1,0 +1,16 @@
+{
+  "event_counts": {
+    "agent_message": 1,
+    "preflight_shell_capability": 1
+  },
+  "distinct_files_read": [],
+  "distinct_docs_read": [],
+  "distinct_files_written": [],
+  "commands_executed": 0,
+  "commands_failed": 0,
+  "commands_no_matches": 0,
+  "commands_blocked_by_policy": 0,
+  "lines_added_total": 0,
+  "lines_removed_total": 0,
+  "step_count": 0
+}

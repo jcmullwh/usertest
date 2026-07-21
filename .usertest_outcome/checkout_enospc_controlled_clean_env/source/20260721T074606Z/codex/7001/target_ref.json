@@ -1,0 +1,18 @@
+{
+  "repo_input": "C:\\Users\\jason\\AppData\\Local\\Temp\\ut_checkout_enospc_probe_pi3nkx19\\source",
+  "ref": "probe-ref",
+  "commit_sha": "10a9ac3c987ab029994f2345bc8be183e44fb8f8",
+  "acquire_mode": "git",
+  "agent": "codex",
+  "policy": "safe",
+  "seed": 7001,
+  "obfuscate_agent_docs": false,
+  "requested_persona_id": "p",
+  "requested_mission_id": "m",
+  "requested_codex_resume_session_id": null,
+  "users_md_present": false,
+  "persona_id": "p",
+  "mission_id": "m",
+  "prompt_template_path": "C:\\Users\\jason\\AppData\\Local\\Temp\\ut_checkout_enospc_probe_pi3nkx19\\runner_root\\configs\\prompt_templates\\t.prompt.md",
+  "report_schema_path": "C:\\Users\\jason\\AppData\\Local\\Temp\\ut_checkout_enospc_probe_pi3nkx19\\runner_root\\configs\\report_schemas\\s.schema.json"
+}

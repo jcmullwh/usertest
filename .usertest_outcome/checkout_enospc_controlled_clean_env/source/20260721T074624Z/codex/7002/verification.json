@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "status": "disabled",
+  "terminal_reason": null,
+  "skipped": true,
+  "skip_reason": "verification_commands_not_configured",
+  "attempt_number": 1,
+  "commands_configured": [],
+  "source": "disabled",
+  "reused": false,
+  "workspace_hash": null,
+  "broker_request_id": null,
+  "broker_artifacts_dir": null,
+  "failure_reason": null,
+  "timed_out": false,
+  "cancelled": false
+}
