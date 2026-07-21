@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from backlog_repo import render_verification_contract_markdown
-from runner_core.runner import RunResult
+from runner_core.runner import RunRequest, RunResult
 
 from usertest_implement.ci import _wait_for_ci_success
 from usertest_implement.commands.review import (
     _build_merge_outcome_record,
     _build_review_correction_prompt,
+    _build_review_semantic_correction_request,
     _cmd_review_merge,
     _cmd_review_run,
     _is_same_queue_ticket_move,
@@ -1414,6 +1416,117 @@ def test_build_final_review_summary_rejects_shallow_causal_acceptance(
     assert summary[field] == value
 
 
+def test_bounded_residual_paths_limit_outcome_without_blocking_sound_code(
+    tmp_path: Path,
+) -> None:
+    summary = _build_final_review_summary(
+        selected=SimpleNamespace(
+            fingerprint="abc123abc123abcd",
+            idea_path=tmp_path / "ticket.md",
+        ),
+        review_run_dir=tmp_path / "review_run",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "pr": {
+                "number": 1,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "implementation_scope": {"status": "verified"},
+        },
+        agent_summary={
+            "review_decision": "approved",
+            "approach_alignment": "aligned",
+            "mechanism_assessment": "mechanism_addressed",
+            "original_scenario_oracle": "exercised",
+            "causal_path_assessment": "residual",
+            "remaining_causal_paths": [
+                "A different storage write can still exhaust the original run volume."
+            ],
+            "scope_assessment": "appropriate",
+            "rationale": (
+                "The selected checkout mechanism is closed under its bounded conditions; "
+                "the retained path limits the outcome to mitigated."
+            ),
+        },
+        report={
+            "issues": [
+                {
+                    "severity": "warn",
+                    "title": "Broader storage exhaustion remains possible",
+                    "details": "This path is outside the selected checkout mechanism.",
+                }
+            ]
+        },
+    )
+
+    assert summary["causal_path_assessment"] == "residual"
+    assert summary["remaining_causal_paths"]
+    assert summary["blocking_finding_count"] == 0
+    assert summary["causal_acceptance"] is True
+    assert summary["merge_ready"] is True
+
+
+def test_residual_path_inside_selected_mechanism_remains_blocking(
+    tmp_path: Path,
+) -> None:
+    summary = _build_final_review_summary(
+        selected=SimpleNamespace(
+            fingerprint="abc123abc123abcd",
+            idea_path=tmp_path / "ticket.md",
+        ),
+        review_run_dir=tmp_path / "review_run",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "pr": {
+                "number": 1,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "implementation_scope": {"status": "verified"},
+        },
+        agent_summary={
+            "review_decision": "changes_requested",
+            "approach_alignment": "aligned",
+            "mechanism_assessment": "mechanism_addressed",
+            "original_scenario_oracle": "exercised",
+            "causal_path_assessment": "residual",
+            "remaining_causal_paths": [
+                "The selected checkout fallback still returns the failed destination."
+            ],
+            "scope_assessment": "appropriate",
+            "rationale": "The selected mechanism is not complete.",
+        },
+        report={
+            "issues": [
+                {
+                    "severity": "error",
+                    "title": "Selected fallback path remains open",
+                    "details": "A repository correction is required.",
+                }
+            ]
+        },
+    )
+
+    assert summary["blocking_finding_count"] == 1
+    assert summary["causal_acceptance"] is False
+    assert summary["merge_ready"] is False
+
+
 def test_scope_label_is_advisory_without_a_concrete_blocking_finding(
     tmp_path: Path,
 ) -> None:
@@ -1488,6 +1601,9 @@ def test_review_prompt_centers_causal_acceptance_before_scope() -> None:
     assert "not the mutable merge gate" in prompt
     assert "bound original-scenario oracle" in prompt
     assert "which causal paths, if any, can still reproduce the problem" in prompt
+    assert "bounded residuals may coexist with approval" in prompt
+    assert "Missing external/live proof" in prompt
+    assert "A broken prescribed verification command is a code/test defect" in prompt
     assert "Scope is secondary to causal correctness" in prompt
     assert "hard-blocks only a missing planned production target" in prompt
 
@@ -1560,7 +1676,10 @@ def test_review_prompt_projects_large_research_history_without_losing_causal_evi
     assert ticket_path.read_text(encoding="utf-8") == ticket_markdown
 
 
-def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) -> None:
+def test_review_correction_reuses_exact_prior_reviewer_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fingerprint = "c0rrectc0rrect00"
     ticket_path = _make_ticket(
         tmp_path,
@@ -1610,6 +1729,11 @@ def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) 
         f"    last_review_run_dir: {json.dumps(str(previous_review_run_dir))}\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0,
+        stdout=head_oid + "\n",
+        stderr="",
+    ))
 
     context = _review_correction_context(
         selected=selected,
@@ -1621,6 +1745,7 @@ def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) 
 
     assert context["codex_resume_session_id"] == session_id
     assert context["resume_workspace_dir"] == workspace_dir.resolve()
+    assert context["resume_workspace_source"] == "prior_review"
     assert context["prior_model"] == "gpt-5.6-terra"
     prompt = _build_review_correction_prompt(
         corrections=["Verify that the planned test was dependency-correctly relocated."],
@@ -1632,7 +1757,10 @@ def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) 
     assert "dependency-correctly relocated" in prompt
 
 
-def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
+def test_review_correction_keeps_same_reviewer_for_a_corrected_pr_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fingerprint = "c0rrectc0rrect01"
     ticket_path = _make_ticket(
         tmp_path,
@@ -1643,6 +1771,8 @@ def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
     implementation_run_dir = tmp_path / "runs" / "implementation"
     implementation_run_dir.mkdir(parents=True)
     previous_review_run_dir = tmp_path / "runs" / "review" / "first"
+    previous_review_run_dir.mkdir(parents=True)
+    session_id = "019f6733-3afd-7270-839c-5e9d0ca4ff71"
     _write_json(
         previous_review_run_dir / "review_summary.json",
         {
@@ -1655,6 +1785,14 @@ def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
         previous_review_run_dir / "review_ref.json",
         {"implementation_run_dir": str(implementation_run_dir)},
     )
+    _write_json(
+        previous_review_run_dir / "target_ref.json",
+        {"agent": "codex", "model": "gpt-5.6-sol"},
+    )
+    (previous_review_run_dir / "raw_events.jsonl").write_text(
+        json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n",
+        encoding="utf-8",
+    )
     ledger_path = tmp_path / ".agents" / "state" / "actions.yaml"
     ledger_path.parent.mkdir(parents=True)
     ledger_path.write_text(
@@ -1664,14 +1802,83 @@ def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="different PR head"):
-        _review_correction_context(
-            selected=selected,
-            implementation_run_dir=implementation_run_dir,
-            ledger_path=ledger_path,
-            pr_url="https://example.invalid/pr/213",
-            reviewed_head_oid="b" * 40,
-        )
+    corrected_run_dir = tmp_path / "runs" / "implementation-correction"
+    corrected_run_dir.mkdir(parents=True)
+    corrected_workspace = tmp_path / "corrected-workspace"
+    corrected_workspace.mkdir()
+    _write_json(
+        corrected_run_dir / "workspace_ref.json",
+        {"workspace_dir": str(corrected_workspace)},
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: SimpleNamespace(
+            returncode=0 if Path(argv[2]).resolve() == corrected_workspace.resolve() else 1,
+            stdout=(
+                "b" * 40 + "\n"
+                if Path(argv[2]).resolve() == corrected_workspace.resolve()
+                else ""
+            ),
+            stderr="",
+        ),
+    )
+    context = _review_correction_context(
+        selected=selected,
+        implementation_run_dir=corrected_run_dir,
+        ledger_path=ledger_path,
+        pr_url="https://example.invalid/pr/213",
+        reviewed_head_oid="b" * 40,
+    )
+
+    assert context["codex_resume_session_id"] == session_id
+    assert context["previous_reviewed_head_oid"] == "a" * 40
+    assert context["current_reviewed_head_oid"] == "b" * 40
+    assert context["previous_implementation_run_dir"] == implementation_run_dir.resolve()
+    assert context["current_implementation_run_dir"] == corrected_run_dir.resolve()
+    assert context["resume_workspace_dir"] == corrected_workspace.resolve()
+    assert context["resume_workspace_source"] == "current_verified_implementation"
+
+
+def test_semantic_review_error_returns_to_exact_same_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed_run_dir = tmp_path / "failed-review"
+    failed_run_dir.mkdir()
+    session_id = "019f6733-3afd-7270-839c-5e9d0ca4ff72"
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.implementation_author_continuity",
+        lambda _run_dir: {
+            "agent": "codex",
+            "exact_session_available": True,
+            "session_id": session_id,
+        },
+    )
+    original = RunRequest(
+        repo="https://example.invalid/repo.git",
+        ref="b" * 40,
+        model="gpt-5.6-sol",
+        agent_append_system_prompt_file=tmp_path / "initial.md",
+        resume_workspace_dir=tmp_path / "current-workspace",
+    )
+
+    corrected = _build_review_semantic_correction_request(
+        request=original,
+        failed_run_dir=failed_run_dir,
+        reviewed_head_oid="b" * 40,
+        validation_error=(
+            "extensions.review_summary.remaining_causal_paths must be empty "
+            "when causal_path_assessment is closed"
+        ),
+    )
+
+    assert corrected.codex_resume_session_id == session_id
+    assert corrected.agent_append_system_prompt_file is None
+    assert corrected.resume_workspace_dir == original.resume_workspace_dir
+    assert corrected.ref == original.ref
+    assert "remaining_causal_paths must be empty" in str(corrected.agent_user_prompt)
+    assert "use `residual` when explicit paths remain" in str(corrected.agent_user_prompt)
 
 
 def test_retained_review_correction_prompt_preserves_order_and_prior_binding(
@@ -2892,6 +3099,79 @@ def test_wait_for_ci_success_polls_view_until_completed_success(
     ci_gate = _read_json(run_dir / "ci_gate.json")
     assert isinstance(ci_gate, dict)
     assert ci_gate["finished_at_utc"] is not None
+
+
+def test_wait_for_ci_success_requires_requested_event_for_same_head(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(parents=True)
+    seen_run_ids: list[str] = []
+
+    def _fake_run(argv, **_kwargs):
+        if argv[:3] == ["gh", "run", "list"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "databaseId": 10,
+                            "headSha": "abc123",
+                            "event": "push",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "createdAt": "2026-07-21T08:05:31Z",
+                            "url": "https://example.invalid/runs/10",
+                        },
+                        {
+                            "databaseId": 11,
+                            "headSha": "abc123",
+                            "event": "pull_request",
+                            "status": "completed",
+                            "conclusion": "success",
+                            "createdAt": "2026-07-21T08:05:32Z",
+                            "url": "https://example.invalid/runs/11",
+                        },
+                    ]
+                ),
+                stderr="",
+            )
+        if argv[:3] == ["gh", "run", "view"]:
+            seen_run_ids.append(argv[3])
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "status": "completed",
+                        "conclusion": "success",
+                        "url": "https://example.invalid/runs/11",
+                    }
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr("usertest_implement.review_context.subprocess.run", _fake_run)
+    monkeypatch.setattr("usertest_implement.ci.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("usertest_implement.ci.time.monotonic", lambda: 0.0)
+
+    summary = _wait_for_ci_success(
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        branch="backlog/test",
+        head_sha="abc123",
+        workflow="CI",
+        timeout_seconds=60.0,
+        required_event="pull_request",
+    )
+
+    assert seen_run_ids == ["11"]
+    assert summary["required_event"] == "pull_request"
+    assert summary["run_id"] == 11
+    assert summary["passed"] is True
 
 
 def test_run_gh_text_returns_empty_string_when_stdout_missing(monkeypatch, tmp_path: Path) -> None:

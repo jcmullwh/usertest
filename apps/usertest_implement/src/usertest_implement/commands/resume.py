@@ -1470,6 +1470,7 @@ def _cmd_resume_pr(
                     timeout_seconds=_ci_timeout_seconds_arg(
                         getattr(args, "ci_timeout_seconds", None)
                     ),
+                    required_event="pull_request",
                 )
                 if ci_ref.get("passed") is not True:
                     exit_code = max(exit_code, 5)

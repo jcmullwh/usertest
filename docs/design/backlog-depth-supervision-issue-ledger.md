@@ -2719,16 +2719,85 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: a split group whose atoms all resolve through runner-owned atom membership or stable operational signature to exactly one pending durable case returns to that case rather than becoming a new child. Registry updates also replace the prior synthetic aggregate for the same stable signature with the current full-occurrence aggregate, while recording the retired IDs in `superseded_operational_evidence_atom_ids` for audit history.
 - Verification: the operational occurrence-reopen test now proves a complete current source snapshot and retained supersession history; the focused problem-mining test proves signature-bound split return; and the 225-test affected suite passes. Exact zero-relation-call replay `U:\ubq\c1\s12replay_20260721T025627Z` authenticates all three current atoms as `supports_case`, retains the accepted relation decision, reports complete source snapshots with zero missing IDs, and ranks storage/Gemini P0 and Docker P1 from verified recurrence evidence.
 
+### BDS-199 - Post-research split children lost their authenticated source frontier
+
+- Status: `closed`
+- Priority: retained-research reuse, correct final disposition, model-throughput efficiency
+- Objective impact: Stage 3 correctly split a broad storage case into distinct checkout and Claude provider-write action boundaries and then researched the Claude child against its exact historical occurrences. The split child nevertheless persisted only its generated facet-context atom as derived evidence and left `source_evidence_atom_ids` empty. Exact next-cycle hydration therefore rejected the valid proof and selected repeat research instead of parking the unresolved historical case.
+- Exact evidence: storage parent run `U:\ubq\c1\s3_b429_20260721T031448Z` authenticated three occurrences and produced two receipt-bound child facets. Claude child run `U:\ubq\c1\s3_e9f_reuse_20260721T042008Z` retained a verified `insufficient_evidence` dossier plus a successful current live Claude adapter experiment. Deterministic Stage 4 emitted zero options. The following Stage-2 replay at `U:\ubq\c1\s2_e9f_final_20260721T042052Z` nevertheless returned `retained_research_current_source_evidence_snapshot_invalid`; its registry had two occurrence IDs but an empty source frontier, no source hashes, and no snapshot digest.
+- Correction: a post-research split receipt's explicitly partitioned original occurrences are now the durable source frontier for each child. The generated facet atom remains derived research context. Stage 3 still independently validates the immutable receipt before assigning any occurrence, so this repair restores lineage without weakening split authentication.
+- Verification: 37 focused post-research-relation and retained-hydration tests pass. Exact split replay `U:\ubq\c1\s3_b429_split3_20260721T042643Z` gives both children complete hash-bound source snapshots. The existing Claude dossier was reused with zero new research calls, deterministic Stage 4 again produced zero options, and exact replay `U:\ubq\c1\s2_e9f_fixed_final_20260721T043021Z` routes `await_evidence`, deselects both research and downstream, and records a content-bound reconsideration frontier. The broader application suite is included in the final controller verification matrix.
+
+### BDS-200 - Review acceptance treated bounded residual paths as an unmergeable selected-mechanism defect
+
+- Status: `closed`
+- Priority: quality-throughput balance, bounded causal claims
+- Objective impact: a correct implementation could be held indefinitely because the reviewer was forced to call every broader recurrence path closed, even when the plan deliberately selected one authenticated mechanism and retained the other paths as explicit limitations.
+- Exact evidence: the first PR #220 review correctly found one standalone-probe import defect, but also treated missing natural disk-full proof and explicitly excluded later-storage/pip/copy paths as repository change requests. The implementation's maximum claim was already `mitigated`, not resolved.
+- Correction: the deterministic acceptance contract now permits `causal_path_assessment=residual` when the selected mechanism is addressed, the original-scenario oracle is exercised, the reviewer approves, and no blocking finding remains. An open path inside the selected mechanism or an `unclear` assessment still blocks. The review prompt separately identifies external/live proof as an outcome-confidence boundary rather than an automatic code defect.
+- Verification: focused review tests cover approved bounded residuals and rejection of an open selected-mechanism path. The retained reviewer ultimately approved exact head `86e7aee...` with four explicit residual paths, zero blocking findings, and maximum claim `mitigated`.
+
+### BDS-201 - Commit finalization added runner-owned verification outputs to the implementation PR
+
+- Status: `closed`
+- Priority: pipeline correctness, PR signal, storage safety
+- Objective impact: a five-file implementation became a 63-file PR because the finalizer committed 58 `.usertest_outcome` artifacts produced by its own verification. This obscured the product change and created unnecessary repository/storage churn.
+- Exact evidence: correction finalization created commit `f6419d3` containing the five intended files plus 58 generated outcome files. No implementation author action requested those files. The retained bytes were useful evidence and therefore were not deleted.
+- Correction: runner-owned `.usertest_run_dir`, `.usertest_outcome`, and `pip/cache` paths are untracked before staging and excluded from commits. Historical accidental tracking self-heals by removing only index entries while preserving local bytes. Finalization always evaluates this cleanup even when ordinary porcelain is initially clean.
+- Verification: focused finalizer and handoff tests prove untracked outputs remain on disk, historical tracked outputs leave the patch, and unrelated dirty files still block. Commit `86e7aee` reduces PR #220 back to the intended five files; all retained evidence remains present locally.
+
+### BDS-202 - PR resume selected push-event CI and polled long CI too frequently
+
+- Status: `closed`
+- Priority: correct handoff state, operational efficiency
+- Objective impact: a PR could be marked failed from a push workflow even when the PR workflow was the relevant merge gate, and ten-second polling created unnecessary status traffic for jobs known to take many minutes.
+- Exact evidence: at `f6419d3`, pull-request run `29812925157` passed while push run `29812923456` had one flaky Windows failure; the resume path selected the push result. Later PR run `29816405282` needed retries for transient Windows post-job failures before passing on unchanged bytes.
+- Correction: CI lookup requires an exact event: ordinary handoff uses `push`, PR resume uses `pull_request`. The internal long-CI poll interval is 120 seconds; supervisor observation uses roughly ten-minute intervals. No test timeout was shortened.
+- Verification: event-selection regression coverage passes. Current PR #220 pull-request run `29816405282` is green, including Windows runner_core job `88602276756`; the unchanged push run is also green.
+
+### BDS-203 - Same-reviewer correction was impossible after implementation changed the PR head
+
+- Status: `closed`
+- Priority: self-healing review, avoidable model cost
+- Objective impact: the workflow demanded an unchanged review head and identical implementation run before sending feedback to the same reviewer. Any legitimate author correction changes the head, so the policy forced a fresh reviewer precisely when retained-context correction is most valuable.
+- Exact evidence: after the original author fixed the valid standalone-probe defect and runner-output cleanup produced exact head `86e7aee`, the corrected review dry run stopped with `Prior review is bound to a different PR head`. A subsequent attempt also found the old reviewer workspace directory present but no longer a valid Git repository.
+- Correction: the exact reviewer session may reassess a new verified head of the same ticket and PR. The current immutable-head/verification gate remains authoritative. Workspace reuse now requires a valid checkout at the exact current head; otherwise it uses the current verified implementation checkout or a fresh checkout while retaining the Codex session.
+- Verification: 53 review tests cover corrected-head continuity, current-workspace fallback, and exact session reuse. Production correction retained reviewer session `019f836f-287b-7331-9a8c-5ef849541ff9` across the old and current heads.
+
+### BDS-204 - A correctable semantic review-output error terminated instead of self-healing
+
+- Status: `closed`
+- Priority: nondeterministic self-healing, good throughput
+- Objective impact: substantively complete review work was discarded at postprocessing when one enum/list combination was inconsistent, even though the exact author session and all evidence remained available.
+- Exact evidence: the retained PR #220 reviewer approved the bounded change and listed four residual paths but emitted `causal_path_assessment=closed`. Deterministic validation rejected the report because closed requires an empty list. The turn exited zero, used the signed-in subscription, and otherwise supplied the complete evidence-backed assessment.
+- Correction: post-review semantic validation errors are returned verbatim to the exact same Codex session for up to three bounded corrections. The author must return a complete replacement report and preserve valid findings; actual code defects are not waived. Every failed semantic run and validation error remains retained.
+- Verification: focused tests prove exact-session repair request construction. In production the same reviewer corrected only the inconsistent field to `residual` in 64.5 seconds; the final report is approved, causal acceptance true, merge ready, and retains all four limitations.
+
+### BDS-205 - A bounded mitigation was downgraded because natural live preconditions were absent
+
+- Status: `closed`
+- Priority: honest outcome throughput, avoid zero-throughput gates
+- Objective impact: the outcome workflow required natural live proof even for an explicitly bounded `mitigated` result. When the operational drive had 274,942,918,656 bytes free rather than the safe 4-24 MiB live-test precondition, the pipeline changed a passing controlled mitigation from `tests_verified` to `unverified`.
+- Exact evidence: PR #220's original-scenario role passed. The live role correctly refused to manufacture disk exhaustion and retained its failed predicate artifact. The first progression reported expected `mitigated`, observed `unverified`, despite a separate faithful controlled mitigation-effect contract.
+- Correction: natural live evidence remains mandatory for `live_verified` or `resolved`. A plan whose maximum expected state is deliberately `mitigated` advances on the bound original-scenario and faithful mitigation-effect roles while retaining missing live proof as a risk. This does not promote the case to resolved.
+- Verification: 87 focused outcome/review tests pass. Post-merge replay ran the original-scenario and mitigation-effect roles, both passed, and terminal provenance validated across the explicit `I:` and `U:` roots. Ticket `8bf5f7a551cf4cd4` is complete at `mitigated`; `live_evidence` is empty and both remaining risks are explicit.
+
+### Broad verification checkpoint after BDS-199 through BDS-205
+
+- The canonical source-bound complete affected matrix passed in 392.3 seconds: `usertest_implement` 337/337, `usertest_backlog` 841 passed plus two expected skips out of 843 collected, and `backlog_core` 534/534. All three complete Ruff scopes passed. No timeout was shortened.
+- A package-local PDM launch first stopped during collection because its installed sibling packages were stale. This is a recurrence of the already-deduplicated AN-38 environment-launch cluster, not a product or test failure; the corrected source-bound command ran every affected test. A root-level PDM attempt also stopped immediately because the monorepo intentionally has no root PDM project.
+- Strict full-project mypy remains red across substantial pre-existing typing debt and untyped sibling-package boundaries. It is not a currently green repository/PR contract and was not used to overrule the green runtime suites or to expand this PR into unrelated typing work.
+
 ## Verification-pending fixes
 
 ### BDS-001 — Stage 3 treated future design choices as material research unknowns
 
-- Status: `verification_failed_partial_correction_required`
+- Status: `closed`
 - Evidence: researcher repeatedly demanded an approved future ceiling/interface and completed post-change proof before optioning.
 - Local correction: mission and guidance now distinguish empirical unknowns from future design parameters and permit fail-first/parameterized outcomes. Five focused prompt-guidance tests pass.
-- Live qualification result: the provider-storage dossier correctly marks "fail earlier, reclaim owned storage, relocate state, or recover the same turn" as `material: false`, so it does not block readiness. Ticket assembly nevertheless emits that nonmaterial future-design item as the fifth mandatory `Resolve material unknown` investigation step. The hard gate is corrected, but the preserved frontier still sends future design work back to research.
-- Required correction: blocked/research-required ticket investigation steps must contain only material empirical unknowns. Nonmaterial future-design parameters may remain as downstream notes but must not be phrased or routed as prerequisites for more Stage-3 research.
-- Closure proof: the maintenance and provider-storage dossiers advance or park on empirical evidence only, while future ceiling/interface/recovery choices flow to Stage 4 notes without appearing in the Stage-3 investigation queue.
+- Live qualification result: the provider-storage dossier correctly marks "fail earlier, reclaim owned storage, relocate state, or recover the same turn" as `material: false`, so it does not block readiness. Ticket assembly initially emitted that item as a mandatory `Resolve material unknown` investigation step.
+- Correction: blocked/research-required ticket investigation steps now include only material empirical unknowns. Nonmaterial future-design parameters remain available as downstream context but are not phrased or routed as prerequisites for more Stage-3 research.
+- Verification: 61 ticket-assembly/export tests pass, including an end-to-end regression that retains the nonmaterial note while excluding it from mandatory investigation work. The exact checkout ticket advanced on its empirical evidence without requiring a future interface decision from Stage 3.
 
 ### BDS-002 — Independent-feedback lineage could bind to a stale source attempt
 

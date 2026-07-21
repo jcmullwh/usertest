@@ -839,6 +839,11 @@ def test_partial_research_split_creates_unresearched_children_and_immutable_rece
     }
     assert child_occurrences == {("atom:checkout",), ("atom:writer",)}
     assert all(
+        record["source_evidence_atom_ids"]
+        == record["occurrence_evidence_atom_ids"]
+        for record in result["problem_records"]
+    )
+    assert all(
         record["evidence_atom_ids"] != ["atom:aggregate"] for record in result["problem_records"]
     )
     facet_atoms = [
@@ -884,12 +889,24 @@ def test_partial_research_split_creates_unresearched_children_and_immutable_rece
     assert set(registry["cases"]["case:broad"]["child_case_ids"]) == {
         record["case_id"] for record in result["problem_records"]
     }
+    for child in result["problem_records"]:
+        entry = registry["cases"][child["case_id"]]
+        assert entry["source_evidence_atom_ids"] == child["occurrence_evidence_atom_ids"]
+        assert set(entry["source_evidence_atom_sha256_by_id"]) == set(
+            child["occurrence_evidence_atom_ids"]
+        )
+        assert entry["source_evidence_snapshot_complete"] is True
+        assert entry["source_evidence_snapshot_missing_atom_ids"] == []
+        assert len(entry["source_evidence_snapshot_sha256"]) == 64
     carried = problem_case_records_from_registry(registry)
     assert {record["case_id"] for record in carried} == {
         record["case_id"] for record in result["problem_records"]
     }
     assert all(
         record["occurrence_evidence_atom_ids"]
+        and record["source_evidence_atom_ids"]
+        == record["occurrence_evidence_atom_ids"]
+        and record["source_evidence_snapshot_complete"] is True
         and record["post_research_split_receipt"]
         == result["problem_records"][0]["post_research_split_receipt"]
         for record in carried

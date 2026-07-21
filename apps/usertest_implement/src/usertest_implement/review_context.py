@@ -226,10 +226,21 @@ def _build_review_append_prompt(
         "- `remaining_causal_paths`: an array naming every known residual path (empty only when none remain)\n"
         "- `scope_assessment`: `appropriate` | `excessive` | `unclear`\n"
         "- `rationale`: short string\n\n"
-        "An approval requires `mechanism_addressed`, `exercised`, and `closed`. A test that "
-        "does not replay the bound oracle is not original-scenario verification. Put every "
-        "symptom-only change, unexercised oracle, or residual causal path in `issues[]`; use "
-        "high or critical severity when it invalidates the claimed resolution. The "
+        "Approval is scoped to the ticket's selected mechanism and explicit maximum outcome "
+        "claim. It requires `mechanism_addressed` and an `exercised` code/test oracle at the "
+        "confidence layer the implementation claims. A test that does not replay the bound "
+        "oracle is not original-scenario verification. Use `causal_path_assessment=closed` "
+        "only when no known path remains inside that bounded claim. Use `residual` and name "
+        "the paths when other mechanisms or operating conditions can still reproduce a "
+        "broader symptom. Such bounded residuals may coexist with approval when they are "
+        "outside the selected claim, are honestly retained, and only limit the outcome to "
+        "a state such as mitigated or tests_verified. Put every symptom-only change, "
+        "unexercised claimed oracle, or causal path left open inside the selected mechanism "
+        "in `issues[]`; use high or critical severity when it invalidates the claimed "
+        "outcome. Missing external/live proof must remain visible and must prevent a live or "
+        "resolved claim, but it is not by itself a code-change request when faithful "
+        "controlled proof passed and no repository change can supply the unavailable "
+        "environment. A broken prescribed verification command is a code/test defect. The "
         "`review_decision` is your causal/code acceptance judgment, not the mutable merge "
         "gate. A draft PR, pending CI, an infrastructure failure, or an unrelated/base-branch "
         "failure makes the PR operationally not merge-ready, but must not by itself turn an "
@@ -511,13 +522,16 @@ def _build_final_review_summary(
         if str(finding.get("severity") or "").strip().casefold()
         in {"error", "high", "critical", "blocker", "fatal"}
     ]
+    # A bounded mitigation may honestly retain recurrence paths outside its selected mechanism.
+    # Those paths constrain the outcome claim, but they do not make correct code unmergeable.
+    # A path left open inside the selected mechanism remains blocking through the reviewer's
+    # decision and/or an error-severity finding.  ``unclear`` is never sufficient for acceptance.
     causal_acceptance = (
         agent_summary["review_decision"] == "approved"
         and agent_summary["approach_alignment"] == "aligned"
         and agent_summary["mechanism_assessment"] == "mechanism_addressed"
         and agent_summary["original_scenario_oracle"] == "exercised"
-        and agent_summary["causal_path_assessment"] == "closed"
-        and not agent_summary["remaining_causal_paths"]
+        and agent_summary["causal_path_assessment"] in {"closed", "residual"}
         and deterministic_scope_verified
         and not blocking_findings
     )

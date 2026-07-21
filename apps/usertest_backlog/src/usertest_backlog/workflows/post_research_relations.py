@@ -832,9 +832,12 @@ def apply_post_research_relation_assessments(
                 "root_cause_confidence": 0.0,
                 "evidence_atom_ids": [facet_atom["atom_id"]],
                 # The generated facet description is downstream research context.
-                # Original occurrences are authenticated separately by the split
-                # receipt when this child returns to Stage 3.
-                "source_evidence_atom_ids": [],
+                # The immutable split receipt authenticates the original occurrences
+                # assigned to this child.  They are therefore its durable source
+                # frontier (and can be snapshot-bound for retained-research reuse),
+                # while the generated facet remains derived context.  Stage 3 still
+                # revalidates the receipt before assigning any occurrence to research.
+                "source_evidence_atom_ids": occurrence_ids,
                 "derived_evidence_atom_ids": [facet_atom["atom_id"]],
                 "occurrence_evidence_atom_ids": occurrence_ids,
                 "split_from_case_id": case_id,

@@ -150,6 +150,14 @@ def _material_unknown_investigation_steps(research: dict[str, Any] | None) -> li
         for item in material_unknowns[:8]:
             if not isinstance(item, dict):
                 continue
+            # The proof retains useful uncertainty even after it is shown not to
+            # block the implementation decision.  Preserve that context below in
+            # the full research section, but do not turn it back into mandatory
+            # investigation work for the implementer.  Legacy entries without an
+            # explicit flag remain material for compatibility with the readiness
+            # contract.
+            if item.get("material") is False:
+                continue
             unknown = _coerce_string(item.get("unknown"))
             evidence_needed = _coerce_string(item.get("evidence_needed"))
             if unknown is None:

@@ -10,7 +10,7 @@ from typing import Any
 
 from backlog_repo.plan_scope import validate_plan_target_contract
 
-from usertest_implement.git_ops import _RUNNER_OWNED_GIT_EXCLUDES
+from usertest_implement.git_ops import RUNNER_OWNED_GIT_EXCLUDES
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -77,7 +77,7 @@ def _implementation_workspace_status(repo: Path) -> str:
         "--untracked-files=all",
         "--",
         ".",
-        *_RUNNER_OWNED_GIT_EXCLUDES,
+        *RUNNER_OWNED_GIT_EXCLUDES,
     )
 
 
@@ -319,7 +319,7 @@ def validate_verified_implementation_head(*, run_dir: Path) -> dict[str, Any]:
             git_ref.get("branch") or ""
         ).strip():
             raise ValueError("implementation_provenance_workspace_branch_mismatch")
-        if _git(workspace, "status", "--porcelain", "--untracked-files=all"):
+        if _implementation_workspace_status(workspace):
             raise ValueError("implementation_provenance_workspace_dirty_existing_head")
         if not _git_is_ancestor(workspace, str(raw["repo_revision"]), head):
             raise ValueError("implementation_provenance_planned_revision_not_ancestor")

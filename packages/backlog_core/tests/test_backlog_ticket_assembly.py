@@ -1380,6 +1380,57 @@ def test_assemble_backlog_tickets_splits_by_change_plan() -> None:
     assert triage[0]["stage"] == "triage"
 
 
+def test_ready_ticket_does_not_reopen_explicitly_nonmaterial_unknown() -> None:
+    problem_id = "problem:one"
+    research = _research_proof(
+        problem_id,
+        material_unknowns=[
+            {
+                "unknown": "Which historical producer exhausted the workspace volume",
+                "affects": ["solution_scope"],
+                "evidence_needed": "A contemporaneous producer-level capacity inventory",
+                "material": False,
+            }
+        ],
+    )
+    option = _option(problem_id)
+    selection = _selection(problem_id)
+    selection["falsification_review"] = bind_falsification_review(
+        selection["falsification_review"],
+        problem_id=problem_id,
+        selected_option=option,
+        research=research,
+    )
+    plan = _plan(problem_id, 1)
+    plan.pop("plan_revision_id", None)
+    plan.pop("plan_revision_source", None)
+    plan = bind_plan_outcome_oracle(plan, research=research, selection=selection)
+    plan = assign_plan_revision_id(plan)
+
+    [ticket] = assemble_backlog_tickets(
+        problem_records=[_problem_record(problem_id)],
+        priority_decisions=[
+            {
+                "case_id": "case:one",
+                "problem_id": problem_id,
+                "priority_bucket": "p1",
+                "selected_for_research": True,
+                "priority_rationale": "The verified acquisition failure requires a change.",
+                "priority_status": "prioritized",
+            }
+        ],
+        research_dossiers=[research],
+        solution_option_sets=[option],
+        selection_decisions=[selection],
+        change_plans=[plan],
+    )
+
+    assert ticket["stage"] == "ready_for_ticket"
+    assert ticket["ticket_readiness"] == {"ready": True, "reasons": []}
+    assert ticket["investigation_steps"] == []
+    assert ticket["research"]["material_unknowns"] == research["material_unknowns"]
+
+
 def test_ticket_promotes_research_problem_refinement_over_stale_stage1_and_plan() -> None:
     problem_id = "problem:one"
     refinement = {

@@ -36,12 +36,26 @@ def _run(argv: list[str], *, cwd: Path, check: bool) -> CommandResult:
 DEFAULT_GIT_USER_NAME = "usertest-implement"
 DEFAULT_GIT_USER_EMAIL = "usertest-implement@local"
 
-# These paths are created by the implementation runner itself inside retained local
-# workspaces.  They are evidence/cache transport, never part of the ticket patch.
-_RUNNER_OWNED_GIT_EXCLUDES: tuple[str, ...] = (
+# These paths are created by the implementation runner or its verification commands inside
+# retained local workspaces. They are evidence/cache transport, never part of the ticket patch.
+RUNNER_OWNED_GIT_PATHS: tuple[str, ...] = (
+    ".usertest_run_dir",
+    ".usertest_outcome",
+    "pip/cache",
+)
+RUNNER_OWNED_GIT_EXCLUDES: tuple[str, ...] = (
     ":(exclude).usertest_run_dir/**",
+    ":(exclude).usertest_outcome/**",
     ":(exclude)pip/cache/**",
 )
+
+
+def is_runner_owned_git_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").strip("/")
+    return any(
+        normalized == root or normalized.startswith(f"{root}/")
+        for root in RUNNER_OWNED_GIT_PATHS
+    )
 
 
 def ensure_git_identity(
@@ -92,8 +106,24 @@ def head_sha(workspace_dir: Path) -> str:
 
 
 def commit_all(workspace_dir: Path, *, message: str) -> str | None:
+    # A prior runner version may already have committed verification output. Remove only the
+    # index entries while preserving the retained evidence bytes on disk. This also makes a
+    # correction resume self-heal the historical mistake instead of recommitting it.
     _run(
-        ["git", "add", "-A", "--", ".", *_RUNNER_OWNED_GIT_EXCLUDES],
+        [
+            "git",
+            "rm",
+            "-r",
+            "--cached",
+            "--ignore-unmatch",
+            "--",
+            *RUNNER_OWNED_GIT_PATHS,
+        ],
+        cwd=workspace_dir,
+        check=True,
+    )
+    _run(
+        ["git", "add", "-A", "--", ".", *RUNNER_OWNED_GIT_EXCLUDES],
         cwd=workspace_dir,
         check=True,
     )

@@ -613,7 +613,7 @@ def test_postmerge_propagates_outcome_root_overrides_without_moving_receipt_root
         (
             "mitigated",
             True,
-            ["original_scenario", "live", "mitigation_effect"],
+            ["original_scenario", "mitigation_effect"],
         ),
     ],
 )

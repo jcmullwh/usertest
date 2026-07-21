@@ -40,11 +40,14 @@ def _wait_for_ci_success(
     head_sha: str,
     workflow: str,
     timeout_seconds: float | None,
+    required_event: str = "push",
 ) -> dict[str, Any]:
     """
     Wait for GitHub Actions CI to pass for the current branch HEAD before opening a PR.
 
-    This relies on CI being triggered for `push` events on the branch.
+    Initial implementation runs wait for the branch ``push`` workflow. PR-backed resumes pass
+    ``pull_request`` so the gate follows the merge-authoritative check suite instead of an
+    independent same-SHA push run that may have a different matrix or transient result.
     """
 
     started_utc = _utc_now_z()
@@ -52,6 +55,7 @@ def _wait_for_ci_success(
     summary: dict[str, Any] = {
         "schema_version": 1,
         "workflow": workflow,
+        "required_event": required_event,
         "branch": branch,
         "head_sha": head_sha,
         "run_id": None,
@@ -72,12 +76,10 @@ def _wait_for_ci_success(
         matches = [
             r
             for r in runs
-            if isinstance(r, dict) and r.get("headSha") == head_sha and r.get("event") == "push"
+            if isinstance(r, dict)
+            and r.get("headSha") == head_sha
+            and r.get("event") == required_event
         ]
-        if not matches:
-            matches = [
-                r for r in runs if isinstance(r, dict) and r.get("headSha") == head_sha
-            ]
         if not matches:
             return None
         matches.sort(key=lambda r: str(r.get("createdAt") or ""), reverse=True)
@@ -91,7 +93,7 @@ def _wait_for_ci_success(
         if timeout_seconds is not None and elapsed > timeout_seconds:
             summary["error"] = (
                 f"Timed out waiting to find a GitHub Actions run for {workflow} "
-                f"(branch={branch}, head_sha={head_sha})."
+                f"(branch={branch}, head_sha={head_sha}, event={required_event})."
             )
             summary["finished_at_utc"] = _utc_now_z()
             _write_json(run_dir / "ci_gate.json", summary)
@@ -142,7 +144,9 @@ def _wait_for_ci_success(
 
     assert run_id is not None
 
-    poll_interval_seconds = 10.0
+    # CI commonly takes 10+ minutes. Two-minute completion checks avoid wasteful high-frequency
+    # polling while keeping completion latency reasonable.
+    poll_interval_seconds = 120.0
     while True:
         elapsed = time.monotonic() - started_monotonic
         if timeout_seconds is not None and elapsed > timeout_seconds:

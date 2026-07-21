@@ -75,6 +75,9 @@ def test_finalize_commit_excludes_runner_runtime_and_cache_files(tmp_path: Path)
     runtime_file = workspace / ".usertest_run_dir" / "verification" / "result.json"
     runtime_file.parent.mkdir(parents=True)
     runtime_file.write_text("{}\n", encoding="utf-8")
+    outcome_file = workspace / ".usertest_outcome" / "controlled" / "report.json"
+    outcome_file.parent.mkdir(parents=True)
+    outcome_file.write_text("{}\n", encoding="utf-8")
     cache_file = workspace / "pip" / "cache" / "http-v2" / "entry.body"
     cache_file.parent.mkdir(parents=True)
     cache_file.write_text("cache\n", encoding="utf-8")
@@ -97,10 +100,56 @@ def test_finalize_commit_excludes_runner_runtime_and_cache_files(tmp_path: Path)
     ).stdout.splitlines()
     assert committed == ["README.md", "src/new.py"]
     assert runtime_file.is_file()
+    assert outcome_file.is_file()
     assert cache_file.is_file()
     status = _run(["git", "status", "--short"], cwd=workspace).stdout
     assert "?? .usertest_run_dir/" in status
+    assert "?? .usertest_outcome/" in status
     assert "?? pip/" in status
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_finalize_commit_untracks_prior_verification_output_without_deleting_it(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    assert _run(["git", "init"], cwd=workspace).returncode == 0
+    assert _run(["git", "config", "user.name", "test"], cwd=workspace).returncode == 0
+    assert _run(["git", "config", "user.email", "test@example.com"], cwd=workspace).returncode == 0
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+    outcome_file = workspace / ".usertest_outcome" / "controlled" / "report.json"
+    outcome_file.parent.mkdir(parents=True)
+    outcome_file.write_text('{"status":"mitigated"}\n', encoding="utf-8")
+    assert _run(["git", "add", "-A"], cwd=workspace).returncode == 0
+    assert (
+        _run(["git", "commit", "-m", "bad historical runner commit"], cwd=workspace).returncode
+        == 0
+    )
+    base_sha = _run(["git", "rev-parse", "HEAD"], cwd=workspace).stdout.strip()
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+    _write_json(run_dir / "target_ref.json", {"commit_sha": base_sha})
+
+    git_ref = finalize_commit(
+        run_dir=run_dir,
+        branch="backlog/untrack-runtime-output",
+        commit_message="Untrack runner-owned verification output",
+    )
+
+    assert git_ref["commit_performed"] is True
+    assert outcome_file.is_file()
+    assert _run(["git", "ls-files", "--", ".usertest_outcome"], cwd=workspace).stdout == ""
+    committed = _run(
+        ["git", "diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
+        cwd=workspace,
+    ).stdout
+    assert "D\t.usertest_outcome/controlled/report.json" in committed
+    assert "?? .usertest_outcome/" in _run(
+        ["git", "status", "--short"], cwd=workspace
+    ).stdout
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not available")

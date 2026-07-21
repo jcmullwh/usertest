@@ -14,7 +14,6 @@ from usertest_implement.git_ops import (
     ensure_remote,
     head_sha,
     push_branch,
-    status_porcelain,
 )
 
 
@@ -79,19 +78,14 @@ def finalize_commit(
         checkout_branch(workspace_dir, branch)
         if git_ref.get("base_commit") is None:
             git_ref["base_commit"] = head_sha(workspace_dir)
-        if status_porcelain(workspace_dir).strip():
-            head = commit_all(workspace_dir, message=commit_message)
-            git_ref["commit_performed"] = head is not None
-            if head is not None:
-                git_ref["head_commit"] = head
-            else:
-                observed_head = head_sha(workspace_dir)
-                git_ref["commit_observed"] = True
-                git_ref["base_commit"] = observed_head
-                git_ref["head_commit"] = observed_head
+        # ``commit_all`` also reconciles runner-owned paths accidentally tracked by an older
+        # run. That repair is required even when ordinary porcelain status is initially clean.
+        head = commit_all(workspace_dir, message=commit_message)
+        git_ref["commit_performed"] = head is not None
+        if head is not None:
+            git_ref["head_commit"] = head
         else:
             observed_head = head_sha(workspace_dir)
-            git_ref["commit_performed"] = False
             git_ref["commit_observed"] = True
             git_ref["base_commit"] = observed_head
             git_ref["head_commit"] = observed_head
