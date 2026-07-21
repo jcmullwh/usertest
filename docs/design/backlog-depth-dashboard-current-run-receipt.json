@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "as_of": "2026-07-21T12:01:01Z",
+  "as_of": "2026-07-21T13:50:28Z",
   "current_run_id": "qualification-cycle-bc70b15b-20260720",
   "summary_cards": [
     {
@@ -44,11 +44,11 @@
     "scope": "Non-IDEA qualification cycle prepared from merged origin/dev commit bc70b15b with 2,854 sealed atoms and explicit cross-volume evidence roots. Work began with narrow Stage-1/2 slices and retained Stage-3/4 frontiers, then advanced the authenticated checkout-ENOSPC case through Stages 3-6, ticket export, implementation, review, PR #220 merge, and outcome progression. Signed-in host Codex subscription was required throughout; API fallback and Docker use were disabled. No image, container, source input, or retained evidence artifact was removed.",
     "timing": {
       "start_at": "2026-07-20T17:50:50Z",
-      "end_at": null,
-      "elapsed_seconds": 65411,
-      "coverage": "active",
-      "display": "18 h 10 m active",
-      "note": "Wall time from fresh qualification preparation through the first completed implementation/outcome chain and post-merge controller verification. Checkout Stage 4 took 228.7 seconds, Stage 5 took 416.5 seconds, and Stage 6 took 844.1 seconds. Handoff adoption reran the five exact plan commands in 1,013.7 seconds. The pre-merge 1,714-test controller matrix passed in 392.3 seconds; after integrating current `dev`, the complete 2,208-test affected matrix passed in 1,666.7 seconds. Long model, test, and CI work is observed at roughly ten-minute intervals; no test timeout was shortened."
+      "end_at": "2026-07-21T13:50:28Z",
+      "elapsed_seconds": 71978,
+      "coverage": "complete",
+      "display": "19 h 59 m complete",
+      "note": "Wall time from fresh qualification preparation through the first completed implementation/outcome chain, controller verification, PR #217 integration, and the start of the next exact-revision lifecycle. Checkout Stage 4 took 228.7 seconds, Stage 5 took 416.5 seconds, and Stage 6 took 844.1 seconds. Handoff adoption reran the five exact plan commands in 1,013.7 seconds. The pre-merge 1,714-test controller matrix passed in 392.3 seconds; after integrating current `dev`, the complete 2,208-test affected matrix passed in 1,666.7 seconds. Long model, test, and CI work was observed at roughly ten-minute intervals; no test timeout was shortened."
     },
     "furthest_stage": "Merged implementation with terminal, evidence-bounded outcome",
     "current_state": "PR #220 merged into `dev` at `2b132e20f6d822bf517b55f847875a84b2d420e3`. The checkout-ENOSPC ticket is complete with outcome `mitigated`: original-scenario and faithful controlled mitigation-effect evidence passed, natural live disk exhaustion was not manufactured, and the absence of live proof remains explicit. Controller head `b3df410` now includes current `dev`; its full affected matrix and Ruff scopes pass. The qualification queue contains three ready tickets, one historical in-progress plan, one completed ticket, and no real discarded ticket. PR #217 push/CI is the remaining controller gate.",

@@ -6327,6 +6327,22 @@ def _bind_problem_mining_relation_split_receipts(
     registry_cases = registry_cases_raw if isinstance(registry_cases_raw, dict) else {}
 
     for record in canonical_records:
+        current_relation_actions_raw = record.get("case_relation_actions")
+        current_relation_actions = (
+            {
+                _coerce_string(action.get("action"))
+                for action in current_relation_actions_raw
+                if isinstance(action, Mapping)
+            }
+            if isinstance(current_relation_actions_raw, list)
+            else set()
+        )
+        if "split" not in current_relation_actions:
+            # Durable children can return from an earlier Stage-1 or post-research
+            # split. Their parent fields describe historical identity provenance; a
+            # current keep-separate decision must not be rebound as though this
+            # relation response had created the child.
+            continue
         parent_case_id = _coerce_string(record.get("split_from_case_id"))
         parent_problem_id = _coerce_string(record.get("split_parent_problem_id"))
         child_case_id = _coerce_string(record.get("case_id"))
