@@ -1471,11 +1471,24 @@ def test_run_once_serializes_failed_terminal_reason_into_report(
         ),
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert result.report_validation_errors == []
     verification = json.loads((result.run_dir / "verification.json").read_text(encoding="utf-8"))
     assert verification["terminal_reason"] == "failed"
     report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
     assert report["extensions"]["verification"]["terminal_reason"] == "failed"
+    verification_errors = json.loads(
+        (result.run_dir / "verification_errors.json").read_text(encoding="utf-8")
+    )
+    assert verification_errors["errors"][0] == "verification_failed"
+    error = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error["type"] == "VerificationFailed"
+    assert error["code"] == "verification_failed"
+    assert error["failure_phase"] == "verification"
+    assert error["exit_code"] == 1
+    assert error["verification"]["terminal_reason"] == "failed"
+    assert error["verification"]["command"] == _marker_verification_command()
+    assert not (result.run_dir / "report_validation_errors.json").exists()
 
 
 # --- Canonical agent-visible path contract -------------------------------------------------

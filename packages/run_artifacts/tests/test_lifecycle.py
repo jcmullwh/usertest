@@ -99,6 +99,31 @@ def test_classify_run_lifecycle_precedence_keeps_terminal_diagnostics_loud() -> 
     ) == "terminal_artifact_unreadable"
 
 
+def test_classify_run_lifecycle_verification_error_json_precedes_report_validation() -> None:
+    classification = classify_run_lifecycle(
+        report_read=_present(
+            "report.json",
+            {"schema_version": 1, "kind": "task_run_v1", "status": "success"},
+        ),
+        error_read=_present(
+            "error.json",
+            {
+                "type": "VerificationFailed",
+                "code": "verification_failed",
+                "failure_phase": "verification",
+                "exit_code": 1,
+            },
+        ),
+        report_validation_errors_read=_present(
+            "report_validation_errors.json",
+            ["defensive stale validation artifact"],
+        ),
+    )
+
+    assert classification.status == "error"
+    assert classification.reason == "error_json_present"
+
+
 def test_classify_history_record_lifecycle_uses_same_contract() -> None:
     record = {
         "status": "missing_report",
