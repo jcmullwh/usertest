@@ -66,14 +66,18 @@ def _current_research_summary(record: Mapping[str, Any]) -> dict[str, Any] | Non
     return dict(current) if isinstance(current, Mapping) else None
 
 
-def hydrate_retained_research_proof(
+def _hydrate_retained_research_dossier(
     record: Mapping[str, Any],
+    *,
+    require_ready: bool,
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    """Load one exact retained Stage-3 dossier and re-run the current readiness gate.
+    """Load one exact retained Stage-3 dossier and authenticate its evidence.
 
     The compact case-registry summary is never itself accepted as research evidence.  It
     must point to the complete Stage-3 document, whose exact case/problem item is checked
-    against the retained digest and the current research contract before reuse.
+    against the retained digest and the current research contract before reuse.  Callers
+    that intend to implement from the proof additionally require the readiness gate;
+    callers authenticating an explicit insufficient-evidence disposition do not.
     """
 
     summary = _current_research_summary(record)
@@ -241,12 +245,13 @@ def hydrate_retained_research_proof(
         return None, ["retained_research_summary_content_mismatch"]
 
     contract_dossier = research_contract_view(dossier)
-    ready, readiness_errors = assess_research_readiness(contract_dossier)
-    if not ready:
-        return None, [
-            "retained_research_proof_not_ready",
-            *(f"retained_research_readiness:{error}" for error in readiness_errors),
-        ]
+    if require_ready:
+        ready, readiness_errors = assess_research_readiness(contract_dossier)
+        if not ready:
+            return None, [
+                "retained_research_proof_not_ready",
+                *(f"retained_research_readiness:{error}" for error in readiness_errors),
+            ]
     persisted_ready, persisted_errors = verify_persisted_research_evidence(contract_dossier)
     if not persisted_ready:
         return None, [
@@ -256,4 +261,20 @@ def hydrate_retained_research_proof(
     return dossier, []
 
 
-__all__ = ["hydrate_retained_research_proof"]
+def hydrate_retained_research_proof(
+    record: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Load an exact retained Stage-3 dossier that is currently implementation-ready."""
+
+    return _hydrate_retained_research_dossier(record, require_ready=True)
+
+
+def hydrate_retained_research_evidence(
+    record: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Load exact persisted Stage-3 evidence without claiming it is implementation-ready."""
+
+    return _hydrate_retained_research_dossier(record, require_ready=False)
+
+
+__all__ = ["hydrate_retained_research_evidence", "hydrate_retained_research_proof"]

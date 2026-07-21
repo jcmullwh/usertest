@@ -2673,6 +2673,24 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Correction: bounded carried-case materialization now runs the deterministic `build_case_registry(..., supporting_atoms=atoms)` reconciliation performed by the normal Stage-1 handoff before Stage 2/3. The existing verified dossier was passed through the normal retained-dossier reuse path with zero new model calls; the reuse wrapper also applies the production `research_contract_view` to runner-enriched lineage fields.
 - Verification: the reconciled source snapshot has zero atom-hash mismatches and advances the case revision from 2 to 3. Retained Stage 3 reuse and deterministic Stage 4 both completed without model calls. Exact next-cycle hydration reports zero research errors and zero no-change errors, returns `runner_retained_no_change_v1`, and routes `await_evidence` with research and downstream both deselected.
 
+### BDS-194 - Authenticated insufficient-evidence dispositions repeated Stage 3 indefinitely
+
+- Status: `closed`
+- Priority: throughput, honest evidence boundaries, repeated-work prevention
+- Objective impact: a researcher could correctly establish a material historical evidence boundary, Stage 4 could correctly emit zero options, and the next cycle would still route the case to `research_update`. That spends new model calls on evidence the accepted dossier explicitly says is unavailable and rewards overclaiming over an honest `insufficient_evidence` result.
+- Exact evidence: Docker case `case:78a46fdb1a86e33ad4a3` reproduced the daemon-unavailable terminal mechanism but could not attribute the authenticated 160802.8974575-second setup interval because the source run retained no effective timeout, per-step Docker timestamps, or host suspension state. Its accepted same-author dossier is `insufficient_evidence` with `undetermined` actionability and one material unknown. Deterministic Stage 4 emitted four matching readiness blockers and zero options with zero model calls. Before correction, exact next-cycle replay returned `research_update` and selected Stage 3 again.
+- Correction: retained hydration now distinguishes an exact persisted research dossier from an implementation-ready proof. A content-bound Stage-4 `insufficient_evidence` disposition may park only when the complete Stage-3 artifact authenticates, persisted evidence verifies, the current readiness gate still fails, the Stage-4 input hash binds that dossier and current source frontier, the option set is empty, and the exact Stage-4 outcome records the same readiness blockers. Missing or stale Stage 4 routes only to deterministic downstream rebuild; invalid or changed Stage 3 still routes to research.
+- Verification: 54 adjacent research/downstream/historical lifecycle tests pass. Exact replay of the real Docker artifacts returns `runner_retained_insufficient_evidence_v1` with all four expected blockers and routes `await_evidence`; research and downstream are both deselected. Tampered Stage 3 routes `research_update`, while missing or tampered Stage 4 routes `continue_downstream` without repeating research.
+
+### BDS-195 - The bounded Docker Stage-4 handoff initially used the pre-research registry
+
+- Status: `closed_throwaway_wrapper`
+- Priority: supervisor-efficiency, retained-lineage fidelity
+- Objective impact: the first bounded Stage-4 result correctly evaluated the accepted Docker dossier but attached its zero-option disposition to a registry whose current research pointer still referenced the older malformed proof. Treating that artifact as final would have broken next-cycle hydration even though both stage-local results were correct.
+- Exact evidence: `stage4_case_78a46_insufficient_20260721T010312Z` emitted the expected four readiness blockers and zero options, while its output registry's `best_research_proof` still referenced `repo_revision=unavailable:not_executed`. The mismatch was detected before lifecycle acceptance by inspecting the persisted registry rather than trusting the Stage-4 receipt alone.
+- Correction: the accepted dossier was rematerialized through the normal zero-call Stage-3 retained-dossier path, which persisted its exact artifact reference and digest into the reconciled registry. Stage 4 was then rerun deterministically from that registry. No model work or authored research was repeated.
+- Verification: `stage3_case_78a46_reuse_corrected_20260721T010426Z` records reuse without a new model invocation and preserves all ten retained attempts. `stage4_case_78a46_final_20260721T010445Z` binds the corrected Stage-3 digest, and exact next-cycle hydration authenticates both artifacts with zero errors.
+
 ## Verification-pending fixes
 
 ### BDS-001 — Stage 3 treated future design choices as material research unknowns

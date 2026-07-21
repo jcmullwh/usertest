@@ -1,30 +1,30 @@
 {
   "schema_version": 3,
-  "as_of": "2026-07-21T00:02:17Z",
+  "as_of": "2026-07-21T01:21:37Z",
   "current_run_id": "qualification-cycle-bc70b15b-20260720",
   "summary_cards": [
     {
       "label": "Current pipeline state",
-      "value": "3 mitigated; 5 parked; 18 other active",
-      "detail": "Fresh preparation began with 28 registry entries. Five canonical cases now have authenticated already-addressed research plus zero-option Stage-4 dispositions; the Windows provisional pair collapsed to one canonical case and one new alias. The current registry projects 26 canonical records: five parked, 18 other active, and three mitigated, with two aliases retained only for lineage.",
+      "value": "3 mitigated; 6 parked; 17 other active",
+      "detail": "Fresh preparation began with 28 registry entries. Five canonical cases have authenticated already-addressed research and one has an authenticated material evidence boundary; all six have content-bound zero-option Stage-4 dispositions. The Windows provisional pair collapsed to one canonical case and one new alias. The current registry projects 26 canonical records: six parked, 17 other active, and three mitigated, with two aliases retained only for lineage.",
       "tone": "good"
     },
     {
       "label": "Current bounded throughput",
-      "value": "38 calls; 26 continuations; 0 restarts",
-      "detail": "Preparation used zero model calls. A mixed Stage-1 slice reached eight correct dispositions after same-author correction. Five evidence-backed canonical cases now completed causal Stage 3 and deterministic Stage 4; one represented a two-case same-cause group and reduced it to one downstream unit. The fifth self-corrected from its original author session and reused its verified proof after a deterministic snapshot repair, with no repeated research call. None produced a ticket or bad-ready output.",
+      "value": "45 calls; 32 continuations; 0 restarts",
+      "detail": "Preparation used zero model calls. A mixed Stage-1 slice reached eight correct dispositions after same-author correction. Six evidence-backed canonical cases now completed causal Stage 3 and deterministic Stage 4; one represented a two-case same-cause group. The sixth preserved its same author while correcting an initially shallow Docker conclusion into an honest unresolved 44.7-hour timing boundary. None produced a ticket or bad-ready output.",
       "tone": "good"
     },
     {
       "label": "Full qualification",
       "value": "0 / 2 cycles",
-      "detail": "This is still a narrow baseline cycle, not a full end-to-end qualification. Five exercised canonical cases reached their correct final no-change dispositions, but the remaining active corpus has not been processed and automated export remains disabled.",
+      "detail": "This is still a narrow baseline cycle, not a full end-to-end qualification. Six exercised canonical cases reached stable evidence-backed dispositions, but the remaining active corpus has not been processed and automated export remains disabled.",
       "tone": "bad"
     },
     {
       "label": "Next delivery gate",
       "value": "PR #217 green; continue narrowly",
-      "detail": "All observed PR #217 checks are green at controller head `a9c3584`. Continue from the reconciled current registry with one evidence-backed case at a time; preserve all five completed research frontiers and keep exports disabled until an actionable case completes the downstream chain correctly.",
+      "detail": "All 80 observed PR #217 checks are green at controller head `7845ccb`. Commit and push the sixth disposition plus its repeat-research prevention, then continue from the reconciled current registry one evidence-backed case at a time. Keep exports disabled until an actionable case completes the downstream chain correctly.",
       "tone": "warn"
     }
   ],
@@ -34,71 +34,29 @@
     "lifecycle_id": "pipeline-cycle:bc70b15b:20260720",
     "lifecycle_kind": "pipeline_cycle",
     "rework": {
-      "author_invocations": 38,
-      "continuation_launches": 26,
-      "stage_reruns": 10,
+      "author_invocations": 45,
+      "continuation_launches": 32,
+      "stage_reruns": 12,
       "full_restarts": 0,
-      "summary": "The 38 signed-in Sol/high calls were two initial Stage-1 authors, two retained-session Stage-1 corrections, five Stage-2 prioritizers, seven calls for the first Stage-3 case, four for the second, three for maintenance images, ten for the grouped Windows case, and five for the historical ungated-shell-dispatch case. Twenty-six calls resumed an existing author session. Ten bounded stage relaunches or deterministic rematerializations followed contained component defects, a corrected group packet, or source-snapshot reconciliation; no author dossier or full pipeline was restarted."
+      "summary": "The 45 signed-in Sol/high calls were two initial Stage-1 authors, two retained-session Stage-1 corrections, five Stage-2 prioritizers, seven calls for the first Stage-3 case, four for the second, three for maintenance images, ten for the grouped Windows case, five for historical ungated shell dispatch, and seven for the Docker case. Thirty-two calls resumed an existing author session. Twelve bounded stage relaunches or deterministic rematerializations followed contained component defects, corrected group/lineage packets, or source-snapshot reconciliation; no author dossier or full pipeline was restarted."
     },
-    "label": "Fresh merged-dev cycle through five stable already-addressed dispositions",
-    "scope": "Non-IDEA qualification cycle prepared from merged origin/dev commit bc70b15b with 2,854 sealed atoms and explicit cross-volume evidence roots. Work stayed narrow: one mixed Stage-1/2 mechanics slice, bounded Stage-2 selections, five evidence-backed Stage-3 research units, one verified same-cause collapse, and deterministic no-change Stage 4 dispositions. Signed-in host Codex subscription was required; API fallback, Docker, export, ticket mutation, implementation, and removal were disabled.",
+    "label": "Fresh merged-dev cycle through six stable evidence-backed dispositions",
+    "scope": "Non-IDEA qualification cycle prepared from merged origin/dev commit bc70b15b with 2,854 sealed atoms and explicit cross-volume evidence roots. Work stayed narrow: one mixed Stage-1/2 mechanics slice, bounded Stage-2 selections, six evidence-backed Stage-3 research units, one verified same-cause collapse, five deterministic no-change Stage-4 dispositions, and one deterministic insufficient-evidence disposition. Signed-in host Codex subscription was required; API fallback, export, ticket mutation, implementation, and removal were disabled. Research did not create or remove Docker objects.",
     "timing": {
       "start_at": "2026-07-20T17:50:50Z",
       "end_at": null,
-      "elapsed_seconds": 22287,
+      "elapsed_seconds": 27047,
       "coverage": "active",
-      "display": "6 h 11 m active",
-      "note": "Wall time from fresh qualification preparation through five exact retained-disposition replays. The first Stage 3 consumed 3,254.36 seconds, the second 1,216.86 seconds, maintenance 1,283.0 seconds, grouped Windows research 3,312.96 seconds, and historical ungated-shell-dispatch research 2,992.7 seconds. Three focused same-author relation corrections consumed another 1,341.46 seconds. All five Stage-4 no-change dispositions used zero model calls. The fifth proof was rematerialized after source-snapshot reconciliation with zero new author calls. The latest full app suite consumed 394.8 seconds. Long model work was polled at ten-minute intervals."
+      "display": "7 h 31 m active",
+      "note": "Wall time from fresh qualification preparation through six exact retained-disposition replays. The first five Stage-3 cases consumed 3,254.36, 1,216.86, 1,283.0, 3,312.96, and 2,992.7 seconds. The Docker case consumed 1,794.8 seconds for initial research plus 518.97 and 475.96 seconds for two focused same-author boundary corrections. All six Stage-4 dispositions used zero model calls. Two final proofs were rematerialized with zero new author calls to persist corrected source or research lineage. The latest full app suite consumed 328.5 seconds and the adjacent lifecycle set passed 54 tests. Long model work was polled at ten-minute intervals."
     },
-    "furthest_stage": "Authenticated Stage-4 no-change disposition with stable next-cycle routing",
-    "current_state": "`case:131290268e2889891e0c` established that the historical Codex model-message failure is already addressed; `case:01fc33f2c4cf70160dfb` did the same for Claude duplicate-tool-use-ID retry; `case:4fb8e280d15b4c0b0fc2` established that the historical count-or-age maintenance-image retention mechanism was removed. The grouped Windows research bound all 25 member source atoms to one authenticated mechanism, established the July guard as already addressed, and aliased `case:7df34a9a76b8de621aed` into canonical `case:fe517dafc2a12d5779ab`. `case:dc5bf9281cc94e1856f8` established that the April shell-required mission lacked the later launchability gate and that the current gate and 12-test contract address it. Every Stage 4 emitted `not_required`, zero options, zero model calls, and no Stage 5/6. Exact replays route all five canonical cases to `await_evidence` with no repeated research or downstream work.",
-    "outcome": "Five evidence-backed canonical cases correctly parked as already addressed; one same-cause pair collapsed; eight mixed atoms dispositioned; zero bad-ready escapes; zero tickets; full-cycle qualification still 0/2",
+    "furthest_stage": "Authenticated Stage-4 disposition with stable next-cycle routing",
+    "current_state": "Five canonical cases are authenticated as already addressed: historical Codex model-message failure, Claude duplicate-tool-use-ID retry, obsolete count-or-age maintenance-image retention, the grouped Windows shell-availability pair, and historical ungated shell dispatch. Docker case `case:78a46fdb1a86e33ad4a3` reproduced the daemon-unavailable terminal mechanism but found that the source run spent 160802.8974575 seconds in aggregate setup. It proved that the product can invoke `docker version` with no deadline, but retained evidence cannot distinguish that path from earlier setup, host suspension, or external scheduling. The same author corrected the dossier to `insufficient_evidence` and `undetermined` actionability. Stage 4 emitted the exact four readiness blockers, zero options, zero model calls, and no Stage 5/6. Exact replays route all six canonical cases to `await_evidence` without repeated research or downstream work.",
+    "outcome": "Five evidence-backed cases parked as already addressed; one parked on a material evidence boundary; one same-cause pair collapsed; eight mixed atoms dispositioned; zero bad-ready escapes; zero tickets; full-cycle qualification still 0/2",
     "errors": {
-      "count": 16,
+      "count": 18,
       "count_kind": "deduplicated_clusters",
-      "summary": "Sixteen deduplicated clusters were observed in this fresh cycle. Ten are closed in product, preparation code, or bounded wrappers; two are contained under active supervision; and four remain nonblocking follow-up, including exact preflight parity, missing-source prioritization, and machine-evaluable external-feedback rechecks. Individual model validation messages are not counted as separate system defects.",
-      "cluster_ids": [
-        "BDS-178",
-        "BDS-179",
-        "BDS-180",
-        "BDS-181",
-        "BDS-182",
-        "BDS-183",
-        "BDS-184",
-        "BDS-185",
-        "BDS-186",
-        "BDS-187",
-        "BDS-188",
-        "BDS-189",
-        "BDS-190",
-        "BDS-191",
-        "BDS-192",
-        "BDS-193"
-      ]
-    },
-    "automatic_self_corrections": {
-      "count": 12,
-      "count_kind": "deduplicated_clusters",
-      "summary": "Stage 1 returned independent-review feedback to the exact primary and reviewer sessions. The first three Stage-3 cases corrected authored and verifier frontiers to zero without restart. Grouped Windows research corrected two authored errors and an independent frontier that moved 34 to 28 to 28 to 2 to 2 to zero; equal counts with changed identities retained the same author. Three later relation-feedback turns progressively added a controlled adapter, exact source attestation, and the required positive-outcome contract. The fifth Stage-3 case repaired its output contract, then reduced the verifier frontier through three same-author continuations to zero. No dossier was restarted or discarded.",
-      "cluster_ids": [
-        "AUTHOR-STAGE1-MAINTENANCE-DISAGREEMENT-01",
-        "AUTHOR-STAGE3-CODEX-MESSAGES-OUTPUT-01",
-        "AUTHOR-STAGE3-CODEX-MESSAGES-EVIDENCE-01",
-        "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-OUTPUT-01",
-        "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-EVIDENCE-01",
-        "AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01",
-        "AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01",
-        "AUTHOR-STAGE3-WINDOWS-OUTPUT-01",
-        "AUTHOR-STAGE3-WINDOWS-EVIDENCE-01",
-        "AUTHOR-STAGE3-WINDOWS-RELATION-01",
-        "AUTHOR-STAGE3-WINDOWS-SHELL-OUTPUT-01",
-        "AUTHOR-STAGE3-WINDOWS-SHELL-EVIDENCE-01"
-      ]
-    },
-    "supervisor_interventions": {
-      "count": 19,
-      "count_kind": "deduplicated_clusters",
-      "summary": "The supervisor selected narrow slices, triggered retained-session feedback, corrected bounded launch and artifact-lineage wrappers, registered exact Git trust for the clean U: worktree after reboot, diagnosed lifecycle and relation integration defects from exact replays, implemented the general contract fixes, and ran verification. Additional clusters advanced the two-case Windows research unit and the historical ungated-shell-dispatch case through their correct Stage-3/4 dispositions. The system authored every prioritization, research conclusion, experiment, relation assessment, and final no-change disposition.",
+      "summary": "Eighteen deduplicated clusters were observed in this fresh cycle. Twelve are closed in product, preparation code, or bounded wrappers; two are contained under active supervision; and four remain nonblocking follow-up. The two newest clusters prevented repeat research for authenticated insufficient-evidence cases and corrected a bounded handoff that initially used a pre-research registry. Individual model validation messages are not counted as separate system defects.",
       "cluster_ids": [
         "BDS-178",
         "BDS-179",
@@ -116,14 +74,64 @@
         "BDS-191",
         "BDS-192",
         "BDS-193",
-        "SUPERVISOR-STAGE2-4-MAINTENANCE-01",
-        "SUPERVISOR-STAGE2-4-WINDOWS-GROUP-01",
-        "SUPERVISOR-STAGE2-4-WINDOWS-SHELL-01"
+        "BDS-194",
+        "BDS-195"
       ]
     },
-    "next_action": "Record and push the fifth disposition and its source-snapshot handoff evidence to PR #217, then continue the fresh cycle with the next evidence-backed active case from the reconciled current registry. Preserve all five completed Stage-3/4 frontiers unless new evidence changes an authenticated case revision.",
+    "automatic_self_corrections": {
+      "count": 15,
+      "count_kind": "deduplicated_clusters",
+      "summary": "Stage 1 returned independent-review feedback to the exact primary and reviewer sessions. The first five Stage-3 units corrected authored and verifier frontiers to zero without restart; grouped Windows research also corrected its relation frontier in place. The Docker author reduced seven output-contract findings to zero, then four verifier findings to zero. Two later same-author turns investigated the previously overlooked 44.7-hour timing boundary and encoded the evidenced no-timeout alternative without discarding the dossier. No dossier was restarted or discarded.",
+      "cluster_ids": [
+        "AUTHOR-STAGE1-MAINTENANCE-DISAGREEMENT-01",
+        "AUTHOR-STAGE3-CODEX-MESSAGES-OUTPUT-01",
+        "AUTHOR-STAGE3-CODEX-MESSAGES-EVIDENCE-01",
+        "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-OUTPUT-01",
+        "AUTHOR-STAGE3-CLAUDE-DUPLICATE-ID-EVIDENCE-01",
+        "AUTHOR-STAGE3-MAINTENANCE-OUTPUT-01",
+        "AUTHOR-STAGE3-MAINTENANCE-EVIDENCE-01",
+        "AUTHOR-STAGE3-WINDOWS-OUTPUT-01",
+        "AUTHOR-STAGE3-WINDOWS-EVIDENCE-01",
+        "AUTHOR-STAGE3-WINDOWS-RELATION-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-OUTPUT-01",
+        "AUTHOR-STAGE3-WINDOWS-SHELL-EVIDENCE-01",
+        "AUTHOR-STAGE3-DOCKER-OUTPUT-01",
+        "AUTHOR-STAGE3-DOCKER-EVIDENCE-01",
+        "AUTHOR-STAGE3-DOCKER-ACTIONABILITY-01"
+      ]
+    },
+    "supervisor_interventions": {
+      "count": 22,
+      "count_kind": "deduplicated_clusters",
+      "summary": "The supervisor selected narrow slices, triggered retained-session feedback, corrected bounded launch and artifact-lineage wrappers, diagnosed lifecycle and relation integration defects from exact replays, implemented the general contract fixes, and ran verification. The newest intervention challenged a shallow Docker non-actionable conclusion using the source run's authenticated 44.7-hour setup duration; the same author performed the deeper research. The system authored every prioritization, research conclusion, experiment, relation assessment, and final disposition.",
+      "cluster_ids": [
+        "BDS-178",
+        "BDS-179",
+        "BDS-180",
+        "BDS-181",
+        "BDS-182",
+        "BDS-183",
+        "BDS-184",
+        "BDS-185",
+        "BDS-186",
+        "BDS-187",
+        "BDS-188",
+        "BDS-189",
+        "BDS-190",
+        "BDS-191",
+        "BDS-192",
+        "BDS-193",
+        "BDS-194",
+        "BDS-195",
+        "SUPERVISOR-STAGE2-4-MAINTENANCE-01",
+        "SUPERVISOR-STAGE2-4-WINDOWS-GROUP-01",
+        "SUPERVISOR-STAGE2-4-WINDOWS-SHELL-01",
+        "SUPERVISOR-STAGE2-4-DOCKER-01"
+      ]
+    },
+    "next_action": "Commit and push the sixth disposition and the general insufficient-evidence wait contract to PR #217, then continue with the next evidence-backed active case from the reconciled current registry. Preserve all six completed Stage-3/4 frontiers unless new evidence changes an authenticated case revision.",
     "tone": "warn",
-    "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. The first two completed research/Stage-4 pairs are retained at `stage3_case_131290_sol_high_20260720T183300Z` / `stage4_case_131290_sol_high_20260720T193300Z` and `stage3_case_01fc33_sol_high_20260720T195200Z` / `stage4_case_01fc33_sol_high_20260720T201400Z`. Maintenance is retained at `stage3_case_4fb8_sol_high_20260720T203500Z` / `stage4_case_4fb8_sol_high_20260720T205700Z`. Grouped Windows research is retained at `stage3_group_windows_sol_high_20260720T210800Z` plus same-session relation corrections through `stage3_group_windows_relation_feedback3_20260720T224500Z`; production collapse is at `post_research_group_windows_20260720T231000Z` and Stage 4 at `stage4_group_windows_sol_high_20260720T231500Z`. Historical ungated-shell-dispatch research is retained at `stage3_case_dc5bf_sol_high_20260720T230232Z`; its source-snapshot-corrected zero-call rematerialization is `stage3_case_dc5bf_reuse_reconciled_20260721T000006Z` and final Stage 4 is `stage4_case_dc5bf_reconciled_20260721T000109Z`. Exact replay hydrates both the research and no-change contracts with zero errors and routes `await_evidence`. Controller head `a9c3584` passed all 80 observed PR #217 checks; 21 focused relation tests and the full app suite also passed locally, with the full suite completing 838 tests and two expected skips in 394.8 seconds. No source input, ticket, workspace, image, container, or evidence artifact was removed.",
+    "data_quality": "Preparation `bc70b15b_20260720T175050Z` sealed 2,854 atoms and 28 cases at exact target revision `bc70b15bf1f6709a589d308f0739c2b865a65e77`. The first five final research/Stage-4 frontiers remain at the paths recorded in the previous receipt. Docker research is retained at `stage3_case_78a46_sol_high_20260721T000717Z`, timing feedback at `stage3_case_78a46_timing_feedback_20260721T003937Z`, accepted downgrade resolution at `stage3_case_78a46_downgrade_resolution_20260721T005317Z`, zero-call lineage rematerialization at `stage3_case_78a46_reuse_corrected_20260721T010426Z`, and final Stage 4 at `stage4_case_78a46_final_20260721T010445Z`. Exact replay authenticates `runner_retained_insufficient_evidence_v1` with zero errors and routes `await_evidence`. Controller head `7845ccb` passed all 80 observed PR #217 checks; 54 focused tests and the full backlog application suite pass locally, with the full suite completing with two expected skips in 328.5 seconds. Docker remained at six images and zero containers across research, and no source input, ticket, workspace, image, container, or evidence artifact was removed.",
     "source_ids": [
       "backlog_depth_supervision_issue_ledger"
     ]

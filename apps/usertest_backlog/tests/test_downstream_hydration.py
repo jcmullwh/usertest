@@ -271,6 +271,83 @@ def _retained_no_change_record(
     return record, paths, registry
 
 
+def _retained_insufficient_evidence_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict, dict[str, Path], dict]:
+    problem = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "title": "One causal problem",
+        "evidence_atom_ids": ["atom:one"],
+        "source_evidence_atom_ids": ["atom:one"],
+    }
+    dossier = _dossier()
+    dossier.update(
+        {
+            "research_status": "insufficient_evidence",
+            "actionability_assessment": {
+                "disposition": "undetermined",
+                "rationale": "The retained evidence cannot distinguish two causal paths.",
+                "evidence_refs": ["experiment:one"],
+            },
+            "blocking_reasons": ["The source run lacks per-step timing."],
+            "material_unknowns": [
+                {
+                    "unknown": "Which causal path consumed the historical interval.",
+                    "material": True,
+                    "affects": ["root_cause", "actionability", "change_surface"],
+                    "evidence_needed": "Authenticated per-step timing from the source run.",
+                }
+            ],
+        }
+    )
+    blockers = [
+        "research_status_insufficient_evidence",
+        "research_blocking_reasons_present",
+        "research_actionability_undetermined",
+        "material_unknown_blocks_implementation_decision",
+    ]
+    outcome = {
+        "problem_id": "problem:one",
+        "optioning_status": "insufficient_evidence",
+        "decision_rationale": "Material causal evidence is unavailable.",
+        "research_readiness_blockers": blockers,
+        "option_count": 0,
+        "rejected_option_count": 0,
+    }
+    paths = {
+        "research": tmp_path / "research.json",
+        "options": tmp_path / "options.json",
+    }
+    registry = build_case_registry([problem], supporting_atoms=[_atom()])
+    registry = _persist_stage(
+        registry,
+        paths["research"],
+        "repro_research",
+        [dossier],
+    )
+    registry = _persist_stage(
+        registry,
+        paths["options"],
+        "solution_optioning",
+        [],
+        input_meta={"optioning_outcomes": [outcome]},
+    )
+    record = problem_case_records_from_registry(registry)[0]
+    monkeypatch.setattr(
+        research_hydration,
+        "verify_persisted_research_evidence",
+        lambda _item: (True, []),
+    )
+    monkeypatch.setattr(
+        downstream_hydration,
+        "assess_research_readiness",
+        lambda _item: (False, blockers),
+    )
+    return record, paths, registry
+
+
 @pytest.mark.parametrize("disposition", ["already_addressed", "non_actionable"])
 def test_exact_no_change_disposition_hydrates_and_routes_to_nonterminal_wait(
     tmp_path: Path,
@@ -295,6 +372,107 @@ def test_exact_no_change_disposition_hydrates_and_routes_to_nonterminal_wait(
     assert route["eligible_for_downstream"] is False
     assert route["reconsider_when"]
     assert registry["cases"]["case:one"]["state"] == "active"
+
+
+def test_exact_insufficient_evidence_disposition_routes_to_nonterminal_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record, _paths, registry = _retained_insufficient_evidence_record(
+        tmp_path, monkeypatch
+    )
+
+    retained, errors = (
+        downstream_hydration.hydrate_retained_insufficient_evidence_disposition(
+            record
+        )
+    )
+    route = prioritization._runner_research_route(record)
+
+    assert errors == []
+    assert retained is not None
+    assert retained["contract_revision"] == "runner_retained_insufficient_evidence_v1"
+    assert retained["research_status"] == "insufficient_evidence"
+    assert route["research_route"] == "await_evidence"
+    assert route["selected_for_research"] is False
+    assert route["eligible_for_downstream"] is False
+    assert route["reconsider_when"]
+    assert registry["cases"]["case:one"]["state"] == "active"
+
+
+def test_missing_insufficient_evidence_disposition_rebuilds_stage4_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record, _paths, _registry = _retained_insufficient_evidence_record(
+        tmp_path, monkeypatch
+    )
+    record["prior_stage_context"].pop("optioning")
+
+    retained, errors = (
+        downstream_hydration.hydrate_retained_insufficient_evidence_disposition(
+            record
+        )
+    )
+    route = prioritization._runner_research_route(record)
+
+    assert retained is None
+    assert errors == ["retained_insufficient_evidence_optioning_summary_missing"]
+    assert route["research_route"] == "continue_downstream"
+    assert route["selected_for_research"] is False
+    assert route["eligible_for_downstream"] is True
+
+
+def test_tampered_insufficient_evidence_stage4_rebuilds_downstream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record, paths, _registry = _retained_insufficient_evidence_record(
+        tmp_path, monkeypatch
+    )
+    document = json.loads(paths["options"].read_text(encoding="utf-8"))
+    document["input_meta"]["optioning_outcomes"][0]["decision_rationale"] = "tampered"
+    paths["options"].write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    retained, errors = (
+        downstream_hydration.hydrate_retained_insufficient_evidence_disposition(
+            record
+        )
+    )
+    route = prioritization._runner_research_route(record)
+
+    assert retained is None
+    assert errors == ["retained_insufficient_evidence_outcome_digest_mismatch"]
+    assert route["research_route"] == "continue_downstream"
+
+
+def test_tampered_insufficient_evidence_stage3_routes_to_research_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record, paths, _registry = _retained_insufficient_evidence_record(
+        tmp_path, monkeypatch
+    )
+    document = json.loads(paths["research"].read_text(encoding="utf-8"))
+    document["items"][0]["root_cause_confidence"] = 0.1
+    paths["research"].write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    retained, errors = (
+        downstream_hydration.hydrate_retained_insufficient_evidence_disposition(
+            record
+        )
+    )
+    route = prioritization._runner_research_route(record)
+
+    assert retained is None
+    assert errors[0] == "retained_insufficient_evidence_research_invalid"
+    assert "sha256_mismatch" in errors[1]
+    assert route["research_route"] == "research_update"
+    assert route["selected_for_research"] is True
 
 
 @pytest.mark.parametrize(

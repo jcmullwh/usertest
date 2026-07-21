@@ -13,6 +13,7 @@ from backlog_miner.prompt_correction import (
 from usertest_backlog.shared import *
 from usertest_backlog.workflows.downstream_hydration import (
     hydrate_retained_downstream_chain,
+    hydrate_retained_insufficient_evidence_disposition,
     hydrate_retained_no_change_disposition,
 )
 from usertest_backlog.workflows.research_hydration import hydrate_retained_research_proof
@@ -202,6 +203,43 @@ def _runner_research_route(record: Mapping[str, Any]) -> dict[str, Any]:
         if external_wait:
             route = "resume_prior"
             reason = "A retained provider-wait frontier must resume rather than restart."
+        elif research_status == "insufficient_evidence":
+            wait_disposition, wait_errors = (
+                hydrate_retained_insufficient_evidence_disposition(record)
+            )
+            if wait_disposition is not None and not wait_errors:
+                route = "await_evidence"
+                reason = (
+                    "The exact current insufficient-evidence proof and its content-bound "
+                    "zero-option Stage-4 disposition agree that implementation is blocked "
+                    "on material evidence. The case waits without repeating research."
+                )
+                reconsider_when = (
+                    "A new source-evidence atom, changed case/source/research revision, or "
+                    "explicit blocker-recheck receipt changes the recorded frontier."
+                )
+            elif wait_errors and wait_errors[0] == (
+                "retained_insufficient_evidence_research_invalid"
+            ):
+                route = "research_update"
+                reason = (
+                    "The retained insufficient-evidence summary could not authenticate its "
+                    "Stage-3 proof and requires fresh revalidation. First hydration result: "
+                    + wait_errors[1]
+                    + "."
+                    if len(wait_errors) > 1
+                    else "The retained insufficient-evidence Stage-3 proof is invalid and "
+                    "requires fresh revalidation."
+                )
+            else:
+                route = "continue_downstream"
+                reason = (
+                    "The exact retained insufficient-evidence proof is current, but its "
+                    "zero-option Stage-4 disposition is absent, stale, or unverified and "
+                    "will be rebuilt deterministically. First result: "
+                    + (wait_errors[0] if wait_errors else "disposition_unavailable")
+                    + "."
+                )
         elif research_status in {"blocked", "partial"} or root_cause_status == "blocked":
             if reassessment_completed_without_frontier_change or stable_wait:
                 route = "await_evidence"
