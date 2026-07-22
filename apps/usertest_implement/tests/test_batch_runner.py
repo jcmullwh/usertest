@@ -23,6 +23,7 @@ from usertest_implement.batch_runner import (
     TicketRunResult,
     WorkerTemplate,
     _add_batch_resource_conflicts,
+    _apply_run_overrides,
     _batch_subprocess_env,
     _build_docker_resource_plan,
     _build_phases,
@@ -151,6 +152,47 @@ def test_checked_in_batch_config_covers_low_without_default_ticket_timeout() -> 
     }
 
 
+def test_explicit_run_role_overrides_replace_batch_defaults() -> None:
+    config: dict[str, Any] = {
+        "version": 1,
+        "defaults": {
+            "refresh_agent": "claude",
+            "refresh_model": "configured-refresh",
+            "worker_roster": [
+                {"agent": "codex", "model": "configured-codex"},
+                {"agent": "gemini"},
+            ],
+            "implementation_review_agent": "claude",
+        },
+    }
+
+    _apply_run_overrides(
+        config,
+        refresh_agent="codex",
+        refresh_model="gpt-5.6-sol",
+        worker_agent="codex",
+        worker_model="gpt-5.6-sol",
+        implementation_review_agent="codex",
+        implementation_review_model="gpt-5.6-sol",
+    )
+
+    assert config["defaults"] == {
+        "refresh_agent": "codex",
+        "refresh_model": "gpt-5.6-sol",
+        "worker_roster": [{"agent": "codex", "model": "gpt-5.6-sol"}],
+        "implementation_review_agent": "codex",
+        "implementation_review_model": "gpt-5.6-sol",
+    }
+
+
+def test_worker_model_override_requires_explicit_worker_agent() -> None:
+    with pytest.raises(ValueError, match="--worker-model requires --worker-agent"):
+        _apply_run_overrides(
+            {"version": 1, "defaults": {"worker_roster": [{"agent": "codex"}]}},
+            worker_model="gpt-5.6-sol",
+        )
+
+
 def test_wave_base_revision_is_fetched_resolved_and_receipted(
     tmp_path: Path,
     monkeypatch,
@@ -251,6 +293,8 @@ def test_ticket_process_receives_exact_wave_revision(tmp_path: Path, monkeypatch
         implementation_ref=revision,
         implementation_runs_dir=runs_dir,
         ledger_path=ledger_path,
+        implementation_review_agent="codex",
+        implementation_review_model="gpt-5.6-sol",
     )
 
     assert result.returncode == 0
@@ -259,6 +303,8 @@ def test_ticket_process_receives_exact_wave_revision(tmp_path: Path, monkeypatch
     assert command[command.index("--ref") + 1] == revision
     assert command[command.index("--runs-dir") + 1] == str(runs_dir)
     assert command[command.index("--ledger") + 1] == str(ledger_path)
+    assert command[command.index("--implementation-review-agent") + 1] == "codex"
+    assert command[command.index("--implementation-review-model") + 1] == "gpt-5.6-sol"
 
 
 def _write_terminal_source_artifacts(

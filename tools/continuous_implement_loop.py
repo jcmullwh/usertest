@@ -1052,9 +1052,7 @@ def _run_batch_pass(ctx: LoopContext) -> bool:
     """Run one full maintenance batch pass through the batch engine."""
 
     _write_state(ctx, status="running", current_action="batch")
-    proc = _run_logged(
-        ctx,
-        [
+    argv = [
             str(ctx.implement_python),
             "-m",
             "usertest_implement.cli",
@@ -1064,7 +1062,22 @@ def _run_batch_pass(ctx: LoopContext) -> bool:
             "run",
             "--config",
             str(ctx.batch_config_path),
-        ],
+            "--refresh-agent",
+            ctx.backlog_agent,
+            "--worker-agent",
+            ctx.implementation_agent,
+            "--implementation-review-agent",
+            ctx.review_agent,
+        ]
+    if ctx.backlog_model:
+        argv.extend(["--refresh-model", ctx.backlog_model])
+    if ctx.implementation_model:
+        argv.extend(["--worker-model", ctx.implementation_model])
+    if ctx.review_model:
+        argv.extend(["--implementation-review-model", ctx.review_model])
+    proc = _run_logged(
+        ctx,
+        argv,
         cwd=ctx.repo_root,
         label="batch run",
     )

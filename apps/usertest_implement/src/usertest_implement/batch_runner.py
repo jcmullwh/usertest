@@ -1372,6 +1372,8 @@ def _run_ticket_process(
     implementation_runs_dir: Path | None = None,
     ledger_path: Path | None = None,
     maintenance_image_metadata_path: Path | None = None,
+    implementation_review_agent: str | None = None,
+    implementation_review_model: str | None = None,
 ) -> TicketRunResult:
     command = [
         str(implement_python),
@@ -1400,6 +1402,10 @@ def _run_ticket_process(
         command.extend(["--ledger", str(ledger_path)])
     if worker.model is not None:
         command.extend(["--model", worker.model])
+    if implementation_review_agent is not None:
+        command.extend(["--implementation-review-agent", implementation_review_agent])
+    if implementation_review_model is not None:
+        command.extend(["--implementation-review-model", implementation_review_model])
     if maintenance_image_metadata_path is not None:
         command.extend(
             [
@@ -1500,6 +1506,68 @@ def _build_workers(config: dict[str, Any]) -> list[WorkerTemplate]:
     if not workers:
         raise ValueError("Batch config must define defaults.worker_roster")
     return workers
+
+
+def _apply_run_overrides(
+    config: dict[str, Any],
+    *,
+    refresh_agent: str | None = None,
+    refresh_model: str | None = None,
+    worker_agent: str | None = None,
+    worker_model: str | None = None,
+    implementation_review_agent: str | None = None,
+    implementation_review_model: str | None = None,
+) -> dict[str, Any]:
+    """Apply explicit batch CLI role overrides over the checked-in config."""
+
+    defaults_raw = config.get("defaults")
+    if defaults_raw is None:
+        defaults: dict[str, Any] = {}
+        config["defaults"] = defaults
+    elif isinstance(defaults_raw, dict):
+        defaults = defaults_raw
+    else:
+        raise ValueError("Batch config defaults must be a mapping")
+
+    def normalized_agent(value: str | None, *, role: str) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized not in VALID_AGENTS:
+            raise ValueError(f"Invalid {role} agent: {normalized!r}")
+        return normalized
+
+    def normalized_model(value: str | None) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    effective_refresh_agent = normalized_agent(refresh_agent, role="refresh")
+    if effective_refresh_agent is not None:
+        defaults["refresh_agent"] = effective_refresh_agent
+    effective_refresh_model = normalized_model(refresh_model)
+    if effective_refresh_model is not None:
+        defaults["refresh_model"] = effective_refresh_model
+
+    effective_worker_agent = normalized_agent(worker_agent, role="worker")
+    effective_worker_model = normalized_model(worker_model)
+    if effective_worker_model is not None and effective_worker_agent is None:
+        raise ValueError("--worker-model requires --worker-agent")
+    if effective_worker_agent is not None:
+        worker: dict[str, Any] = {"agent": effective_worker_agent}
+        if effective_worker_model is not None:
+            worker["model"] = effective_worker_model
+        defaults["worker_roster"] = [worker]
+
+    effective_review_agent = normalized_agent(
+        implementation_review_agent,
+        role="implementation review",
+    )
+    if effective_review_agent is not None:
+        defaults["implementation_review_agent"] = effective_review_agent
+    effective_review_model = normalized_model(implementation_review_model)
+    if effective_review_model is not None:
+        defaults["implementation_review_model"] = effective_review_model
+    return config
 
 
 def _build_phases(config: dict[str, Any], *, data_root: Path) -> list[PhaseConfig]:
@@ -1731,6 +1799,27 @@ def _drain_phase(
     defaults = config.get("defaults", {})
     refresh_agent = str(defaults.get("refresh_agent") or workers[0].agent)
     refresh_model = str(defaults.get("refresh_model") or workers[0].model or LATEST_CODEX_MODEL)
+    implementation_review_agent_raw = defaults.get("implementation_review_agent")
+    implementation_review_agent = (
+        str(implementation_review_agent_raw).strip().lower()
+        if isinstance(implementation_review_agent_raw, str)
+        and implementation_review_agent_raw.strip()
+        else None
+    )
+    if (
+        implementation_review_agent is not None
+        and implementation_review_agent not in VALID_AGENTS
+    ):
+        raise ValueError(
+            f"Invalid implementation review agent: {implementation_review_agent!r}"
+        )
+    implementation_review_model_raw = defaults.get("implementation_review_model")
+    implementation_review_model = (
+        str(implementation_review_model_raw).strip()
+        if isinstance(implementation_review_model_raw, str)
+        and implementation_review_model_raw.strip()
+        else None
+    )
     ticket_timeout_seconds: float | None = None
     ticket_timeout_raw = defaults.get("ticket_timeout_seconds")
     if ticket_timeout_raw not in (None, ""):
@@ -1882,6 +1971,8 @@ def _drain_phase(
                             / "backlog_implement_actions.yaml"
                         ),
                         maintenance_image_metadata_path=maintenance_image_metadata_path,
+                        implementation_review_agent=implementation_review_agent,
+                        implementation_review_model=implementation_review_model,
                     )
                     in_flight[future] = (candidate, worker, candidate.execution_conflict_keys)
 
@@ -2031,8 +2122,27 @@ def _drain_phase(
     raise RuntimeError(f"Phase {phase.name} exceeded max_phase_cycles={max_phase_cycles}")
 
 
-def run_batch(*, repo_root: Path, config_path: Path) -> int:
+def run_batch(
+    *,
+    repo_root: Path,
+    config_path: Path,
+    refresh_agent: str | None = None,
+    refresh_model: str | None = None,
+    worker_agent: str | None = None,
+    worker_model: str | None = None,
+    implementation_review_agent: str | None = None,
+    implementation_review_model: str | None = None,
+) -> int:
     config = _load_batch_config(config_path)
+    _apply_run_overrides(
+        config,
+        refresh_agent=refresh_agent,
+        refresh_model=refresh_model,
+        worker_agent=worker_agent,
+        worker_model=worker_model,
+        implementation_review_agent=implementation_review_agent,
+        implementation_review_model=implementation_review_model,
+    )
     workers = _build_workers(config)
     defaults_raw = config.get("defaults")
     defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
@@ -2106,6 +2216,45 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     state["code_root"] = str(repo_root.resolve())
     state["owner_root"] = str(owner_root)
     state["repo_input"] = repo_input
+    state["effective_execution_roles"] = {
+        "refresh": {
+            "agent": str(defaults.get("refresh_agent") or workers[0].agent),
+            "model": str(
+                defaults.get("refresh_model") or workers[0].model or LATEST_CODEX_MODEL
+            ),
+            "agent_origin": "cli_override" if refresh_agent else "batch_config",
+            "model_origin": "cli_override" if refresh_model else "batch_config",
+        },
+        "implementation_workers": [
+            {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
+            for worker in workers
+        ],
+        "implementation_workers_origin": (
+            "cli_override" if worker_agent else "batch_config"
+        ),
+        "implementation_review": {
+            "agent_override": defaults.get("implementation_review_agent"),
+            "model_override": defaults.get("implementation_review_model"),
+            "agent_origin": (
+                "cli_override"
+                if implementation_review_agent
+                else (
+                    "batch_config"
+                    if defaults.get("implementation_review_agent")
+                    else "run_settings"
+                )
+            ),
+            "model_origin": (
+                "cli_override"
+                if implementation_review_model
+                else (
+                    "batch_config"
+                    if defaults.get("implementation_review_model")
+                    else "run_settings"
+                )
+            ),
+        },
+    }
     state["global_blockers"] = list(preflight.get("blockers", []))
     if state["global_blockers"]:
         state["status"] = "blocked"
@@ -2338,6 +2487,12 @@ def add_batch_subcommands(subparsers: argparse._SubParsersAction[argparse.Argume
         default=Path("configs/backlog_implement_batch.yaml"),
         help="Batch config YAML path (default: configs/backlog_implement_batch.yaml).",
     )
+    run_p.add_argument("--refresh-agent", choices=sorted(VALID_AGENTS))
+    run_p.add_argument("--refresh-model")
+    run_p.add_argument("--worker-agent", choices=sorted(VALID_AGENTS))
+    run_p.add_argument("--worker-model")
+    run_p.add_argument("--implementation-review-agent", choices=sorted(VALID_AGENTS))
+    run_p.add_argument("--implementation-review-model")
 
     status_p = batch_sub.add_parser("status", help="Show batch state JSON.")
     status_p.add_argument("--batch-id", help="Optional batch id. Defaults to the latest batch.")
@@ -2353,7 +2508,16 @@ def add_batch_subcommands(subparsers: argparse._SubParsersAction[argparse.Argume
         repo_root = (
             Path(args.repo_root).resolve() if args.repo_root is not None else Path.cwd().resolve()
         )
-        return run_batch(repo_root=repo_root, config_path=args.config.resolve())
+        return run_batch(
+            repo_root=repo_root,
+            config_path=args.config.resolve(),
+            refresh_agent=args.refresh_agent,
+            refresh_model=args.refresh_model,
+            worker_agent=args.worker_agent,
+            worker_model=args.worker_model,
+            implementation_review_agent=args.implementation_review_agent,
+            implementation_review_model=args.implementation_review_model,
+        )
 
     def _cmd_batch_status(args: argparse.Namespace) -> int:
         repo_root = (
