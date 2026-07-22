@@ -1127,6 +1127,19 @@ def _requeue_ticket(*, candidate: BatchCandidate, repo_root: Path) -> Path:
     return path
 
 
+def _return_ticket_for_replanning(*, candidate: BatchCandidate) -> Path:
+    """Move a candidate with an invalid Stage-6 contract out of the ready queue."""
+
+    path = move_ticket_file(
+        owner_root=candidate.owner_root,
+        fingerprint=candidate.fingerprint,
+        to_bucket="1.5 - to_plan",
+        dry_run=False,
+    ).resolve()
+    _sync_ticket_atom_actions(owner_root=candidate.owner_root)
+    return path
+
+
 def _move_ticket_for_review(*, candidate: BatchCandidate, repo_root: Path) -> Path:
     path = move_ticket_file(
         owner_root=candidate.owner_root,
@@ -1690,6 +1703,74 @@ def _record_launch_wave_decision(
     return wave
 
 
+def _record_candidate_plan_contract_failure(
+    *,
+    batch_dir_path: Path,
+    state: dict[str, Any],
+    phase_name: str,
+    cycle: int,
+    candidate: BatchCandidate,
+    error: ValueError,
+) -> None:
+    """Retain one invalid planning artifact without blocking unrelated candidates."""
+
+    failed_at = utc_now_z()
+    replanned_path: Path | None = None
+    replan_error: str | None = None
+    try:
+        replanned_path = _return_ticket_for_replanning(candidate=candidate)
+    except Exception as exc:  # noqa: BLE001 - retain custody failure as case-local evidence
+        replan_error = f"{type(exc).__name__}: {exc}"
+
+    failure = {
+        "ticket_key": candidate.ticket_key,
+        "fingerprint": candidate.fingerprint,
+        "run_dir": None,
+        "failure_class": "candidate_plan_contract_invalid",
+        "summary": str(error),
+        "failed_utc": failed_at,
+        "global_blocker": False,
+        "retryable": False,
+        "disposition": "replan_required",
+        "original_ticket_path": str(candidate.ticket_path),
+        "replanned_ticket_path": str(replanned_path) if replanned_path is not None else None,
+        "replan_error": replan_error,
+    }
+    state.setdefault("failed", []).append(failure)
+    admission_receipt_error: str | None = None
+    try:
+        append_jsonl(
+            batch_dir_path / "candidate_admission_failures.jsonl",
+            {
+                "schema_version": 1,
+                "recorded_utc": failed_at,
+                "phase": phase_name,
+                "cycle": cycle,
+                "source_name": candidate.source_name,
+                "ticket_key": candidate.ticket_key,
+                "fingerprint": candidate.fingerprint,
+                "severity": candidate.severity,
+                "title": candidate.title,
+                "failure_class": failure["failure_class"],
+                "summary": failure["summary"],
+                "global_blocker": False,
+                "worker_launched": False,
+                "disposition": failure["disposition"],
+                "original_ticket_path": failure["original_ticket_path"],
+                "replanned_ticket_path": failure["replanned_ticket_path"],
+                "replan_error": replan_error,
+            },
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        admission_receipt_error = f"{type(exc).__name__}: {exc}"
+        failure["admission_receipt_error"] = admission_receipt_error
+    _print(
+        f"REPLAN phase={phase_name} fingerprint={candidate.fingerprint} "
+        f"class={failure['failure_class']} moved={replanned_path is not None} "
+        f"receipt_error={admission_receipt_error or '<none>'} summary={error}"
+    )
+
+
 def _phase_blocker_id(failure_class: str, handoff_summary: dict[str, Any] | None) -> str:
     if (
         isinstance(handoff_summary, dict)
@@ -1827,10 +1908,23 @@ def _drain_phase(
                         break
                     candidate = queue.pop(launch_index)
                     if wave_base_revision is not None:
-                        _validate_candidate_wave_revision(
-                            candidate=candidate,
-                            wave_base_revision=wave_base_revision,
-                        )
+                        try:
+                            _validate_candidate_wave_revision(
+                                candidate=candidate,
+                                wave_base_revision=wave_base_revision,
+                            )
+                        except ValueError as exc:
+                            processed.add(candidate.ticket_key)
+                            _record_candidate_plan_contract_failure(
+                                batch_dir_path=batch_dir_path,
+                                state=state,
+                                phase_name=phase.name,
+                                cycle=cycle,
+                                candidate=candidate,
+                                error=exc,
+                            )
+                            persist_state(batch_dir_path, state)
+                            continue
                     worker = workers[next_worker_index % len(workers)]
                     next_worker_index += 1
                     claimed_path = _claim_ticket(candidate=candidate, repo_root=repo_root)
