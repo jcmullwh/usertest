@@ -22,6 +22,7 @@ from run_artifacts.lifecycle_events import (
     TelemetryArtifactError,
     TelemetryValidationError,
     append_lifecycle_event,
+    append_lifecycle_events,
     command_family,
     deserialize_lifecycle_context,
     fingerprint_command,
@@ -196,6 +197,48 @@ def test_jsonl_append_is_idempotent_and_detects_event_id_conflicts(tmp_path: Pat
     conflicting_id = replace(first, event_type="stage.completed")
     with pytest.raises(IdempotencyConflictError, match="different content"):
         append_lifecycle_event(path, conflicting_id)
+
+
+def test_jsonl_batch_append_is_atomic_and_preserves_idempotency(tmp_path: Path) -> None:
+    path = tmp_path / "lifecycle_events.jsonl"
+    first = _event()
+    second = _event(
+        event_id="event-2",
+        idempotency_key="case-1:stage-1:completed",
+        event_type="stage.completed",
+        occurred_at=T1,
+        ended_at=T1,
+    )
+
+    assert append_lifecycle_events(path, (first, second)) == 2
+    assert append_lifecycle_events(path, (first, second)) == 0
+    assert read_lifecycle_events(path) == [first, second]
+
+    conflicting_id = replace(second, event_type="stage.failed")
+    with pytest.raises(IdempotencyConflictError, match="different content"):
+        append_lifecycle_events(path, (conflicting_id,))
+
+
+def test_jsonl_batch_append_rejects_action_rebinding_before_writing(tmp_path: Path) -> None:
+    path = tmp_path / "lifecycle_events.jsonl"
+    started = _event(
+        event_id="action-a-started",
+        idempotency_key="action-a:started",
+        event_type="action.started",
+        attributes={"action_id": "action-a"},
+    )
+    rebound = _event(
+        event_id="action-b-started",
+        idempotency_key="action-b:started",
+        event_type="action.started",
+        occurred_at=T1,
+        started_at=T1,
+        attributes={"action_id": "action-b"},
+    )
+
+    with pytest.raises(IdempotencyConflictError, match="already bound to action"):
+        append_lifecycle_events(path, (started, rebound))
+    assert not path.exists()
 
 
 def test_jsonl_append_rejects_rebinding_work_unit_to_another_action(

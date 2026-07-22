@@ -9,7 +9,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, TextIO, cast
 
-CASE_METRICS_VERSION = "lifecycle_case_metrics_v1"
+CASE_METRICS_VERSION = "lifecycle_case_metrics_v2"
 AUTOMATION_SCORE_VERSION = "automation_score_v1"
 
 TOKEN_DIMENSIONS = (
@@ -609,6 +609,8 @@ def _new_case(case_id: str) -> dict[str, Any]:
         "pr_created_at": [],
         "outcome_verified_at": [],
         "origin_telemetry_known": False,
+        "lifecycle_opened_event_count": 0,
+        "case_cohort_eligible": None,
         "raw_dispositions": set(),
         "milestones": {},
         "milestone_manual": defaultdict(list),
@@ -1426,6 +1428,20 @@ def _collect_events(
                 and case["manual_action_telemetry_complete"] is None
             ):
                 case["manual_action_telemetry_complete"] = True
+            cohort_eligible = _bool_field(
+                event, "case_cohort_eligible", "cohort_eligible"
+            )
+            lifecycle_kind = _string(_field(event, "lifecycle_kind"))
+            if cohort_eligible is False:
+                case["case_cohort_eligible"] = False
+            elif (
+                cohort_eligible is True
+                or (
+                    lifecycle_kind is not None
+                    and _normalize_label(lifecycle_kind) == "case"
+                )
+            ) and case["case_cohort_eligible"] is None:
+                case["case_cohort_eligible"] = True
             atom_timestamps = _timestamp_values(
                     _field(
                         event,
@@ -1465,6 +1481,9 @@ def _collect_events(
 
         if event_type == "lifecycle.opened":
             for case_id in case_ids:
+                cases[case_id]["lifecycle_opened_event_count"] += 1
+                if cases[case_id]["case_cohort_eligible"] is None:
+                    cases[case_id]["case_cohort_eligible"] = True
                 cases[case_id]["opened_at"].append(timestamp)
                 if timestamp is not None:
                     cases[case_id]["lineage_at"].append(timestamp)
@@ -1956,6 +1975,14 @@ def _finalize_work_units(
                 else "model_invocation_tokens_missing"
             )
             _issue(issues, code, work_unit_id=work_unit_id)
+        actor_types = work.get("actor_types")
+        actors = actor_types if isinstance(actor_types, set) else set()
+        if "supervisor" in actors and not work["tokens_explicit"]:
+            _issue(
+                issues,
+                "supervising_agent_tokens_missing",
+                work_unit_id=work_unit_id,
+            )
 
 
 def _dependency_closure(
@@ -2038,7 +2065,11 @@ def _token_cost_for_work_ids(
     for work_unit_id in sorted(work_unit_ids):
         work = work_units[work_unit_id]
         gross_tokens = work.get("tokens")
-        model_usage_expected = "model.invocation.completed" in work.get("event_types", set())
+        actor_types = work.get("actor_types")
+        actors = actor_types if isinstance(actor_types, set) else set()
+        model_usage_expected = "model.invocation.completed" in work.get(
+            "event_types", set()
+        ) or bool(actors.intersection({"model", "supervisor"}))
         cost_unknown = work.get("cost_unknown") is True
         token_map: Mapping[str, Any] | None = None
         expects_tokens = False
@@ -2992,6 +3023,7 @@ def aggregate_case_metrics(events: LifecycleSource) -> dict[str, Any]:
                     else "active"
                 ),
                 "disposition_verified": disposition_verified,
+                "cohort_eligible": case["case_cohort_eligible"] is True,
                 "timing": {
                     "atom_at": _iso(atom_at),
                     "admission_at": _iso(admission_at),
@@ -3039,6 +3071,7 @@ def aggregate_case_metrics(events: LifecycleSource) -> dict[str, Any]:
                 "automation_score_v1": automation,
                 "milestones_completed": sorted(case["milestones"]),
                 "completeness": {
+                    "lifecycle_opened_present": case["lifecycle_opened_event_count"] > 0,
                     "origin_present": "origin" in case["milestones"],
                     "disposition_present": disposition is not None,
                     "disposition_verified": disposition_verified,
@@ -3539,6 +3572,7 @@ def _automation_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 def _completeness_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     fields = (
+        "lifecycle_opened_present",
         "origin_present",
         "origin_telemetry_known",
         "manual_action_telemetry_complete",
@@ -3650,9 +3684,16 @@ def aggregate_cohort_metrics(
         if isinstance(case, Mapping)
     ]
     selected_ids = set(case_ids) if case_ids is not None else None
+    cohort_eligible_cases = [
+        case for case in all_cases if case.get("cohort_eligible") is True
+    ]
+    excluded_cases = [
+        case for case in all_cases if case.get("cohort_eligible") is not True
+    ]
+    selection_pool = all_cases if selected_ids is not None else cohort_eligible_cases
     cases = [
         case
-        for case in all_cases
+        for case in selection_pool
         if selected_ids is None
         or _string(case.get("case_lifecycle_id")) in selected_ids
         or _string(case.get("case_id")) in selected_ids
@@ -3756,11 +3797,28 @@ def aggregate_cohort_metrics(
                 "case_lifecycle_ids": sorted(incomplete_fingerprint_case_ids),
             }
         )
+    if excluded_cases:
+        version_warnings.append(
+            {
+                "code": "case_cohort_eligibility_missing",
+                "excluded_case_count": len(excluded_cases),
+                "case_lifecycle_ids": sorted(
+                    str(case.get("case_lifecycle_id") or case.get("case_id"))
+                    for case in excluded_cases
+                ),
+            }
+        )
     return {
         "schema_version": 1,
         "metric_version": CASE_METRICS_VERSION,
         "cohort_id": cohort_id or "cohort",
+        "observed_case_count": len(all_cases),
         "case_count": len(cases),
+        "excluded_case_count": len(excluded_cases),
+        "excluded_case_lifecycle_ids": sorted(
+            str(case.get("case_lifecycle_id") or case.get("case_id"))
+            for case in excluded_cases
+        ),
         "case_lifecycle_ids": sorted(
             str(case.get("case_lifecycle_id") or case.get("case_id")) for case in cases
         ),

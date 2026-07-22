@@ -651,6 +651,70 @@ def test_unmaterialized_model_usage_propagates_unknown_instead_of_zero() -> None
     )
 
 
+def test_supervising_agent_work_without_usage_is_unknown_instead_of_zero() -> None:
+    case = aggregate_case_metrics(
+        [
+            _event(
+                "lifecycle.opened",
+                "life:supervisor-usage-missing",
+                at="2026-07-21T01:00:00Z",
+                origin_ids=["atom:supervisor-usage-missing"],
+            ),
+            _event(
+                "action.completed",
+                "life:supervisor-usage-missing",
+                work_unit_id="support:supervisor-action",
+                action_id="action:supervisor-action",
+                actor="supervising_agent",
+                manual=True,
+                accounting_scope="support",
+                active_seconds=2,
+                started_at="2026-07-21T01:00:01Z",
+                ended_at="2026-07-21T01:00:03Z",
+            ),
+        ]
+    )["cases"][0]
+
+    all_in = case["accounting"]["all_in"]
+    assert all_in["gross"]["total_tokens"] is None
+    assert all_in["gross"]["known_token_subtotal"]["total_tokens"] == 0
+    assert all_in["completeness"]["expected_token_work_units"] == 1
+    assert all_in["completeness"]["token_work_units"] == 0
+    assert any(
+        issue["code"] == "supervising_agent_tokens_missing"
+        for issue in case["reconciliation"]["issues"]
+    )
+
+
+def test_human_only_work_without_model_usage_has_known_zero_tokens() -> None:
+    case = aggregate_case_metrics(
+        [
+            _event(
+                "lifecycle.opened",
+                "life:human-only",
+                at="2026-07-21T01:00:00Z",
+                origin_ids=["atom:human-only"],
+            ),
+            _event(
+                "action.completed",
+                "life:human-only",
+                work_unit_id="support:human-action",
+                action_id="action:human-action",
+                actor="human",
+                manual=True,
+                accounting_scope="support",
+                active_seconds=2,
+                started_at="2026-07-21T01:00:01Z",
+                ended_at="2026-07-21T01:00:03Z",
+            ),
+        ]
+    )["cases"][0]
+
+    all_in = case["accounting"]["all_in"]
+    assert all_in["gross"]["total_tokens"] == 0
+    assert all_in["completeness"]["expected_token_work_units"] == 0
+
+
 def test_reused_prior_work_without_cost_lineage_propagates_unknown_totals() -> None:
     case = aggregate_case_metrics(
         [
@@ -875,6 +939,68 @@ def test_active_case_is_not_coerced_to_failed_disposition() -> None:
     assert cohort["active_case_count"] == 1
 
 
+def test_default_cohort_excludes_events_without_lifecycle_opening() -> None:
+    report = aggregate_case_metrics(
+        [
+            _event(
+                "lifecycle.opened",
+                "life:admitted",
+                at="2026-07-21T03:00:00Z",
+                origin_ids=["atom:admitted"],
+            ),
+            _event(
+                "action.completed",
+                "life:engineering-operation",
+                at="2026-07-21T03:00:01Z",
+                work_unit_id="work:engineering-operation",
+                action_id="action:engineering-operation",
+                actor="supervising_agent",
+                manual=True,
+                accounting_scope="support",
+                active_seconds=1,
+            ),
+        ]
+    )
+
+    cases = {case["case_lifecycle_id"]: case for case in report["cases"]}
+    assert cases["life:admitted"]["cohort_eligible"] is True
+    assert cases["life:engineering-operation"]["cohort_eligible"] is False
+
+    cohort = aggregate_cohort_metrics(report)
+    assert cohort["observed_case_count"] == 2
+    assert cohort["case_count"] == 1
+    assert cohort["excluded_case_count"] == 1
+    assert cohort["excluded_case_lifecycle_ids"] == ["life:engineering-operation"]
+    assert any(
+        warning["code"] == "case_cohort_eligibility_missing"
+        for warning in cohort["version_warnings"]
+    )
+
+
+def test_explicit_case_attestation_includes_historical_case_without_opening_time() -> None:
+    report = aggregate_case_metrics(
+        [
+            _event(
+                "disposition.verified",
+                "legacy:life:no-opening-time",
+                case_id="case:no-opening-time",
+                at="2026-07-21T03:00:00Z",
+                disposition="already_addressed",
+                lifecycle_kind="case",
+                case_cohort_eligible=True,
+            )
+        ]
+    )
+
+    [case] = report["cases"]
+    assert case["cohort_eligible"] is True
+    assert case["completeness"]["lifecycle_opened_present"] is False
+    cohort = aggregate_cohort_metrics(report)
+    assert cohort["case_count"] == 1
+    assert cohort["excluded_case_count"] == 0
+    assert cohort["disposition_counts"] == {"already_addressed": 1}
+
+
 @pytest.mark.parametrize(
     "resolution_mode",
     [
@@ -1015,7 +1141,10 @@ def test_legacy_reused_action_work_unit_is_split_without_losing_cost() -> None:
 
     report = aggregate_case_metrics(events)
 
-    assert report["reconciliation"]["ok"] is True
+    assert report["reconciliation"]["ok"] is False
+    assert {issue["code"] for issue in report["reconciliation"]["issues"]} == {
+        "supervising_agent_tokens_missing"
+    }
     [migration] = report["normalization"]["legacy_action_work_unit_splits"]
     assert migration["source_work_unit_id"] == legacy_work_id
     assert migration["source_event_count"] == 4

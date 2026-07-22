@@ -1756,65 +1756,83 @@ def read_lifecycle_events(path: Path) -> list[LifecycleEvent]:
     return events
 
 
-def append_lifecycle_event(
+def append_lifecycle_events(
     path: Path,
-    event: LifecycleEvent | Mapping[str, Any],
+    events: Sequence[LifecycleEvent | Mapping[str, Any]],
     *,
     lock_timeout_seconds: float = 10.0,
-) -> bool:
-    """Append one durable event; return ``False`` when its idempotency key already exists."""
+) -> int:
+    """Append validated events in one durable write and return the inserted count."""
 
-    validated = validate_lifecycle_event(event)
+    validated_events = [validate_lifecycle_event(event) for event in events]
+    if not validated_events:
+        return 0
     path.parent.mkdir(parents=True, exist_ok=True)
     with _artifact_lock(path, timeout_seconds=lock_timeout_seconds):
         objects, repaired = _read_jsonl_objects(path, repair_truncated_tail=True)
-        validated_action_id = (
-            str(validated.attributes.get("action_id") or "").strip()
-            if validated.event_type.startswith("action.")
-            else ""
-        )
+        existing_by_event_id: dict[str, LifecycleEvent] = {}
+        idempotency_keys: set[str] = set()
+        action_by_work_unit: dict[str, str] = {}
+        work_unit_by_action: dict[str, str] = {}
+
+        def register_action_binding(event: LifecycleEvent) -> None:
+            if not event.event_type.startswith("action."):
+                return
+            action_id = str(event.attributes.get("action_id") or "").strip()
+            work_unit_id = event.context.work_unit_id
+            if not action_id or work_unit_id is None:
+                return
+            existing_action = action_by_work_unit.get(work_unit_id)
+            if existing_action is not None and existing_action != action_id:
+                raise IdempotencyConflictError(
+                    f"work_unit_id {work_unit_id!r} is already bound to action "
+                    f"{existing_action!r}; cannot bind it to {action_id!r}"
+                )
+            existing_work = work_unit_by_action.get(action_id)
+            if existing_work is not None and existing_work != work_unit_id:
+                raise IdempotencyConflictError(
+                    f"action_id {action_id!r} is already bound to work unit "
+                    f"{existing_work!r}; cannot bind it to {work_unit_id!r}"
+                )
+            action_by_work_unit[work_unit_id] = action_id
+            work_unit_by_action[action_id] = work_unit_id
+
         for raw in objects:
-            existing = LifecycleEvent.from_dict(raw)
-            if existing.event_id == validated.event_id:
-                if existing.to_dict() != validated.to_dict():
+            retained_event = LifecycleEvent.from_dict(raw)
+            if retained_event.event_id in existing_by_event_id:
+                raise TelemetryArtifactError(
+                    f"duplicate event_id in {path}: {retained_event.event_id}"
+                )
+            if retained_event.idempotency_key in idempotency_keys:
+                raise TelemetryArtifactError(
+                    f"duplicate idempotency_key in {path}: {retained_event.idempotency_key}"
+                )
+            existing_by_event_id[retained_event.event_id] = retained_event
+            idempotency_keys.add(retained_event.idempotency_key)
+            register_action_binding(retained_event)
+
+        inserted: list[LifecycleEvent] = []
+        for validated in validated_events:
+            matching_event = existing_by_event_id.get(validated.event_id)
+            if matching_event is not None:
+                if matching_event.to_dict() != validated.to_dict():
                     raise IdempotencyConflictError(
                         f"event_id {validated.event_id!r} already has different content"
                     )
-                return False
-            if existing.idempotency_key == validated.idempotency_key:
-                return False
-            existing_action_id = (
-                str(existing.attributes.get("action_id") or "").strip()
-                if existing.event_type.startswith("action.")
-                else ""
-            )
-            if (
-                validated_action_id
-                and existing_action_id
-                and validated.context.work_unit_id is not None
-                and existing.context.work_unit_id == validated.context.work_unit_id
-                and existing_action_id != validated_action_id
-            ):
-                raise IdempotencyConflictError(
-                    "work_unit_id "
-                    f"{validated.context.work_unit_id!r} is already bound to action "
-                    f"{existing_action_id!r}; cannot bind it to {validated_action_id!r}"
-                )
-            if (
-                validated_action_id
-                and existing_action_id == validated_action_id
-                and validated.context.work_unit_id is not None
-                and existing.context.work_unit_id is not None
-                and existing.context.work_unit_id != validated.context.work_unit_id
-            ):
-                raise IdempotencyConflictError(
-                    "action_id "
-                    f"{validated_action_id!r} is already bound to work unit "
-                    f"{existing.context.work_unit_id!r}; cannot bind it to "
-                    f"{validated.context.work_unit_id!r}"
-                )
+                continue
+            if validated.idempotency_key in idempotency_keys:
+                continue
+            register_action_binding(validated)
+            existing_by_event_id[validated.event_id] = validated
+            idempotency_keys.add(validated.idempotency_key)
+            inserted.append(validated)
 
-        line = (canonical_json(validated.to_dict()) + "\n").encode("utf-8")
+        if not inserted:
+            return 0
+        lines = b"".join(
+            (canonical_json(event.to_dict()) + "\n").encode("utf-8")
+            for event in inserted
+        )
         prefix = b""
         if path.exists() and path.stat().st_size > 0 and not repaired:
             with path.open("rb") as handle:
@@ -1824,7 +1842,7 @@ def append_lifecycle_event(
         try:
             descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
             try:
-                payload = memoryview(prefix + line)
+                payload = memoryview(prefix + lines)
                 while payload:
                     written = os.write(descriptor, payload)
                     if written <= 0:
@@ -1834,9 +1852,29 @@ def append_lifecycle_event(
             finally:
                 os.close(descriptor)
         except OSError as exc:
-            raise TelemetryArtifactError(f"cannot append lifecycle event to {path}: {exc}") from exc
+            raise TelemetryArtifactError(
+                f"cannot append lifecycle events to {path}: {exc}"
+            ) from exc
         _fsync_directory(path.parent)
-    return True
+    return len(inserted)
+
+
+def append_lifecycle_event(
+    path: Path,
+    event: LifecycleEvent | Mapping[str, Any],
+    *,
+    lock_timeout_seconds: float = 10.0,
+) -> bool:
+    """Append one durable event; return ``False`` when its idempotency key already exists."""
+
+    return (
+        append_lifecycle_events(
+            path,
+            (event,),
+            lock_timeout_seconds=lock_timeout_seconds,
+        )
+        == 1
+    )
 
 
 def write_lifecycle_manifest(path: Path, manifest: LifecycleManifest | Mapping[str, Any]) -> str:
@@ -1918,6 +1956,7 @@ __all__ = [
     "TelemetryValidationError",
     "UsageSemantics",
     "append_lifecycle_event",
+    "append_lifecycle_events",
     "canonical_json",
     "canonical_sha256",
     "command_family",

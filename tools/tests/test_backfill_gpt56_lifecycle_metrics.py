@@ -82,6 +82,8 @@ def test_backfill_preserves_unknowns_and_structured_clusters(tmp_path: Path) -> 
     assert manifest["certification"]["eligible"] is False
     closed = next(row for row in rows if row["event_type"] == "lifecycle.closed")
     assert closed["attributes"]["cost_unknown"] is True
+    assert closed["attributes"]["lifecycle_kind"] == "case"
+    assert closed["attributes"]["case_cohort_eligible"] is True
 
     # Re-imports rebuild deterministically instead of retaining stale events.
     second = mod.backfill_dashboard(

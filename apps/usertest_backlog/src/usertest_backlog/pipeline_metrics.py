@@ -50,6 +50,16 @@ class _CycleTelemetry:
     automatic: bool
 
 
+@dataclass(frozen=True)
+class _ModelTelemetryProjection:
+    manifest_paths: tuple[Path, ...]
+    expected_invocation_ids: tuple[str, ...]
+    completed_invocation_ids: tuple[str, ...]
+    invocation_expected: bool | None
+    complete: bool
+    issues: tuple[str, ...]
+
+
 _CONTEXT_LOCK = threading.Lock()
 _CYCLE_BY_REGISTRY: dict[Path, _CycleTelemetry] = {}
 
@@ -310,6 +320,93 @@ def _manifest_invocation_id(path: Path) -> str | None:
     return invocation_id if isinstance(invocation_id, str) and invocation_id else None
 
 
+def _model_telemetry_projection(
+    stage_doc: Mapping[str, Any],
+) -> _ModelTelemetryProjection:
+    input_meta = stage_doc.get("input_meta")
+    input_meta = input_meta if isinstance(input_meta, Mapping) else {}
+    contract_raw = input_meta.get("model_invocation_contract")
+    if not isinstance(contract_raw, Mapping):
+        return _ModelTelemetryProjection(
+            manifest_paths=(),
+            expected_invocation_ids=(),
+            completed_invocation_ids=(),
+            invocation_expected=None,
+            complete=False,
+            issues=("stage_model_invocation_contract_missing",),
+        )
+
+    contract = dict(contract_raw)
+    issues: list[str] = []
+    if contract.get("schema_version") != 1:
+        issues.append("stage_model_invocation_contract_schema_invalid")
+    invocation_expected_raw = contract.get("invocation_expected")
+    invocation_expected = (
+        invocation_expected_raw if isinstance(invocation_expected_raw, bool) else None
+    )
+    if invocation_expected is None:
+        issues.append("stage_model_invocation_contract_expectation_invalid")
+    expected_contract_hash = canonical_sha256(
+        {key: value for key, value in contract.items() if key != "contract_sha256"}
+    )
+    if contract.get("contract_sha256") != expected_contract_hash:
+        issues.append("stage_model_invocation_contract_hash_changed")
+
+    manifests_raw = contract.get("manifests")
+    manifests = manifests_raw if isinstance(manifests_raw, list) else []
+    if not isinstance(manifests_raw, list):
+        issues.append("stage_model_invocation_contract_manifests_invalid")
+    paths: list[Path] = []
+    expected_ids: set[str] = set()
+    completed_ids: set[str] = set()
+    for index, ref_raw in enumerate(manifests):
+        ref = ref_raw if isinstance(ref_raw, Mapping) else {}
+        path_raw = ref.get("path")
+        path = Path(str(path_raw)) if isinstance(path_raw, str) and path_raw.strip() else None
+        if path is None or not path.is_file():
+            issues.append(f"stage_model_invocation_ref_missing:{index}")
+            continue
+        paths.append(path)
+        ref_sha = ref.get("sha256")
+        if not isinstance(ref_sha, str) or ref_sha != sha256(path.read_bytes()).hexdigest():
+            issues.append(f"stage_model_invocation_ref_changed:{index}")
+        invocation_id = _manifest_invocation_id(path)
+        if invocation_id is None:
+            issues.append(f"stage_model_invocation_id_missing:{index}")
+            continue
+        if invocation_id in expected_ids:
+            issues.append(f"stage_model_invocation_id_duplicated:{invocation_id}")
+        expected_ids.add(invocation_id)
+        source_path = path.parent / "lifecycle_events.jsonl"
+        if not source_path.is_file():
+            issues.append(f"stage_model_invocation_event_log_missing:{index}")
+            continue
+        try:
+            source_events = read_lifecycle_events(source_path)
+        except Exception:  # noqa: BLE001 - retained telemetry remains unknown, not fatal
+            issues.append(f"stage_model_invocation_event_log_invalid:{index}")
+            continue
+        if any(
+            event.event_type == "model.invocation.completed"
+            and event.context.invocation_id == invocation_id
+            for event in source_events
+        ):
+            completed_ids.add(invocation_id)
+        else:
+            issues.append(f"stage_model_invocation_completion_missing:{invocation_id}")
+
+    if invocation_expected is True and not expected_ids:
+        issues.append("stage_model_invocation_manifest_missing")
+    return _ModelTelemetryProjection(
+        manifest_paths=tuple(paths),
+        expected_invocation_ids=tuple(sorted(expected_ids)),
+        completed_invocation_ids=tuple(sorted(completed_ids)),
+        invocation_expected=invocation_expected,
+        complete=not issues,
+        issues=tuple(dict.fromkeys(issues)),
+    )
+
+
 def _link_model_invocation_events(
     *,
     stage_doc: Mapping[str, Any],
@@ -449,6 +546,12 @@ def record_stage_telemetry(
     reused_input = _input_reused(stage_doc)
     dependency_ids, reused_lineage_complete = _reused_work_dependencies(stage_doc)
     reused_cost_unknown = reused_input and not reused_lineage_complete
+    model_projection = _model_telemetry_projection(stage_doc)
+    cost_unknown_reasons: list[str] = []
+    if reused_cost_unknown:
+        cost_unknown_reasons.append("reused_prior_work_missing_complete_dependency_lineage")
+    if not model_projection.complete:
+        cost_unknown_reasons.append("model_usage_telemetry_incomplete")
 
     work_context = LifecycleContext(
         cycle_id=cycle.cycle_id,
@@ -470,16 +573,19 @@ def record_stage_telemetry(
                 "stage": stage,
                 "milestone_id": milestone,
                 "dependency_ids": dependency_ids,
-                "cost_unknown": reused_cost_unknown,
+                "cost_unknown": bool(cost_unknown_reasons),
                 "cost_unknown_reason": (
-                    "reused_prior_work_missing_complete_dependency_lineage"
-                    if reused_cost_unknown
-                    else None
+                    ",".join(cost_unknown_reasons) if cost_unknown_reasons else None
                 ),
+                "resource_time_unknown": True,
+                "resource_time_unknown_reason": "stage_boundary_active_time_not_retained",
+                "model_usage_telemetry_complete": model_projection.complete,
+                "model_usage_telemetry_issues": list(model_projection.issues),
+                "model_invocation_expected": model_projection.invocation_expected,
+                "expected_model_invocation_ids": list(model_projection.expected_invocation_ids),
+                "completed_model_invocation_ids": list(model_projection.completed_invocation_ids),
                 "cost_status": (
-                    "linked_reused_prior_work"
-                    if reused_input
-                    else "stage_boundary_only"
+                    "linked_reused_prior_work" if reused_input else "stage_boundary_only"
                 ),
                 "reused_work_dependency_set_complete": reused_lineage_complete,
                 "artifact_sha256": stage_digest,

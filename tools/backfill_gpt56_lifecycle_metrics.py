@@ -29,7 +29,7 @@ for _source in reversed(
 
 from run_artifacts.lifecycle_events import (  # noqa: E402
     LifecycleContext,
-    append_lifecycle_event,
+    append_lifecycle_events,
     canonical_sha256,
     make_lifecycle_event,
 )
@@ -139,6 +139,7 @@ def backfill_dashboard(
     final_events_path = output_dir / "lifecycle_events.jsonl"
     events_path = output_dir / ".lifecycle_events.jsonl.backfill.tmp"
     events_path.unlink(missing_ok=True)
+    retained_events: list[Any] = []
     selected: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     raw_sources = source.get("sources")
@@ -203,9 +204,12 @@ def backfill_dashboard(
             "origin": "unknown_external",
             "provenance_quality": "operator_attested",
         }
+        cohort_attributes = {
+            "lifecycle_kind": lifecycle_kind,
+            "case_cohort_eligible": lifecycle_kind == "case",
+        }
         if started is not None:
-            append_lifecycle_event(
-                events_path,
+            retained_events.append(
                 make_lifecycle_event(
                     "lifecycle.opened",
                     context,
@@ -213,6 +217,7 @@ def backfill_dashboard(
                     occurred_at=_iso(started),
                     started_at=_iso(started),
                     attributes={
+                        **cohort_attributes,
                         "legacy_run_id": run_id,
                         "origin_telemetry_complete": False,
                     },
@@ -237,8 +242,7 @@ def backfill_dashboard(
         )
         intervention_error_ids = set(intervention_ids) & set(error_ids)
         for cluster_id in error_ids:
-            append_lifecycle_event(
-                events_path,
+            retained_events.append(
                 make_lifecycle_event(
                     "error.occurred",
                     context,
@@ -246,6 +250,7 @@ def backfill_dashboard(
                     occurred_at=_iso(fallback),
                     error_cluster_id=cluster_id,
                     attributes={
+                        **cohort_attributes,
                         "error_kind": "legacy_attested_cluster",
                         "legacy_self_healed": cluster_id in self_healed_ids,
                         "resolution_evidence_unknown": (
@@ -261,8 +266,7 @@ def backfill_dashboard(
             )
 
         for cluster_id in sorted(set(error_ids) & self_healed_ids):
-            append_lifecycle_event(
-                events_path,
+            retained_events.append(
                 make_lifecycle_event(
                     "error.resolved",
                     context,
@@ -270,6 +274,7 @@ def backfill_dashboard(
                     occurred_at=_iso(fallback),
                     error_cluster_id=cluster_id,
                     attributes={
+                        **cohort_attributes,
                         "resolution_mode": "self_healed_same_author",
                         "resolution_cost_attribution_complete": False,
                     },
@@ -286,8 +291,7 @@ def backfill_dashboard(
                     ),
                 }
             )
-            append_lifecycle_event(
-                events_path,
+            retained_events.append(
                 make_lifecycle_event(
                     "intervention.completed",
                     intervention_context,
@@ -302,6 +306,7 @@ def backfill_dashboard(
                     intervention_id=intervention_id,
                     provenance_quality="operator_attested",
                     attributes={
+                        **cohort_attributes,
                         "intervention_kind": "legacy_attested_cluster",
                         "required_for_progress": True,
                         "active_seconds": None,
@@ -328,14 +333,14 @@ def backfill_dashboard(
                         ),
                     }
                 )
-                append_lifecycle_event(
-                    events_path,
+                retained_events.append(
                     make_lifecycle_event(
                         "model.invocation.completed",
                         invocation_context,
                         idempotency_key=f"legacy:{run_id}:invocation:{index + 1}",
                         occurred_at=_iso(fallback),
                         attributes={
+                            **cohort_attributes,
                             "usage_semantics": "unattributable",
                             "token_usage": None,
                             "legacy_timestamp_exact": False,
@@ -345,14 +350,14 @@ def backfill_dashboard(
                 )
 
         if disposition is not None:
-            append_lifecycle_event(
-                events_path,
+            retained_events.append(
                 make_lifecycle_event(
                     "disposition.verified",
                     context,
                     idempotency_key=f"legacy:{run_id}:disposition:{disposition}",
                     occurred_at=_iso(ended or fallback),
                     attributes={
+                        **cohort_attributes,
                         "disposition": disposition,
                         "verified": True,
                         "closure_valid": True,
@@ -369,8 +374,7 @@ def backfill_dashboard(
             )
 
         if ended is not None:
-            append_lifecycle_event(
-                events_path,
+            retained_events.append(
                 make_lifecycle_event(
                     "lifecycle.closed",
                     context,
@@ -379,6 +383,7 @@ def backfill_dashboard(
                     started_at=_iso(started) if started is not None else _iso(ended),
                     ended_at=_iso(ended),
                     attributes={
+                        **cohort_attributes,
                         "legacy_run_id": run_id,
                         "disposition": disposition,
                         # Every legacy row represents case work, but schema v3 did
@@ -430,6 +435,7 @@ def backfill_dashboard(
             }
         )
 
+    append_lifecycle_events(events_path, retained_events)
     events_path.replace(final_events_path)
     source_digest = sha256(dashboard_path.read_bytes()).hexdigest()
     manifest: dict[str, Any] = {

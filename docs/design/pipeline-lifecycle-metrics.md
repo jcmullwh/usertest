@@ -20,6 +20,12 @@ Each instrumented run directory retains:
 totals are not authoritative. Missing or ambiguous evidence is retained as `null`/unknown and
 withholds only the affected certified metric; it does not block operational disposition.
 
+A supervising-agent work boundary is token-bearing unless exact usage is attached or explicitly
+linked to a measured model work unit; absence of that evidence is unknown, not zero. A persisted
+pipeline stage likewise must carry a hash-bound invocation contract whose complete invocation set
+reconciles to retained completion events. Stage-boundary active time remains unknown until the
+producer retains a measured interval, even when the model portion is measured exactly.
+
 ## Automatic collection and refresh
 
 Instrumentation is attached to the top-level runner, backlog model invocations, pipeline stage
@@ -110,6 +116,11 @@ Use `--dependency-work-unit-id` for required retained/shared work and
 `--all-in-dependency-work-unit-id` for directly required supervising-agent or outside-platform
 work. General platform engineering is left without a case beneficiary and is not amortized into
 the cohort.
+
+The default case cohort requires either a `lifecycle.opened` event or an authoritative
+`case_cohort_eligible` attestation for historical evidence whose opening time was not retained.
+Action-only identities without either boundary stay visible in `case_metrics.json` but are listed as
+excluded from cohort and disposition aggregates.
 
 ## Materialization and dashboard rendering
 

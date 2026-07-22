@@ -1,6 +1,6 @@
 # Lifecycle case metrics v1
 
-The `lifecycle_case_metrics_v1` report is deterministic over lifecycle event dictionaries. Input
+The `lifecycle_case_metrics_v2` report is deterministic over lifecycle event dictionaries. Input
 may be an iterable of mappings or one or more JSONL files. Custom producer values may be at the
 top level, in `context`, or in `attributes`; legacy `data` and `payload` containers are also read.
 
@@ -40,7 +40,9 @@ lifecycle is not coerced to `failed_incomplete`; a terminal lifecycle with no va
 
 Token dimensions are `total_tokens`, `input_tokens`, `cached_input_tokens`,
 `uncached_input_tokens`, `output_tokens`, and `reasoning_output_tokens`. Cached input remains part
-of input and total tokens. Conflicting totals or cache dimensions fail reconciliation.
+of input and total tokens. Conflicting totals or cache dimensions fail reconciliation. A
+supervising-agent work boundary without attributable model usage is unknown, never zero; its known
+subtotal remains available separately.
 
 Canonical time fields are `started_at`, `ended_at`, `active_seconds`, `machine_wait_seconds`, and
 `external_wait_seconds`. Resource time is summed; wall time is the union of work intervals. Gaps
@@ -107,6 +109,10 @@ withholding reasons and must not be presented as certified.
 `aggregate_cohort_metrics` unions work-unit IDs for nonduplicative direct, inclusive, and all-in
 totals. Every exact disposition includes median, nearest-rank p75, nearest-rank p90, and totals for
 tokens, timing boundaries, resource/interval time, errors, interventions, and manual actions.
+The default cohort contains only lifecycle identities with an explicit `lifecycle.opened` event or
+an authoritative `case_cohort_eligible` attestation (used when historical opening time is unknown).
+Action-only or otherwise orphaned identities remain in `case_metrics.json` for audit and are listed
+under the cohort's excluded-case fields instead of being misreported as active pipeline cases.
 
 `compare_cohorts` emits before/after fingerprints, absolute and percentage deltas, configured
 objective direction, observed direction, completeness, and reconciliation. These are factual

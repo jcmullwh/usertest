@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 from run_artifacts.lifecycle_events import (
     LifecycleContext,
     append_lifecycle_event,
+    canonical_sha256,
     make_lifecycle_event,
 )
 
@@ -13,6 +15,35 @@ from usertest_backlog.pipeline_metrics import (
     bind_ticket_lifecycle_ids,
     record_stage_telemetry,
 )
+
+
+def _with_model_contract(
+    stage: dict[str, object],
+    *,
+    manifest_paths: list[Path] | None = None,
+    invocation_expected: bool = False,
+) -> dict[str, object]:
+    paths = manifest_paths or []
+    contract: dict[str, object] = {
+        "schema_version": 1,
+        "agent": "codex",
+        "dry_run": False,
+        "subscription_required": True,
+        "invocation_expected": invocation_expected,
+        "manifests": [
+            {
+                "path": str(path),
+                "sha256": sha256(path.read_bytes()).hexdigest(),
+            }
+            for path in paths
+        ],
+    }
+    contract["contract_sha256"] = canonical_sha256(contract)
+    updated = dict(stage)
+    input_meta = dict(updated.get("input_meta") or {})
+    input_meta["model_invocation_contract"] = contract
+    updated["input_meta"] = input_meta
+    return updated
 
 
 def test_stage_telemetry_closes_verified_negative_and_is_idempotent(tmp_path: Path) -> None:
@@ -56,6 +87,13 @@ def test_stage_telemetry_closes_verified_negative_and_is_idempotent(tmp_path: Pa
     assert list((tmp_path / "telemetry" / "cases").rglob("lifecycle_manifest.json"))
     assert (tmp_path / "case_metrics.json").is_file()
     assert (tmp_path / "cohort_metrics.json").is_file()
+    work = next(row for row in rows if row["event_type"] == "work.completed")
+    assert work["attributes"]["cost_unknown"] is True
+    assert work["attributes"]["model_usage_telemetry_complete"] is False
+    metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
+    [case] = metrics["cases"]
+    assert case["accounting"]["inclusive"]["gross"]["total_tokens"] is None
+    assert case["accounting"]["inclusive"]["gross"]["active_seconds"] is None
 
 
 def test_shared_stage_and_ticket_binding_share_one_lifecycle_attempt(tmp_path: Path) -> None:
@@ -130,16 +168,16 @@ def test_stage_links_bound_model_usage_without_duplicating_case_cost(tmp_path: P
             attributes={"required_for_progress": True},
         ),
     )
-    stage = {
-        "stage": "problem_mining",
-        "generated_at": "2026-07-21T12:00:10Z",
-        "input_meta": {
-            "model_invocation_contract": {
-                "manifests": [{"path": str(manifest_path)}]
-            }
+    stage = _with_model_contract(
+        {
+            "stage": "problem_mining",
+            "generated_at": "2026-07-21T12:00:10Z",
+            "input_meta": {},
+            "items": [{"case_id": "case-1"}, {"case_id": "case-2"}],
         },
-        "items": [{"case_id": "case-1"}, {"case_id": "case-2"}],
-    }
+        manifest_paths=[manifest_path],
+        invocation_expected=True,
+    )
     registry_path = tmp_path / "case_registry.json"
     record_stage_telemetry(
         case_registry={"cases": {}},
@@ -166,7 +204,11 @@ def test_stage_links_bound_model_usage_without_duplicating_case_cost(tmp_path: P
         "work_unit_id"
     ]
     metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
-    assert metrics["reconciliation"]["ok"] is True
+    assert metrics["reconciliation"]["ok"] is False
+    assert {issue["code"] for issue in metrics["reconciliation"]["issues"]} == {
+        "supervising_agent_tokens_missing",
+        "work_unit_resource_time_unknown",
+    }
     assert {
         case["accounting"]["inclusive"]["gross"]["total_tokens"]
         for case in metrics["cases"]
@@ -209,16 +251,18 @@ def test_reused_stage_without_complete_prior_work_edges_withholds_cost(tmp_path:
 
 
 def test_reused_stage_accepts_explicit_complete_prior_work_edges(tmp_path: Path) -> None:
-    stage = {
-        "stage": "repro_research",
-        "generated_at": "2026-07-21T12:00:00Z",
-        "input_meta": {
-            "retained_research_reused_count": 1,
-            "prior_work_unit_ids": ["prior:stage1", "prior:stage2"],
-            "reused_work_dependency_set_complete": True,
-        },
-        "items": [{"case_id": "case-1"}],
-    }
+    stage = _with_model_contract(
+        {
+            "stage": "repro_research",
+            "generated_at": "2026-07-21T12:00:00Z",
+            "input_meta": {
+                "retained_research_reused_count": 1,
+                "prior_work_unit_ids": ["prior:stage1", "prior:stage2"],
+                "reused_work_dependency_set_complete": True,
+            },
+            "items": [{"case_id": "case-1"}],
+        }
+    )
     record_stage_telemetry(
         case_registry={"cases": {}},
         case_registry_path=tmp_path / "case_registry.json",
