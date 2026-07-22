@@ -1,10 +1,14 @@
-"""Render the backlog-depth operational dashboard from its JSON ledger.
+"""Render the authoritative generated metrics dashboard or a legacy v3 ledger.
 
-The companion JSON remains the source of truth.  This script deliberately
-renders only lifecycle-level run summaries; detailed benchmark measurements
-stay in the rest of the metrics document.
+New case metrics must use ``--cohort-metrics``. That mode delegates to the
+schema-v4 renderer whose source of truth is generated ``cohort_metrics.json``.
 
-Future automation can upsert one run by passing a small receipt shaped as::
+The schema-v3 JSON/HTML mode is retained only to render and backfill historical
+evidence. A legacy receipt can be applied only with the explicit
+``--allow-legacy-receipt`` migration flag. Such receipts are never authoritative
+for new metrics.
+
+A historical receipt is shaped as::
 
     {
       "schema_version": 3,
@@ -14,8 +18,7 @@ Future automation can upsert one run by passing a small receipt shaped as::
       "run": { ...one operational_dashboard run object... }
     }
 
-Use ``--check`` in validation to prove that the JSON is valid and the checked-in
-HTML block exactly matches the rendered ledger.
+Use ``--check`` in either mode to prove the generated artifacts are current.
 """
 
 from __future__ import annotations
@@ -25,7 +28,9 @@ from datetime import datetime
 from html import escape
 import json
 from pathlib import Path
-from typing import Any, Mapping
+import subprocess
+import sys
+from typing import Any, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +40,7 @@ DEFAULT_JSON = (
 DEFAULT_HTML = (
     ROOT / "docs/design/historical-automated-backlog-depth-remediation-metrics.html"
 )
+GENERATED_RENDERER = ROOT / "tools/render_pipeline_metrics_dashboard.py"
 START_MARKER = "        <!-- BEGIN GENERATED OPERATIONAL DASHBOARD -->"
 END_MARKER = "        <!-- END GENERATED OPERATIONAL DASHBOARD -->"
 ENTRY_KINDS = {"baseline", "lifecycle_run", "supporting_activity"}
@@ -510,13 +516,62 @@ def _apply_receipt(payload: dict[str, Any], receipt_path: Path) -> None:
     payload["operational_dashboard"] = dashboard
 
 
-def main() -> int:
+def _render_generated_metrics(args: argparse.Namespace) -> int:
+    command = [sys.executable, str(GENERATED_RENDERER), str(args.cohort_metrics)]
+    if args.metrics_html_output is not None:
+        command.extend(("--html-output", str(args.metrics_html_output)))
+    if args.metrics_json_output is not None:
+        command.extend(("--json-output", str(args.metrics_json_output)))
+    for comparison in args.comparison:
+        command.extend(("--comparison", str(comparison)))
+    if args.check:
+        command.append("--check")
+    return int(subprocess.run(command, check=False).returncode)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", type=Path, default=DEFAULT_JSON)
     parser.add_argument("--html", type=Path, default=DEFAULT_HTML)
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument(
+        "--allow-legacy-receipt",
+        action="store_true",
+        help="Permit a schema-v3 historical migration write; never use for new cases.",
+    )
+    parser.add_argument(
+        "--cohort-metrics",
+        type=Path,
+        help="Generated cohort_metrics.json (authoritative schema-v4 mode).",
+    )
+    parser.add_argument("--metrics-html-output", type=Path)
+    parser.add_argument("--metrics-json-output", type=Path)
+    parser.add_argument("--comparison", action="append", default=[], type=Path)
     parser.add_argument("--check", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    generated_only_options = (
+        args.metrics_html_output is not None
+        or args.metrics_json_output is not None
+        or bool(args.comparison)
+    )
+    if args.cohort_metrics is not None:
+        if args.receipt is not None or args.allow_legacy_receipt:
+            raise DashboardContractError(
+                "generated metrics mode cannot accept schema-v3 receipts"
+            )
+        return _render_generated_metrics(args)
+    if generated_only_options:
+        raise DashboardContractError(
+            "metrics output and comparison options require --cohort-metrics"
+        )
+    if args.receipt is not None and not args.allow_legacy_receipt:
+        raise DashboardContractError(
+            "schema-v3 receipts are legacy evidence only; pass "
+            "--allow-legacy-receipt for an explicit historical migration"
+        )
+    if args.allow_legacy_receipt and args.receipt is None:
+        raise DashboardContractError("--allow-legacy-receipt requires --receipt")
 
     payload = _load_json(args.json)
     if args.receipt is not None:

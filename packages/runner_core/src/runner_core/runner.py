@@ -3384,6 +3384,36 @@ def _maybe_write_token_monitoring_artifacts(run_dir: Path) -> None:
         )
 
 
+def _maybe_write_lifecycle_telemetry(
+    *,
+    run_dir: Path,
+    request: RunRequest,
+) -> None:
+    try:
+        from runner_core.lifecycle_telemetry import write_run_lifecycle_telemetry
+
+        write_run_lifecycle_telemetry(
+            run_dir=run_dir,
+            agent=request.agent,
+            model=request.model,
+            policy=request.policy,
+            parent_case_id=request.parent_case_id,
+            origin_stage=request.origin_stage,
+            supervisor_instruction=request.supervisor_instruction,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _write_json(
+            run_dir / "lifecycle_telemetry_error.json",
+            {
+                "schema_version": 1,
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "generated_at_utc": _utc_now_z(),
+                "non_fatal": True,
+            },
+        )
+
+
 def _schema_is_task_run_v1(schema_dict: dict[str, Any]) -> bool:
     properties = schema_dict.get("properties")
     properties_dict = properties if isinstance(properties, dict) else {}
@@ -8259,3 +8289,4 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             pass
 
         _maybe_write_token_monitoring_artifacts(run_dir)
+        _maybe_write_lifecycle_telemetry(run_dir=run_dir, request=request)

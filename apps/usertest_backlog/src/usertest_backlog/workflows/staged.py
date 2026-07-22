@@ -29,6 +29,10 @@ from usertest_backlog.commands.export_tickets import (
     _export_artifact_paths,
     _ux_review_path_for_backlog,
 )
+from usertest_backlog.pipeline_metrics import (
+    bind_ticket_lifecycle_ids,
+    record_stage_telemetry,
+)
 from usertest_backlog.shared import *
 from usertest_backlog.workflows.derived_evidence import (
     annotate_operational_failure_candidates,
@@ -1096,6 +1100,17 @@ def _persist_case_registry_stage_lineage(
         strict=True,
     )
     write_case_registry(case_registry_path, updated)
+    try:
+        record_stage_telemetry(
+            case_registry=updated,
+            case_registry_path=case_registry_path,
+            stage_doc=stage_doc,
+        )
+    except Exception as exc:  # noqa: BLE001 - metrics must not gate case disposition
+        print(
+            f"[backlog] WARNING: failed to record lifecycle telemetry: {exc}",
+            file=sys.stderr,
+        )
     return updated
 
 
@@ -8576,6 +8591,17 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         if isinstance(tickets_for_atoms_raw, list)
         else []
     )
+    try:
+        tickets_for_atoms = bind_ticket_lifecycle_ids(
+            tickets_for_atoms,
+            case_registry_path=case_registry_json,
+        )
+        summary["tickets"] = tickets_for_atoms
+    except Exception as exc:  # noqa: BLE001 - metrics must not gate case disposition
+        print(
+            f"[backlog] WARNING: failed to bind lifecycle identity to tickets: {exc}",
+            file=sys.stderr,
+        )
     try:
         ticket_lineage_doc = _ticket_lineage_stage_document(
             tickets=tickets_for_atoms,

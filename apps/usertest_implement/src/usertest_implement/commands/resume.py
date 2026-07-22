@@ -893,6 +893,9 @@ def _selected_from_resume_state(
         export_index=ticket_ref.get("export_index")
         if isinstance(ticket_ref.get("export_index"), int)
         else None,
+        case_id=_clean_str(ticket.get("case_id")),
+        plan_revision_id=_clean_str(ticket.get("plan_revision_id")),
+        case_lifecycle_id=_clean_str(ticket.get("case_lifecycle_id")),
     )
 
 

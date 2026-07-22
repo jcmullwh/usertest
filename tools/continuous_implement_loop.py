@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,10 @@ if str(_IMPLEMENT_SRC) not in sys.path:
     sys.path.insert(0, str(_IMPLEMENT_SRC))
 
 from backlog_repo import is_generated_backlog_ticket  # noqa: E402
+from run_artifacts.lifecycle_events import (  # noqa: E402
+    LifecycleContext,
+    lifecycle_context_env,
+)
 
 from usertest_implement.batch_state import latest_batch_dir, load_json  # noqa: E402
 from usertest_implement.ledger import update_ledger_file  # noqa: E402
@@ -63,6 +68,7 @@ class LoopContext:
     gh_bin: str = "gh"
     last_cleanup_monotonic: float = field(default=0.0)
     last_refresh_monotonic: float = field(default=0.0)
+    controller_context: LifecycleContext | None = field(default=None)
 
 
 def _utc_now_z() -> str:
@@ -101,6 +107,97 @@ def _write_state(ctx: LoopContext, **payload: Any) -> None:
     )
 
 
+def _controller_environment(ctx: LoopContext) -> dict[str, str]:
+    env = dict(os.environ)
+    if ctx.controller_context is not None:
+        env.update(lifecycle_context_env(ctx.controller_context))
+    return env
+
+
+def _tree_fingerprint(root: Path, paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(
+        {item.resolve() for item in paths if item.is_file()},
+        key=lambda item: item.as_posix().casefold(),
+    ):
+        try:
+            relative = path.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            relative = path.as_posix()
+        digest.update(relative.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _system_commit(repo_root: Path) -> str:
+    inherited = os.environ.get("GITHUB_SHA", "").strip()
+    if inherited:
+        return inherited
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown"
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else "unknown"
+
+
+def _build_controller_context(ctx: LoopContext) -> LifecycleContext:
+    prompt_paths = [
+        *ctx.repo_root.glob("configs/backlog_prompts/*.md"),
+        *ctx.repo_root.glob("configs/backlog_stage_guidance/*.md"),
+    ]
+    config_paths = [
+        path
+        for path in (
+            ctx.settings_path,
+            ctx.batch_config_path,
+            ctx.repo_root / "configs" / "backlog_research.yaml",
+        )
+        if path.is_file()
+    ]
+    return LifecycleContext(
+        cycle_id=f"continuous-controller:{uuid.uuid4()}",
+        session_id=f"continuous-controller:{os.getpid()}",
+        system_fingerprint={
+            "controller_context_verified": "true",
+            "code_commit": _system_commit(ctx.repo_root),
+            "prompt_hash": _tree_fingerprint(ctx.repo_root, prompt_paths),
+            "config_hash": _tree_fingerprint(ctx.repo_root, config_paths),
+            "policy_hash": _tree_fingerprint(
+                ctx.repo_root,
+                [ctx.batch_config_path] if ctx.batch_config_path.is_file() else [],
+            ),
+            "models": json.dumps(
+                {
+                    "backlog": ctx.backlog_model,
+                    "implementation": ctx.implementation_model,
+                    "review": ctx.review_model,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "providers": json.dumps(
+                {
+                    "backlog": ctx.backlog_agent,
+                    "implementation": ctx.implementation_agent,
+                    "review": ctx.review_agent,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "score_version": "automation_score_v1",
+        },
+    )
+
+
 def _run_logged(
     ctx: LoopContext,
     argv: list[str],
@@ -118,6 +215,7 @@ def _run_logged(
         proc = subprocess.run(
             argv,
             cwd=str(cwd),
+            env=_controller_environment(ctx),
             stdout=handle,
             stderr=handle,
             text=True,
@@ -141,6 +239,7 @@ def _run_captured(
     proc = subprocess.run(
         argv,
         cwd=str(cwd),
+        env=_controller_environment(ctx),
         capture_output=True,
         text=True,
         check=False,
@@ -193,6 +292,39 @@ def _run_maintenance_cleanup(ctx: LoopContext) -> None:
     ctx.last_cleanup_monotonic = time.monotonic()
     if proc.returncode != 0:
         _append_log(ctx, "WARNING maintenance image cleanup failed; continuing")
+
+
+def _refresh_observational_metrics(ctx: LoopContext) -> None:
+    """Run the staleness-aware metrics refresh without gating pipeline work."""
+
+    metrics_root = ctx.owner_root / "runs"
+    if not metrics_root.exists() or not next(
+        metrics_root.rglob("lifecycle_events.jsonl"), None
+    ):
+        return
+    refresh_tool = ctx.repo_root / "tools" / "refresh_pipeline_metrics.py"
+    if not refresh_tool.is_file():
+        _append_log(ctx, "WARNING observational metrics refresh tool is missing")
+        return
+    proc = _run_logged(
+        ctx,
+        [
+            str(ctx.implement_python),
+            str(refresh_tool),
+            "--root",
+            str(metrics_root),
+            "--output-dir",
+            str(metrics_root / "_pipeline_metrics"),
+            "--cohort-id",
+            "continuous-pipeline",
+            "--stale-after-hours",
+            "24",
+        ],
+        cwd=ctx.repo_root,
+        label="observational pipeline metrics refresh",
+    )
+    if proc.returncode != 0:
+        _append_log(ctx, "WARNING observational metrics refresh failed; continuing")
 
 
 def _load_ledger(ctx: LoopContext) -> dict[str, Any]:
@@ -1251,6 +1383,7 @@ def main(argv: list[str] | None = None) -> int:
             repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe"
         ).resolve(),
     )
+    ctx.controller_context = _build_controller_context(ctx)
 
     ctx.pid_path.parent.mkdir(parents=True, exist_ok=True)
     ctx.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -1259,6 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
     while True:
         try:
             _write_state(ctx, status="running", current_action="startup")
+            _refresh_observational_metrics(ctx)
             if _maintenance_cleanup_due(ctx):
                 _run_maintenance_cleanup(ctx)
 

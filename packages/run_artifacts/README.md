@@ -12,6 +12,9 @@ It is shared by:
 - backlog tooling (`backlog_core`, `usertest-backlog`)
 - CLI apps that compile/analyze run history
 
+The package also owns the dependency-free lifecycle telemetry contract used to account for case,
+shared-work, model-usage, error, intervention, and manual-action lineage across those tools.
+
 ---
 
 ## Install
@@ -119,6 +122,39 @@ print(counts)
 
 - `iter_report_history(source, target_slug=..., repo_input=..., embed=..., max_embed_bytes=...)`
 - `write_report_history_jsonl(runs_dir, out_path=..., target_slug=..., repo_input=..., embed=..., max_embed_bytes=...)`
+
+### Lifecycle telemetry
+
+- `LifecycleContext`, `LifecycleEvent`, and `LifecycleManifest`
+- `ModelUsageReceipt`, `ErrorCluster`, `Intervention`, and `ManualAction`
+- `make_lifecycle_event(...)` and `append_lifecycle_event(...)`
+- `serialize_lifecycle_context(...)`, `lifecycle_context_env(...)`, and
+  `load_context_from_env(...)`
+- `write_lifecycle_manifest(...)` and `write_content_addressed_model_usage_receipt(...)`
+- `redact_command(...)`, `fingerprint_command(...)`, and `command_family(...)`
+
+The event log writer uses an exclusive sidecar lock, a single append payload, and `fsync`. A partial
+unterminated tail left by a crashed writer is repaired at the next append; corruption in a completed
+line remains a hard error. Event ids cannot change content, and repeated idempotency keys are not
+appended again.
+
+Pass lifecycle context to child processes without an application dependency:
+
+```python
+from run_artifacts import LifecycleContext, lifecycle_context_env, load_context_from_env
+
+context = LifecycleContext(
+    case_lifecycle_id="case-42-attempt-2",
+    case_id="case-42",
+    work_unit_id="qualification-stage-1",
+)
+child_environment = lifecycle_context_env(context)
+same_context = load_context_from_env(child_environment, required=True)
+```
+
+`ModelUsageReceipt.usage_semantics` must be explicit. A `session_cumulative` receipt publishes only
+the validated difference between matching baseline and observed token dimensions;
+`unattributable` receipts preserve observations but cannot publish attributable token totals.
 
 ### Failure shaping
 

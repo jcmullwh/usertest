@@ -730,6 +730,11 @@ def _ticket_export_decision(
     )
     return {
         "fingerprint": fingerprint,
+        **(
+            {"case_lifecycle_id": lifecycle_id}
+            if (lifecycle_id := _coerce_string(ticket.get("case_lifecycle_id")))
+            else {}
+        ),
         "case_id": ticket_export_case_id(ticket),
         "plan_revision_id": ticket_export_plan_revision_id(ticket),
         "stage": stage,
@@ -2262,6 +2267,11 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         exports.append(
             {
                 "fingerprint": fingerprint,
+                **(
+                    {"case_lifecycle_id": lifecycle_id}
+                    if (lifecycle_id := _coerce_string(ticket.get("case_lifecycle_id")))
+                    else {}
+                ),
                 "case_id": ticket_export_case_id(ticket),
                 "plan_revision_id": ticket_export_plan_revision_id(ticket),
                 "export_kind": export_kind,
@@ -2282,6 +2292,15 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 ),
                 "source_ticket": {
                     "fingerprint": fingerprint,
+                    **(
+                        {"case_lifecycle_id": lifecycle_id}
+                        if (
+                            lifecycle_id := _coerce_string(
+                                ticket.get("case_lifecycle_id")
+                            )
+                        )
+                        else {}
+                    ),
                     "case_id": ticket_export_case_id(ticket),
                     "plan_revision_id": ticket_export_plan_revision_id(ticket),
                     "stage": stage_effective,

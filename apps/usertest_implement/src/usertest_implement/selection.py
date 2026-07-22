@@ -307,6 +307,12 @@ def _select_ticket_from_export(
                 if local_provenance["legacy_identity"]
                 else str(local_provenance["plan_revision_id"])
             ),
+            case_lifecycle_id=(
+                str(export["case_lifecycle_id"])
+                if isinstance(export.get("case_lifecycle_id"), str)
+                and str(export["case_lifecycle_id"]).strip()
+                else None
+            ),
             ticket_body_sha256=str(local_provenance["ticket_body_sha256"]),
             local_plan_sha256=str(local_provenance["local_plan_sha256"]),
             verification_contract_sha256=local_provenance[
@@ -331,6 +337,11 @@ def _select_ticket_from_export(
         plan_revision_id=(
             export.get("plan_revision_id")
             if isinstance(export.get("plan_revision_id"), str)
+            else None
+        ),
+        case_lifecycle_id=(
+            export.get("case_lifecycle_id")
+            if isinstance(export.get("case_lifecycle_id"), str)
             else None
         ),
         ticket_body_sha256=canonical_ticket_body_sha256(body),
@@ -391,6 +402,7 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
         export_index=None,
         case_id=meta.get("case_id"),
         plan_revision_id=meta.get("plan_revision_id"),
+        case_lifecycle_id=meta.get("case_lifecycle_id"),
         ticket_body_sha256=canonical_ticket_body_sha256(text),
         local_plan_sha256=canonical_plan_sha256(text),
         verification_contract_sha256=(

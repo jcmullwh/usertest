@@ -113,6 +113,34 @@ Common entry points:
 - `render_report_markdown(report)`
 - `analyze_report_history(history_records)`
 - `write_issue_analysis(path, analysis)`
+- `load_lifecycle_events(jsonl_or_events)`
+- `aggregate_case_metrics(jsonl_or_events)`
+- `aggregate_cohort_metrics(jsonl_or_case_report)`
+- `compare_cohorts(before, after)`
+- `discover_lifecycle_event_logs(roots)`
+- `materialize_lifecycle_metrics(event_sources=..., output_dir=...)`
+
+## Lifecycle case metrics
+
+`reporter.case_metrics` is a pure event-dictionary/JSONL aggregator. It intentionally does not
+import `run_artifacts`; a producer or materializer should resolve referenced token receipts and put
+their exact token dimensions on `model.invocation.completed` before aggregation.
+
+Case aggregation is keyed by `case_lifecycle_id` while retaining the stable `case_id`. Costs are
+identified by `work_unit_id`. `shared_work_id`, beneficiary lifecycle IDs, and dependency IDs
+control attribution without copying shared cost:
+
+- direct: case-owned work only;
+- inclusive: direct work plus shared/reused work and causal dependency closure;
+- all-in: inclusive work plus support, manual, supervisor, and all-in dependency closure.
+
+Cohorts union work-unit IDs before summing. Consequently, a shared Stage 1/2 unit appears in every
+beneficiary's inclusive lineage but only once in a cohort total.
+
+The exact disposition categories are `already_addressed`, `non_actionable`, `duplicate`,
+`superseded`, `pr`, and `failed_incomplete`. Active lifecycles have no disposition and are reported
+separately. See [`docs/case-metrics-v1.md`](docs/case-metrics-v1.md) for the complete event,
+accounting, timing, resolution, certification, and comparison contracts.
 
 ---
 
