@@ -8,7 +8,7 @@ accompany the merge back to `main`.
 Scope at a glance:
 
 - 370 commits ahead of `main`
-- 127 first-parent PR merges into `dev`
+- 126 first-parent PR merges into `dev`
 - Major workstreams across onboarding, runner reliability, backlog automation, implementation
   workflow automation, and maintenance/ops tooling
 
