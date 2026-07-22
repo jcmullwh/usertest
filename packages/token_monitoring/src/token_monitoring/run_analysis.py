@@ -99,6 +99,11 @@ def _status_class(run_dir: Path) -> str:
 
 
 def _read_file_evidence(run_dir: Path) -> list[dict[str, Any]]:
+    def nonnegative_int(value: Any) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
     out: list[dict[str, Any]] = []
     for event in _iter_jsonl(run_dir / "normalized_events.jsonl"):
         if event.get("type") != "read_file":
@@ -107,17 +112,41 @@ def _read_file_evidence(run_dir: Path) -> list[dict[str, Any]]:
         if not isinstance(data, dict):
             continue
         path = data.get("path")
-        bytes_value = data.get("bytes")
         if not isinstance(path, str):
             continue
+        observed_bytes = nonnegative_int(data.get("observed_bytes"))
+        file_size_bytes = nonnegative_int(data.get("file_size_bytes"))
+        if file_size_bytes is None:
+            # ``bytes`` is the legacy normalizer field. Provider adapters populate it
+            # from the source file size, including for bounded/partial reads, so it is
+            # useful as file metadata but cannot prove how much content the agent saw.
+            file_size_bytes = nonnegative_int(data.get("bytes"))
+        whole_file_observed_raw = data.get("whole_file_observed")
+        whole_file_observed = (
+            whole_file_observed_raw
+            if isinstance(whole_file_observed_raw, bool)
+            else None
+        )
         out.append(
             {
                 "path": path,
-                "bytes": bytes_value if isinstance(bytes_value, int) else None,
+                # Preserve the v1 field for consumers while correcting its semantics:
+                # ranked read bytes are bytes actually observed, never total file size.
+                "bytes": observed_bytes,
+                "observed_bytes": observed_bytes,
+                "file_size_bytes": file_size_bytes,
+                "whole_file_observed": whole_file_observed,
                 "source": str(run_dir / "normalized_events.jsonl"),
             }
         )
-    out.sort(key=lambda item: int(item.get("bytes") or 0), reverse=True)
+    out.sort(
+        key=lambda item: (
+            item.get("observed_bytes") is not None,
+            int(item.get("observed_bytes") or 0),
+            int(item.get("file_size_bytes") or 0),
+        ),
+        reverse=True,
+    )
     return out[:25]
 
 
@@ -483,9 +512,9 @@ def _build_signals(
                     "largest_read_files": read_files[:10],
                 },
                 mitigation=(
-                    "Modularize oversized files and steer agents toward targeted "
-                    "symbol or section reads "
-                    "instead of broad file/config dumps."
+                    "Batch independent targeted reads into fewer model turns. When observed "
+                    "coverage proves whole-file dumps, modularize oversized files or steer "
+                    "agents toward the required symbol or section."
                 ),
                 false_positive_risk=(
                     "Initial repo orientation can be useful; this signal requires "
