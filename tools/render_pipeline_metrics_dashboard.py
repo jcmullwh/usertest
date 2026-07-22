@@ -31,6 +31,7 @@ DISPOSITIONS = (
 )
 STAT_FIELDS = ("count", "total", "median", "p75", "p90")
 OBJECTIVES = {"decrease", "increase", "neutral"}
+RENDERER_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 class GeneratedDashboardContractError(ValueError):
@@ -915,6 +916,7 @@ def build_dashboard_projection(
                 label="cohort_metrics.generated_at",
             ),
             "sha256": hashlib.sha256(canonical_source).hexdigest(),
+            "renderer_sha256": RENDERER_SHA256,
             "comparison_sha256s": comparison_hashes,
             "mixed_version_lifecycle": (
                 version_boundary_map.get("mixed_system_fingerprints") is True
@@ -1045,6 +1047,17 @@ def validate_dashboard_projection(value: object) -> Mapping[str, Any]:
     ):
         raise GeneratedDashboardContractError(
             "dashboard.source.sha256 must be a SHA-256 digest"
+        )
+    renderer_digest = _text_or_none(
+        source.get("renderer_sha256"), label="dashboard.source.renderer_sha256"
+    )
+    if (
+        renderer_digest is None
+        or len(renderer_digest) != 64
+        or any(character not in string.hexdigits for character in renderer_digest)
+    ):
+        raise GeneratedDashboardContractError(
+            "dashboard.source.renderer_sha256 must be a SHA-256 digest"
         )
     comparison_digests = _list(
         source.get("comparison_sha256s"), label="dashboard.source.comparison_sha256s"

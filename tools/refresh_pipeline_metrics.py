@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -125,8 +126,20 @@ def decide_refresh(
     dashboard_payload = (
         _read_json(dashboard_json_path) if dashboard_json_path.is_file() else None
     )
-    if dashboard_payload is not None and dashboard_payload.get("schema_version") != 4:
-        reasons.append("dashboard_definition_changed")
+    if dashboard_payload is not None:
+        dashboard_source = dashboard_payload.get("source")
+        dashboard_source_map = (
+            dashboard_source if isinstance(dashboard_source, dict) else {}
+        )
+        deployed_renderer_digest = hashlib.sha256(
+            _DASHBOARD_RENDERER.read_bytes()
+        ).hexdigest()
+        if (
+            dashboard_payload.get("schema_version") != 4
+            or dashboard_source_map.get("renderer_sha256")
+            != deployed_renderer_digest
+        ):
+            reasons.append("dashboard_definition_changed")
 
     if sources and all(path.is_file() for path in derived_paths):
         derived_mtime = min(path.stat().st_mtime for path in derived_paths)

@@ -145,6 +145,7 @@ def test_projection_preserves_accounting_views_and_unknowns() -> None:
     assert projection["schema_version"] == 4
     assert projection["document_type"] == "generated_pipeline_metrics_dashboard"
     assert projection["source"]["mixed_version_lifecycle"] is True
+    assert projection["source"]["renderer_sha256"] == mod.RENDERER_SHA256
     assert projection["source"]["version_warning_codes"] == [
         "mixed_system_fingerprints"
     ]
@@ -414,6 +415,7 @@ def test_materialization_is_deterministic_and_check_detects_stale_output(
     assert html_path.read_bytes() == first_html
     assert json_path.read_bytes() == first_json
     assert json.loads(first_json)["source"]["sha256"] == projection["source"]["sha256"]
+    assert json.loads(first_json)["source"]["renderer_sha256"] == mod.RENDERER_SHA256
 
     mod.materialize_dashboard(
         source_path,
