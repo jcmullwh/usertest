@@ -587,6 +587,8 @@ def test_resume_uses_same_workspace_when_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_dir, workspace, _ = _make_resume_run(tmp_path)
+    author_run = tmp_path / "adopted_author_run"
+    author_run.mkdir()
     resumed_run = tmp_path / "resumed_run"
     seen = {}
 
@@ -597,6 +599,15 @@ def test_resume_uses_same_workspace_when_available(
         return SimpleNamespace(run_dir=resumed_run, exit_code=0, report_validation_errors=[])
 
     monkeypatch.setattr(resume_commands, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        resume_commands,
+        "_resume_agent_continuity",
+        lambda **_: (
+            "codex",
+            "019f5000-0000-7000-8000-000000000002",
+            {"author_source_run_dir": str(author_run)},
+        ),
+    )
     monkeypatch.setattr(
         resume_commands,
         "_load_runner_config",
@@ -619,7 +630,7 @@ def test_resume_uses_same_workspace_when_available(
     assert request.keep_workspace is True
     assert request.agent == "codex"
     assert request.codex_resume_session_id == "019f5000-0000-7000-8000-000000000002"
-    assert request.codex_resume_usage_source_run_dir == run_dir
+    assert request.codex_resume_usage_source_run_dir == author_run.resolve()
     assert request.agent_user_prompt is not None
     assert (
         "Do not restart the original full ticket prompt from scratch" in request.agent_user_prompt
@@ -1256,6 +1267,8 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     ticket_ref["ticket_provenance"] = {"target_contract": {"schema_version": 1}}
     _write_json(run_dir / "ticket_ref.json", ticket_ref)
     resumed_run = tmp_path / "resumed_pr_run"
+    author_run = tmp_path / "adopted_pr_author_run"
+    author_run.mkdir()
     seen = {}
     monkeypatch.setattr(
         resume_commands,
@@ -1315,6 +1328,15 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
         }
 
     monkeypatch.setattr(resume_commands, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        resume_commands,
+        "_resume_agent_continuity",
+        lambda **_: (
+            "codex",
+            "019f5000-0000-7000-8000-000000000003",
+            {"author_source_run_dir": str(author_run)},
+        ),
+    )
     monkeypatch.setattr(resume_commands, "finalize_commit", fake_commit)
     monkeypatch.setattr(resume_commands, "finalize_push", fake_push)
     monkeypatch.setattr(
@@ -1353,7 +1375,7 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     assert request.keep_workspace is True
     assert request.agent == "codex"
     assert request.codex_resume_session_id == "019f5000-0000-7000-8000-000000000003"
-    assert request.codex_resume_usage_source_run_dir == run_dir
+    assert request.codex_resume_usage_source_run_dir == author_run.resolve()
     assert request.agent_user_prompt is not None
     assert "Current PR metadata" in request.agent_user_prompt
     assert request.agent_append_system_prompt is None

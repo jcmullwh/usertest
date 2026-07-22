@@ -204,6 +204,20 @@ def _resume_agent_continuity(
     )
 
 
+def _resume_usage_source_run_dir(
+    *,
+    run_dir: Path,
+    author_continuity: Mapping[str, Any],
+    codex_resume_session_id: str | None,
+) -> Path | None:
+    """Return the run that owns the retained high-water mark for a continuation."""
+
+    if codex_resume_session_id is None:
+        return None
+    source = _clean_str(author_continuity.get("author_source_run_dir"))
+    return Path(source).expanduser().resolve() if source is not None else run_dir.resolve()
+
+
 _CODEX_CONTEXT_EXHAUSTED_FRAGMENT = "ran out of room in the model's context window"
 
 
@@ -1230,8 +1244,10 @@ def _cmd_resume_pr(
         parent_case_id=selected.case_id,
         case_lifecycle_id=selected.case_lifecycle_id,
         codex_resume_session_id=codex_resume_session_id,
-        codex_resume_usage_source_run_dir=(
-            run_dir if codex_resume_session_id is not None else None
+        codex_resume_usage_source_run_dir=_resume_usage_source_run_dir(
+            run_dir=run_dir,
+            author_continuity=author_continuity,
+            codex_resume_session_id=codex_resume_session_id,
         ),
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
@@ -1782,8 +1798,10 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         parent_case_id=selected.case_id,
         case_lifecycle_id=selected.case_lifecycle_id,
         codex_resume_session_id=codex_resume_session_id,
-        codex_resume_usage_source_run_dir=(
-            run_dir if codex_resume_session_id is not None else None
+        codex_resume_usage_source_run_dir=_resume_usage_source_run_dir(
+            run_dir=run_dir,
+            author_continuity=author_continuity,
+            codex_resume_session_id=codex_resume_session_id,
         ),
         keep_workspace=True,
         verification_commands=tuple(verification_commands),

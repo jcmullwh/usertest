@@ -240,6 +240,9 @@ def _select_ticket_from_export(
         outer_plan_revision_id = export.get("plan_revision_id")
         source_case_id = source_ticket.get("case_id")
         source_plan_revision_id = source_ticket.get("plan_revision_id")
+        outer_lifecycle_id = export.get("case_lifecycle_id")
+        source_lifecycle_id = source_ticket.get("case_lifecycle_id")
+        body_lifecycle_id = export_body_metadata.get("case_lifecycle_id")
         if local_provenance["legacy_identity"] is False:
             if local_provenance["verification_contract"] is None:
                 raise ValueError(
@@ -263,6 +266,19 @@ def _select_ticket_from_export(
                         f"Export case/plan provenance mismatch: {label}={observed!r} "
                         f"expected={expected_identity_values[label]!r}"
                     )
+            lifecycle_identity_values = {
+                "export.case_lifecycle_id": outer_lifecycle_id,
+                "source_ticket.case_lifecycle_id": source_lifecycle_id,
+                "body_markdown.case_lifecycle_id": body_lifecycle_id,
+            }
+            if any(value is not None for value in lifecycle_identity_values.values()):
+                expected_lifecycle_id = local_selected.case_lifecycle_id
+                for label, observed in lifecycle_identity_values.items():
+                    if observed != expected_lifecycle_id:
+                        raise ValueError(
+                            "Export lifecycle provenance mismatch: "
+                            f"{label}={observed!r} expected={expected_lifecycle_id!r}"
+                        )
 
         expected_hashes = {
             "body_sha256": local_provenance["ticket_body_sha256"],
@@ -308,9 +324,9 @@ def _select_ticket_from_export(
                 else str(local_provenance["plan_revision_id"])
             ),
             case_lifecycle_id=(
-                str(export["case_lifecycle_id"])
-                if isinstance(export.get("case_lifecycle_id"), str)
-                and str(export["case_lifecycle_id"]).strip()
+                local_selected.case_lifecycle_id
+                if isinstance(local_selected.case_lifecycle_id, str)
+                and local_selected.case_lifecycle_id.strip()
                 else None
             ),
             ticket_body_sha256=str(local_provenance["ticket_body_sha256"]),

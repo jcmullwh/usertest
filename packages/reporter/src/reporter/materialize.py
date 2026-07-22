@@ -217,6 +217,11 @@ def materialize_lifecycle_metrics(
         comparison = compare_cohorts(prior, cohort_report)
         comparison_path = output / COHORT_COMPARISON_FILENAME
         _atomic_write_json(comparison_path, comparison)
+    else:
+        # The conventional filename is itself part of the published artifact
+        # contract.  Leaving an earlier comparison in place would let consumers
+        # mistake stale output for the current no-comparison materialization.
+        (output / COHORT_COMPARISON_FILENAME).unlink(missing_ok=True)
 
     return MaterializedMetrics(
         case_metrics_path=case_path,

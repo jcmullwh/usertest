@@ -106,3 +106,38 @@ def test_conflicting_event_id_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(LifecycleMetricsError, match="conflicting lifecycle events"):
         reconcile_event_streams([first, second])
+
+
+def test_materialization_removes_stale_comparison_when_disabled(tmp_path: Path) -> None:
+    stream = tmp_path / "runs" / "lifecycle_events.jsonl"
+    _write_events(
+        stream,
+        [
+            _event("open", "lifecycle.opened", "2026-07-01T00:00:00Z"),
+            _event(
+                "closed",
+                "disposition.verified",
+                "2026-07-01T00:01:00Z",
+                disposition="already_addressed",
+                verified=True,
+            ),
+        ],
+    )
+    output = tmp_path / "metrics"
+    prior = {"schema_version": 1, "cohort_id": "prior", "cases": []}
+
+    with_comparison = materialize_lifecycle_metrics(
+        event_sources=[stream],
+        output_dir=output,
+        comparison_cohort=prior,
+    )
+    assert with_comparison.comparison_path is not None
+    assert with_comparison.comparison_path.is_file()
+
+    without_comparison = materialize_lifecycle_metrics(
+        event_sources=[stream],
+        output_dir=output,
+    )
+
+    assert without_comparison.comparison_path is None
+    assert not (output / "cohort_comparison.json").exists()
