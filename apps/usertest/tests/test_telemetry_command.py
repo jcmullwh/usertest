@@ -6,12 +6,21 @@ from pathlib import Path
 
 import pytest
 from run_artifacts.lifecycle_events import (
+    LIFECYCLE_CONTEXT_ENV,
+    LIFECYCLE_CONTEXT_FILE_ENV,
     LifecycleContext,
     TelemetryArtifactError,
     lifecycle_context_env,
 )
 
 from usertest.cli import main
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_lifecycle_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make boundary-origin tests independent of the parent test launcher."""
+    monkeypatch.delenv(LIFECYCLE_CONTEXT_ENV, raising=False)
+    monkeypatch.delenv(LIFECYCLE_CONTEXT_FILE_ENV, raising=False)
 
 
 def _invoke(argv: list[str]) -> int:
@@ -106,6 +115,7 @@ def test_telemetry_exec_verified_controller_child_is_automatic(
     events = tmp_path / "lifecycle_events.jsonl"
     parent = LifecycleContext(
         cycle_id="controller-cycle",
+        work_unit_id="work:controller-parent",
         system_fingerprint={"controller_context_verified": "true"},
     )
     for name, value in lifecycle_context_env(parent).items():
@@ -136,6 +146,30 @@ def test_telemetry_exec_verified_controller_child_is_automatic(
         == "verified_automatic_subprocess_wall"
     )
     assert completed["attributes"]["resource_time_unknown"] is False
+    assert completed["context"]["work_unit_id"] != parent.work_unit_id
+    assert completed["attributes"]["parent_work_unit_id"] == parent.work_unit_id
+    assert completed["attributes"]["dependency_ids"] == [parent.work_unit_id]
+
+
+def test_telemetry_exec_rejects_reused_explicit_work_unit(tmp_path: Path) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    common = [
+        "telemetry",
+        "exec",
+        "--events",
+        str(events),
+        "--work-unit-id",
+        "work:one-concrete-action",
+        "--",
+        sys.executable,
+        "-c",
+        "print('child')",
+    ]
+
+    assert _invoke(common) == 0
+    with pytest.raises(TelemetryArtifactError, match="already bound to action"):
+        main(common)
+    assert len(events.read_text(encoding="utf-8").splitlines()) == 2
 
 def test_telemetry_action_record_retains_manual_burden(tmp_path: Path) -> None:
     events = tmp_path / "lifecycle_events.jsonl"

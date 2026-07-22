@@ -39,7 +39,10 @@ def _add_context_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cycle-id")
     parser.add_argument("--stage")
     parser.add_argument("--milestone-id")
-    parser.add_argument("--work-unit-id")
+    parser.add_argument(
+        "--work-unit-id",
+        help="Unique concrete cost-unit identity; do not reuse it for another action.",
+    )
     parser.add_argument("--shared-work-id")
     parser.add_argument("--beneficiary-case-lifecycle-id", action="append", default=[])
     parser.add_argument(
@@ -282,6 +285,21 @@ def _clean_command(command: list[str]) -> list[str]:
     return cleaned
 
 
+def _concrete_action_work_identity(
+    args: argparse.Namespace, context: LifecycleContext
+) -> tuple[str, str | None, list[str]]:
+    inherited_work_unit_id = context.work_unit_id if args.work_unit_id is None else None
+    concrete_work_unit_id = args.work_unit_id or f"work:{uuid.uuid4()}"
+    dependencies = list(args.dependency_work_unit_id)
+    if (
+        inherited_work_unit_id is not None
+        and inherited_work_unit_id != concrete_work_unit_id
+        and inherited_work_unit_id not in dependencies
+    ):
+        dependencies.append(inherited_work_unit_id)
+    return concrete_work_unit_id, inherited_work_unit_id, dependencies
+
+
 def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
     context, verified_parent = _context_from_args(args)
     actor, initiator, origin = _event_actor(args, verified_parent=verified_parent)
@@ -294,9 +312,12 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
     redacted = redact_command(command)
     action_id = f"action:{uuid.uuid4()}"
     invocation_id = f"invocation:{uuid.uuid4()}"
+    concrete_work_unit_id, inherited_work_unit_id, dependencies = (
+        _concrete_action_work_identity(args, context)
+    )
     child_context = replace(
         context,
-        work_unit_id=context.work_unit_id or f"work:{uuid.uuid4()}",
+        work_unit_id=concrete_work_unit_id,
         invocation_id=invocation_id,
         parent_action_id=action_id,
         system_fingerprint={
@@ -339,6 +360,8 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
                 args,
                 action_id=action_id,
                 telemetry_exec_timing_version=2,
+                parent_work_unit_id=inherited_work_unit_id,
+                dependency_ids=dependencies,
                 command_family=command_family(command),
                 redacted_command=redacted,
                 command_fingerprint=fingerprint_command(redacted),
@@ -401,6 +424,8 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
                 args,
                 action_id=action_id,
                 telemetry_exec_timing_version=2,
+                parent_work_unit_id=inherited_work_unit_id,
+                dependency_ids=dependencies,
                 command_family=command_family(command),
                 redacted_command=redacted,
                 command_fingerprint=fingerprint_command(redacted),
@@ -496,9 +521,12 @@ def _cmd_telemetry_action_record(args: argparse.Namespace) -> int:
     if classified_seconds > wall_seconds + 1e-6:
         raise ValueError("active and wait seconds must not exceed the action interval")
     action_id = f"action:{uuid.uuid4()}"
+    concrete_work_unit_id, inherited_work_unit_id, dependencies = (
+        _concrete_action_work_identity(args, context)
+    )
     action_context = replace(
         context,
-        work_unit_id=context.work_unit_id or f"work:{uuid.uuid4()}",
+        work_unit_id=concrete_work_unit_id,
         parent_action_id=action_id,
     )
     append_lifecycle_event(
@@ -529,6 +557,8 @@ def _cmd_telemetry_action_record(args: argparse.Namespace) -> int:
             attributes=_action_attributes(
                 args,
                 action_id=action_id,
+                parent_work_unit_id=inherited_work_unit_id,
+                dependency_ids=dependencies,
                 result=args.result,
                 related_error_cluster_ids=list(args.error_cluster_id),
                 wait_category=args.wait_category,

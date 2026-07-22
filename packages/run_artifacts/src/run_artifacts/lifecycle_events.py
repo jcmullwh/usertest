@@ -1581,27 +1581,37 @@ def _artifact_lock(
     while True:
         try:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+        except OSError as exc:
+            is_contention = isinstance(exc, FileExistsError) or (
+                os.name == "nt" and isinstance(exc, PermissionError)
+            )
+            if not is_contention:
+                raise TelemetryArtifactError(
+                    f"cannot create telemetry lock {lock_path}: {exc}"
+                ) from exc
+            # Windows can surface an existing exclusively-created lock as a
+            # sharing-violation PermissionError rather than FileExistsError.
+            # Reconcile both as lock contention, while retaining the same
+            # bounded timeout and stale-lock recovery contract.
             try:
                 age = time.time() - lock_path.stat().st_mtime
             except FileNotFoundError:
                 continue
+            except PermissionError:
+                age = 0.0
             if age > stale_after_seconds:
                 try:
                     lock_path.unlink()
-                except FileNotFoundError:
+                except (FileNotFoundError, PermissionError):
                     pass
-                continue
+                else:
+                    continue
             if time.monotonic() - started >= timeout_seconds:
                 raise TelemetryArtifactError(
                     f"timed out waiting for telemetry lock: {lock_path}"
                 ) from None
             time.sleep(0.01)
             continue
-        except OSError as exc:
-            raise TelemetryArtifactError(
-                f"cannot create telemetry lock {lock_path}: {exc}"
-            ) from exc
         try:
             os.write(descriptor, f"pid={os.getpid()} created={utc_now()}\n".encode("ascii"))
             os.fsync(descriptor)
@@ -1758,6 +1768,11 @@ def append_lifecycle_event(
     path.parent.mkdir(parents=True, exist_ok=True)
     with _artifact_lock(path, timeout_seconds=lock_timeout_seconds):
         objects, repaired = _read_jsonl_objects(path, repair_truncated_tail=True)
+        validated_action_id = (
+            str(validated.attributes.get("action_id") or "").strip()
+            if validated.event_type.startswith("action.")
+            else ""
+        )
         for raw in objects:
             existing = LifecycleEvent.from_dict(raw)
             if existing.event_id == validated.event_id:
@@ -1768,6 +1783,36 @@ def append_lifecycle_event(
                 return False
             if existing.idempotency_key == validated.idempotency_key:
                 return False
+            existing_action_id = (
+                str(existing.attributes.get("action_id") or "").strip()
+                if existing.event_type.startswith("action.")
+                else ""
+            )
+            if (
+                validated_action_id
+                and existing_action_id
+                and validated.context.work_unit_id is not None
+                and existing.context.work_unit_id == validated.context.work_unit_id
+                and existing_action_id != validated_action_id
+            ):
+                raise IdempotencyConflictError(
+                    "work_unit_id "
+                    f"{validated.context.work_unit_id!r} is already bound to action "
+                    f"{existing_action_id!r}; cannot bind it to {validated_action_id!r}"
+                )
+            if (
+                validated_action_id
+                and existing_action_id == validated_action_id
+                and validated.context.work_unit_id is not None
+                and existing.context.work_unit_id is not None
+                and existing.context.work_unit_id != validated.context.work_unit_id
+            ):
+                raise IdempotencyConflictError(
+                    "action_id "
+                    f"{validated_action_id!r} is already bound to work unit "
+                    f"{existing.context.work_unit_id!r}; cannot bind it to "
+                    f"{validated.context.work_unit_id!r}"
+                )
 
         line = (canonical_json(validated.to_dict()) + "\n").encode("utf-8")
         prefix = b""

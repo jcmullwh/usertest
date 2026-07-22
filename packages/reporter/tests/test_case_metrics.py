@@ -881,6 +881,137 @@ def test_open_error_mode_remains_distinct_for_active_lifecycle() -> None:
     assert case["errors"]["open_cluster_count"] == 1
 
 
+def test_legacy_reused_action_work_unit_is_split_without_losing_cost() -> None:
+    legacy_work_id = "work:legacy-action-bundle"
+    events = [
+        _event(
+            "lifecycle.opened",
+            "life:legacy-actions",
+            case_id="case:legacy-actions",
+            at="2026-07-21T00:00:00Z",
+            origin_ids=["atom:legacy-actions"],
+        ),
+        _event(
+            "action.started",
+            "life:legacy-actions",
+            at="2026-07-21T00:00:01Z",
+            work_unit_id=legacy_work_id,
+            action_id="action:one",
+            actor="supervisor",
+            manual=True,
+            stage="repair",
+            started_at="2026-07-21T00:00:01Z",
+        ),
+        _event(
+            "action.completed",
+            "life:legacy-actions",
+            at="2026-07-21T00:00:02Z",
+            work_unit_id=legacy_work_id,
+            action_id="action:one",
+            actor="supervisor",
+            manual=True,
+            stage="repair",
+            active_seconds=1,
+            started_at="2026-07-21T00:00:01Z",
+            ended_at="2026-07-21T00:00:02Z",
+        ),
+        _event(
+            "action.started",
+            "life:legacy-actions",
+            at="2026-07-21T00:00:03Z",
+            work_unit_id=legacy_work_id,
+            action_id="action:two",
+            actor="supervisor",
+            manual=True,
+            stage="delivery",
+            started_at="2026-07-21T00:00:03Z",
+        ),
+        _event(
+            "action.completed",
+            "life:legacy-actions",
+            at="2026-07-21T00:00:05Z",
+            work_unit_id=legacy_work_id,
+            action_id="action:two",
+            actor="supervisor",
+            manual=True,
+            stage="delivery",
+            active_seconds=2,
+            started_at="2026-07-21T00:00:03Z",
+            ended_at="2026-07-21T00:00:05Z",
+        ),
+        _event(
+            "work.completed",
+            "life:legacy-actions",
+            work_unit_id="work:dependent",
+            dependency_ids=[legacy_work_id],
+            active_seconds=3,
+            started_at="2026-07-21T00:00:05Z",
+            ended_at="2026-07-21T00:00:08Z",
+        ),
+    ]
+
+    report = aggregate_case_metrics(events)
+
+    assert report["reconciliation"]["ok"] is True
+    [migration] = report["normalization"]["legacy_action_work_unit_splits"]
+    assert migration["source_work_unit_id"] == legacy_work_id
+    assert migration["source_event_count"] == 4
+    concrete_ids = {
+        binding["work_unit_id"] for binding in migration["concrete_bindings"]
+    }
+    assert len(concrete_ids) == 2
+    units = {unit["work_unit_id"]: unit for unit in report["work_units"]}
+    assert set(units) == concrete_ids | {"work:dependent"}
+    assert set(units["work:dependent"]["dependency_ids"]) == concrete_ids
+    case = report["cases"][0]
+    assert case["manual_actions"]["count"] == 2
+    assert case["accounting"]["all_in"]["gross"]["active_seconds"] == 6.0
+    cohort = aggregate_cohort_metrics(report)
+    assert cohort["normalization"]["legacy_action_work_unit_splits"] == [migration]
+
+
+def test_legacy_action_split_does_not_hide_non_action_identity_conflict() -> None:
+    legacy_work_id = "work:genuinely-ambiguous"
+    events = [
+        _event(
+            "action.completed",
+            "life:ambiguous",
+            work_unit_id=legacy_work_id,
+            action_id="action:one",
+            actor="supervisor",
+            manual=True,
+            stage="repair",
+            active_seconds=1,
+        ),
+        _event(
+            "action.completed",
+            "life:ambiguous",
+            work_unit_id=legacy_work_id,
+            action_id="action:two",
+            actor="supervisor",
+            manual=True,
+            stage="delivery",
+            active_seconds=2,
+        ),
+        _event(
+            "work.completed",
+            "life:ambiguous",
+            work_unit_id=legacy_work_id,
+            stage="qualification",
+            active_seconds=3,
+        ),
+    ]
+
+    report = aggregate_case_metrics(events)
+
+    assert report["normalization"]["legacy_action_work_unit_splits"] == []
+    assert report["reconciliation"]["ok"] is False
+    assert any(
+        issue["code"] == "work_unit_stage_conflict"
+        for issue in report["reconciliation"]["issues"]
+    )
+
+
 def test_cohort_publishes_mixed_version_lifecycle_warning() -> None:
     events = [
         _event(

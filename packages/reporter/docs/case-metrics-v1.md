@@ -11,6 +11,13 @@ retained separately. Shared work uses `shared_work_id`; `beneficiary_case_lifecy
 to each case without duplicating cohort cost. `dependency_ids` enter inclusive closure, while
 `all_in_dependency_ids` add outside/support dependencies only to all-in accounting.
 
+For retained legacy telemetry, the aggregator can recover a reused action work ID when every
+claimant is an action or intervention with its own explicit identity. It deterministically splits
+the work into those concrete identities, expands dependencies on the legacy ID to the recovered
+units, and publishes the exact mapping under
+`normalization.legacy_action_work_unit_splits`. If any non-action work also claims the ID, the
+evidence remains unreconciled rather than being guessed.
+
 Canonical event types are:
 
 - `lifecycle.opened` / `lifecycle.closed`

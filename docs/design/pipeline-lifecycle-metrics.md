@@ -68,6 +68,18 @@ interval is known; otherwise active/resource classification remains unknown whil
 interval remains reportable. A child launched from verified controller context is automatic and
 uses its subprocess interval as active resource time unless a more precise value is supplied.
 
+Each exec or recorded action receives a unique concrete work unit by default. An inherited parent
+work unit is retained as a dependency, not reused as the child's identity. A caller-supplied
+`--work-unit-id` is an exact concrete identity; atomically rebinding it to another action is rejected
+before that action can enter the event stream. The inverse is enforced as well: one action identity
+cannot be rebound to another concrete work unit.
+
+For legacy retained events created before that invariant, aggregation may split a reused work unit
+only when every claimant is an action or intervention with an explicit identity. Dependencies on
+the legacy identity expand to all recovered concrete units, and the generated report exposes the
+mapping in `normalization.legacy_action_work_unit_splits`. A non-action claimant keeps the evidence
+ambiguous and reconciliation fails rather than estimating.
+
 For unavoidable browser, UI, approval, or other external actions, record the completed action:
 
 ```powershell

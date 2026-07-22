@@ -1229,6 +1229,107 @@ def _action_id(event: Mapping[str, Any], event_type: str, index: int) -> tuple[s
     return f"synthetic:{event_type}:{index:08d}", False
 
 
+def _legacy_action_work_unit_aliases(
+    events: Sequence[Mapping[str, Any]],
+) -> tuple[dict[int, str], dict[str, tuple[str, ...]], list[dict[str, Any]]]:
+    """Recover concrete action identities from legacy reused work-unit IDs.
+
+    Early telemetry CLI callers sometimes supplied one descriptive ``work_unit_id``
+    for several separate actions. The stream still retained a unique ``action_id``
+    (or ``intervention_id``), so that ambiguity is recoverable without estimating
+    cost. A non-action claimant remains genuinely ambiguous and is not normalized.
+    """
+
+    event_bindings: dict[int, tuple[str, str, str]] = {}
+    bindings_by_source: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    explicit_work_ids: set[str] = set()
+    non_action_claims: set[str] = set()
+
+    for index, event in enumerate(events):
+        source_work_id = _string(_field(event, "work_unit_id", "work_id"))
+        if source_work_id is None:
+            continue
+        explicit_work_ids.add(source_work_id)
+        event_type = _event_type(event)
+        identity_type: str | None = None
+        if event_type is not None and event_type.startswith("action"):
+            identity_type = "action"
+        elif event_type is not None and event_type.startswith("intervention"):
+            identity_type = "intervention"
+        if identity_type is None:
+            non_action_claims.add(source_work_id)
+            continue
+        assert event_type is not None
+        action_id, explicit_action_id = _action_id(event, event_type, index)
+        if not explicit_action_id:
+            continue
+        binding = (identity_type, action_id)
+        event_bindings[index] = (source_work_id, *binding)
+        bindings_by_source[source_work_id].add(binding)
+
+    aliases_by_event: dict[int, str] = {}
+    aliases_by_source: dict[str, tuple[str, ...]] = {}
+    migrations: list[dict[str, Any]] = []
+    for source_work_id in sorted(bindings_by_source):
+        bindings = sorted(bindings_by_source[source_work_id])
+        if len(bindings) < 2 or source_work_id in non_action_claims:
+            continue
+        concrete_bindings = [
+            {
+                "identity_type": identity_type,
+                "action_id": action_id,
+                "work_unit_id": (
+                    f"{source_work_id}::legacy-concrete::{identity_type}:{action_id}"
+                ),
+            }
+            for identity_type, action_id in bindings
+        ]
+        concrete_ids = [item["work_unit_id"] for item in concrete_bindings]
+        if len(set(concrete_ids)) != len(concrete_ids) or any(
+            concrete_id in explicit_work_ids for concrete_id in concrete_ids
+        ):
+            # Never overwrite a producer-owned identity. The original events will
+            # instead retain their reconciliation conflicts.
+            continue
+        alias_for_binding = {
+            (item["identity_type"], item["action_id"]): item["work_unit_id"]
+            for item in concrete_bindings
+        }
+        aliases_by_source[source_work_id] = tuple(sorted(concrete_ids))
+        source_event_count = 0
+        for index, (event_source, identity_type, action_id) in event_bindings.items():
+            if event_source != source_work_id:
+                continue
+            aliases_by_event[index] = alias_for_binding[(identity_type, action_id)]
+            source_event_count += 1
+        migrations.append(
+            {
+                "source_work_unit_id": source_work_id,
+                "source_event_count": source_event_count,
+                "concrete_bindings": concrete_bindings,
+            }
+        )
+    return aliases_by_event, aliases_by_source, migrations
+
+
+def _expand_legacy_work_unit_references(
+    value: Any,
+    aliases_by_source: Mapping[str, Sequence[str]],
+    *,
+    current_work_unit_id: str | None = None,
+) -> list[str]:
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for work_unit_id in _strings(value):
+        replacements = aliases_by_source.get(work_unit_id, (work_unit_id,))
+        for replacement in replacements:
+            if replacement == current_work_unit_id or replacement in seen:
+                continue
+            seen.add(replacement)
+            expanded.append(replacement)
+    return expanded
+
+
 def _new_error_cluster(cluster_id: str) -> dict[str, Any]:
     return {
         "error_cluster_id": cluster_id,
@@ -1271,9 +1372,16 @@ def _mark_resolution(
                 cluster["resolved_at"] = timestamp
 
 
-def _collect_events(events: list[dict[str, Any]]) -> tuple[
+def _collect_events(
+    events: list[dict[str, Any]],
+    *,
+    work_unit_aliases_by_event: Mapping[int, str] | None = None,
+    work_unit_aliases_by_source: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[
     dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[dict[str, Any]], int
 ]:
+    aliases_by_event = work_unit_aliases_by_event or {}
+    aliases_by_source = work_unit_aliases_by_source or {}
     cases: dict[str, dict[str, Any]] = {}
     work_units: dict[str, dict[str, Any]] = {}
     global_issues: list[dict[str, Any]] = []
@@ -1421,12 +1529,13 @@ def _collect_events(events: list[dict[str, Any]]) -> tuple[
                         cluster["resolution_evidence_unknown"] = True
                 else:
                     cluster["resolution_event_count"] += 1
-                    resolution_work_ids = _strings(
+                    resolution_work_ids = _expand_legacy_work_unit_references(
                         _field(
                             event,
                             "resolution_work_unit_ids",
                             "attributed_work_unit_ids",
-                        )
+                        ),
+                        aliases_by_source,
                     )
                     cluster["resolution_work_unit_ids"].update(resolution_work_ids)
                     attribution_complete = _bool_field(
@@ -1659,7 +1768,10 @@ def _collect_events(events: list[dict[str, Any]]) -> tuple[
             or has_cost
         )
         if should_materialize_work:
-            work_unit_id, explicit_work_id = _work_unit_id(event, event_type, index)
+            source_work_unit_id, explicit_work_id = _work_unit_id(
+                event, event_type, index
+            )
+            work_unit_id = aliases_by_event.get(index, source_work_unit_id)
             work = work_units.setdefault(work_unit_id, _new_work_unit(work_unit_id))
             work["source_event_count"] += 1
             work["event_types"].add(event_type)
@@ -1674,16 +1786,20 @@ def _collect_events(events: list[dict[str, Any]]) -> tuple[
                 work["owner_case_ids"].add(owner_case_id)
             beneficiaries = _beneficiary_case_ids(event)
             work["beneficiary_case_ids"].update(beneficiaries)
-            dependencies = _strings(
-                _field(event, "dependency_ids", "work_unit_dependency_ids", "depends_on")
+            dependencies = _expand_legacy_work_unit_references(
+                _field(event, "dependency_ids", "work_unit_dependency_ids", "depends_on"),
+                aliases_by_source,
+                current_work_unit_id=work_unit_id,
             )
-            all_in_dependencies = _strings(
+            all_in_dependencies = _expand_legacy_work_unit_references(
                 _field(
                     event,
                     "all_in_dependency_ids",
                     "support_dependency_ids",
                     "overhead_work_unit_ids",
-                )
+                ),
+                aliases_by_source,
+                current_work_unit_id=work_unit_id,
             )
             work["dependency_ids"].update(dependencies)
             work["all_in_dependency_ids"].update(all_in_dependencies)
@@ -2708,7 +2824,14 @@ def aggregate_case_metrics(events: LifecycleSource) -> dict[str, Any]:
     """Aggregate exact lifecycle facts into per-case metrics and a reusable work graph."""
 
     loaded = load_lifecycle_events(events)
-    cases, work_units, global_issues, ignored_event_count = _collect_events(loaded)
+    aliases_by_event, aliases_by_source, legacy_action_splits = (
+        _legacy_action_work_unit_aliases(loaded)
+    )
+    cases, work_units, global_issues, ignored_event_count = _collect_events(
+        loaded,
+        work_unit_aliases_by_event=aliases_by_event,
+        work_unit_aliases_by_source=aliases_by_source,
+    )
     _finalize_work_units(work_units, global_issues)
     serialized_cases: list[dict[str, Any]] = []
 
@@ -2954,6 +3077,9 @@ def aggregate_case_metrics(events: LifecycleSource) -> dict[str, Any]:
             _serialize_work_unit(work_units[work_unit_id])
             for work_unit_id in sorted(work_units)
         ],
+        "normalization": {
+            "legacy_action_work_unit_splits": legacy_action_splits,
+        },
         "reconciliation": {
             "ok": not all_issues,
             "issues": sorted(
@@ -3520,6 +3646,10 @@ def aggregate_cohort_metrics(
     ]
     work_units = _rehydrate_work_units(case_report)
     overall = _group_summary(cases, work_units)
+    raw_normalization = case_report.get("normalization")
+    normalization = (
+        dict(raw_normalization) if isinstance(raw_normalization, Mapping) else {}
+    )
 
     disposition_groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     active_case_ids: list[str] = []
@@ -3639,6 +3769,7 @@ def aggregate_cohort_metrics(
         "manual_actions": overall["manual_actions"],
         "manual_work": overall["manual_work"],
         "automation_score_v1": overall["automation_score_v1"],
+        "normalization": normalization,
         "by_disposition": by_disposition,
         "by_system_fingerprint": by_fingerprint,
         "system_fingerprints": [fingerprint_values[key] for key in sorted(fingerprints)],

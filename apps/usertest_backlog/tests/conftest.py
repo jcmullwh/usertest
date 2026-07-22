@@ -4,6 +4,18 @@ import importlib
 
 import pytest
 
+_LIFECYCLE_CONTEXT_ENV_NAMES = (
+    "USERTEST_LIFECYCLE_CONTEXT",
+    "USERTEST_LIFECYCLE_CONTEXT_FILE",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_lifecycle_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests hermetic when a verified controller launches pytest."""
+    for name in _LIFECYCLE_CONTEXT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest.fixture(autouse=True)
 def _force_local_triage_embedder(monkeypatch: pytest.MonkeyPatch) -> None:

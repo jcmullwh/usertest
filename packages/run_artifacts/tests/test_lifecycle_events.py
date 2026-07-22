@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -197,6 +198,51 @@ def test_jsonl_append_is_idempotent_and_detects_event_id_conflicts(tmp_path: Pat
         append_lifecycle_event(path, conflicting_id)
 
 
+def test_jsonl_append_rejects_rebinding_work_unit_to_another_action(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "lifecycle_events.jsonl"
+    started = _event(
+        event_id="action-a-started",
+        idempotency_key="action-a:started",
+        event_type="action.started",
+        attributes={"action_id": "action-a"},
+    )
+    completed = _event(
+        event_id="action-a-completed",
+        idempotency_key="action-a:completed",
+        event_type="action.completed",
+        occurred_at=T1,
+        ended_at=T1,
+        attributes={"action_id": "action-a"},
+    )
+    rebound = _event(
+        event_id="action-b-started",
+        idempotency_key="action-b:started",
+        event_type="action.started",
+        occurred_at=T2,
+        started_at=T2,
+        attributes={"action_id": "action-b"},
+    )
+    action_rebound = _event(
+        event_id="action-a-rebound",
+        idempotency_key="action-a:rebound",
+        event_type="action.completed",
+        occurred_at=T2,
+        ended_at=T2,
+        context=_context(work_unit_id="work-2"),
+        attributes={"action_id": "action-a"},
+    )
+
+    assert append_lifecycle_event(path, started)
+    assert append_lifecycle_event(path, completed)
+    with pytest.raises(IdempotencyConflictError, match="already bound to action"):
+        append_lifecycle_event(path, rebound)
+    with pytest.raises(IdempotencyConflictError, match="already bound to work unit"):
+        append_lifecycle_event(path, action_rebound)
+    assert read_lifecycle_events(path) == [started, completed]
+
+
 def test_jsonl_append_repairs_only_a_truncated_tail(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle_events.jsonl"
     first = _event()
@@ -237,6 +283,32 @@ def test_jsonl_append_serializes_concurrent_writers(tmp_path: Path) -> None:
     assert results == [True] * 20
     loaded = read_lifecycle_events(path)
     assert {event.event_id for event in loaded} == {event.event_id for event in events}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows lock contention semantics")
+def test_jsonl_append_retries_windows_lock_permission_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "lifecycle_events.jsonl"
+    original_open = os.open
+    permission_race_observed = False
+
+    def _open_with_one_permission_race(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        nonlocal permission_race_observed
+        if not permission_race_observed and str(target).endswith(".lock"):
+            permission_race_observed = True
+            raise PermissionError(13, "simulated Windows sharing violation", str(target))
+        return original_open(target, flags, mode)
+
+    monkeypatch.setattr(os, "open", _open_with_one_permission_race)
+
+    assert append_lifecycle_event(path, _event()) is True
+    assert permission_race_observed is True
+    assert len(read_lifecycle_events(path)) == 1
 
 
 def test_jsonl_reader_rejects_duplicate_ids_and_idempotency_keys(tmp_path: Path) -> None:
