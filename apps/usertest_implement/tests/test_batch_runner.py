@@ -31,6 +31,7 @@ from usertest_implement.batch_runner import (
     _collect_wave_candidates,
     _configured_owner_root,
     _drain_phase,
+    _effective_refresh_role,
     _pick_launchable_candidate_index,
     _refresh_backlog,
     _resolve_wave_base_revision,
@@ -191,6 +192,34 @@ def test_worker_model_override_requires_explicit_worker_agent() -> None:
             {"version": 1, "defaults": {"worker_roster": [{"agent": "codex"}]}},
             worker_model="gpt-5.6-sol",
         )
+
+
+def test_agent_only_overrides_discard_provider_specific_models() -> None:
+    config: dict[str, Any] = {
+        "version": 1,
+        "defaults": {
+            "refresh_agent": "codex",
+            "refresh_model": "gpt-5.6-sol",
+            "worker_roster": [{"agent": "codex", "model": "gpt-5.6-sol"}],
+            "implementation_review_agent": "codex",
+            "implementation_review_model": "gpt-5.6-sol",
+        },
+    }
+
+    _apply_run_overrides(
+        config,
+        refresh_agent="claude",
+        implementation_review_agent="gemini",
+    )
+
+    assert config["defaults"]["refresh_agent"] == "claude"
+    assert "refresh_model" not in config["defaults"]
+    assert config["defaults"]["implementation_review_agent"] == "gemini"
+    assert "implementation_review_model" not in config["defaults"]
+    assert _effective_refresh_role(
+        defaults=config["defaults"],
+        workers=[WorkerTemplate(worker_index=1, agent="codex", model="gpt-5.6-sol")],
+    ) == ("claude", None, "batch_config", "agent_default")
 
 
 def test_wave_base_revision_is_fetched_resolved_and_receipted(

@@ -30,9 +30,6 @@ from usertest_implement.ledger import update_ledger_file  # noqa: E402
 _SEVERITY_PATTERN = re.compile(r"^- Severity:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _EXPORT_KIND_PATTERN = re.compile(r"^- Export kind:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _FINGERPRINT_PATTERN = re.compile(r"^- Fingerprint:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
-LATEST_CODEX_MODEL = "gpt-5.5"
-
-
 @dataclass
 class LoopContext:
     """Shared runtime configuration for the continuous implementation loop."""
@@ -1150,7 +1147,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--settings-profile", default="default")
     parser.add_argument("--backlog-agent", choices=["claude", "codex", "gemini"], default="codex")
-    parser.add_argument("--backlog-model", default=LATEST_CODEX_MODEL)
+    parser.add_argument(
+        "--backlog-model",
+        default=None,
+        help=(
+            "Optional backlog model override. When omitted, the selected agent's configured "
+            "default is used."
+        ),
+    )
     parser.add_argument("--backlog-research-ref", default="origin/dev")
     parser.add_argument(
         "--backlog-breadth-profile",

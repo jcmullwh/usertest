@@ -92,6 +92,15 @@ def test_run_batch_pass_invokes_usertest_implement_batch_run(tmp_path: Path) -> 
     ]
 
 
+def test_backlog_model_is_opt_in_for_alternate_agents() -> None:
+    mod = _load_module()
+
+    args = mod._build_parser().parse_args(["--backlog-agent", "claude"])
+
+    assert args.backlog_agent == "claude"
+    assert args.backlog_model is None
+
+
 def test_latest_terminal_proof_is_hash_verified_before_loop_stops(tmp_path: Path) -> None:
     mod = _load_module()
     owner_root = tmp_path / "owner"

@@ -51,7 +51,6 @@ SEVERITY_RANK = {
     "low": 3,
 }
 VALID_AGENTS = {"claude", "codex", "gemini"}
-LATEST_CODEX_MODEL = "gpt-5.5"
 RUN_HISTORY_ARTIFACT_NAMES = {
     "agent_attempts.json",
     "effective_run_spec.json",
@@ -756,7 +755,7 @@ def _refresh_backlog(
     repo_input: str,
     backlog_python: Path,
     agent: str,
-    model: str,
+    model: str | None,
     batch_dir_path: Path,
 ) -> Path:
     owner_root = (owner_root or repo_root).resolve()
@@ -1021,7 +1020,7 @@ def _collect_wave_candidates(
     repo_input: str,
     backlog_python: Path,
     refresh_agent: str,
-    refresh_model: str,
+    refresh_model: str | None,
     batch_dir_path: Path,
     sources: list[BacklogSource],
     severities: set[str],
@@ -1508,6 +1507,40 @@ def _build_workers(config: dict[str, Any]) -> list[WorkerTemplate]:
     return workers
 
 
+def _effective_refresh_role(
+    *,
+    defaults: dict[str, Any],
+    workers: list[WorkerTemplate],
+) -> tuple[str, str | None, str, str]:
+    """Resolve refresh identity without carrying a model across providers."""
+
+    configured_agent = defaults.get("refresh_agent")
+    refresh_agent = (
+        str(configured_agent).strip().lower()
+        if isinstance(configured_agent, str) and configured_agent.strip()
+        else workers[0].agent
+    )
+    if refresh_agent not in VALID_AGENTS:
+        raise ValueError(f"Invalid refresh agent: {refresh_agent!r}")
+    agent_origin = "batch_config" if configured_agent else "worker_roster"
+
+    if "refresh_model" in defaults:
+        configured_model = defaults.get("refresh_model")
+        refresh_model = (
+            str(configured_model).strip()
+            if isinstance(configured_model, str) and configured_model.strip()
+            else None
+        )
+        model_origin = "batch_config" if refresh_model is not None else "agent_default"
+    elif refresh_agent == workers[0].agent:
+        refresh_model = workers[0].model
+        model_origin = "worker_roster" if refresh_model is not None else "agent_default"
+    else:
+        refresh_model = None
+        model_origin = "agent_default"
+    return refresh_agent, refresh_model, agent_origin, model_origin
+
+
 def _apply_run_overrides(
     config: dict[str, Any],
     *,
@@ -1542,9 +1575,11 @@ def _apply_run_overrides(
         return normalized or None
 
     effective_refresh_agent = normalized_agent(refresh_agent, role="refresh")
+    effective_refresh_model = normalized_model(refresh_model)
     if effective_refresh_agent is not None:
         defaults["refresh_agent"] = effective_refresh_agent
-    effective_refresh_model = normalized_model(refresh_model)
+        if effective_refresh_model is None:
+            defaults.pop("refresh_model", None)
     if effective_refresh_model is not None:
         defaults["refresh_model"] = effective_refresh_model
 
@@ -1562,9 +1597,11 @@ def _apply_run_overrides(
         implementation_review_agent,
         role="implementation review",
     )
+    effective_review_model = normalized_model(implementation_review_model)
     if effective_review_agent is not None:
         defaults["implementation_review_agent"] = effective_review_agent
-    effective_review_model = normalized_model(implementation_review_model)
+        if effective_review_model is None:
+            defaults.pop("implementation_review_model", None)
     if effective_review_model is not None:
         defaults["implementation_review_model"] = effective_review_model
     return config
@@ -1797,8 +1834,10 @@ def _drain_phase(
 ) -> None:
     owner_root = (owner_root or repo_root).resolve()
     defaults = config.get("defaults", {})
-    refresh_agent = str(defaults.get("refresh_agent") or workers[0].agent)
-    refresh_model = str(defaults.get("refresh_model") or workers[0].model or LATEST_CODEX_MODEL)
+    refresh_agent, refresh_model, _, _ = _effective_refresh_role(
+        defaults=defaults,
+        workers=workers,
+    )
     implementation_review_agent_raw = defaults.get("implementation_review_agent")
     implementation_review_agent = (
         str(implementation_review_agent_raw).strip().lower()
@@ -2216,14 +2255,15 @@ def run_batch(
     state["code_root"] = str(repo_root.resolve())
     state["owner_root"] = str(owner_root)
     state["repo_input"] = repo_input
+    effective_refresh_agent, effective_refresh_model, agent_origin, model_origin = (
+        _effective_refresh_role(defaults=defaults, workers=workers)
+    )
     state["effective_execution_roles"] = {
         "refresh": {
-            "agent": str(defaults.get("refresh_agent") or workers[0].agent),
-            "model": str(
-                defaults.get("refresh_model") or workers[0].model or LATEST_CODEX_MODEL
-            ),
-            "agent_origin": "cli_override" if refresh_agent else "batch_config",
-            "model_origin": "cli_override" if refresh_model else "batch_config",
+            "agent": effective_refresh_agent,
+            "model": effective_refresh_model,
+            "agent_origin": "cli_override" if refresh_agent else agent_origin,
+            "model_origin": "cli_override" if refresh_model else model_origin,
         },
         "implementation_workers": [
             {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
