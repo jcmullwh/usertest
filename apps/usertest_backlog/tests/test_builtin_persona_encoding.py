@@ -7,17 +7,17 @@ BUILTIN_PERSONAS = (
 )
 MOJIBAKE_SENTINELS = (
     "\ufffd",  # Unicode replacement character from a lossy decode.
-    "\u00c2",  # Common UTF-8 interpreted as Windows-1252 prefix.
-    "\u00c3",  # Common UTF-8 interpreted as Windows-1252 prefix.
     "\u00e2\u20ac",  # Corrupted curly quotes, dashes, and ellipses.
     "\u00f0\u0178",  # Corrupted four-byte Unicode, commonly emoji.
-    "\u00ef\u00bb\u00bf",  # UTF-8 BOM interpreted as text.
+    "\u00c2\u00a0",  # Corrupted non-breaking space.
+    "\u00ef\u00bb\u00bf",  # UTF-8 BOM bytes interpreted as text.
+    "\ufeff",  # Actual UTF-8 BOM decoded as a code point.
 )
 
 
 def test_builtin_personas_are_clean_utf8_text() -> None:
     failures: list[str] = []
-    persona_paths = sorted(BUILTIN_PERSONAS.glob("*.persona.md"))
+    persona_paths = sorted(BUILTIN_PERSONAS.rglob("*.persona.md"))
     assert persona_paths, f"No built-in personas found under {BUILTIN_PERSONAS}"
 
     for path in persona_paths:
