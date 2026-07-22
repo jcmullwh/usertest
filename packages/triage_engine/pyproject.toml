@@ -45,6 +45,7 @@ warn_unused_configs = true
 [tool.deptry]
 # Drop-in snippets are transplantable scaffolding and should not affect dependency linting.
 extend_exclude = ["^\\.agents/dropins/"]
+known_first_party = ["triage_engine"]
 
 [tool.ruff]
 target-version = "py311"

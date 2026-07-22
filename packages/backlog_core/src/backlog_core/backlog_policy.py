@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from backlog_core.stage_contracts import assess_research_readiness
+from backlog_core.ticket_readiness import assess_ticket_readiness
+
 CHANGE_SURFACE_KIND_ENUM: set[str] = {
     "new_command",
     "new_flag",
@@ -88,6 +91,18 @@ def _has_change_plan(ticket: dict[str, Any]) -> bool:
     if change_plan_id is not None:
         return True
     return False
+
+
+def _has_ready_research_proof(ticket: dict[str, Any]) -> bool:
+    """Return whether the ticket carries a strict, sufficient research proof.
+
+    Historical dossiers remain readable through the stage-contract legacy parser,
+    but absence of a version-2 proof is intentionally not equivalent to success.
+    """
+    ready, _ = assess_research_readiness(
+        ticket.get("research") if isinstance(ticket.get("research"), dict) else None
+    )
+    return ready
 
 
 _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH: tuple[str, ...] = (
@@ -339,7 +354,12 @@ def apply_backlog_policy(
         if stage not in TICKET_STAGE_ENUM:
             stage = "triage"
 
-        ready_prereqs = _has_selected_solution(item) and _has_change_plan(item)
+        ready_prereqs, readiness_reasons = assess_ticket_readiness(item)
+        research_ready = _has_ready_research_proof(item)
+        item["ticket_readiness"] = {
+            "ready": ready_prereqs,
+            "reasons": readiness_reasons,
+        }
 
         change_surface_raw = item.get("change_surface")
         change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
@@ -379,10 +399,16 @@ def apply_backlog_policy(
         steps_to_add: list[str] = []
 
         # Guardrail: `ready_for_ticket` is only valid once a selected solution
-        # AND a change plan exist.
+        # and a change plan exist and research has established the mechanism.
         if stage == "ready_for_ticket" and not ready_prereqs:
             new_stage = "research_required"
-            risks_to_add.append("missing_change_plan")
+            if any(
+                reason.startswith(("selection_", "solution_option_", "change_plan_"))
+                for reason in readiness_reasons
+            ):
+                risks_to_add.append("missing_change_plan")
+            if not research_ready:
+                risks_to_add.append("research_evidence_incomplete")
 
         if labeled:
             if matched_rules and failing_rules and stage != "blocked":
@@ -397,6 +423,13 @@ def apply_backlog_policy(
                     if ready_prereqs
                     else "research_required"
                 )
+
+        # No policy rule, UX label, or configured default can override the evidence
+        # chain. Routing remains fail-closed at the final transition boundary.
+        if new_stage == "ready_for_ticket" and not ready_prereqs:
+            new_stage = "research_required"
+            if "readiness_contract_failed" not in risks_to_add:
+                risks_to_add.append("readiness_contract_failed")
 
         existing_risks = _coerce_string_list(item.get("risks"))
         for risk in risks_to_add:

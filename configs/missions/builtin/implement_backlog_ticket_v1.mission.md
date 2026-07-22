@@ -42,6 +42,23 @@ ticket text is already included in this prompt as append system prompt content. 
    - clearly describe what is blocked
    - propose the smallest next steps a human should take
 
+## Delegation guidance
+
+Use delegation only when it helps preserve parent context or improve independent coverage. Good candidates are:
+
+- broad read-only exploration of large files or cross-module contracts
+- test failure triage and log summarization
+- independent review of implementation risks
+- narrow investigation of one module or workflow
+
+Do not delegate small, obvious changes where delegation overhead would add noise. When you do delegate, require a concise
+summary back to the parent covering findings, paths, risks, and recommended next steps; keep raw broad-source dumps, full
+logs, and copied file contents out of the parent context unless a short excerpt is essential evidence.
+
+Delegation is not a scope gate. If no delegation tool or capability is available, complete the full ticket yourself rather
+than under-scoping, skipping broad investigation, or treating the lack of delegation as a reason to leave acceptance
+criteria unmet.
+
 ## Constraints
 
 - Prefer minimal diffs; avoid unrelated refactors.

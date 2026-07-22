@@ -79,7 +79,15 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
         event_counts[event_type] += 1
 
-        if event_type in {"read_file", "write_file", "run_command", "web_search", "tool_call"}:
+        if event_type in {
+            "read_file",
+            "write_file",
+            "run_command",
+            "web_search",
+            "tool_call",
+            "delegation_invocation",
+            "delegation_result",
+        }:
             step_count += 1
 
         data = event.get("data", {})

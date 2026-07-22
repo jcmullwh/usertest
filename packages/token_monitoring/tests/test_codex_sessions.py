@@ -216,3 +216,24 @@ def test_ambiguous_thread_join_is_named(tmp_path: Path) -> None:
 
     assert found is None
     assert exceptions[0]["code"] == "ambiguous_session_filename_matches"
+
+
+def test_codex_session_classifies_delegation_tool_call(tmp_path: Path) -> None:
+    session = tmp_path / "rollout-2026-07-05T00-00-00-thread-1.jsonl"
+    _write_session(
+        session,
+        [
+            _token_event(50, 50),
+            _tool_call(
+                name="mcp__multi_agent__spawn_agent",
+                call_id="agent-call",
+                arguments={"task": "Inspect only and summarize.", "agent": "codex"},
+            ),
+        ],
+    )
+
+    result = parse_codex_session(session)
+
+    assert result.accepted is True
+    assert result.trace[0]["action"]["type"] == "delegation"
+    assert result.trace[0]["action"]["prompt_chars"] > 0

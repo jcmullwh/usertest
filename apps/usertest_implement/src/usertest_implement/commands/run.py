@@ -1,8 +1,23 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from runner_core.retained_oracle_assets import (
+    resolve_retained_oracle_asset_transport,
+    retained_oracle_asset_summary,
+)
+
+from usertest_implement.backlog_refresh import (
+    BacklogRefreshRequest,
+    run_shadow_backlog_refresh,
+)
 from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
 from usertest_implement.commands.review import _run_review_for_selected_ticket
+from usertest_implement.implementation_provenance import record_verified_implementation_head
+from usertest_implement.outcome_evidence import build_verification_binding
+from usertest_implement.resume_state import (
+    RESUME_STATE_ARTIFACT_NAME,
+    write_ticket_resume_state,
+)
 from usertest_implement.review_context import _run_gh_text
 from usertest_implement.selection import (
     _compose_ticket_blob,
@@ -13,6 +28,7 @@ from usertest_implement.selection import (
     _select_ticket_from_export,
     _select_ticket_from_owner_root,
     _select_ticket_from_path,
+    _selected_ticket_provenance,
     _should_move_ticket_to_review,
     _write_pr_manifest,
 )
@@ -82,42 +98,83 @@ def _refresh_backlog_for_ticket_implementation(
     )
     target = _resolve_backlog_target(runs_dir=runs_dir, target=args.backlog_target)
 
-    backlog_agent = str(args.backlog_agent) if args.backlog_agent else "claude"
+    backlog_agent = str(args.backlog_agent) if args.backlog_agent else "codex"
     backlog_model = (
         str(args.backlog_model).strip()
         if isinstance(args.backlog_model, str) and args.backlog_model.strip()
         else None
     )
-    review_agent = (
-        str(args.review_agent).strip()
-        if isinstance(args.review_agent, str) and args.review_agent.strip()
-        else backlog_agent
-    )
-    review_model = (
-        str(args.review_model).strip()
-        if isinstance(args.review_model, str) and args.review_model.strip()
+    requested_review_agent = getattr(args, "review_agent", None)
+    if (
+        isinstance(requested_review_agent, str)
+        and requested_review_agent.strip()
+        and requested_review_agent.strip() != backlog_agent
+    ):
+        raise SystemExit(
+            "Shadow-backed refresh requires one agent across backlog, intent, and UX review; "
+            "--review-agent must match --backlog-agent."
+        )
+    requested_review_model = getattr(args, "review_model", None)
+    normalized_review_model = (
+        requested_review_model.strip()
+        if isinstance(requested_review_model, str) and requested_review_model.strip()
         else None
     )
-
-    base = [sys.executable, "-m", "usertest_backlog.cli"]
-    common = ["--repo-root", str(repo_root), "--runs-dir", str(runs_dir), "--target", target]
-
-    backlog_cmd = base + ["reports", "backlog", *common, "--agent", backlog_agent]
-    if backlog_model is not None:
-        backlog_cmd.extend(["--model", backlog_model])
-    _run_workflow_step(backlog_cmd, cwd=repo_root, label="reports backlog")
-
-    intent_cmd = base + ["reports", "intent-snapshot", *common]
-    _run_workflow_step(intent_cmd, cwd=repo_root, label="reports intent-snapshot")
-
-    review_cmd = base + ["reports", "review-ux", *common, "--agent", review_agent]
-    if review_model is not None:
-        review_cmd.extend(["--model", review_model])
-    _run_workflow_step(review_cmd, cwd=repo_root, label="reports review-ux")
-
-    export_cmd = base + ["reports", "export-tickets", *common]
-    export_cmd.extend(["--stage", "ready_for_ticket"])
-    _run_workflow_step(export_cmd, cwd=repo_root, label="reports export-tickets")
+    if normalized_review_model is not None and normalized_review_model != backlog_model:
+        raise SystemExit(
+            "Shadow-backed refresh requires one model across backlog, intent, and UX review; "
+            "--review-model must match --backlog-model."
+        )
+    research_ref = (
+        str(args.backlog_research_ref).strip()
+        if isinstance(getattr(args, "backlog_research_ref", None), str)
+        and str(args.backlog_research_ref).strip()
+        else "origin/dev"
+    )
+    breadth_profile = (
+        str(args.backlog_breadth_profile).strip()
+        if isinstance(getattr(args, "backlog_breadth_profile", None), str)
+        and str(args.backlog_breadth_profile).strip()
+        else "internal_maintenance"
+    )
+    actions_yaml_raw = getattr(args, "backlog_actions_yaml", None)
+    atom_actions_yaml_raw = getattr(args, "backlog_atom_actions_yaml", None)
+    shadow_state_raw = getattr(args, "backlog_shadow_state", None)
+    backlog_python_candidate = (
+        repo_root
+        / "apps"
+        / "usertest_backlog"
+        / ".venv"
+        / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    )
+    run_shadow_backlog_refresh(
+        BacklogRefreshRequest(
+            repo_root=repo_root,
+            repo_input=str(repo_root),
+            runs_dir=runs_dir,
+            target=target,
+            backlog_python=(
+                backlog_python_candidate
+                if backlog_python_candidate.is_file()
+                else Path(sys.executable)
+            ),
+            research_ref=research_ref,
+            breadth_profile=breadth_profile,
+            agent=backlog_agent,
+            model=backlog_model,
+            actions_yaml=(
+                actions_yaml_raw.resolve() if isinstance(actions_yaml_raw, Path) else None
+            ),
+            atom_actions_yaml=(
+                atom_actions_yaml_raw.resolve()
+                if isinstance(atom_actions_yaml_raw, Path)
+                else None
+            ),
+            qualified_shadow_state_path=(
+                shadow_state_raw.resolve() if isinstance(shadow_state_raw, Path) else None
+            ),
+        )
+    )
 
 
 
@@ -265,6 +322,95 @@ def _run_selected_ticket(
         raise SystemExit(
             f"--verify-reuse must be one of auto/off; got {getattr(args, 'verify_reuse', None)!r}."
         )
+    supervisor_instructions: list[str] = []
+    for raw_instruction in getattr(args, "supervisor_instructions", None) or []:
+        if not isinstance(raw_instruction, str) or not raw_instruction.strip():
+            raise SystemExit(
+                "--supervisor-instruction entries must be non-empty strings; "
+                f"got {raw_instruction!r}."
+            )
+        supervisor_instructions.append(raw_instruction.strip())
+    supervisor_instruction = "\n\n".join(supervisor_instructions)
+
+    selected_provenance: dict[str, Any] | None = None
+    local_plan_available = bool(
+        selected.idea_path is not None and selected.idea_path.is_file()
+    )
+    if not bool(args.dry_run) or local_plan_available:
+        try:
+            selected_provenance = _selected_ticket_provenance(
+                selected,
+                require_local_plan=not bool(args.dry_run),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    plan_verification_contract = (
+        selected_provenance.get("verification_contract")
+        if isinstance(selected_provenance, dict)
+        else None
+    )
+    if (
+        isinstance(selected_provenance, dict)
+        and selected_provenance.get("legacy_identity") is False
+        and not isinstance(plan_verification_contract, dict)
+    ):
+        raise SystemExit(
+            "Case-aware implementation plans require a hashed stage-6 verification "
+            "command contract."
+        )
+    if isinstance(plan_verification_contract, dict):
+        plan_commands_raw = plan_verification_contract.get("commands")
+        plan_commands = (
+            [str(command) for command in plan_commands_raw]
+            if isinstance(plan_commands_raw, list)
+            else []
+        )
+        if verification_commands and verification_commands != plan_commands:
+            raise SystemExit(
+                "Configured verification commands do not exactly match the selected "
+                "plan's stage-6 verification contract."
+            )
+        if (
+            not verification_commands
+            and verification_profile != "none"
+            and not bool(getattr(args, "skip_verify", False))
+        ):
+            verification_commands = plan_commands
+
+    retained_oracle_assets_root: Path | None = None
+    retained_oracle_asset_spec: dict[str, Any] | None = None
+    retained_oracle_transport_summary: dict[str, Any] | None = None
+    verification_reuse_forced_reason: str | None = None
+    try:
+        retained_oracle_transport = resolve_retained_oracle_asset_transport(
+            verification_contract=(
+                plan_verification_contract
+                if isinstance(plan_verification_contract, dict)
+                else None
+            ),
+            tickets_export_path=selected.tickets_export_path,
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            f"Selected ticket retained-oracle asset is unavailable or invalid: {exc}"
+        ) from exc
+    if retained_oracle_transport is not None:
+        retained_oracle_assets_root, retained_oracle_asset_spec = retained_oracle_transport
+        verification_reuse_mode = "off"
+        verification_reuse_forced_reason = "retained_oracle_asset_server_staging"
+        retained_oracle_transport_summary = retained_oracle_asset_summary(
+            trusted_runs_root=retained_oracle_assets_root,
+            spec=retained_oracle_asset_spec,
+        )
+
+    for command in verification_commands:
+        safety_errors = verification_command_safety_errors(command)
+        if safety_errors:
+            raise SystemExit(
+                "Unsafe verification command in selected plan/configuration: "
+                f"{command!r}: {'; '.join(safety_errors)}"
+            )
 
     wants_handoff = bool(args.commit) or bool(args.push) or bool(args.pr)
 
@@ -273,6 +419,29 @@ def _run_selected_ticket(
     #
     # Default to the PR base branch (dev by default) unless the user explicitly provided --ref.
     effective_ref = args.ref
+    plan_target_contract = (
+        selected_provenance.get("target_contract")
+        if isinstance(selected_provenance, dict)
+        else None
+    )
+    if isinstance(plan_target_contract, dict):
+        planned_revision = str(plan_target_contract.get("repo_revision") or "").strip()
+        if not planned_revision:
+            raise SystemExit("Plan target contract is missing its repository revision.")
+        if effective_ref is not None and str(effective_ref).strip() not in {
+            "",
+            planned_revision,
+        }:
+            raise SystemExit(
+                "Case-aware implementation must start from the exact stage-6 repository "
+                f"revision: expected={planned_revision!r} requested={effective_ref!r}"
+            )
+        effective_ref = planned_revision
+        if wants_handoff and bool(getattr(args, "skip_verify", False)):
+            raise SystemExit(
+                "Case-aware implementation cannot commit, push, or open a PR with "
+                "--skip-verify."
+            )
     if wants_handoff and (effective_ref is None or not str(effective_ref).strip()):
         base = str(getattr(args, "base_branch", "") or "").strip()
         if base:
@@ -348,6 +517,16 @@ def _run_selected_ticket(
                 test_gate,
             ]
 
+    verification_binding: dict[str, Any] | None = None
+    if selected_provenance is not None:
+        try:
+            verification_binding = build_verification_binding(
+                ticket_provenance=selected_provenance,
+                configured_commands=verification_commands,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+
     exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
     exec_cache_dir = getattr(args, "exec_cache_dir", None)
     if exec_cache_dir is not None:
@@ -359,6 +538,11 @@ def _run_selected_ticket(
         and exec_cache == "warm"
         and bool(getattr(args, "maintenance_venv_cache", True))
     )
+    exec_maintenance_image_metadata_path = getattr(
+        args, "exec_maintenance_image_metadata_path", None
+    )
+    if exec_maintenance_image_metadata_path is not None:
+        exec_maintenance_image_metadata_path = exec_maintenance_image_metadata_path.resolve()
 
     ticket_blob = _compose_ticket_blob(selected)
     request = RunRequest(
@@ -372,16 +556,20 @@ def _run_selected_ticket(
         model=args.model,
         agent_config_overrides=tuple(args.agent_config_override or []),
         agent_append_system_prompt=ticket_blob,
+        supervisor_instruction=supervisor_instruction or None,
         keep_workspace=keep_workspace,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
         verification_reuse_mode=verification_reuse_mode,
+        retained_oracle_assets_root=retained_oracle_assets_root,
+        retained_oracle_asset_spec=retained_oracle_asset_spec,
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,
         exec_keep_container=bool(args.exec_keep_container),
         exec_cache=exec_cache,
         exec_cache_dir=exec_cache_dir,
         exec_maintenance_venv_cache=maintenance_venv_cache,
+        exec_maintenance_image_metadata_path=exec_maintenance_image_metadata_path,
         exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
         exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
     )
@@ -414,10 +602,18 @@ def _run_selected_ticket(
                 "exec_keep_container": request.exec_keep_container,
                 "exec_cache": request.exec_cache,
                 "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
+                "exec_maintenance_image_metadata_path": (
+                    str(request.exec_maintenance_image_metadata_path)
+                    if request.exec_maintenance_image_metadata_path is not None
+                    else None
+                ),
                 "verification_profile": verification_profile,
                 "verification_commands": list(request.verification_commands),
                 "verification_timeout_seconds": request.verification_timeout_seconds,
                 "verification_reuse_mode": request.verification_reuse_mode,
+                "verification_reuse_forced_reason": verification_reuse_forced_reason,
+                "retained_oracle_asset_transport": retained_oracle_transport_summary,
+                "supervisor_instructions": supervisor_instructions,
                 "commit": bool(args.commit),
                 "push": bool(args.push),
                 "pr": bool(args.pr),
@@ -450,6 +646,19 @@ def _run_selected_ticket(
     duration_seconds = max(0.0, time.monotonic() - wall_start)
 
     run_dir = result.run_dir
+    if isinstance(plan_target_contract, dict):
+        target_ref = _read_json(run_dir / "target_ref.json")
+        planned_revision = str(plan_target_contract["repo_revision"])
+        observed_revision = (
+            str(target_ref.get("commit_sha") or "").strip()
+            if isinstance(target_ref, dict)
+            else ""
+        )
+        if observed_revision.casefold() != planned_revision.casefold():
+            raise SystemExit(
+                "Implementation workspace did not resolve to the stage-6 repository "
+                f"revision: expected={planned_revision!r} observed={observed_revision!r}"
+            )
     timing_payload = {
         "schema_version": 1,
         "started_at": started_at,
@@ -462,6 +671,8 @@ def _run_selected_ticket(
         if isinstance(phases, dict):
             timing_payload["phases"] = phases
     _write_json(run_dir / "timing.json", timing_payload)
+    if selected_provenance is None or verification_binding is None:
+        raise SystemExit("Selected ticket provenance was not established before execution")
     _write_json(
         run_dir / "settings_ref.json",
         {
@@ -472,7 +683,7 @@ def _run_selected_ticket(
     _write_json(
         run_dir / "ticket_ref.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "fingerprint": selected.fingerprint,
             "title": selected.title,
             "export_kind": selected.export_kind,
@@ -480,6 +691,38 @@ def _run_selected_ticket(
                 str(selected.tickets_export_path) if selected.tickets_export_path is not None else None
             ),
             "export_index": selected.export_index,
+            "case_id": selected_provenance["case_id"],
+            "plan_revision_id": selected_provenance["plan_revision_id"],
+            "ticket_provenance": {
+                key: selected_provenance[key]
+                for key in (
+                    "schema_version",
+                    "fingerprint",
+                    "case_id",
+                    "plan_revision_id",
+                    "legacy_identity",
+                    "ticket_body_sha256",
+                    "local_plan_sha256",
+                    "local_plan_path",
+                    "local_plan_filename",
+                    "verification_contract_sha256",
+                    "target_contract",
+                    "target_contract_sha256",
+                    "generated_ticket",
+                )
+            },
+            "verification_binding": verification_binding,
+            "retained_oracle_asset_transport": (
+                {
+                    "trusted_runs_root": str(retained_oracle_assets_root.resolve()),
+                    "spec": retained_oracle_asset_spec,
+                    "summary": retained_oracle_transport_summary,
+                }
+                if retained_oracle_assets_root is not None
+                and retained_oracle_asset_spec is not None
+                else None
+            ),
+            "supervisor_instruction": request.supervisor_instruction,
             "owner_repo": {
                 "root": str(selected.owner_root) if selected.owner_root is not None else None,
                 "idea_path": str(selected.idea_path) if selected.idea_path is not None else None,
@@ -570,6 +813,17 @@ def _run_selected_ticket(
             git_user_email=args.git_user_email,
         )
         commit_performed = bool(git_ref.get("commit_performed") is True)
+        if commit_performed and isinstance(plan_target_contract, dict):
+            try:
+                record_verified_implementation_head(
+                    run_dir=run_dir,
+                    require_exact_base=True,
+                )
+            except ValueError as exc:
+                raise SystemExit(
+                    "Unable to bind runner verification to the committed implementation: "
+                    f"{exc}"
+                ) from exc
 
     if args.push and not handoff_blocked:
         if not commit_performed:
@@ -733,6 +987,8 @@ def _run_selected_ticket(
                         pass
                     else:
                         pr_ref["body"] = pr_body
+                        pr_body_path = run_dir / "pr_body.md"
+                        pr_body_path.write_text(pr_body, encoding="utf-8")
                         try:
                             pr_url = _run_gh_text(
                                 cwd=workspace_dir,
@@ -744,8 +1000,8 @@ def _run_selected_ticket(
                                     str(args.base_branch),
                                     "--title",
                                     title,
-                                    "--body",
-                                    pr_body,
+                                    "--body-file",
+                                    str(pr_body_path),
                                     *(["--draft"] if create_draft else []),
                                 ],
                             ).strip()
@@ -768,12 +1024,13 @@ def _run_selected_ticket(
         )
     ):
         try:
-            move_ticket_file(
+            moved_ticket_path = move_ticket_file(
                 owner_root=selected.owner_root,
                 fingerprint=selected.fingerprint,
                 to_bucket="4 - for_review",
                 dry_run=False,
             )
+            selected = _select_ticket_from_path(moved_ticket_path)
             _sync_ticket_atom_actions(repo_root=repo_root, owner_root=selected.owner_root)
         except Exception as e:
             print(f"WARNING: failed to move ticket to for_review: {e}", file=sys.stderr)
@@ -837,6 +1094,8 @@ def _run_selected_ticket(
                 review_mission_id=_DEFAULT_REVIEW_MISSION_ID,
                 review_seed=int(args.seed),
                 review_agent_config_override=list(getattr(args, "agent_config_override", []) or []),
+                review_corrections=[],
+                adopt_review_run=None,
                 keep_workspace=bool(args.keep_workspace),
                 exec_backend=str(args.exec_backend),
                 exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
@@ -893,13 +1152,13 @@ def _run_selected_ticket(
         print(f"  Workspace: {workspace_dir_str}", file=sys.stderr)
         print("  Remediation:", file=sys.stderr)
         remote = push_ref.get("remote_name") or args.remote_name
-        branch = None
+        remediation_branch = None
         if isinstance(git_ref, dict):
-            branch = git_ref.get("branch")
-        if not branch:
-            branch = args.branch or "<branch>"
+            remediation_branch = git_ref.get("branch")
+        if not remediation_branch:
+            remediation_branch = args.branch or branch or "<branch>"
         print(f"    cd {workspace_dir_str}", file=sys.stderr)
-        print(f"    git push --set-upstream {remote} {branch}", file=sys.stderr)
+        print(f"    git push --set-upstream {remote} {remediation_branch}", file=sys.stderr)
         exit_code = max(exit_code, 4)
 
     if args.pr and pr_ref is not None and pr_ref.get("error"):
@@ -912,13 +1171,47 @@ def _run_selected_ticket(
         print("    gh pr create --help", file=sys.stderr)
         exit_code = max(exit_code, 5)
 
+    try:
+        resume_state = write_ticket_resume_state(
+            selected=selected,
+            run_dir=run_dir,
+            owner_root=selected.owner_root,
+            branch=branch,
+            exit_code=exit_code,
+            review_run_dir=review_run_dir,
+        )
+    except Exception as e:
+        resume_state = None
+        print(f"WARNING: failed to write {RESUME_STATE_ARTIFACT_NAME}: {e}", file=sys.stderr)
+
+    if ledger_path is not None and isinstance(resume_state, dict):
+        try:
+            update_ledger_file(
+                ledger_path,
+                fingerprint=selected.fingerprint,
+                updates={
+                    "last_resume_state_path": str(run_dir / RESUME_STATE_ARTIFACT_NAME),
+                    "last_resume_lifecycle_state": resume_state.get("lifecycle_state"),
+                },
+            )
+        except Exception as e:
+            print(f"WARNING: failed to update ledger resume state: {e}", file=sys.stderr)
+
     print(str(run_dir))
     return exit_code
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(args.repo_root)
-    cfg = _load_runner_config(repo_root)
+    configured_runs_dir = getattr(args, "runs_dir", None)
+    cfg = _load_runner_config(
+        repo_root,
+        runs_dir=(
+            configured_runs_dir.resolve()
+            if isinstance(configured_runs_dir, Path)
+            else None
+        ),
+    )
 
     selected: SelectedTicket
     if args.ticket_path is not None:

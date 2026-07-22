@@ -23,6 +23,7 @@ RELEVANT_COMMANDS = {
     "usertest reports analyze",
     "usertest token-monitor analyze",
     "usertest token-monitor batch-context",
+    "usertest token-monitor delegation-ab",
     "usertest init-usertest",
     "usertest personas list",
     "usertest missions list",
@@ -117,6 +118,7 @@ def test_existing_dry_run_and_print_modifiers_are_classified() -> None:
         "usertest-backlog reports review-ux": {"--dry-run"},
         "usertest-backlog reports sync-atom-actions": {"--dry-run"},
         "usertest token-monitor analyze": {"--no-write"},
+        "usertest token-monitor delegation-ab": {"--no-write"},
         "usertest-implement run": {"--dry-run", "--no-commit", "--no-push", "--no-pr"},
         "usertest-implement review run": {"--dry-run"},
         "usertest-implement tickets run-next": {

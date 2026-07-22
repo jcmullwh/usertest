@@ -495,6 +495,11 @@ def test_prepare_execution_backend_maintenance_profile_uses_image_ref_and_update
             metadata={
                 "schema_version": 1,
                 "profile": "maintenance",
+                "cache": {
+                    "enabled": True,
+                    "strategy": "per-worker-writable-copy",
+                    "projects": [],
+                },
                 "timings": {
                     "fingerprint_seconds": 0.5,
                     "image_resolution_seconds": 1.5,
@@ -542,6 +547,7 @@ def test_prepare_execution_backend_maintenance_profile_uses_image_ref_and_update
     assert sandbox_meta["docker_profile"] == "maintenance"
     assert sandbox_meta["maintenance_image_source"] == "local"
     assert sandbox_meta["maintenance_cache_mount_count"] == 1
+    assert sandbox_meta["maintenance_cache_strategy"] == "per-worker-writable-copy"
 
 
 def test_prepare_execution_backend_maintenance_profile_rejects_custom_context(
@@ -659,9 +665,142 @@ def test_prepare_maintenance_profile_prefers_local_image_and_plans_cache_mounts(
     assert prep.image_source == "local"
     assert prep.cache_mount_hits == 1
     assert prep.cache_mounts[0].container_path == "/workspace/packages/demo/.venv"
+    assert prep.cache_mounts[0].read_only is False
+    assert prep.cache_mounts[0].host_path != mounted_venv.resolve()
+    assert prep.cache_mounts[0].host_path.is_relative_to(
+        (run_dir / "sandbox" / "maintenance_venv_copies").resolve()
+    )
+    assert prep.cache_mounts[0].host_path.exists()
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "1"
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ROOT"] == "/cache/usertest_maint_venvs"
     assert prep.env_overrides["USERTEST_MAINT_VENV_SEED_ROOT"] == "/opt/usertest_maint_seed"
+    assert prep.metadata["cache"]["enabled"] is True
+    assert prep.metadata["cache"]["strategy"] == "per-worker-writable-copy"
+    project_meta = prep.metadata["cache"]["projects"][0]
+    assert project_meta["cache_strategy"] == "per-worker-writable-copy"
+    assert project_meta["host_venv_dir"] == str(mounted_venv.resolve())
+    assert project_meta["mounted_host_path"] == str(prep.cache_mounts[0].host_path)
+    assert project_meta["mount_read_only"] is False
+
+    cold_run_dir = tmp_path / "run-cold"
+    cold_run_dir.mkdir(parents=True, exist_ok=True)
+    cold_prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=cold_run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="cold",
+        cache_dir=None,
+        maintenance_venv_reuse_enabled=False,
+        timeout_seconds=30.0,
+    )
+    assert cold_prep.cache_mounts == []
+    assert cold_prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "0"
+    assert cold_prep.metadata["cache"]["enabled"] is False
+    assert cold_prep.metadata["cache"]["strategy"] == "disabled"
+    assert cold_prep.metadata["cache"]["projects"][0]["cache_strategy"] == "disabled"
+
+
+def test_prepare_maintenance_profile_concurrent_workers_get_distinct_writable_venv_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two worker contexts must not writable-mount the same shared cache hit as .venv."""
+
+    repo_root = tmp_path / "repo"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    run_dir_1 = tmp_path / "run-1"
+    run_dir_2 = tmp_path / "run-2"
+    run_dir_1.mkdir(parents=True, exist_ok=True)
+    run_dir_2.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/jcmullwh/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "resolve_maintenance_docker_image",
+        lambda **_kwargs: backend_mod.MaintenanceImageResolution(
+            image_ref="usertest-maintenance:abc123",
+            env_hash="a" * 64,
+            image_source="local",
+            image_resolution_seconds=0.0,
+            context_metadata={"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+            metadata={"image": {"source": "local"}},
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {
+            "projects": [
+                {"id": "demo", "path": "packages/demo", "fingerprint": "f" * 64},
+            ]
+        },
+    )
+
+    shared_venv = cache_dir / "usertest_maint_venvs" / "demo" / ("f" * 64) / "venv"
+    shared_venv.mkdir(parents=True, exist_ok=True)
+    (shared_venv / "marker.txt").write_text("cached\n", encoding="utf-8")
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+    )
+
+    prep_1 = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir_1,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=None,
+    )
+    prep_2 = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir_2,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=None,
+    )
+
+    mount_1 = prep_1.cache_mounts[0]
+    mount_2 = prep_2.cache_mounts[0]
+    assert mount_1.container_path == mount_2.container_path == "/workspace/packages/demo/.venv"
+    assert mount_1.read_only is False
+    assert mount_2.read_only is False
+    assert mount_1.host_path != mount_2.host_path
+    assert mount_1.host_path != shared_venv.resolve()
+    assert mount_2.host_path != shared_venv.resolve()
+    assert mount_1.host_path.is_relative_to(
+        (run_dir_1 / "sandbox" / "maintenance_venv_copies").resolve()
+    )
+    assert mount_2.host_path.is_relative_to(
+        (run_dir_2 / "sandbox" / "maintenance_venv_copies").resolve()
+    )
+    assert (mount_1.host_path / "marker.txt").read_text(encoding="utf-8") == "cached\n"
+    assert (mount_2.host_path / "marker.txt").read_text(encoding="utf-8") == "cached\n"
+    assert prep_1.metadata["cache"]["strategy"] == "per-worker-writable-copy"
+    assert prep_2.metadata["cache"]["strategy"] == "per-worker-writable-copy"
 
 
 def test_prepare_maintenance_profile_uses_branch_alias_as_build_cache_when_hash_missing(
@@ -759,6 +898,204 @@ def test_prepare_maintenance_profile_uses_branch_alias_as_build_cache_when_hash_
     assert prep.image_source == "built"
     assert prep.metadata["image"]["build_cache_from"] == [expected_cache_ref]
     assert prep.metadata["image"]["alias_pull_attempts"][0]["ref"] == expected_cache_ref
+
+
+def test_resolve_maintenance_docker_image_records_pull_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    context_dir = run_dir / "sandbox" / "maintenance_image_context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/example/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+            cleanup_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (
+            context_dir,
+            {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        ),
+    )
+    monkeypatch.setattr(backend_mod, "compute_image_hash", lambda **_kwargs: "e" * 64)
+    monkeypatch.setattr(backend_mod, "_docker_image_exists_local", lambda **_kwargs: False)
+
+    def _fake_pull(**kwargs):
+        kwargs["log_path"].write_text(
+            json.dumps({"returncode": 0, "stdout": "pulled", "stderr": ""}) + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            args=["docker", "pull", kwargs["ref"]],
+            returncode=0,
+            stdout="pulled",
+            stderr="",
+        )
+
+    tagged: dict[str, str] = {}
+    monkeypatch.setattr(backend_mod, "_docker_pull_image", _fake_pull)
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_tag_image",
+        lambda **kwargs: tagged.update(
+            {"source": kwargs["source_ref"], "target": kwargs["target_ref"]}
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_build_maintenance_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker build should not run")),
+    )
+
+    artifact_path = run_dir / "preflight" / "maintenance_image.json"
+    resolution = backend_mod.resolve_maintenance_docker_image(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        timeout_seconds=30.0,
+        artifact_path=artifact_path,
+    )
+
+    assert resolution.image_source == "pulled"
+    assert resolution.image_ref == "usertest-maintenance:" + ("e" * 16)
+    assert tagged == {
+        "source": "ghcr.io/example/usertest-maintenance:" + ("e" * 16),
+        "target": "usertest-maintenance:" + ("e" * 16),
+    }
+    persisted = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert persisted["image"]["source"] == "pulled"
+    assert persisted["image"]["pull_attempted"] is True
+    assert persisted["artifacts"]["pull_log"].endswith("maintenance_docker_pull.json")
+    assert persisted["timings"]["image_resolution_seconds"] >= 0
+
+
+def test_prepare_maintenance_profile_consumes_pre_resolved_image_without_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    metadata_path = tmp_path / "batch" / "preflight" / "maintenance_image.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    pre_resolved = {
+        "schema_version": 1,
+        "kind": "maintenance_image_resolution",
+        "profile": "maintenance",
+        "image": {
+            "env_hash": "f" * 64,
+            "image_ref": "usertest-maintenance:" + ("f" * 16),
+            "local_ref": "usertest-maintenance:" + ("f" * 16),
+            "published_ref": "ghcr.io/example/usertest-maintenance:" + ("f" * 16),
+            "source": "built",
+            "pull_attempted": True,
+            "alias_pull_attempts": [{"ref": "ghcr.io/example/usertest-maintenance:dev-latest"}],
+            "build_cache_from": ["ghcr.io/example/usertest-maintenance:dev-latest"],
+            "build_performed": True,
+            "context_dir": str(tmp_path / "context"),
+            "context_metadata": {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        },
+        "artifacts": {
+            "pull_log": str(tmp_path / "pull.json"),
+            "alias_pull_log": str(tmp_path / "cache-pulls.json"),
+            "build_log": str(tmp_path / "build.log"),
+        },
+        "timings": {"image_resolution_seconds": 12.5},
+    }
+    metadata_path.write_text(json.dumps(pre_resolved) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/example/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+            cleanup_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("context preparation should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_image_exists_local",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local image resolution should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_pull_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker pull should not run")),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_build_maintenance_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker build should not run")),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {"projects": []},
+    )
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        exec_maintenance_image_metadata_path=metadata_path,
+    )
+
+    prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=30.0,
+    )
+
+    assert prep.image_ref == "usertest-maintenance:" + ("f" * 16)
+    assert prep.image_source == "built"
+    assert prep.image_resolution_seconds == 0.0
+    assert prep.metadata["image"]["pre_resolved"] is True
+    assert prep.metadata["image"]["pre_resolved_image_ref"] == prep.image_ref
+    assert prep.metadata["image_resolution"]["metadata_path"] == str(metadata_path.resolve())
+    assert prep.metadata["image_resolution"]["provenance"]["image"]["source"] == "built"
 
 
 def test_prepare_maintenance_profile_runs_cleanup_and_records_artifact(
@@ -935,4 +1272,11 @@ def test_prepare_maintenance_profile_cleanup_failure_is_best_effort(
     assert cleanup_meta["errors"] == ["Automatic maintenance image cleanup failed: boom"]
     assert prep.metadata["cleanup"]["errors"] == [
         "Automatic maintenance image cleanup failed: boom"
+    ]
+    assert prep.metadata["cleanup"]["postresolution"]["errors"] == [
+        "Post-resolution maintenance image cleanup failed: boom"
+    ]
+    post_cleanup_artifact = run_dir / "sandbox" / "maintenance_image_postresolution_cleanup.json"
+    assert json.loads(post_cleanup_artifact.read_text(encoding="utf-8"))["errors"] == [
+        "Post-resolution maintenance image cleanup failed: boom"
     ]

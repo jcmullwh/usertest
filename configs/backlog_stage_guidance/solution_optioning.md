@@ -1,69 +1,90 @@
-# Stage 4 guidance: solution optioning
+# Stage 4 guidance: evidence-backed solution optioning
 
 ## Goal
 
-Produce one solution option per configured family for each researched problem. Options
-are grounded in the research dossier and must stay within the configured taxonomy.
+Produce zero to three genuinely distinct causal mechanisms from an evidence-sufficient
+research proof and source inspected at the recorded repository revision.
 
-## Duration guardrail
+## Progression gate
 
-Stage artifacts and tool calls must not invent sleeps, polling delays, retry delays, or
-timeout values. If waiting behavior is part of the path being analyzed, use an existing
-repo-configured value or document the limitation instead of making up a duration. This
-also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar duration
-parameters to shell/tool invocations unless the assigned evidence includes that exact
-configured value.
+Do not option a dossier unless the research-readiness contract passes. Return an explicit
+`insufficient_evidence` outcome when a material present-state fact affects the root cause,
+reachable change surface, indispensable existing requirement, or available protection
+signal. A prospective policy or interface choice, such as a finite threshold, configurable
+default, identity/alias rule, or interface extension, is Stage-4 work, not automatically
+missing research: state the choice, bounded tradeoffs, safety constraints, and verification. Return
+`no_safe_option` when the evidence is sufficient but all considered mechanisms leave
+unacceptable risk.
 
-## Option families (from configs/backlog_taxonomy.json)
+## Optional family lenses
 
-The current three families are:
-1. `most_direct` – smallest targeted change addressing the specific instance
-2. `most_robust` – adds defense-in-depth or broader correctness
-3. `most_comprehensive` – addresses the problem class, not just the instance
+The configured family IDs are compatibility labels, not mandatory slots or a quality
+ranking. Omit a family when it does not represent a distinct mechanism. Different amounts
+of validation or abstraction around the same mechanism do not automatically create
+different options. Multiple distinct mechanisms may share the same family label.
 
-Every output must include exactly one option per configured family. Do not invent new
-families. Do not omit a family. If a family genuinely does not apply, explain why in
-the option's tradeoffs and still include the entry.
+## Causal and scope evidence
 
-## What to favor
+- Record the mechanism, covered symptoms, unsupported assumptions, residual recurrence
+  paths, compatibility risks, and before/after testability for every option.
+- Define an `outcome_strategy` for every option: the intended useful operation, concrete
+  success properties, relevant safety constraints, and the verified Stage-3 baseline
+  scenarios that Stage 6 must replay. This is a proposed success contract, not pre-change
+  proof that the option works. Error disappearance, exit zero, or a new diagnostic alone
+  is surface-level unless it is the actual source requirement.
+- Prefer a runner-verified fail-first experiment for the same source atoms. Its unchanged
+  command fails before and may pass after the implementation. Mark it
+  `post_change_replay_mode=verified_fail_first`. An exit-zero experiment that asserts the old
+  symptom is mechanism evidence, not an exact post-change oracle, and its retained research
+  asset cannot be rewritten. If no fail-first exists, use
+  `post_change_replay_mode=stage6_planned_unverified`; Stage 6 may design a distinct future
+  proof without requiring that solution-specific command to have already run.
+- Bind every option to one exact verified research hypothesis: copy its statement,
+  mechanism symbols, supporting evidence, genuine counterevidence (including an honest empty
+  list), and exactly one runner-owned causal proof route without paraphrase. Normally copy every
+  causal falsification attempt ID and require a survived runner-replayed challenge. For an exact
+  deterministic static/config mechanism with a runner-minted closure, copy every deterministic
+  closure receipt ID and keep falsification attempt refs empty. Never invent an alternative or
+  challenge to make a record advance; an unrelated refuting experiment is invalid. Require
+  at least one exact inspected control point that is causally sufficient to reverse the
+  evidenced mechanism. A multi-symbol call path does not imply one edit per symbol: bind
+  the sufficient boundary to the full exact symbol chain it controls. The runner must show
+  that boundary on every selected failure path through an exact mechanism link or strong
+  causal control; `sufficiency_rationale` explains the choice but cannot prove it. An
+  unrelated or uninspected intervention cannot advance. Do not add edits at every traversed
+  symbol merely to satisfy this gate; return to research when the causal boundary is not
+  evidenced.
+- Record only runner-minted failure or typed mechanism paths. Copy each `path_name` and its
+  single `failure_path_id` or `mechanism_evidence_id` exactly.
+- Require at least two independent consumers or paths before describing an option as
+  shared, canonical, centralized, class-level, or system-wide. Their runner-owned
+  `independence_key` values must differ. One run may expose independent consumers; atom
+  sets need not be disjoint.
+- Reserve that two-path requirement for broad problem coverage or a new reusable abstraction.
+  The complete recovery path for one evidenced operation may touch several existing callers,
+  functions, or components, extend an existing shared helper, and add sequencing or protection
+  without becoming broad scope. Keep it `single_path`, inspect affected callers for
+  compatibility, and preserve each causally necessary step.
+- Follow the reachable operation to its earliest same-resource failure boundary. A control
+  that runs only after that point cannot recover the operation; propose an earlier ordering
+  when the inspected call path supports it.
+- Maximize safe useful throughput. Partial supporting-operation errors may be surfaced while
+  the intended operation continues only when the option verifies a safe postcondition and
+  sufficient actual progress. Avoid both blanket abort-on-any-error behavior and swallowed
+  errors or assumed progress.
+- Treat an observed benchmark or current configuration value as a possible prospective
+  default or test case, not a universal supported maximum unless a repository requirement or
+  capacity constraint establishes it.
+- Artifact IDs, experiment IDs, files, symbols, renamed paths, and multiple observations
+  of the same execution path do not establish independent scope.
 
-- Options grounded in the research dossier, not in speculation.
-- Options that reflect what the repo actually does (small, composable changes unless
-  breadth is compelling based on research).
-- Options that include honest tradeoffs, including recurrence prevention and test
-  implications.
-- Options where the change-surface hypothesis is realistic given evidence breadth.
-- Options that solve the underlying mechanism when research shows repeated or shared
-  causes, not just the exact observed symptom.
+## Repository use
 
-## What to avoid
+Inspect relevant source and tests in the supplied read-only workspace. Do not modify files,
+install dependencies, or run mutating commands. Do not invent sleep, polling, retry, or
+timeout values that are absent from repository evidence.
 
-- Do not use banned steering terms: fastest, quickest, easiest, simplest, lowest-effort.
-  Use family labels instead to express tradeoffs.
-- Do not invent a solution not grounded in the research dossier.
-- Do not include `selected_solution` in this stage's output.
-- Do not describe implementation steps as if selection has happened.
-- Do not frame a hardcoded branch, one-off exception, or narrow special-case workaround
-  as a good option unless the research dossier supports an isolated instance or an
-  intentional boundary.
+## Output
 
-## Output contract
-
-Each option must include:
-- `option_id` (stable, e.g. `option:readme-quickstart:most_direct`)
-- `problem_id` (matching stage-1 record)
-- `family_id` (one of the configured family IDs from taxonomy)
-- `summary`
-- `tradeoffs`
-- `recurrence_prevention`
-- `change_surface_hypothesis`
-- `test_implications`
-- `rationale` (grounded in research dossier)
-- `option_status` = `"optioned"`
-
-## Relation-review guidance
-
-At this stage the relation reviewer may merge option sets from two problems when research
-showed they share a root cause and a single option set can address both. The reviewer may
-also split an option set when research showed multiple independent causes that deserve
-separate option sets.
+Return the optioning envelope defined by the stage prompt. `options_produced` carries one
+to three validated options; `insufficient_evidence` and `no_safe_option` carry none.

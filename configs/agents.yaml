@@ -33,15 +33,18 @@ agents:
 
   claude:
     binary: claude
-    # Claude Code alias for latest Sonnet on the Anthropic API; currently Sonnet 5.
-    default_model: sonnet
+    # Pin to Anthropic's current Sonnet model instead of relying on Claude Code's alias resolution.
+    default_model: claude-sonnet-5
     supports_json_schema: true
     raw_events_format: jsonl
     output_format: stream-json
     notes: "Implemented (headless `claude -p`)."
-    # Optional delegation capability contract. Leave unset until a local CLI probe or
-    # adapter documentation confirms the installed CLI's delegation/subagent tool names.
-    # delegation_tools: []
+    # Delegation capability contract confirmed against Claude Code 2.1.205.
+    # Guard the version so a changed CLI marks delegation unavailable instead of
+    # silently assuming the tool name is still valid.
+    delegation:
+      tools: ["Agent"]
+      confirmed_cli_versions: ["2.1.205 (Claude Code)"]
     sandbox_cli_install:
       # Claude Code is commonly installed via npm; keep deps minimal.
       apt: [nodejs]
@@ -56,9 +59,13 @@ agents:
     raw_events_format: jsonl
     output_format: stream-json
     notes: "Implemented (headless `gemini --output-format stream-json`)."
-    # Optional delegation capability contract. Leave unset until a local CLI probe or
-    # adapter documentation confirms the installed CLI's delegation/subagent tool names.
-    # delegation_tools: []
+    # Delegation capability contract confirmed against Gemini CLI 0.50.0.
+    # Gemini exposes subagent dispatch through the unified invoke_agent tool.
+    # Guard the version so a changed CLI marks delegation unavailable instead of
+    # silently assuming the tool name is still valid.
+    delegation:
+      tools: ["invoke_agent"]
+      confirmed_cli_versions: ["0.50.0"]
     sandbox_cli_install:
       apt: [nodejs]
       pip: []

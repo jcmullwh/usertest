@@ -47,7 +47,7 @@ Run the offline-safe “first success” script (creates a local `.venv`, instal
 
 - **Windows PowerShell:**
   ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1
+  powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/offline_first_success.ps1
   ```
 - **macOS / Linux:**
   ```bash

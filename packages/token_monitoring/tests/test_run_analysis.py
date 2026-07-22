@@ -106,6 +106,67 @@ def test_run_analysis_emits_actionable_signals_without_raw_output(tmp_path: Path
     assert analysis["privacy"]["contains_raw_command_output"] is False
 
 
+def test_source_read_evidence_ranks_observed_bytes_not_total_file_size(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    sessions = tmp_path / "sessions"
+    thread_id = "thread-1"
+    _base_run(run_dir, thread_id=thread_id)
+    _write_jsonl(
+        run_dir / "normalized_events.jsonl",
+        [
+            {
+                "type": "read_file",
+                "data": {
+                    "path": "docs/large.json",
+                    "bytes": 792_933,
+                    "file_size_bytes": 792_933,
+                    "observed_bytes": 1_466,
+                    "whole_file_observed": False,
+                },
+            },
+            {
+                "type": "read_file",
+                "data": {
+                    "path": "src/whole.py",
+                    "bytes": 2_048,
+                    "file_size_bytes": 2_048,
+                    "observed_bytes": 2_048,
+                    "whole_file_observed": True,
+                },
+            },
+        ],
+    )
+    _write_jsonl(
+        sessions / f"rollout-{thread_id}.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": thread_id}},
+            _token_event(120_000, 120_000),
+            _call("Get-Content docs/large.json | Select-Object -First 25"),
+            _token_event(260_000, 140_000),
+        ],
+    )
+
+    analysis = analyze_run(run_dir, codex_sessions_root=sessions)
+
+    signal = next(
+        signal
+        for signal in analysis["signals"]
+        if signal["signal_id"] == "broad_source_config_read"
+    )
+    largest = signal["evidence"]["largest_read_files"]
+    assert [item["path"] for item in largest] == ["src/whole.py", "docs/large.json"]
+    assert largest[1] == {
+        "path": "docs/large.json",
+        "bytes": 1_466,
+        "observed_bytes": 1_466,
+        "file_size_bytes": 792_933,
+        "whole_file_observed": False,
+        "source": str(run_dir / "normalized_events.jsonl"),
+    }
+
+
 def test_write_run_monitoring_writes_artifacts_and_trace(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     sessions = tmp_path / "sessions"
@@ -162,3 +223,106 @@ def test_batch_context_flags_zero_completed_control_plane_only(tmp_path: Path) -
     assert analysis["completed_count"] == 0
     assert analysis["signals"][0]["signal_id"] == "control_plane_spin"
     assert analysis["signals"][0]["confirmed_by_counters"] is False
+
+
+def test_run_analysis_classifies_no_delegation_explicitly(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    sessions = tmp_path / "sessions"
+    _base_run(run_dir)
+    _write_jsonl(
+        sessions / "rollout-thread-1.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": "thread-1"}},
+            _token_event(100, 100),
+            _call("pwd"),
+        ],
+    )
+
+    analysis = analyze_run(run_dir, codex_sessions_root=sessions)
+
+    assert analysis["delegation_summary"]["classification"] == "no_delegation"
+    assert analysis["delegation_summary"]["invocation_count"] == 0
+
+
+def test_run_analysis_distinguishes_delegation_tradeoff_from_waste(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    sessions = tmp_path / "sessions"
+    _base_run(run_dir)
+    _write_jsonl(
+        run_dir / "normalized_events.jsonl",
+        [
+            {
+                "type": "delegation_invocation",
+                "data": {
+                    "tool_name": "invoke_agent",
+                    "prompt_chars": 80,
+                    "input_keys": ["prompt"],
+                },
+            },
+            {
+                "type": "delegation_result",
+                "data": {
+                    "tool_name": "invoke_agent",
+                    "result_kind": "parent_context_summary",
+                    "output_chars": 320,
+                    "output_lines": 8,
+                    "raw_broad_source_leak": False,
+                    "token_usage": {
+                        "input_tokens": 5000,
+                        "cached_input_tokens": 0,
+                        "uncached_input_tokens": 5000,
+                        "output_tokens": 500,
+                        "reasoning_output_tokens": 0,
+                        "total_tokens": 5500,
+                    },
+                },
+            },
+        ],
+    )
+    _write_jsonl(
+        sessions / "rollout-thread-1.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": "thread-1"}},
+            _token_event(1000, 1000),
+            _call("pwd"),
+        ],
+    )
+
+    analysis = analyze_run(run_dir, codex_sessions_root=sessions)
+
+    assert analysis["delegation_summary"]["classification"] == "delegation_parent_context_tradeoff"
+    assert analysis["token_summary"]["parent_input_tokens"] == 1000
+    assert analysis["token_summary"]["delegated_token_dimensions"]["total_tokens"] == 5500
+    assert analysis["token_summary"]["combined_total_tokens"] == 6501
+    assert "delegation_parent_context_tradeoff" in {
+        signal["signal_id"] for signal in analysis["signals"]
+    }
+
+
+def test_run_analysis_flags_delegation_raw_source_leak_for_non_codex(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _base_run(run_dir, agent="claude")
+    _write_jsonl(
+        run_dir / "normalized_events.jsonl",
+        [
+            {"type": "delegation_invocation", "data": {"tool_name": "Agent"}},
+            {
+                "type": "delegation_result",
+                "data": {
+                    "tool_name": "Agent",
+                    "result_kind": "raw_broad_source_leak",
+                    "output_chars": 50000,
+                    "output_lines": 1000,
+                    "source_like_lines": 800,
+                    "raw_broad_source_leak": True,
+                },
+            },
+        ],
+    )
+
+    analysis = analyze_run(run_dir, codex_sessions_root=tmp_path / "sessions")
+
+    assert analysis["delegation_summary"]["classification"] == "delegation_raw_broad_source_leak"
+    signal_ids = {signal["signal_id"] for signal in analysis["signals"]}
+    assert "unsupported_provider_gap" in signal_ids
+    assert "delegation_raw_broad_source_leak" in signal_ids

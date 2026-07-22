@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 from run_artifacts.history import (
+    HISTORY_RUN_ARTIFACT_RELATIVE_PATHS,
+    MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
     iter_report_history,
     load_run_record,
     select_recent_run_dirs,
@@ -13,6 +16,22 @@ from run_artifacts.history import (
 
 def _write_json(path: Path, obj: object) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _canonical_hash(value: object) -> str:
+    return sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def test_history_artifact_contract_exposes_cleanup_sidecar() -> None:
+    assert MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH == (
+        "sandbox/maintenance_image_cleanup.json"
+    )
+    assert MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH in HISTORY_RUN_ARTIFACT_RELATIVE_PATHS
+    assert len(HISTORY_RUN_ARTIFACT_RELATIVE_PATHS) == len(
+        set(HISTORY_RUN_ARTIFACT_RELATIVE_PATHS)
+    )
 
 
 def test_write_report_history_jsonl_filters_and_embeds(tmp_path: Path) -> None:
@@ -308,3 +327,109 @@ def test_load_run_record_includes_terminal_artifact_read_details(tmp_path: Path)
     assert record["status"] == "terminal_artifact_unreadable"
     assert record["terminal_artifact_reads"]["report.json"]["exists"] is True
     assert record["terminal_artifact_reads"]["report.json"]["error_phase"] == "parse"
+
+
+def test_history_loads_maintenance_cleanup_sidecar_with_provenance(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260102T000000Z" / "codex" / "0"
+    (run_dir / "sandbox").mkdir(parents=True)
+    _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/target_a"})
+    payload = {
+        "schema_version": 1,
+        "cleanup_enabled": True,
+        "dry_run": False,
+        "repos_scanned": ["local", "registry.example/maintenance"],
+        "kept_tags": [
+            "local:identity-a",
+            "registry.example/maintenance:identity-a",
+        ],
+        "deleted_tags": [],
+        "deleted_image_ids": [],
+        "errors": [],
+    }
+    sidecar_path = run_dir / "sandbox" / "maintenance_image_cleanup.json"
+    _write_json(sidecar_path, payload)
+    expected_sha = sha256(sidecar_path.read_bytes()).hexdigest()
+
+    iterated = next(iter_report_history(runs_dir, embed="none"))
+    loaded = load_run_record(run_dir, runs_dir=runs_dir)
+    assert loaded is not None
+    for record in (iterated, loaded):
+        assert record["maintenance_image_cleanup"] == payload
+        assert record["maintenance_image_cleanup_read"] == {
+            "path": "sandbox/maintenance_image_cleanup.json",
+            "exists": True,
+            "decode_ok": True,
+            "parse_ok": True,
+            "error_phase": None,
+            "error_type": None,
+            "error_message": None,
+        }
+        assert record["maintenance_image_cleanup_artifact_ref"] == {
+            "path": "sandbox/maintenance_image_cleanup.json",
+            "exists": True,
+            "size_bytes": sidecar_path.stat().st_size,
+            "sha256": expected_sha,
+        }
+
+
+def test_history_preserves_malformed_maintenance_cleanup_read_failure(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260102T000000Z" / "codex" / "0"
+    (run_dir / "sandbox").mkdir(parents=True)
+    _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/target_a"})
+    sidecar_path = run_dir / "sandbox" / "maintenance_image_cleanup.json"
+    sidecar_path.write_text("{not-json}\n", encoding="utf-8")
+
+    record = next(iter_report_history(runs_dir, embed="none"))
+    assert record["maintenance_image_cleanup"] is None
+    assert record["maintenance_image_cleanup_read"]["exists"] is True
+    assert record["maintenance_image_cleanup_read"]["parse_ok"] is False
+    assert record["maintenance_image_cleanup_read"]["error_phase"] == "parse"
+    assert record["maintenance_image_cleanup_read"]["error_type"] == "JSONDecodeError"
+    assert record["maintenance_image_cleanup_artifact_ref"]["sha256"] == sha256(
+        sidecar_path.read_bytes()
+    ).hexdigest()
+
+
+def test_report_history_exposes_only_verified_research_parent_assignment(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260102T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    target_ref = {
+        "repo_input": "C:/repo/target_a",
+        "mission_id": "backlog_repro_research",
+    }
+    _write_json(run_dir / "target_ref.json", target_ref)
+    _write_json(run_dir / "report.json", {"schema_version": 1, "status": "success"})
+    assignment = {
+        "status": "complete",
+        "errors": [],
+        "case_id": "case:parent",
+        "problem_id": "problem:parent",
+        "expected_atom_ids": ["atom:source"],
+        "atom_receipts": [],
+    }
+    assignment["assignment_sha256"] = _canonical_hash(assignment)
+    sidecar = {
+        "schema_version": 1,
+        "producer": "backlog_miner.research_runner",
+        "target_ref_sha256": _canonical_hash(target_ref),
+        "evidence_assignment": assignment,
+    }
+    sidecar["sidecar_sha256"] = _canonical_hash(sidecar)
+    _write_json(run_dir / "evidence_assignment.json", sidecar)
+
+    record = next(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert record["evidence_assignment_read_status"] == "verified"
+    assert record["evidence_assignment"] == assignment
+
+    sidecar["evidence_assignment"]["case_id"] = "case:tampered"
+    _write_json(run_dir / "evidence_assignment.json", sidecar)
+    record = next(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert record["evidence_assignment_read_status"] == "invalid"
+    assert record["evidence_assignment"] is None

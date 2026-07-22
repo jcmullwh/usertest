@@ -37,6 +37,15 @@ def _init_git_repo(path: Path) -> None:
     )
 
 
+def _git(path: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def test_git_clone_supports_no_local_flag(monkeypatch) -> None:
     recorded: list[list[str]] = []
 
@@ -137,5 +146,37 @@ def test_acquire_target_local_git_repo_uses_safe_clone_and_connectivity_check(
             text=True,
         )
         assert proc.returncode == 0, proc.stderr or proc.stdout
+    finally:
+        shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+
+
+def test_acquire_target_fetches_ref_reachable_only_from_source_remote_tracking_ref(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src_repo"
+    _init_git_repo(src)
+    primary_branch = _git(src, "branch", "--show-current")
+
+    _git(src, "checkout", "-b", "temporary-frontier")
+    (src / "frontier.txt").write_text("remote-tracking frontier\n", encoding="utf-8")
+    _git(src, "add", "frontier.txt")
+    _git(src, "commit", "-m", "frontier")
+    frontier = _git(src, "rev-parse", "HEAD")
+    _git(src, "update-ref", "refs/remotes/origin/dev", frontier)
+    _git(src, "checkout", primary_branch)
+    _git(src, "update-ref", "-d", "refs/heads/temporary-frontier")
+
+    assert _git(src, "rev-parse", "refs/remotes/origin/dev") == frontier
+    assert _git(src, "branch", "--contains", frontier) == ""
+
+    dest = tmp_path / "workspace"
+    acquired = target_acquire.acquire_target(repo=str(src), dest_dir=dest, ref=frontier)
+    try:
+        assert acquired.mode == "git"
+        assert acquired.commit_sha == frontier
+        assert (acquired.workspace_dir / "frontier.txt").read_text(encoding="utf-8") == (
+            "remote-tracking frontier\n"
+        )
+        assert _git(acquired.workspace_dir, "branch", "--show-current") == ""
     finally:
         shutil.rmtree(acquired.workspace_dir, ignore_errors=True)

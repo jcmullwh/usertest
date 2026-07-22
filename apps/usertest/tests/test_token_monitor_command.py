@@ -140,3 +140,68 @@ def test_token_monitor_batch_context_command_writes_artifacts(
     out = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "token_batch_context.json" in out
     assert (batch_dir / "token_batch_context.json").exists()
+
+
+def test_token_monitor_delegation_ab_no_write_prints_json_only(
+    tmp_path: Path, capsys: object
+) -> None:
+    disabled = tmp_path / "disabled"
+    enabled = tmp_path / "enabled"
+    sessions = tmp_path / "sessions"
+    _base_run(disabled, sessions)
+    _base_run(enabled, sessions)
+    _write_json(disabled / "ticket_ref.json", {"fingerprint": "abc", "title": "Same ticket"})
+    _write_json(enabled / "ticket_ref.json", {"fingerprint": "abc", "title": "Same ticket"})
+    _write_jsonl(
+        enabled / "normalized_events.jsonl",
+        [
+            {"type": "delegation_invocation", "data": {"tool_name": "invoke_agent"}},
+            {
+                "type": "delegation_result",
+                "data": {"tool_name": "invoke_agent", "result_kind": "parent_context_summary"},
+            },
+        ],
+    )
+    # Keep the two fake runs distinct enough for the Codex thread join.
+    _write_jsonl(
+        enabled / "raw_events.jsonl",
+        [{"type": "thread.started", "thread_id": "thread-2"}],
+    )
+    _write_jsonl(
+        sessions / "rollout-thread-2.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": "thread-2"}},
+            _token_event(10, 10),
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "pwd"}),
+                },
+            },
+        ],
+    )
+
+    try:
+        main(
+            [
+                "token-monitor",
+                "delegation-ab",
+                "--disabled-run",
+                str(disabled),
+                "--enabled-run",
+                str(enabled),
+                "--codex-sessions-root",
+                str(sessions),
+                "--no-write",
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    out = capsys.readouterr().out  # type: ignore[attr-defined]
+    parsed = json.loads(out)
+    assert parsed["validation_kind"] == "delegation_ab"
+    assert parsed["comparisons"][0]["pair_key"] == "abc"
+    assert not (tmp_path / "delegation_ab_validation.json").exists()

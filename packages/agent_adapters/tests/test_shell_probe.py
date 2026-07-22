@@ -65,14 +65,14 @@ def _make_marker_agent(tmp_path: Path) -> str:
     if os.name == "nt":
         wrapper = tmp_path / "marker_agent.cmd"
         wrapper.write_text(
-            f"@echo off\r\n\"{sys.executable}\" \"{script}\" %*\r\n",
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
             encoding="utf-8",
             newline="\n",
         )
         return str(wrapper)
     wrapper = tmp_path / "marker_agent.sh"
     wrapper.write_text(
-        "#!/bin/sh\n" f"exec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+        f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -90,6 +90,8 @@ def test_probe_agent_shell_launch_uses_codex_adapter_path(tmp_path: Path) -> Non
         binary=binary,
         codex_sandbox="workspace-write",
         codex_ask_for_approval="never",
+        codex_ignore_user_config=False,
+        codex_ignore_rules=False,
     )
 
     payload = result.to_dict()
@@ -101,6 +103,8 @@ def test_probe_agent_shell_launch_uses_codex_adapter_path(tmp_path: Path) -> Non
     assert "exec" in result.argv
     assert "--sandbox" in result.argv
     assert "workspace-write" in result.argv
+    assert "--ignore-user-config" not in result.argv
+    assert "--ignore-rules" not in result.argv
 
 
 def test_probe_agent_shell_launch_accepts_codex_command_execution_aggregated_output(
@@ -133,14 +137,14 @@ def test_probe_agent_shell_launch_accepts_codex_command_execution_aggregated_out
     if os.name == "nt":
         binary = tmp_path / "codex_aggregated_output.cmd"
         binary.write_text(
-            f"@echo off\r\n\"{sys.executable}\" \"{script}\" %*\r\n",
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
             encoding="utf-8",
             newline="\n",
         )
     else:
         binary = tmp_path / "codex_aggregated_output.sh"
         binary.write_text(
-            "#!/bin/sh\n" f"exec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
             encoding="utf-8",
             newline="\n",
         )
@@ -158,6 +162,98 @@ def test_probe_agent_shell_launch_accepts_codex_command_execution_aggregated_out
     assert result["ok"] is True
     assert result["marker_seen"] is True
     assert result["marker_source"] == "codex.command_execution"
+
+
+def test_probe_agent_shell_launch_requires_positive_controlled_commands(tmp_path: Path) -> None:
+    script = tmp_path / "codex_required_commands.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "import sys",
+                "sys.stdin.read()",
+                "commands = [",
+                "    ('git rev-parse --is-inside-work-tree', 'true\\n'),",
+                "    ('python --version', 'Python 3.14\\n'),",
+                "    (\"Write-Output 'shell_probe=ok'\", 'shell_probe=ok\\n'),",
+                "]",
+                "for command, output in commands:",
+                "    print(json.dumps({'item': {'type': 'command_execution', "
+                "'command': 'powershell -Command ' + command, 'aggregated_output': output, "
+                "'exit_code': 0, 'status': 'completed'}}))",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    if os.name == "nt":
+        binary = tmp_path / "codex_required_commands.cmd"
+        binary.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        binary = tmp_path / "codex_required_commands.sh"
+        binary.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    payload = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "probe",
+        binary=str(binary),
+        codex_sandbox="workspace-write",
+        codex_required_commands=[
+            "git rev-parse --is-inside-work-tree",
+            "python --version",
+        ],
+        codex_required_command_outputs={
+            "git rev-parse --is-inside-work-tree": "true",
+            "python --version": "Python ",
+        },
+    ).to_dict()
+
+    assert payload["ok"] is True
+    assert payload["required_commands_seen"] == [
+        "git rev-parse --is-inside-work-tree",
+        "python --version",
+    ]
+
+    wrong_output = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "wrong-output-probe",
+        binary=str(binary),
+        codex_required_commands=["python --version"],
+        codex_required_command_outputs={"python --version": "Ruby "},
+    ).to_dict()
+    assert wrong_output["ok"] is False
+    assert wrong_output["required_commands_seen"] == []
+
+
+def test_probe_agent_shell_launch_fails_when_controlled_command_is_missing(
+    tmp_path: Path,
+) -> None:
+    binary = _make_marker_agent(tmp_path)
+
+    payload = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "probe",
+        binary=binary,
+        codex_required_commands=["python --version"],
+    ).to_dict()
+
+    assert payload["ok"] is False
+    assert payload["required_commands_seen"] == []
+    assert "python --version" in str(payload["reason"])
 
 
 def test_probe_agent_shell_launch_uses_claude_and_gemini_adapter_paths(tmp_path: Path) -> None:
@@ -201,6 +297,123 @@ def test_probe_agent_shell_launch_failure_is_structured(tmp_path: Path) -> None:
     assert result["reason"]
 
 
+def test_probe_agent_shell_launch_retries_codex_context_exhaustion(tmp_path: Path) -> None:
+    script = tmp_path / "context_then_marker.py"
+    counter = tmp_path / "attempt_count.txt"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "import sys",
+                "from pathlib import Path",
+                f"counter = Path({str(counter)!r})",
+                "attempt = int(counter.read_text() or '0') + 1 if counter.exists() else 1",
+                "counter.write_text(str(attempt))",
+                "sys.stdin.read()",
+                "if attempt == 1:",
+                (
+                    "    print(json.dumps({'type': 'error', 'message': \"Codex ran out "
+                    "of room in the model's context window. Start a new thread.\"}))"
+                ),
+                "    raise SystemExit(1)",
+                (
+                    "print(json.dumps({'item': {'type': 'command_execution', 'command': "
+                    "'powershell -Command echo shell_probe=ok', 'aggregated_output': "
+                    "'shell_probe=ok\\n', 'exit_code': 0}}))"
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    if os.name == "nt":
+        binary = tmp_path / "context_then_marker.cmd"
+        binary.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        binary = tmp_path / "context_then_marker.sh"
+        binary.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    payload = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "probe",
+        binary=str(binary),
+        codex_context_exhaustion_retries=1,
+    ).to_dict()
+
+    assert payload["ok"] is True
+    assert payload["attempt_count"] == 2
+    assert payload["retry_count"] == 1
+    assert [item["retryable_context_exhaustion"] for item in payload["attempt_history"]] == [
+        True,
+        False,
+    ]
+    assert all(Path(item["raw_events_path"]).is_file() for item in payload["attempt_history"])
+
+
+def test_probe_agent_shell_launch_bounds_persistent_context_exhaustion(tmp_path: Path) -> None:
+    script = tmp_path / "always_context_exhausted.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "import sys",
+                "sys.stdin.read()",
+                (
+                    "print(json.dumps({'type': 'error', 'message': \"Codex ran out of room "
+                    "in the model's context window.\"}))"
+                ),
+                "raise SystemExit(1)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    if os.name == "nt":
+        binary = tmp_path / "always_context_exhausted.cmd"
+        binary.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        binary = tmp_path / "always_context_exhausted.sh"
+        binary.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    payload = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "probe",
+        binary=str(binary),
+        codex_context_exhaustion_retries=1,
+    ).to_dict()
+
+    assert payload["ok"] is False
+    assert payload["attempt_count"] == 2
+    assert payload["retry_count"] == 1
+    assert all(
+        item["retryable_context_exhaustion"] for item in payload["attempt_history"]
+    )
+
+
 def test_probe_agent_shell_launch_does_not_accept_final_message_marker(tmp_path: Path) -> None:
     script = tmp_path / "final_only.py"
     script.write_text(
@@ -221,14 +434,14 @@ def test_probe_agent_shell_launch_does_not_accept_final_message_marker(tmp_path:
     if os.name == "nt":
         binary = tmp_path / "final_only.cmd"
         binary.write_text(
-            f"@echo off\r\n\"{sys.executable}\" \"{script}\" %*\r\n",
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
             encoding="utf-8",
             newline="\n",
         )
     else:
         binary = tmp_path / "final_only.sh"
         binary.write_text(
-            "#!/bin/sh\n" f"exec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
             encoding="utf-8",
             newline="\n",
         )

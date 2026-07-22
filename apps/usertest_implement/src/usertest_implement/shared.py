@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 _WINDOWS_OFFLINE_FIRST_SUCCESS_CMD = (
-    r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
+    "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/offline_first_success.ps1"
 )
 _POSIX_OFFLINE_FIRST_SUCCESS_CMD = "bash ./scripts/offline_first_success.sh"
 _SOURCE_RELATIVE_PATHS = (
@@ -246,7 +246,13 @@ def _require_docker_available() -> None:
 
 
 try:
-    from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
+    from runner_core import (
+        RunnerConfig,
+        RunRequest,
+        find_repo_root,
+        run_once,
+        verification_command_safety_errors,
+    )
     from runner_core.execution_backend import (
         _load_maintenance_docker_config,
         cleanup_local_maintenance_images,
@@ -263,6 +269,7 @@ try:
         load_atom_actions_yaml,
         load_backlog_actions_yaml,
         reconcile_atom_actions_from_plan_folders,
+        validate_outcome_record,
         write_atom_actions_yaml,
         write_backlog_actions_yaml,
     )
@@ -302,6 +309,12 @@ class SelectedTicket:
     ticket_markdown: str
     tickets_export_path: Path | None
     export_index: int | None
+    case_id: str | None = None
+    plan_revision_id: str | None = None
+    ticket_body_sha256: str | None = None
+    local_plan_sha256: str | None = None
+    verification_contract_sha256: str | None = None
+    target_contract_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -349,6 +362,7 @@ _SETTINGS_COMMON_SPECS: dict[str, _SettingsValueSpec] = {
     "exec_cache": _SettingsValueSpec("choice", choices=("cold", "warm")),
     "exec_cache_dir": _SettingsValueSpec("path", allow_none=True),
     "maintenance_venv_cache": _SettingsValueSpec("bool"),
+    "exec_maintenance_image_metadata_path": _SettingsValueSpec("path", allow_none=True),
     "dry_run": _SettingsValueSpec("bool"),
     "verification_profile": _SettingsValueSpec(
         "choice",
@@ -450,7 +464,7 @@ def _sync_ticket_atom_actions(
     discarded_path: Path | None = None,
     discarded_at: str | None = None,
 ) -> dict[str, Any]:
-    resolved_atom_actions_path = atom_actions_path or _default_atom_actions_path(repo_root)
+    resolved_atom_actions_path = atom_actions_path or _default_atom_actions_path(owner_root)
     atom_actions = load_atom_actions_yaml(resolved_atom_actions_path)
     sync_at = discarded_at or _utc_now_z()
     meta = reconcile_atom_actions_from_plan_folders(
@@ -490,14 +504,18 @@ def _resolve_repo_root(repo_root: Path | None) -> Path:
     return repo_root.resolve()
 
 
-def _load_runner_config(repo_root: Path) -> RunnerConfig:
+def _load_runner_config(
+    repo_root: Path,
+    *,
+    runs_dir: Path | None = None,
+) -> RunnerConfig:
     agents_cfg = _load_yaml(repo_root / "configs" / "agents.yaml").get("agents", {})
     policies_cfg = _load_yaml(repo_root / "configs" / "policies.yaml").get("policies", {})
     if not isinstance(agents_cfg, dict) or not isinstance(policies_cfg, dict):
         raise ValueError("Invalid configs under configs/.")
     return RunnerConfig(
         repo_root=repo_root,
-        runs_dir=repo_root / "runs" / "usertest_implement",
+        runs_dir=(runs_dir or (repo_root / "runs" / "usertest_implement")).resolve(),
         agents=agents_cfg,
         policies=policies_cfg,
     )

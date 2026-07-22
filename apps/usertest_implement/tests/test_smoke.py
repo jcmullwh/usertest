@@ -14,7 +14,7 @@ def test_parser_smoke() -> None:
     assert args.dry_run is True
     assert args.base_branch == "dev"
     assert args.exec_backend == "docker"
-    assert args.exec_keep_container is True
+    assert args.exec_keep_container is False
     assert args.move_on_start is True
     assert args.move_on_commit is True
     assert args.draft_pr_on_ci_failure is True
@@ -37,7 +37,7 @@ def test_parser_no_docker_overrides_default() -> None:
     assert args.exec_backend == "local"
 
 
-def test_parser_opt_out_flags() -> None:
+def test_parser_accepts_pre_resolved_maintenance_image_metadata() -> None:
     parser = build_parser()
     args = parser.parse_args(
         [
@@ -45,16 +45,49 @@ def test_parser_opt_out_flags() -> None:
             "--ticket-path",
             "C:\\tmp\\ticket.md",
             "--dry-run",
-            "--no-exec-keep-container",
+            "--exec-maintenance-image-metadata",
+            "C:\\tmp\\maintenance_image.json",
+        ]
+    )
+    assert args.exec_maintenance_image_metadata_path == Path("C:\\tmp\\maintenance_image.json")
+
+
+def test_parser_container_retention_is_an_explicit_opt_in() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "--ticket-path",
+            "C:\\tmp\\ticket.md",
+            "--dry-run",
+            "--exec-keep-container",
             "--no-move-on-start",
             "--no-move-on-commit",
             "--no-draft-pr-on-ci-failure",
         ]
     )
-    assert args.exec_keep_container is False
+    assert args.exec_keep_container is True
     assert args.move_on_start is False
     assert args.move_on_commit is False
     assert args.draft_pr_on_ci_failure is False
+
+
+def test_all_execution_parser_surfaces_default_to_discarding_containers() -> None:
+    parser = build_parser()
+
+    run_args = parser.parse_args(
+        ["run", "--ticket-path", "C:\\tmp\\ticket.md", "--dry-run"]
+    )
+    review_args = parser.parse_args(
+        ["review", "run", "--ticket-path", "C:\\tmp\\ticket.md", "--dry-run"]
+    )
+    resume_args = parser.parse_args(
+        ["resume", "--run-dir", "C:\\tmp\\run", "--dry-run"]
+    )
+
+    assert run_args.exec_keep_container is False
+    assert review_args.exec_keep_container is False
+    assert resume_args.exec_keep_container is False
 
 
 def test_help_smoke() -> None:
@@ -85,3 +118,34 @@ def test_parser_maintenance_images_list() -> None:
     parser = build_parser()
     args = parser.parse_args(["maintenance-images", "list", "--timeout-seconds", "9"])
     assert args.timeout_seconds == 9.0
+
+
+def test_parser_accepts_model_free_existing_pr_adoption() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "handoff",
+            "adopt-pr",
+            "--owner-root",
+            "C:\\owner",
+            "--ticket-path",
+            "C:\\owner\\.agents\\plans\\2 - ready\\ticket.md",
+            "--source-run-dir",
+            "U:\\runs\\source",
+            "--runs-dir",
+            "U:\\runs",
+            "--pr-url",
+            "https://github.com/example/project/pull/213",
+            "--base-branch",
+            "dev",
+            "--remote-name",
+            "github",
+        ]
+    )
+
+    assert args.handoff_cmd == "adopt-pr"
+    assert args.source_run_dir == Path("U:\\runs\\source")
+    assert args.remote_name == "github"
+    assert args.base_branch == "dev"
+    assert not hasattr(args, "agent")
+    assert not hasattr(args, "model")

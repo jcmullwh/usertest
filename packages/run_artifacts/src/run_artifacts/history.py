@@ -5,6 +5,7 @@ import os
 import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from run_artifacts.lifecycle import (
 )
 from run_artifacts.lifecycle import (
     JsonArtifactReadResult,
+    artifact_read_details,
     classify_run_lifecycle,
 )
 from run_artifacts.path_normalization import normalize_agent_path
@@ -45,6 +47,93 @@ _EMBED_DEFINITION_KEYS = {
     "prompt_template_md",
     "report_schema_json",
 }
+MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH = "sandbox/maintenance_image_cleanup.json"
+HISTORY_NONE_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = (
+    "target_ref.json",
+    "evidence_assignment.json",
+    "effective_run_spec.json",
+    "report.json",
+    "metrics.json",
+    "preflight.json",
+    "error.json",
+    "report_validation_errors.json",
+    "run_meta.json",
+    "agent_attempts.json",
+    "ticket_ref.json",
+    "timing.json",
+    MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
+)
+HISTORY_DEFINITION_EMBED_RELATIVE_PATHS: tuple[str, ...] = (
+    "persona.source.md",
+    "persona.resolved.md",
+    "mission.source.md",
+    "mission.resolved.md",
+    "prompt.template.md",
+    "report.schema.json",
+)
+HISTORY_PROMPT_EMBED_RELATIVE_PATHS: tuple[str, ...] = (
+    "prompt.txt",
+)
+HISTORY_ALL_EMBED_RELATIVE_PATHS: tuple[str, ...] = (
+    "users.md",
+)
+HISTORY_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        (
+            *HISTORY_NONE_RUN_ARTIFACT_RELATIVE_PATHS,
+            *HISTORY_DEFINITION_EMBED_RELATIVE_PATHS,
+            *HISTORY_PROMPT_EMBED_RELATIVE_PATHS,
+            *HISTORY_ALL_EMBED_RELATIVE_PATHS,
+        )
+    )
+)
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    return sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _verified_evidence_assignment_sidecar(
+    run_dir: Path,
+    *,
+    target_ref: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """Read the stage-3 parent binding only when every runner hash is intact."""
+
+    path = run_dir / "evidence_assignment.json"
+    if not path.is_file():
+        return None, "missing"
+    raw = _read_json(path)
+    if not isinstance(raw, dict):
+        return None, "unreadable"
+    supplied_sidecar_hash = raw.get("sidecar_sha256")
+    unsigned = {key: value for key, value in raw.items() if key != "sidecar_sha256"}
+    assignment = raw.get("evidence_assignment")
+    if (
+        raw.get("schema_version") != 1
+        or raw.get("producer") != "backlog_miner.research_runner"
+        or supplied_sidecar_hash != _canonical_json_sha256(unsigned)
+        or not isinstance(target_ref, dict)
+        or raw.get("target_ref_sha256") != _canonical_json_sha256(target_ref)
+        or not isinstance(assignment, dict)
+        or assignment.get("assignment_sha256")
+        != _canonical_json_sha256(
+            {
+                key: value
+                for key, value in assignment.items()
+                if key != "assignment_sha256"
+            }
+        )
+    ):
+        return None, "invalid"
+    return dict(assignment), "verified"
 
 
 def _parse_timestamp_dirname(name: str) -> str | None:
@@ -250,6 +339,33 @@ def _read_json(path: Path) -> Any | None:
     return _read_json_artifact(path).value
 
 
+def _read_maintenance_image_cleanup_sidecar(
+    run_dir: Path,
+) -> tuple[Any | None, dict[str, Any], dict[str, Any]]:
+    """Read the runner-owned cleanup observation with explicit byte/read provenance."""
+
+    path = run_dir / Path(MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH)
+    read = _read_json_artifact(path)
+    read_details = artifact_read_details(read)
+    read_details["path"] = MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH
+
+    artifact_ref: dict[str, Any] = {
+        "path": MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
+        "exists": read.exists,
+        "size_bytes": None,
+        "sha256": None,
+    }
+    if read.exists:
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            pass
+        else:
+            artifact_ref["size_bytes"] = len(raw)
+            artifact_ref["sha256"] = sha256(raw).hexdigest()
+    return read.value, read_details, artifact_ref
+
+
 def _derive_run_status(
     *,
     report_read: JsonArtifactReadResult,
@@ -435,6 +551,12 @@ def iter_report_history(
             run_rel = None
 
         target_ref = _read_json(run_dir / "target_ref.json")
+        evidence_assignment, evidence_assignment_read_status = (
+            _verified_evidence_assignment_sidecar(
+                run_dir,
+                target_ref=target_ref,
+            )
+        )
         if normalized_repo_input is not None:
             candidate = None
             if isinstance(target_ref, dict):
@@ -459,6 +581,11 @@ def iter_report_history(
         agent_attempts = _read_json(run_dir / "agent_attempts.json")
         ticket_ref = _read_json(run_dir / "ticket_ref.json")
         timing = _read_json(run_dir / "timing.json")
+        (
+            maintenance_image_cleanup,
+            maintenance_image_cleanup_read,
+            maintenance_image_cleanup_artifact_ref,
+        ) = _read_maintenance_image_cleanup_sidecar(run_dir)
 
         agent_exit_code: int | None = None
         if isinstance(error, dict):
@@ -539,6 +666,8 @@ def iter_report_history(
             "status": status,
             "agent_exit_code": agent_exit_code,
             "target_ref": target_ref,
+            "evidence_assignment": evidence_assignment,
+            "evidence_assignment_read_status": evidence_assignment_read_status,
             "effective_run_spec": effective_run_spec,
             "report": report,
             "metrics": metrics,
@@ -549,6 +678,11 @@ def iter_report_history(
             "agent_attempts": agent_attempts,
             "ticket_ref": ticket_ref if isinstance(ticket_ref, dict) else None,
             "timing": timing if isinstance(timing, dict) else None,
+            "maintenance_image_cleanup": maintenance_image_cleanup,
+            "maintenance_image_cleanup_read": maintenance_image_cleanup_read,
+            "maintenance_image_cleanup_artifact_ref": (
+                maintenance_image_cleanup_artifact_ref
+            ),
             "terminal_artifact_reads": terminal_artifact_reads,
             "embedded": embedded,
             "embedded_capture_manifest": embedded_capture_manifest,
@@ -632,6 +766,11 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
     run_meta_read = _read_json_artifact(run_dir / "run_meta.json")
     run_meta = run_meta_read.value
     agent_attempts = _read_json(run_dir / "agent_attempts.json")
+    (
+        maintenance_image_cleanup,
+        maintenance_image_cleanup_read,
+        maintenance_image_cleanup_artifact_ref,
+    ) = _read_maintenance_image_cleanup_sidecar(run_dir)
 
     agent_exit_code: int | None = None
     if isinstance(error, dict):
@@ -666,6 +805,9 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
         "report_validation_errors": report_validation_errors,
         "run_meta": run_meta,
         "agent_attempts": agent_attempts,
+        "maintenance_image_cleanup": maintenance_image_cleanup,
+        "maintenance_image_cleanup_read": maintenance_image_cleanup_read,
+        "maintenance_image_cleanup_artifact_ref": maintenance_image_cleanup_artifact_ref,
         "terminal_artifact_reads": terminal_artifact_reads,
         "embedded": {},
         "embedded_capture_manifest": {},

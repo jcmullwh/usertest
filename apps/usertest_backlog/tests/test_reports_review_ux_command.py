@@ -250,8 +250,7 @@ def test_reports_review_ux_internal_profile_includes_review_domain_and_accept_ex
         "selected_option_id": "option:test:most_comprehensive",
         "selected_family_id": "most_comprehensive",
         "selection_rationale": (
-            "Repeated cross-run startup degradation supports a class-level "
-            "internal fix."
+            "Repeated cross-run startup degradation supports a class-level internal fix."
         ),
         "repo_intent_alignment": "Prefer loud failures and reproducible artifacts.",
         "why_other_options_were_not_selected": "Direct fix leaves broader recurrence risk.",

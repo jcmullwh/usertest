@@ -52,7 +52,7 @@ Commands are grouped under `reports`:
 - `analyze`: analyze a history file and write an issue analysis summary
 - `window`: summarize the last N runs vs previous N runs (timing + outcomes + regressions)
 - `review-ux`: UX-focused review of reports
-- `export-tickets`: export tickets (format depends on repo config)
+- `export-tickets`: write ticket export JSON/Markdown and synchronize configured local plan files
 - `backlog`: render backlog documents
 
 Example:
@@ -72,20 +72,57 @@ Notes:
   alongside the final backlog:
 
   - `*.problem_records.json` / `*.problem_records.md`
+  - `*.problem_records.evidence_receipt.json` (full-read and exact disposition proof)
   - `*.prioritized_problems.json` / `*.prioritized_problems.md`
   - `*.research.json` / `*.research.md`
   - `*.solution_options.json` / `*.solution_options.md`
   - `*.solution_selection.json` / `*.solution_selection.md`
   - `*.change_plans.json` / `*.change_plans.md`
+  - `*.case_registry.json`
   - `*.backlog.json` / `*.backlog.md`
 
   `review-ux` is driven by stage 5 (`*.solution_selection.json`) rather than early-stage tickets.
-- `reports backlog --dry-run` is offline: it does not invoke an agent. It synthesizes deterministic
-  stage outputs so fixtures/tests can validate the full chain end-to-end.
+  Windows evidence reads use direct `Get-Content -Raw -Encoding UTF8 -LiteralPath <file>` commands;
+  the receipt accepts current Codex `aggregated_output` only after exact content, size, and SHA
+  verification and rejects additional output or preview-only citations.
+- `reports backlog --dry-run` is offline: it does not invoke an agent. Stages 1-2 emit
+  deterministic fixture artifacts, stage 3 records blocked research, and stages 4-6 remain empty.
+  Its stage-1 receipt explicitly records that no model read attestation occurred and is never
+  shadow/export eligible. Dry-run validates orchestration and evidence gates; it never synthesizes
+  implementation readiness.
+- `reports backlog --research-ref <git-ref>` overrides the configured stage-3 source ref. Live
+  research resolves that ref before acquisition and binds every downstream artifact to the resolved
+  commit. The default is `backlog_research.source_ref` in `configs/backlog_research.yaml`.
+- Stage-3 clean replays use the explicit `backlog_research.replay_executor` contract. The repo
+  default is `platform_router`: platform-neutral/Linux evidence runs in Docker with
+  `--network none` and no forwarded host environment, while an explicitly Windows-only
+  experiment may use `trusted_host` for an existing local `--repo-input` inside one of
+  `replay_trusted_host_roots`. Missing, invalid, or mismatched routing configuration fails closed.
+  The selected boundary is retained in the stage input and replay evidence receipts.
+- Post-research consolidation requires the same repository revision and a runner-verified causal
+  signature that includes the controlled causal branch; a shared path or symbol alone cannot merge
+  cases. The canonical dossier retains and revalidates every member proof and outcome oracle. Stage
+  5 selects one supported positive outcome contract per retained oracle, and stage 6 emits a signed
+  multi-scenario replay when a canonical case represents more than one original scenario.
+- `reports backlog --shadow` runs the full agent-backed pipeline without updating the atom-action
+  ledger or exporting tickets. The export gate uses `required_consecutive_shadow_cycles`; with
+  `require_exact_export_projection: true`, every cycle in that streak must share the same
+  canonical case and causal plan intent: evidence, mechanism binding, exact targets, and
+  executable oracles. Generated titles, prose, fingerprints, and content-addressed plan revision
+  IDs are not stability signals. The latest backlog and full export projection remain byte-bound
+  to export independently of that cross-cycle semantic comparison.
 - Backlog mining knobs from the legacy one-pass miner (`--miners`, `--coverage-miners`,
   `--bagging-miners`, `--orphan-pass`, `--labelers`, merge flags) are still accepted but are
   ignored by the six-stage pipeline (the CLI prints a note when they are non-default).
-- `reports backlog` excludes atoms with prior outcomes by default (`ticketed` + `queued` + `actioned`).
+- `reports backlog` excludes operationally ticketed/queued/actioned atoms by default, while
+  canonical case lineage prevents derived research or implementation evidence from becoming a new
+  issue by default. An explicit `novel_case` disposition and rationale is required for a distinct
+  research- or implementation-infrastructure failure. Queue state does not mean resolved; durable
+  outcomes distinguish tested, live-verified, resolved, mitigated, duplicate, superseded, and
+  unverified work.
+  A complete plan-folder scan also resets a legacy `actioned` atom to `new` when neither a
+  surviving plan nor a provenance-verified terminal outcome exists. This fail-open recovery does
+  not apply to IDEA-originated records and preserves the old ledger fields as audit history.
   To regenerate the backlog while keeping only actioned work excluded, use
   `--carryover-actioned-only` (demotes `ticketed`/`queued` atoms back to `new` before filtering).
 

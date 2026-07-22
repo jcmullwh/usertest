@@ -367,6 +367,7 @@ def _resolve_codex_sandbox_mode(
     request: Any,
     codex_policy: dict[str, Any],
     has_sandbox_backend: bool,
+    platform_os_name: str = os.name,
 ) -> str:
     sandbox_policy_raw = codex_policy.get("sandbox", "read-only")
     sandbox_policy = (
@@ -374,7 +375,13 @@ def _resolve_codex_sandbox_mode(
         if isinstance(sandbox_policy_raw, str) and sandbox_policy_raw.strip()
         else "read-only"
     )
-    if has_sandbox_backend and request.policy == "write":
+    if request.policy == "write" and (
+        has_sandbox_backend or platform_os_name.strip().lower() == "nt"
+    ):
+        # The current native Windows Codex workspace-write sandbox accepts read-only shell
+        # probes but rejects apply_patch and test commands as read-only. Local write missions
+        # therefore use the CLI's functioning unrestricted mode; runner-owned target, branch,
+        # verification, review, and PR gates remain authoritative.
         return "danger-full-access"
     return sandbox_policy
 

@@ -1,0 +1,455 @@
+{
+  "schema_version": 2,
+  "captured_from": {
+    "problem_records": "runs/usertest/usertest/_compiled/usertest.problem_records.json",
+    "research": "runs/usertest/usertest/_compiled/usertest.research.json",
+    "change_plans": "runs/usertest/usertest/_compiled/usertest.change_plans.json",
+    "captured_at": "2026-07-09",
+    "note": "Sanitized retained extracts from the audit corpus. Missing raw run artifacts remain integrity_unknown; this fixture must not be treated as a replay of evidence that is no longer retained."
+  },
+  "source_manifest": {
+    "canonicalization": "utf8-json-sort-keys-compact",
+    "included_origin": "automated_atom_and_generated_pipeline_artifact",
+    "excluded_origins": [
+      "IDEA",
+      "external_idea"
+    ],
+    "raw_corpus_status": "partially_unavailable_integrity_unknown",
+    "problem_records_source_status": "path_recorded_source_not_retained_in_worktree",
+    "research_source_status": "path_recorded_source_not_retained_in_worktree",
+    "change_plans_source_status": "path_recorded_source_not_retained_in_worktree",
+    "captured_artifact_bindings": [
+      {
+        "logical_path": "runs/usertest/usertest/_compiled/usertest.problem_records.json",
+        "size_bytes": 51416,
+        "sha256": "9092777a465d87e81348837720cbd7cd12b1c85aff2487c5c3b2422ed7fbd722",
+        "retention": "observed_in_external_source_checkout_not_vendored"
+      },
+      {
+        "logical_path": "runs/usertest/usertest/_compiled/usertest.research.json",
+        "size_bytes": 58527,
+        "sha256": "216f866ca08efda3647b3be8dce3a1d75a76c715828d2454119b8349de0dca17",
+        "retention": "observed_in_external_source_checkout_not_vendored"
+      },
+      {
+        "logical_path": "runs/usertest/usertest/_compiled/usertest.change_plans.json",
+        "size_bytes": 120156,
+        "sha256": "5c22094c4c88a997694e2c7cd34cb3a8893b3094c5f37e74e63944bcd18198bd",
+        "retention": "observed_in_external_source_checkout_not_vendored"
+      }
+    ],
+    "cases_sha256": "a5a7cc8b7a2643e1859c0b353f52777450e877d443e2453dd0abe75cf81a808b",
+    "retained_replay_sha256": "aad78d1054889e29e20af3e2923251d22a91cbdcc81194f1bdb2f0bf549d87ef"
+  },
+  "cases": [
+    {
+      "benchmark_id": "lifecycle-classification",
+      "kind": "canonical_grouping",
+      "historical_evidence_status": "integrity_unknown",
+      "source_evidence": [
+        {
+          "evidence_id": "retained:lifecycle:run-failure",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_evidence_projection",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "31f9a15fa156758f2c0e3abc37130b4749752bda3ec01cb6a9b22f9789f34f3e",
+          "snapshot": {
+            "atom_id": "usertest/20260704T042943Z/codex/4095237981:run_failure_event:1",
+            "run_id": "usertest/20260704T042943Z/codex/4095237981",
+            "origin_run_id": "usertest/20260704T042943Z/codex/4095237981",
+            "origin_stage": "atom_extraction",
+            "source": "run_failure_event",
+            "severity_hint": "high",
+            "evidence_role": "observation",
+            "evidence_class": "observation",
+            "disposition": "unresolved",
+            "disposition_status": "pending",
+            "disposition_receipt": null,
+            "case_id": null,
+            "supporting_case_ids": [],
+            "derived_from_atom_ids": [],
+            "idea_originated": false,
+            "text": "A retained automated failure record says an incomplete run directory was classified as missing_report before its report was available. The original raw run directory is no longer retained."
+          }
+        },
+        {
+          "evidence_id": "retained:lifecycle:confusion",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_evidence_projection",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "06c84324872109e94504150fd8c5e2ebb8db43c7b05484730d3f0ee4cc66b697",
+          "snapshot": {
+            "atom_id": "usertest/20260706T082813Z/codex/3207838117:confusion_point:1",
+            "run_id": "usertest/20260706T082813Z/codex/3207838117",
+            "origin_run_id": "usertest/20260706T082813Z/codex/3207838117",
+            "origin_stage": "atom_extraction",
+            "source": "confusion_point",
+            "severity_hint": "high",
+            "evidence_role": "observation",
+            "evidence_class": "observation",
+            "disposition": "unresolved",
+            "disposition_status": "pending",
+            "disposition_receipt": null,
+            "case_id": null,
+            "supporting_case_ids": [],
+            "derived_from_atom_ids": [],
+            "idea_originated": false,
+            "text": "A retained automated atom reports that unfinished run directories were surfaced as missing reports. The original raw atom artifact is unavailable."
+          }
+        }
+      ],
+      "records": [
+        {
+          "problem_id": "problem:missing-report-from-incomplete-run-directories",
+          "case_id": "case:lifecycle-a",
+          "title": "Incomplete run directories are classified as missing_report",
+          "evidence_atom_ids": [
+            "usertest/20260704T042943Z/codex/4095237981:run_failure_event:1",
+            "usertest/20260706T082813Z/codex/3207838117:confusion_point:1"
+          ]
+        },
+        {
+          "problem_id": "problem:incomplete-run-marked-missing-report",
+          "case_id": "case:lifecycle-b",
+          "title": "Incomplete run directories are classified as missing reports",
+          "evidence_atom_ids": [
+            "usertest/20260704T045717Z/codex/2006462894:run_failure_event:1"
+          ]
+        }
+      ],
+      "relation": "same_cause_group",
+      "expected_pre_research_cases": 2,
+      "expected_without_verified_relation_receipt": 2,
+      "expected_with_verified_relation_receipt": 1,
+      "case_sha256": "287606ca5b1f69adcc4a21f8704d9468823c69478f55da800e75ba6b4210f5e8"
+    },
+    {
+      "benchmark_id": "verification-artifact-paths",
+      "kind": "derived_lineage",
+      "historical_evidence_status": "integrity_unknown",
+      "source_evidence": [
+        {
+          "evidence_id": "retained:verification-path:source",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_evidence_projection",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "6605e578ca01f45666ad39071973c0a0966cc1fba7e77b86c69aa3d95efd893c",
+          "snapshot": {
+            "atom_id": "usertest/20260706T083852Z/codex/1599902036:confusion_point:1",
+            "run_id": "usertest/20260706T083852Z/codex/1599902036",
+            "origin_run_id": "usertest/20260706T083852Z/codex/1599902036",
+            "origin_stage": "atom_extraction",
+            "source": "confusion_point",
+            "severity_hint": "high",
+            "evidence_role": "observation",
+            "evidence_class": "observation",
+            "disposition": "unresolved",
+            "disposition_status": "pending",
+            "disposition_receipt": null,
+            "case_id": null,
+            "supporting_case_ids": [],
+            "derived_from_atom_ids": [],
+            "idea_originated": false,
+            "text": "A retained automated atom reports that verification artifacts were not readable through the path given to the agent."
+          }
+        },
+        {
+          "evidence_id": "retained:verification-path:derived-research",
+          "origin_category": "automated",
+          "snapshot_kind": "current_lineage_regression_input",
+          "integrity_status": "synthetic_current_contract",
+          "snapshot_sha256": "e4dab91033abf54a0ff642c92cde96c5d3739f4406798ac13f0dd05e01ba8810",
+          "snapshot": {
+            "atom_id": "usertest/20260706T120000Z/codex/1:confusion_point:1",
+            "run_id": "usertest/20260706T120000Z/codex/1",
+            "origin_run_id": "usertest/20260706T120000Z/codex/1",
+            "origin_stage": "repro_research",
+            "source": "confusion_point",
+            "severity_hint": "high",
+            "mission_id": "backlog_repro_research",
+            "parent_problem_id": "problem:verification-broker-agent-paths-unreadable",
+            "derived_from_atom_ids": [
+              "usertest/20260706T083852Z/codex/1599902036:confusion_point:1"
+            ],
+            "evidence_role": "research",
+            "evidence_class": "observation",
+            "disposition": "unresolved",
+            "disposition_status": "pending",
+            "disposition_receipt": null,
+            "case_id": null,
+            "supporting_case_ids": [],
+            "idea_originated": false,
+            "text": "Research verified that an agent-readable path is now emitted; this is derived evidence for the existing case, not a fresh recurrence."
+          }
+        }
+      ],
+      "problem_id": "problem:verification-broker-agent-paths-unreadable",
+      "case_id": "case:verification-path",
+      "source_atom_id": "usertest/20260706T083852Z/codex/1599902036:confusion_point:1",
+      "derived_atom_id": "usertest/20260706T120000Z/codex/1:confusion_point:1",
+      "mission_id": "backlog_repro_research",
+      "expected_disposition": "supports_case",
+      "expected_new_cases": 0,
+      "case_sha256": "50faa079b13abadc93fd0e32aa0968773edd456206c0385d4989c1117366eb9e"
+    },
+    {
+      "benchmark_id": "apply-patch-context",
+      "kind": "research_gate",
+      "historical_evidence_status": "retained_compiled_excerpt_only",
+      "source_evidence": [
+        {
+          "evidence_id": "retained:apply-patch:compiled-problem",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_problem_reference",
+          "integrity_status": "retained_in_fixture",
+          "snapshot_sha256": "6bd8d6492052ee22612ae2ab3b18525d7338b7029a5a6b17e63161ad72e392b4",
+          "snapshot": {
+            "problem_id": "problem:apply-patch-context-mismatch-blocks-edits",
+            "evidence_atom_ids": [
+              "usertest/20260706T080723Z/codex/2266456674:confusion_point:1",
+              "usertest/20260706T080723Z/codex/2266456674:confusion_point:2",
+              "usertest/20260706T084544Z/codex/1351845563:confusion_point:1",
+              "usertest/20260706T084544Z/codex/1351845563:confusion_point:2"
+            ],
+            "origin_stage": "problem_mining",
+            "evidence_role": "observation",
+            "idea_originated": false
+          }
+        }
+      ],
+      "problem_id": "problem:apply-patch-context-mismatch-blocks-edits",
+      "historical_reproduction_status": "partial",
+      "historical_material_unknown": "Exact failure path and recovery boundary were not established.",
+      "expected_ready": false,
+      "case_sha256": "9d70236fa0a62d2477d97bcae70c10291c3152661a33d9f1f517a26b6be815a7"
+    },
+    {
+      "benchmark_id": "windows-shell",
+      "kind": "outcome_gate",
+      "historical_evidence_status": "integrity_unknown",
+      "source_evidence": [
+        {
+          "evidence_id": "retained:windows-shell:failure",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_evidence_projection",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "842a0db75b721d8ee4130e092e43aabb023c6470faa3cf9973ddba9542e46235",
+          "snapshot": {
+            "atom_id": "retained/windows-shell:run_failure_event:1",
+            "run_id": "retained/windows-shell",
+            "origin_run_id": "retained/windows-shell",
+            "origin_stage": "atom_extraction",
+            "source": "run_failure_event",
+            "severity_hint": "blocker",
+            "evidence_role": "observation",
+            "evidence_class": "observation",
+            "disposition": "unresolved",
+            "disposition_status": "pending",
+            "disposition_receipt": null,
+            "case_id": null,
+            "supporting_case_ids": [],
+            "derived_from_atom_ids": [],
+            "idea_originated": false,
+            "text": "A retained automated problem record reports a Windows shell launch failure even though the effective policy allowed shell execution. The original live runtime is unavailable for replay."
+          }
+        }
+      ],
+      "problem_id": "problem:windows-sandbox-shell-exec-panics",
+      "historical_reproduction_status": "partial",
+      "historical_outcome_state": "tests_verified",
+      "expected_current_outcome_state_without_provenance": "unverified",
+      "requires_live_verification": true,
+      "expected_suppresses_discovery": false,
+      "expected_resolution_without_live_proof": "rejected",
+      "case_sha256": "dd0e1d71a0750e76b0acd239bc15b8c95ccd122710b4116fb61b43278a6ab394"
+    },
+    {
+      "benchmark_id": "storage-exhaustion",
+      "kind": "canonical_grouping",
+      "historical_evidence_status": "integrity_unknown",
+      "source_evidence": [
+        {
+          "evidence_id": "retained:storage:install",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_evidence_projection",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "32899e592688cbaf34b52182173f35e0f86a7e12fae4d6ac3f7e6f5526aa9bd3",
+          "snapshot": {
+            "atom_id": "usertest/20260706T075725Z/codex/2096056799:confusion_point:1",
+            "origin_stage": "atom_extraction",
+            "source": "confusion_point",
+            "evidence_role": "observation",
+            "idea_originated": false,
+            "text": "A retained automated atom associates storage exhaustion with scaffold installation failure."
+          }
+        },
+        {
+          "evidence_id": "retained:storage:artifact",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_evidence_projection",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "11360866153598bc806df7df4fdf6c8c42da1f114f680714e6d6d85a3454734f",
+          "snapshot": {
+            "atom_id": "usertest/20260706T083534Z/codex/1423164313:confusion_point:1",
+            "origin_stage": "atom_extraction",
+            "source": "confusion_point",
+            "evidence_role": "observation",
+            "idea_originated": false,
+            "text": "A retained automated atom associates storage exhaustion with structured artifact output failure."
+          }
+        }
+      ],
+      "records": [
+        {
+          "problem_id": "problem:scaffold-install-storage-failures",
+          "case_id": "case:storage-a",
+          "title": "Scaffold install fails on storage exhaustion",
+          "evidence_atom_ids": [
+            "usertest/20260706T075725Z/codex/2096056799:confusion_point:1"
+          ]
+        },
+        {
+          "problem_id": "problem:storage-exhaustion-breaks-artifact-output",
+          "case_id": "case:storage-b",
+          "title": "Storage exhaustion disrupts structured artifacts",
+          "evidence_atom_ids": [
+            "usertest/20260706T083534Z/codex/1423164313:confusion_point:1"
+          ]
+        }
+      ],
+      "relation": "same_cause_group",
+      "expected_pre_research_cases": 2,
+      "expected_without_verified_relation_receipt": 2,
+      "case_sha256": "a4c2f261a3478aa223f797b5e392648782877d33f32113ab9cd2ae4cede0c781"
+    },
+    {
+      "benchmark_id": "claude-empty-stderr",
+      "kind": "outcome_gate",
+      "historical_evidence_status": "integrity_unknown",
+      "source_evidence": [
+        {
+          "evidence_id": "retained:claude:stderr",
+          "origin_category": "automated",
+          "snapshot_kind": "retained_compiled_problem_reference",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "eb5d5fb1e15715fe693e1baa72c49a6ad6ce9afb3417f8d0473ffdf509a58516",
+          "snapshot": {
+            "problem_id": "problem:claude-provider-errors-empty-stderr",
+            "origin_stage": "problem_mining",
+            "evidence_role": "observation",
+            "idea_originated": false,
+            "retained_claim": "Provider failure details were not preserved in stderr."
+          }
+        }
+      ],
+      "problem_id": "problem:claude-provider-errors-empty-stderr",
+      "outcome_state": "unverified",
+      "requires_live_verification": true,
+      "expected_suppresses_discovery": false,
+      "case_sha256": "23e3b7859181dbcf8d5ffbd7cbbf1546bb255a7056784fa9ebe1ab0787f7837c"
+    },
+    {
+      "benchmark_id": "python-toolchain",
+      "kind": "plan_revision",
+      "historical_evidence_status": "plan_files_referenced_not_bound_to_outcomes",
+      "source_evidence": [
+        {
+          "evidence_id": "retained:python-toolchain:plan-references",
+          "origin_category": "generated_pipeline_artifact",
+          "snapshot_kind": "retained_plan_reference_list",
+          "integrity_status": "integrity_unknown",
+          "snapshot_sha256": "e077471beda6c1f91c6c574fb245d83aa5ce9196a275259ffc4a950614a51ce9",
+          "snapshot": {
+            "origin_stage": "implementation_planning",
+            "evidence_role": "implementation",
+            "idea_originated": false,
+            "plan_references": [
+              ".agents/plans/5 - complete/20260307_374a5e3f7bd861df_Establish-a-canonical-Python-toolchain-capability-contract.md",
+              ".agents/plans/5 - complete/20260307_68e8eaf95a982d69_Establish-a-canonical-verified-Python-toolchain.md"
+            ]
+          }
+        }
+      ],
+      "case_id": "case:python-toolchain",
+      "historical_plan_refs": [
+        ".agents/plans/5 - complete/20260307_374a5e3f7bd861df_Establish-a-canonical-Python-toolchain-capability-contract.md",
+        ".agents/plans/5 - complete/20260307_68e8eaf95a982d69_Establish-a-canonical-verified-Python-toolchain.md"
+      ],
+      "plan_revisions": [
+        "plan:python-toolchain:v1",
+        "plan:python-toolchain:v2"
+      ],
+      "expected_distinct_export_identities": 2,
+      "case_sha256": "22854249a33454272b548da9a4a4e1d4d13b1648c901e084e9d32014348b080c"
+    }
+  ],
+  "retained_replay": {
+    "source_problem_id": "problem:apply-patch-context-mismatch-blocks-edits",
+    "problem_record": {
+      "problem_id": "problem:apply-patch-context-mismatch-blocks-edits",
+      "title": "apply_patch context mismatches block edit runs without clear recovery diagnostics",
+      "problem": "Codex write-mode runs repeatedly encountered internal apply_patch failures where expected lines were not found in target files. The patch verifier aborts before writing when hunk context is absent, and the affected runs surface as generic AgentExecFailed or opaque stderr failures.",
+      "user_impact": "Edit-required tasks can fail when patch context is stale or mismatched, and the resulting failure signal does not clearly identify the patch-context mismatch as the blocking condition.",
+      "severity": "high",
+      "confidence": 0.9,
+      "evidence_atom_ids": [
+        "usertest/20260706T080723Z/codex/2266456674:confusion_point:1",
+        "usertest/20260706T080723Z/codex/2266456674:confusion_point:2",
+        "usertest/20260706T084544Z/codex/1351845563:confusion_point:1",
+        "usertest/20260706T084544Z/codex/1351845563:confusion_point:2"
+      ],
+      "evidence_summary": "Atoms report repeated expected-lines-not-found apply_patch failures across Codex runs, one AgentExecFailed exit_code=137, and a reproduced verifier abort that made no repository changes.",
+      "problem_status": "identified"
+    },
+    "research_dossier": {
+      "problem_id": "problem:apply-patch-context-mismatch-blocks-edits",
+      "reproduction_status": "partial",
+      "writes_used": false,
+      "writes_purpose": ["none"],
+      "implementation_performed": false,
+      "diff_classification": "no_changes",
+      "root_cause_hypotheses": [
+        "High confidence: apply_patch correctly aborts when hunk context is absent, but the runner lacks a structured classification for that diagnostic, so the higher-level failure remains generic.",
+        "Medium confidence: Codex JSON/event normalization may not preserve internal apply_patch verifier failures as tool-level failure artifacts unless they are emitted as command_execution output."
+      ],
+      "broader_class_assessment": "repeated_variant",
+      "unknowns": [
+        "Full end-to-end Codex write-mode AgentExecFailed reproduction was not run because the available workspace/tool sandbox was read-only.",
+        "The exact raw Codex JSON shape for internal apply_patch context-mismatch failures remains to be captured from an affected run.",
+        "Original cited evidence artifacts were not available in this workspace for direct comparison."
+      ],
+      "research_status": "researched"
+    },
+    "change_plan": {
+      "change_plan_id": "change-plan:apply-patch-context-mismatch-edit-failure-contract",
+      "problem_id": "problem:apply-patch-context-mismatch-blocks-edits",
+      "selected_option_id": "option:apply-patch-context-mismatch-blocks-edits:most_comprehensive",
+      "title": "Preserve apply_patch context mismatches as structured edit failures",
+      "problem": "Codex write-mode runs repeatedly encountered internal apply_patch failures where expected lines were not found in target files.",
+      "user_impact": "Edit-required tasks can fail when patch context is stale or mismatched.",
+      "proposed_fix": "Define a shared internal edit-failure classification contract used by runner normalization and report rendering.",
+      "implementation_steps": [
+        "Locate the existing runner normalization path that converts Codex tool output, stderr, and command failures into normalized events and report inputs.",
+        "Introduce a small shared edit-failure taxonomy or classifier in runner_core.",
+        "Wire the classifier into the normalization path so edit-tool failures retain the structured class in normalized events and downstream report artifacts."
+      ],
+      "verification_steps": [
+        "Run the runner_core classifier unit tests offline.",
+        "Run the offline normalization/report fixture tests for edit-tool failures."
+      ],
+      "success_criteria": [
+        "An apply_patch expected-lines-not-found verifier failure is classified as patch_context_mismatch in normalized artifacts."
+      ],
+      "rollback_notes": "Revert the taxonomy wiring and report rendering changes together.",
+      "suggested_owner": "runner_core",
+      "change_plan_status": "planned",
+      "related_change_plan_ids": []
+    },
+    "expected_current_disposition": {
+      "research_ready": false,
+      "plan_ready": false,
+      "research_reason": "legacy partial proof has no runner evidence receipt",
+      "plan_reason": "discovery-first and missing exact change targets/revision/commands"
+    }
+  }
+}

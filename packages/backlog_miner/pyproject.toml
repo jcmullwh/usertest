@@ -5,9 +5,11 @@ description = "A Python library (PDM)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "agent_adapters",
+  "agent-adapters",
   "backlog_core",
   "runner_core",
+  "sandbox_runner",
+  "pyyaml>=6.0.3",
 ]
 
 [build-system]
@@ -34,6 +36,7 @@ dev = [
   "-e file:///${PROJECT_ROOT}/../../packages/runner_core#egg=runner_core",
   "-e file:///${PROJECT_ROOT}/../../packages/sandbox_runner#egg=sandbox_runner",
   "-e file:///${PROJECT_ROOT}/../../packages/triage_engine#egg=triage_engine",
+  "-e file:///${PROJECT_ROOT}/../../apps/usertest_implement#egg=usertest_implement",
   "-e file:///${PROJECT_ROOT}/../run_artifacts#egg=run_artifacts",
   "deptry>=0.20.0",
   "mypy>=1.8.0",
@@ -53,6 +56,7 @@ warn_unused_configs = true
 [tool.deptry]
 # Drop-in snippets are transplantable scaffolding and should not affect dependency linting.
 extend_exclude = ["^\\.agents/dropins/"]
+known_first_party = ["backlog_miner"]
 
 [tool.ruff]
 target-version = "py311"

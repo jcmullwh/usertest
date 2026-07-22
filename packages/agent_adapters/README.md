@@ -82,6 +82,8 @@ Common event `type` values:
 - `run_command`
 - `read_file`
 - `write_file`
+- `delegation_invocation`
+- `delegation_result`
 - `error`
 
 Golden normalization fixtures are checked in under `examples/golden_runs/` for Codex, Claude,

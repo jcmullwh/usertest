@@ -111,10 +111,7 @@ def _render_ux_review_markdown(doc: dict[str, Any]) -> str:
                 if isinstance(struct_dims, list):
                     dims = [dim for dim in struct_dims if isinstance(dim, str) and dim.strip()]
                     if dims:
-                        lines.append(
-                            "- Structurally constant dimensions: "
-                            f"`{', '.join(dims)}`"
-                        )
+                        lines.append(f"- Structurally constant dimensions: `{', '.join(dims)}`")
             next_steps = rec.get("next_steps")
             if isinstance(next_steps, list):
                 steps = [s for s in next_steps if isinstance(s, str) and s.strip()]
@@ -154,7 +151,9 @@ def _index_ux_recommendations(doc: dict[str, Any]) -> dict[str, list[dict[str, A
     review_raw = doc.get("review")
     review = review_raw if isinstance(review_raw, dict) else {}
     recs_raw = review.get("recommendations")
-    recs = [item for item in recs_raw if isinstance(item, dict)] if isinstance(recs_raw, list) else []
+    recs = (
+        [item for item in recs_raw if isinstance(item, dict)] if isinstance(recs_raw, list) else []
+    )
     out: dict[str, list[dict[str, Any]]] = {}
     for rec in recs:
         fingerprints_raw = rec.get("fingerprints")
@@ -725,7 +724,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         payload["breadth"] = _coerce_breadth_counts(ticket.get("breadth"))
         payload["problem_breadth"] = problem_breadth
         payload["batch_breadth"] = batch_breadth
-        payload["breadth_profile"] = _coerce_string(ticket.get("breadth_profile")) or breadth_profile
+        payload["breadth_profile"] = (
+            _coerce_string(ticket.get("breadth_profile")) or breadth_profile
+        )
         payload["decision_basis"] = decision_basis
         payload["review_domain"] = review_domain
         payload["structurally_constant_batch_dimensions"] = batch_breadth.get(
@@ -917,5 +918,6 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     print(str(out_md))
     print(f"Reviewer status: {status}")
     return 0
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

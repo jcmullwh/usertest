@@ -17,7 +17,7 @@ def test_agent_config_defaults_use_current_model_routes() -> None:
     agents = _load_yaml(REPO_ROOT / "configs" / "agents.yaml")["agents"]
 
     assert agents["codex"]["default_model"] == "gpt-5.5"
-    assert agents["claude"]["default_model"] == "sonnet"
+    assert agents["claude"]["default_model"] == "claude-sonnet-5"
     assert agents["gemini"]["default_model"] == "auto"
 
 

@@ -1,0 +1,959 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Historical Automated-Backlog Depth Remediation — Executive Summary</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18212f;
+      --muted: #5c6877;
+      --paper: #f5f2eb;
+      --card: #fffdf8;
+      --line: #d9d3c7;
+      --blue: #174f73;
+      --blue-soft: #e5f0f5;
+      --green: #236347;
+      --green-soft: #e7f3ec;
+      --amber: #8a5a13;
+      --amber-soft: #fbf0d9;
+      --red: #8f3131;
+      --red-soft: #fae9e7;
+      --shadow: 0 16px 45px rgba(24, 33, 47, 0.09);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(23, 79, 115, 0.12), transparent 32rem),
+        linear-gradient(180deg, #fbfaf6 0, var(--paper) 38rem);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+
+    a { color: var(--blue); text-underline-offset: 0.16em; }
+    a:hover { text-decoration-thickness: 2px; }
+
+    code {
+      padding: 0.08rem 0.28rem;
+      border-radius: 0.25rem;
+      background: #eee9de;
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 0.88em;
+      overflow-wrap: anywhere;
+    }
+
+    .page {
+      width: min(1160px, calc(100% - 2rem));
+      margin: 0 auto;
+      padding: 2rem 0 5rem;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(2rem, 6vw, 4.8rem);
+      border: 1px solid rgba(23, 79, 115, 0.24);
+      border-radius: 1.25rem;
+      background: linear-gradient(135deg, #123b56 0%, #174f73 55%, #236347 130%);
+      color: white;
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 25rem;
+      height: 25rem;
+      right: -10rem;
+      bottom: -16rem;
+      border: 4rem solid rgba(255, 255, 255, 0.07);
+      border-radius: 50%;
+    }
+
+    .eyebrow {
+      margin: 0 0 0.75rem;
+      color: #c6e2ef;
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.15; }
+    h1 {
+      max-width: 18ch;
+      margin: 0;
+      font-size: clamp(2.35rem, 7vw, 5.1rem);
+      letter-spacing: -0.055em;
+    }
+
+    .hero .dek {
+      max-width: 72ch;
+      margin: 1.4rem 0 0;
+      color: #eef8fb;
+      font-size: clamp(1.02rem, 2.5vw, 1.28rem);
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 1.8rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.42rem 0.7rem;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 15.5rem;
+      gap: 2rem;
+      align-items: start;
+      margin-top: 2rem;
+    }
+
+    .toc {
+      position: sticky;
+      top: 1rem;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 0.85rem;
+      background: rgba(255, 253, 248, 0.9);
+      box-shadow: 0 8px 28px rgba(24, 33, 47, 0.06);
+      backdrop-filter: blur(12px);
+    }
+
+    .toc strong {
+      display: block;
+      margin-bottom: 0.55rem;
+      font-size: 0.78rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      padding: 0.27rem 0;
+      color: var(--muted);
+      font-size: 0.84rem;
+      text-decoration: none;
+    }
+
+    .toc a:hover { color: var(--blue); }
+
+    main { min-width: 0; }
+
+    section {
+      scroll-margin-top: 1rem;
+      margin: 0 0 1.5rem;
+      padding: clamp(1.25rem, 3.5vw, 2.2rem);
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: var(--card);
+      box-shadow: 0 8px 30px rgba(24, 33, 47, 0.055);
+    }
+
+    section > h2 {
+      margin: 0 0 0.9rem;
+      color: var(--blue);
+      font-size: clamp(1.5rem, 3vw, 2.1rem);
+      letter-spacing: -0.025em;
+    }
+
+    section > p:first-of-type { margin-top: 0; }
+
+    h3 {
+      margin: 1.5rem 0 0.45rem;
+      font-size: 1.05rem;
+    }
+
+    .callout {
+      margin: 1.1rem 0;
+      padding: 1rem 1.1rem;
+      border-left: 0.35rem solid var(--blue);
+      border-radius: 0.35rem;
+      background: var(--blue-soft);
+    }
+
+    .callout.warning {
+      border-left-color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .callout.critical {
+      border-left-color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .callout.success {
+      border-left-color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .callout p { margin: 0.3rem 0; }
+
+    .scorecard {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.8rem;
+      margin: 1.1rem 0 0;
+    }
+
+    .score {
+      min-height: 8rem;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 0.75rem;
+      background: #fbfaf6;
+    }
+
+    .score .label {
+      color: var(--muted);
+      font-size: 0.73rem;
+      font-weight: 800;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .score .value {
+      margin-top: 0.2rem;
+      font-size: 1.35rem;
+      font-weight: 850;
+    }
+
+    .score p {
+      margin: 0.35rem 0 0;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .good { color: var(--green); }
+    .caution { color: var(--amber); }
+    .blocked { color: var(--red); }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(7.5rem, 1fr));
+      gap: 0.65rem;
+      margin: 1.2rem 0;
+    }
+
+    .flow .node {
+      position: relative;
+      padding: 0.85rem;
+      border: 1px solid #b9cfda;
+      border-radius: 0.65rem;
+      background: #eef6f9;
+      font-size: 0.83rem;
+    }
+
+    .flow .node strong { display: block; margin-bottom: 0.22rem; color: var(--blue); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.88rem;
+    }
+
+    th, td {
+      padding: 0.72rem;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      color: var(--blue);
+      background: #f0eee8;
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    tbody tr:hover { background: #fbfaf5; }
+
+    .timeline {
+      position: relative;
+      margin: 1rem 0 0.25rem 0.45rem;
+      padding-left: 1.4rem;
+      border-left: 2px solid #b9cfda;
+    }
+
+    .event {
+      position: relative;
+      padding: 0 0 1.25rem 0.25rem;
+    }
+
+    .event::before {
+      content: "";
+      position: absolute;
+      width: 0.72rem;
+      height: 0.72rem;
+      left: -1.83rem;
+      top: 0.28rem;
+      border: 2px solid var(--card);
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 1px #8aaabd;
+    }
+
+    .event.misstep::before { background: var(--amber); }
+    .event.blocker::before { background: var(--red); }
+    .event h3 { margin: 0 0 0.2rem; }
+    .event .when { color: var(--muted); font-size: 0.78rem; font-weight: 700; }
+    .event p { margin: 0.35rem 0; }
+
+    .evidence-list {
+      padding-left: 1.1rem;
+    }
+
+    .evidence-list li { margin: 0.45rem 0; }
+
+    .small { color: var(--muted); font-size: 0.84rem; }
+
+    .status-line {
+      display: grid;
+      grid-template-columns: 9rem 1fr;
+      gap: 0.75rem;
+      padding: 0.72rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .status-line:last-child { border-bottom: 0; }
+    .status-line strong { color: var(--blue); }
+
+    .footer {
+      padding: 1.4rem 0 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+      text-align: center;
+    }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .toc { position: static; order: -1; }
+      .toc a { display: inline-block; margin-right: 0.8rem; }
+      .scorecard { grid-template-columns: 1fr 1fr; }
+      .flow { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (max-width: 560px) {
+      .page { width: min(100% - 1rem, 1160px); padding-top: 0.5rem; }
+      .hero { border-radius: 0.8rem; }
+      .scorecard, .flow { grid-template-columns: 1fr; }
+      .status-line { grid-template-columns: 1fr; gap: 0.15rem; }
+      table { display: block; overflow-x: auto; }
+    }
+
+    @media print {
+      body { background: white; }
+      .page { width: 100%; padding: 0; }
+      .hero, section { box-shadow: none; break-inside: avoid; }
+      .layout { display: block; }
+      .toc { display: none; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <p class="eyebrow">Evidence-backed progress snapshot</p>
+      <h1>Historical automated-backlog depth remediation</h1>
+      <p class="dek">
+        An executive account of how the automated backlog system is being changed from a
+        prose-heavy ticket generator into a causal evidence, planning, and outcome pipeline—and
+        where the remediation itself temporarily drifted into controls that reduced usefulness.
+      </p>
+      <div class="meta">
+        <span class="pill">Snapshot: 2026-07-11 12:17 UTC</span>
+        <span class="pill">Branch: codex/backlog-depth-remediation</span>
+        <span class="pill">Commit assessed: cdd666f3</span>
+        <span class="pill">Status: implementation in progress</span>
+        <a class="pill" href="historical-automated-backlog-depth-remediation-metrics.html">Open benchmark metrics</a>
+      </div>
+    </header>
+
+    <div class="layout">
+      <main>
+        <section id="assessment">
+          <h2>Executive assessment</h2>
+          <div class="callout warning">
+            <p><strong>The architecture has moved materially toward the objective, but the objective is not yet complete.</strong></p>
+            <p>
+              Code and offline tests now enforce lineage, causal research, code-grounded planning,
+              and outcome proof. Live qualification has also proven that signed-in Codex research
+              uses the host ChatGPT subscription rather than API-key billing. However, the latest
+              controlled Stage 3 run correctly remained blocked because its model-authored dossier
+              failed causal-output validation: the first attempt had two contract defects and the
+              retry had one unresolved evidence reference. A separate adversarial review then found
+              another structural issue: the verifier pressured each experiment to cover an entire
+              multi-hop cause, which could encourage artificially shallow root-cause statements.
+            </p>
+          </div>
+
+          <p>
+            The work has therefore progressed beyond “add stricter prompts.” The system now has
+            persistent case identity, evidence roles, same-cause reduction, runner-replayed
+            research, an adversarial solution review, executable before/after outcome oracles,
+            and lifecycle states that distinguish implementation from resolution. At the same
+            time, several early controls were deliberately removed or redesigned when real runs
+            showed that they optimized formal compliance rather than the user’s actual objective.
+          </p>
+
+          <div class="scorecard">
+            <div class="score">
+              <div class="label">Problem mining</div>
+              <div class="value caution">Improved; not qualified</div>
+              <p>The second shadow partitioned 133/133 eligible source atoms and produced 15 cases, but one of three miners still failed and no exact-commit shadow has qualified.</p>
+            </div>
+            <div class="score">
+              <div class="label">Research depth</div>
+              <div class="value blocked">0% accepted live</div>
+              <p>Real agents perform substantive investigation, but 0/15 shadow dossiers and 0/2 exact-commit Stage 3 attempts were accepted; aggregate-mechanism binding still has a semantic defect.</p>
+            </div>
+            <div class="score">
+              <div class="label">Planning depth</div>
+              <div class="value caution">Contract only; no live plans</div>
+              <p>Plans require exact targets, reviewed causal coverage, and runner-owned verification contracts, but the revised live pipeline has produced 0 ready plans.</p>
+            </div>
+            <div class="score">
+              <div class="label">Outcome proof</div>
+              <div class="value caution">Implemented; not exercised end to end</div>
+              <p>Tests, original-scenario replay, live verification, mitigation, and resolution are separate states, but no newly qualified automated case has reached a measured outcome.</p>
+            </div>
+            <div class="score">
+              <div class="label">Live qualification</div>
+              <div class="value blocked">Not yet passed</div>
+              <p>The exact-commit generic subscription smoke passed; full controlled research remains honestly blocked at the causal dossier contract.</p>
+            </div>
+            <div class="score">
+              <div class="label">Ticket regeneration</div>
+              <div class="value blocked">Intentionally deferred</div>
+              <p>Exports remain disabled until two real shadow cycles demonstrate both depth and usable throughput; IDEA/user-originated work remains protected.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="objectives">
+          <h2>The overarching objectives</h2>
+          <p>
+            The governing objective is not to make pull requests impossible to scope incorrectly.
+            Existing review and CI already cover ordinary PR scope. The remediation is aimed at
+            five failure modes that occur earlier and later in the automated backlog lifecycle:
+          </p>
+          <ol>
+            <li><strong>Mine real, unactioned problems from all relevant automated evidence.</strong> Require every eligible source observation to receive an explicit disposition; do not let keyword selection, extraction caps, or partitioning silently erase important observations.</li>
+            <li><strong>Preserve causal identity and provenance.</strong> Research and implementation commentary about an existing case must not be re-mined as independent demand.</li>
+            <li><strong>Establish the mechanism, not merely the symptom.</strong> Research must inspect the exact revision, reproduce or deterministically trace the failure, consider counterevidence, and retain material unknowns.</li>
+            <li><strong>Select and plan a solution that closes the actual causal paths.</strong> “Canonical,” “shared,” or “comprehensive” language is not evidence; plans must name concrete code and executable proof.</li>
+            <li><strong>Prove what happened after implementation.</strong> A merged PR or moved ticket is not synonymous with the original problem being resolved.</li>
+          </ol>
+          <p>
+            Two operational constraints sit alongside those goals: the pipeline must have usable
+            throughput rather than blocking everything, and automated Codex work must use the
+            signed-in host ChatGPT subscription—not an API-key or per-token fallback.
+          </p>
+        </section>
+
+        <section id="starting-point">
+          <h2>What the historical audit established</h2>
+          <p>
+            The initial audit confirmed that the prior system produced detailed-looking artifacts
+            without reliably establishing root cause or resolution. The retained July corpus held
+            1,305 atoms, 66 problem records, 38 research dossiers, 114 options, 38 selections,
+            39 change plans, and 67 final tickets. The strongest signals were structural:
+          </p>
+          <table>
+            <thead>
+              <tr><th>Historical behavior</th><th>Evidence</th><th>Why it mattered</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Selective mining</td>
+                 <td>July runs covered 85/1,076 (7.9%) and 70/229 (30.6%) atoms; 69/172 high-severity atoms (40.1%) had neither coverage nor explicit disposition.</td>
+                <td>Unknown evidence could disappear without a recorded decision.</td>
+              </tr>
+              <tr>
+                <td>Research feedback loop</td>
+                <td>982/1,076 current atoms came from <code>backlog_repro_research</code>; 14/19 ready tickets relied only on research-generated atoms.</td>
+                <td>The system could create apparent recurrence from its own commentary.</td>
+              </tr>
+              <tr>
+                <td>Same-cause review did not reduce work</td>
+                <td>17/23 problems were reduced to seven same-cause groups, and 15/15 in the second run to six groups; nevertheless the pipeline emitted 38 selections and 39 plans.</td>
+                <td>Deduplication was annotation, not an operational case model.</td>
+              </tr>
+              <tr>
+                <td>Partial research advanced</td>
+                <td>30/38 dossiers were partial; all 38 progressed.</td>
+                <td>A report’s existence was treated as evidence sufficiency.</td>
+              </tr>
+              <tr>
+                <td>Prompt-induced solution breadth</td>
+                <td>Exactly three option families were required; 36/38 selections chose <code>most_comprehensive</code>.</td>
+                <td>“Comprehensive” became a rhetorical default rather than an evidence-backed conclusion.</td>
+              </tr>
+              <tr>
+                <td>Discovery-first plans</td>
+                <td>Stages 4–6 read no repository files; 35/39 plans began implementation with “locate,” “identify,” or “inspect.”</td>
+                <td>The plan deferred architecture discovery and validation design to the implementer.</td>
+              </tr>
+              <tr>
+                <td>No aggregate solve-rate evidence</td>
+                <td>Historical completion rarely retained commit, original-scenario replay, or live outcome provenance.</td>
+                <td>Workflow movement could not establish problem resolution.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="small">
+            The totals combine two retained corpora. Primary evidence:
+            <a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.research.json">backlog research</a>,
+            <a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.change_plans.json">backlog plans</a>,
+            <a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.backlog.json">backlog tickets</a>,
+            <a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.backlog_artifacts/solution_optioning/solution_optioning_relation_review_001/solution_optioning_relation_review_001.response.txt">backlog relation review</a>,
+            <a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.research.json">implementation research</a>,
+            <a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.change_plans.json">implementation plans</a>,
+            <a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.backlog.json">implementation tickets</a>, and
+            <a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.backlog_artifacts/solution_optioning/solution_optioning_relation_review_001/solution_optioning_relation_review_001.response.txt">implementation relation review</a>.
+          </p>
+        </section>
+
+        <section id="system-now">
+          <h2>How the system now works</h2>
+          <p>
+            The central architectural shift is from ticket-centric generation to a persistent
+            evidence-and-case graph. Tickets are now downstream views of cases rather than the
+            source of problem identity.
+          </p>
+          <div class="flow" aria-label="Automated backlog flow">
+            <div class="node"><strong>1. Evidence</strong>Every atom receives lineage, role, and a disposition.</div>
+            <div class="node"><strong>2. Canonical case</strong>Merge/split/same-cause decisions reduce work before research.</div>
+            <div class="node"><strong>3. Research proof</strong>Exact revision, experiments, symbols, controls, counterevidence, unknowns.</div>
+            <div class="node"><strong>4. Solution + plan</strong>Neutral causal coverage review and exact code/verification targets.</div>
+            <div class="node"><strong>5. Outcome</strong>Pre/post-merge original-scenario replay, live proof, recurrence, remaining risk.</div>
+          </div>
+
+          <h3>Evidence and case identity</h3>
+          <p>
+            Stable <code>case_id</code> values persist across wording and ticket changes. Source,
+            research, implementation, and verification evidence have different roles. Derived
+            evidence updates its parent by default; only a runner-owned, typed operational failure
+            can originate a new infrastructure case. Every high-severity atom must receive a
+            durable disposition rather than silently falling outside a selected prompt slice.
+          </p>
+
+          <h3>Research as proof</h3>
+          <p>
+            Stage 3 now acquires the exact repository revision and can create research-only harnesses
+            in an isolated workspace. The runner independently replays approved commands, checks
+            artifacts and inspected symbols, binds hypotheses to evidence, and separates a blocked
+            or insufficient investigation from an evidence-sufficient one. Runner-owned outcome
+            oracles carry the demonstrated scenario forward rather than reducing research to prose.
+          </p>
+
+          <h3>Planning and adversarial review</h3>
+          <p>
+            Optioning is no longer required to manufacture direct/robust/comprehensive variants.
+            Zero to three distinct mechanisms are allowed. A separate falsifier challenges causal
+            coverage, unsupported breadth, residual failure paths, and the proposed positive outcome
+            contract. Planning receives a clean checkout at the researched revision and must name
+            exact files, symbols, data-flow changes, compatibility behavior, and executable checks.
+          </p>
+
+          <h3>Outcome and recurrence</h3>
+          <p>
+            The implementation loop distinguishes planned, implemented, tests-verified,
+            original-scenario-verified, live-verified, mitigated, resolved, superseded, duplicate,
+            and unverified states. The same proof used to establish the problem can run against the
+            implementation before merge and the merged commit afterward. Same-class evidence updates
+            or reopens the case rather than spawning a new prose-derived ticket.
+          </p>
+        </section>
+
+        <section id="evolution">
+          <h2>Evolution of the remediation</h2>
+          <div class="timeline">
+            <div class="event">
+              <div class="when">July 9 — audit to implementation</div>
+              <h3>Built persistent lineage and made relation decisions operational</h3>
+              <p>
+                The first implementation established stable cases, explicit atom dispositions,
+                cumulative carry-forward, and merge/alias/split behavior. This directly addressed
+                the historical feedback and deduplication failures.
+              </p>
+            </div>
+            <div class="event misstep">
+              <div class="when">July 10 — objective correction</div>
+              <h3>Removed a PR-scope and anti-forgery ratchet</h3>
+              <p>
+                The initial hardening had accumulated line/blob/import/config/new-file ceremony.
+                Those checks could make a PR formally constrained without proving that the problem
+                was real or solved. They were demoted or removed. The remaining hard gates focus on
+                mechanism coverage, problem-specific outcome proof, tested-head identity, and
+                unresolved high/critical findings.
+              </p>
+            </div>
+            <div class="event">
+              <div class="when">July 10 — mining recall</div>
+              <h3>Replaced keyword-first mining with complete structured evidence passes</h3>
+              <p>
+                Extraction caps were removed, evidence was split into bounded but complete jobs,
+                non-support decisions received independent review, and cross-partition anchors were
+                preserved so supported evidence could not disappear from later relation work.
+              </p>
+            </div>
+            <div class="event">
+              <div class="when">July 10 — research and outcomes</div>
+              <h3>Connected causal research to executable before/after proof</h3>
+              <p>
+                Retained harnesses, static traces, causal interventions, positive outcome contracts,
+                and clean-commit replays were added. This was the largest direct contribution to the
+                root-cause objective: the plan’s claimed solution can now be checked against the
+                exact researched scenario rather than only its own unit tests.
+              </p>
+            </div>
+            <div class="event misstep">
+              <div class="when">July 10–11 — first shadows</div>
+              <h3>Rejected “all blocked” as a successful shadow</h3>
+              <p>
+                Early qualification could satisfy structural invariants while producing no useful
+                research or plan. The gate was changed to require demonstrated positive depth when
+                active cases exist, while still preserving honest case-specific blockers and not
+                forcing an exhausted corpus to fabricate tickets.
+              </p>
+            </div>
+            <div class="event">
+              <div class="when">July 11 — operational evidence</div>
+              <h3>Recovered typed automation failures without re-mining generic agent errors</h3>
+              <p>
+                Sibling implementation history and pre-acquisition failures are now ingested through
+                a bounded runner-owned projection. A live 185-record replay rejected nine generic
+                <code>AgentExecFailed</code> envelopes and retained two typed disk-full occurrences.
+              </p>
+            </div>
+            <div class="event misstep">
+              <div class="when">July 11 — authentication redesign</div>
+              <h3>Abandoned copied auth and login-only proof</h3>
+              <p>
+                Copying <code>auth.json</code> into a disposable Codex home could strand OAuth token
+                refreshes outside the canonical host cache. Exact “Logged in using ChatGPT” output
+                also did not prove that the model endpoint was canonical. The design now uses the
+                host cache directly, blanks API/provider variables in the child only, forces canonical
+                ChatGPT endpoints, and records pre/model/post route and auth receipts.
+              </p>
+            </div>
+            <div class="event misstep">
+              <div class="when">July 11 — host configuration cleanup</div>
+              <h3>Replaced global byte-identity gating with targeted trust-residue cleanup</h3>
+              <p>
+                Installed Codex persists disposable workspace trust even with explicit overrides.
+                Requiring the entire host config to remain unchanged would block legitimate user or
+                concurrent Codex preference changes. Schema 3 now removes only the exact runner-added
+                trust table under a writer-exclusive in-place handle and preserves all unrelated bytes.
+              </p>
+            </div>
+            <div class="event blocker">
+              <div class="when">July 11 — exact-commit live Stage 3</div>
+              <h3>Research was substantive, but the proof contract still blocked it</h3>
+              <p>
+                Two subscription-backed Codex attempts ran for 549 and 685 seconds. Both exited zero
+                and performed real repository investigation. Attempt 1 failed two dossier-contract
+                 fields; the full retry fixed those but invented an unsupported alternative and used
+                 a source atom in the wrong evidentiary direction. Those were the actual validation
+                 failures, and the block was correct. Follow-on adversarial inspection separately found
+                 that per-experiment full-symbol coverage encouraged shallow single-function hypotheses;
+                 its first aggregate replacement then failed semantic review because disconnected
+                 supports could be unioned into a false causal chain. A connected, symptom-rooted
+                 aggregate contract is required before shadow qualification resumes.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section id="missteps">
+          <h2>Missteps and what they taught us</h2>
+          <table>
+            <thead>
+              <tr><th>Misstep</th><th>Why it moved away from the objective</th><th>Correction</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Overbuilding PR-scope controls</td>
+                <td>Optimized audit ceremony around the patch instead of proving the mined problem and selected solution.</td>
+                <td>Scope is advisory; causal coverage, original-scenario proof, tested commit, and critical findings are authoritative.</td>
+              </tr>
+              <tr>
+                <td>Counting a structurally clean, all-blocked shadow as success</td>
+                <td>A pipeline that works zero percent of the time can satisfy purely negative invariants.</td>
+                <td>Require positive retained throughput when active cases are selected, while preserving honest blockers.</td>
+              </tr>
+              <tr>
+                <td>Full rerun for a serialization defect</td>
+                <td>The 549-second first run contained the stronger historical trace. A 685-second full retry fixed shape errors but lost some stronger evidence and invented an invalid alternative.</td>
+                <td>Improve exact contract examples, prevalidate all deterministic causal links together, preserve content-addressed prior evidence, and later use constrained repair only for non-evidence-bearing shape fields.</td>
+              </tr>
+              <tr>
+                <td>Per-experiment full-mechanism coverage</td>
+                <td>Forces each experiment to claim an entire multi-hop cause or shrink the cause to one function, which directly incentivizes surface-level diagnosis.</td>
+                <td>Require the verified union across advancing experiments to cover the cause; controls prove the shared intervened subset.</td>
+              </tr>
+              <tr>
+                <td>Ambiguous positive-contract prompt</td>
+                <td>The mission listed <code>artifact_json_value</code> but illustrated only a command-style <code>value</code> field, while validation requires <code>path</code>, <code>json_pointer</code>, and <code>equals</code>.</td>
+                <td>Separate exact examples per predicate and require the postcondition scalar to match the signed expected field.</td>
+              </tr>
+              <tr>
+                <td>Copied OAuth cache</td>
+                <td>A disposable copy can receive refreshed credentials while the host’s canonical cache becomes stale.</td>
+                <td>Use direct host <code>CODEX_HOME</code> with isolated effective config and no copied auth.</td>
+              </tr>
+              <tr>
+                <td>Login status as billing-route proof</td>
+                <td>Live testing showed a redirected model endpoint could coexist with exact ChatGPT login.</td>
+                <td>Bind canonical endpoints, forbidden override rejection, child environment blanks, and model activation into the receipt.</td>
+              </tr>
+              <tr>
+                <td>Whole-file host-config identity as a gate</td>
+                <td>Concurrent or unrelated preference changes are not evidence of subscription failure and can reduce throughput.</td>
+                <td>Remove only the exact runner-induced disposable trust table; preserve and attest unrelated changes.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="subscription">
+          <h2>Signed-in Codex subscription capability</h2>
+          <div class="callout success">
+            <p><strong>This requirement is preserved and has live proof.</strong></p>
+            <p>
+              Both full Stage 3 attempts used <code>C:\Users\jason\.codex</code> directly,
+              verified exact ChatGPT login before and after execution, used canonical ChatGPT
+              subscription endpoints, blanked all seven API/provider variables, disabled API
+              fallback, copied no auth cache, and restored the host config to SHA-256
+              <code>a063be1e10d81c9f3114bdd1c4d81b4b135b6255d2d9b6e60cb66741c05b39ae</code>.
+            </p>
+          </div>
+          <p>
+            Temporary project trust is handled narrowly. Each run’s schema-3 receipt proves whether
+             the workspace trust entry pre-existed, what exact bytes Codex added, and whether those
+             exact bytes were removed. Both live receipts prove exact restoration for runs in which
+             no unrelated concurrent change occurred; preservation of unrelated edits is established
+             by regression tests rather than those two live runs. Authentication and billing-route checks are independent from the research
+            dossier result; therefore a research-shape failure cannot be misreported as an auth
+            failure, and an auth success cannot advance weak research.
+          </p>
+          <ul class="evidence-list">
+            <li><a href="../../.tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/generic/generic_subscription_smoke_001.codex_auth_receipt.json">Generic exact-commit subscription receipt</a></li>
+            <li><a href="../../.tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/runs/usertest_backlog_depth/20260711T114010Z/codex/3608554477/codex_execpolicy_overlay.json">Controlled Stage 3 attempt 1 receipt</a></li>
+            <li><a href="../../.tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/runs/usertest_backlog_depth/20260711T114953Z/codex/3224679023/codex_execpolicy_overlay.json">Controlled Stage 3 attempt 2 receipt</a></li>
+          </ul>
+        </section>
+
+        <section id="evidence">
+          <h2>Evidence supporting the current claims</h2>
+
+          <h3>Repository-wide verification</h3>
+          <p>
+            The execution plan records that, on commit <code>cdd666f31af5cc91d8df4d42a5b38b47a1e99305</code>, all 14 project
+            environments were synchronized and their full test suites passed in 875.8 seconds.
+            The slow <code>runner_core</code> suite ran uninterrupted for 623.3 seconds—there was no
+            shortened wrapper timeout. Repository-wide Ruff, deptry, all 14 lock checks, README and
+            prompt contracts, tracked JSON/JSONL/YAML parsing, formatting, secret-pattern checks,
+            and <code>git diff --check</code> passed. A fresh CI-equivalent Linux image built in
+            140.1 seconds, and the changed Windows/Linux suites passed (82 Linux tests with one
+            expected Windows-only skip).
+          </p>
+
+          <h3>Live model and research proof</h3>
+          <table>
+            <thead><tr><th>Run</th><th>Result</th><th>What it proves</th><th>What it does not prove</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Generic exact-commit smoke</td>
+                <td class="good"><strong>Passed</strong></td>
+                <td>Installed Codex can use the host ChatGPT subscription and return the expected structured response with valid invocation provenance.</td>
+                <td>Does not exercise Stage 3 causal research.</td>
+              </tr>
+              <tr>
+                <td>Controlled Stage 3 attempt 1</td>
+                <td class="blocked"><strong>Blocked after 549 s</strong></td>
+                <td>Real historical/static mechanism research ran and produced substantive evidence; subscription and cleanup passed.</td>
+                <td>Positive outcome shape and one non-control diagnostic were invalid, so evidence verification did not advance.</td>
+              </tr>
+              <tr>
+                <td>Controlled Stage 3 attempt 2</td>
+                <td class="blocked"><strong>Blocked after 685 s</strong></td>
+                <td>A fresh full retry re-read the repository and corrected the original two shape errors; subscription and cleanup again passed.</td>
+                <td>It invented an alternative hypothesis and cited the source atom in the opposite evidentiary direction; deeper mechanism-binding issues would follow.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="small">
+            See the authoritative <a href="../../.tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/stage3_result.json">Stage 3 result</a>,
+            <a href="../../.tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/runs/usertest_backlog_depth/20260711T114010Z/codex/3608554477/report.json">attempt 1 dossier</a>, and
+            <a href="../../.tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/runs/usertest_backlog_depth/20260711T114953Z/codex/3224679023/report.json">attempt 2 dossier</a>.
+          </p>
+
+          <h3>Benchmark and integration evidence</h3>
+          <p>
+            The repository contains a sanitized historical depth benchmark spanning lifecycle,
+            verification-path, shell, apply-patch, storage, Claude-stderr, and Python-toolchain
+            cases. Positive/negative depth tests cover derived-evidence containment, same-cause
+            collapse, partial research blocking, code-grounded planning, outcome provenance,
+            subscription routing, and replay tamper checks. This evidence is meaningful for code
+            confidence, but it is explicitly not being substituted for the two required real shadow
+            cycles. The fixture is sanitized and some retained evidence is marked
+            <code>integrity_unknown</code>, so it cannot establish a historical solve rate. Moreover,
+            the current aggregate multi-hop fixture is semantically invalid: its disconnected supports
+            pass nominal tests despite not forming a causal chain. That benchmark is therefore treated
+            as failed until the symptom-rooted connectivity contract is corrected and re-proven.
+          </p>
+          <ul class="evidence-list">
+            <li><a href="../../apps/usertest_backlog/tests/fixtures/historical_depth_benchmark.json">Historical depth benchmark fixture</a></li>
+            <li><a href="../../apps/usertest_backlog/tests/test_positive_depth_acceptance.py">Positive depth acceptance suite</a></li>
+            <li><a href="../../packages/backlog_miner/tests/test_full_chain_causal_acceptance.py">Full-chain causal acceptance suite</a></li>
+            <li><a href="../../apps/usertest_implement/tests/test_outcome_progression.py">Outcome progression suite</a></li>
+          </ul>
+        </section>
+
+        <section id="tickets">
+          <h2>Current tickets and historical integrity</h2>
+          <p>
+            Ticket reconciliation has intentionally not started because doing so before live
+            qualification would discard the only operational queue and then regenerate it with an
+            unproven pipeline. The primary checkout currently contains 606 plan Markdown files:
+            369 are definitely automated, 25 are definitely IDEA/user-originated, 170 are readable
+            but origin-unproven and therefore protected, and 42 are corrupt or semantically not plans.
+          </p>
+          <p>
+            The remediation adds a byte-preserving <code>integrity_unknown</code> archival path for
+            those 42 files. It copies and hash-verifies original bytes before unlinking and records
+            copy-only provenance; it does not normalize damaged evidence or invent lifecycle state.
+            The 20 current generated automated queue items are stale under the old depth contract and
+            will be retired only after the revised pipeline is integrated. IDEA and origin-unproven
+            items will not be discarded.
+          </p>
+        </section>
+
+        <section id="status">
+          <h2>What remains before the objective can be claimed</h2>
+          <div class="status-line">
+            <strong>In progress</strong>
+            <span>Replace per-experiment full-symbol requirements with aggregate verified mechanism coverage and shared-subset causal controls.</span>
+          </div>
+          <div class="status-line">
+            <strong>In progress</strong>
+            <span>Correct Stage 3 examples, evidence-reference rules, alternatives/control guidance, and field-specific retry diagnostics.</span>
+          </div>
+          <div class="status-line">
+            <strong>Required next</strong>
+            <span>Repeat focused tests, the full 14-project matrix, cross-platform checks, image build, and an exact-commit live subscription-backed Stage 3 run without a convenience timeout.</span>
+          </div>
+          <div class="status-line">
+            <strong>Required next</strong>
+            <span>Run at least two export-disabled real shadow cycles; inspect every case, dossier, option, plan, auth receipt, causal identity, and stability result.</span>
+          </div>
+          <div class="status-line">
+            <strong>After qualification</strong>
+            <span>Integrate to <code>dev</code>, preserve IDEA/user work, archive/discard obsolete automated tickets with provenance, and regenerate.</span>
+          </div>
+          <div class="status-line">
+            <strong>Terminal loop</strong>
+            <span>Use <code>usertest implement</code> to drain the validated backlog, record outcome proof, regenerate, and continue until no actionable automated case remains.</span>
+          </div>
+          <div class="callout critical">
+            <p>
+              No claim of completed remediation, valid regenerated backlog, or historical solve rate
+              is warranted yet. Live research throughput and the two-cycle case graph remain the
+              decisive acceptance evidence.
+            </p>
+          </div>
+        </section>
+
+        <section id="commits">
+          <h2>Implementation record</h2>
+          <table>
+            <thead><tr><th>Commit</th><th>Purpose</th><th>Contribution</th></tr></thead>
+            <tbody>
+              <tr><td><code>c03ed318</code></td><td>Implement causal backlog depth contracts</td><td>Case lineage, strict stage records, planning and outcome foundations.</td></tr>
+              <tr><td><code>1f57437e</code></td><td>Fix live Codex evidence read attestation</td><td>Bound model claims to actual inspected evidence.</td></tr>
+              <tr><td><code>562e1c7d</code></td><td>Enforce causal backlog depth and subscription provenance</td><td>Broad causal gates, shadow validation, outcome progression, and auth provenance.</td></tr>
+              <tr><td><code>7651f965</code></td><td>Restore usable subscription-backed backlog research</td><td>Corrected over-restrictive Windows execution/auth behavior and preserved real throughput.</td></tr>
+              <tr><td><code>cdd666f3</code></td><td>Preserve subscription-backed research throughput</td><td>Targeted host-trust cleanup, direct host subscription use, and portable evidence replay.</td></tr>
+            </tbody>
+          </table>
+          <p>
+            Relative to <code>origin/dev</code>, the current branch changes 204 files with roughly
+            100,703 insertions and 3,637 deletions. That size reflects both implementation and an
+            unusually large contract/regression suite. It also raises integration risk, which is why
+            exact-commit, cross-platform, live-shadow, and ticket-preservation proof remain mandatory.
+          </p>
+          <p class="small">
+            The continuously updated execution record is
+            <a href="../../.agents/plans/3%20-%20in_progress/20260709_historical_automated_backlog_depth_remediation.md">the remediation ExecPlan</a>.
+          </p>
+        </section>
+
+        <section id="bottom-line">
+          <h2>Bottom line</h2>
+          <p>
+            The project has evolved from a pipeline that generated polished tickets from partial,
+            self-referential evidence into one with explicit contracts for preserving observations,
+            building stable cases, establishing causal mechanisms, challenging solutions, and replaying
+            original scenarios after implementation. Those contracts are materially stronger offline,
+            but the live pipeline has not yet demonstrated an accepted research-to-outcome chain. The
+            most important course corrections were removing PR-scope ceremony, rejecting all-blocked
+            qualification, preserving the host subscription path, and requiring connected,
+            symptom-rooted aggregate causal coverage.
+          </p>
+          <p>
+            The latest live failure is useful evidence rather than a setback to conceal: it proved the
+            auth path, proved that real agents are doing substantive research, and exposed exactly where
+            the proof contract still incentivizes the wrong shape of reasoning. Work should continue
+            only after that defect is corrected and re-proven through real shadow cycles.
+          </p>
+        </section>
+      </main>
+
+      <nav class="toc" aria-label="Document sections">
+        <strong>Contents</strong>
+        <a href="#assessment">Executive assessment</a>
+        <a href="#objectives">Objectives</a>
+        <a href="#starting-point">Historical audit</a>
+        <a href="#system-now">System now</a>
+        <a href="#evolution">Evolution</a>
+        <a href="#missteps">Missteps</a>
+        <a href="#subscription">Subscription proof</a>
+        <a href="#evidence">Evidence</a>
+        <a href="#tickets">Tickets</a>
+        <a href="#status">Remaining work</a>
+        <a href="#commits">Implementation record</a>
+        <a href="#bottom-line">Bottom line</a>
+      </nav>
+    </div>
+
+    <footer class="footer">
+      Prepared as an in-progress executive pause. Claims distinguish code/test confidence from live-runtime proof.
+    </footer>
+  </div>
+</body>
+</html>

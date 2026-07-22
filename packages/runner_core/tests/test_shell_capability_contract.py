@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
 from normalized_events import iter_events_jsonl
 
 import runner_core.runner as runner_mod
@@ -13,6 +14,7 @@ from runner_core.runner import (
     _resolve_shell_capability,
     _shell_probe_result_from_preflight_meta,
 )
+from runner_core.shell_capability import _resolve_codex_sandbox_mode
 
 
 def _install_task_requires_shell_mission(target_repo: Path) -> None:
@@ -103,6 +105,31 @@ def test_shell_capability_resolver_available_blocked_and_unprobed() -> None:
     ).to_dict()
     assert unprobed["state"] == "unprobed"
     assert unprobed["reason_code"] == "codex_windows_shell_unprobed"
+
+
+def test_native_windows_local_codex_write_uses_functioning_unrestricted_sandbox() -> None:
+    write_request = SimpleNamespace(policy="write")
+    safe_request = SimpleNamespace(policy="safe")
+    policy = {"sandbox": "workspace-write"}
+
+    assert _resolve_codex_sandbox_mode(
+        request=write_request,
+        codex_policy=policy,
+        has_sandbox_backend=False,
+        platform_os_name="nt",
+    ) == "danger-full-access"
+    assert _resolve_codex_sandbox_mode(
+        request=write_request,
+        codex_policy=policy,
+        has_sandbox_backend=False,
+        platform_os_name="posix",
+    ) == "workspace-write"
+    assert _resolve_codex_sandbox_mode(
+        request=safe_request,
+        codex_policy={"sandbox": "read-only"},
+        has_sandbox_backend=False,
+        platform_os_name="nt",
+    ) == "read-only"
 
 
 def test_shell_capability_resolver_classifies_codex_windows_probe_failures() -> None:
@@ -352,6 +379,76 @@ def test_shell_required_agent_probe_failure_blocks_dispatch_and_writes_report(
     assert events[-1]["data"]["shell_capability"] == shell_capability
 
 
+def test_shell_probe_subscription_limit_is_parked_not_misclassified_as_policy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_task_requires_shell_mission(target)
+
+    provider_message = (
+        "You've hit your usage limit. Visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at "
+        "Jul 18th, 2026 2:33 AM."
+    )
+    probe_payload = {
+        "kind": "agent_shell_payload",
+        "agent": "codex",
+        "ok": False,
+        "exit_code": 1,
+        "marker_seen": False,
+        "stdout_excerpt": "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "probe-thread"}),
+                json.dumps({"type": "error", "message": provider_message}),
+                json.dumps({"type": "turn.failed", "error": {"message": provider_message}}),
+            ]
+        ),
+        "stderr_excerpt": "Shell snapshot not supported yet for PowerShell",
+        "last_message_excerpt": "",
+        "reason": "Agent shell probe exited non-zero: exit_code=1",
+    }
+    monkeypatch.setattr(runner_mod, "_runner_host_os", lambda: "Windows")
+    monkeypatch.setattr(
+        runner_mod,
+        "probe_agent_shell_launch",
+        lambda **_: SimpleNamespace(to_dict=lambda: dict(probe_payload)),
+    )
+
+    result = run_once(
+        RunnerConfig(
+            repo_root=repo_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": "codex"}},
+            policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+        ),
+        RunRequest(repo=str(target), agent="codex", policy="safe", exec_backend="local"),
+    )
+
+    assert result.exit_code == 1
+    assert any(
+        error == "code=codex_chatgpt_subscription_usage_limit"
+        for error in result.report_validation_errors
+    )
+    error = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error["type"] == "AgentExternalWait"
+    assert error["subtype"] == "provider_subscription_usage_limit"
+    assert error["phase"] == "agent_shell_probe"
+    assert error["route"] == "chatgpt_subscription"
+    assert error["api_fallback_allowed"] is False
+    assert error["external_wait"]["state"] == "parked"
+    assert error["external_wait"]["resume_after"]["raw"] == ("Jul 18th, 2026 2:33 AM")
+    assert error["external_wait"]["retry_mode"] == "resume_same_session"
+    assert not (result.run_dir / "agent_attempts.json").exists()
+
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight["meta"]["external_wait"] == error["external_wait"]
+    assert preflight["meta"]["agent_shell_probe"]["external_wait"] == (error["external_wait"])
+
+
 def test_shell_required_backend_probe_failure_blocks_dispatch_and_classifies(
     tmp_path: Path,
     monkeypatch,
@@ -434,6 +531,10 @@ def test_delegation_capability_resolver_available_unavailable_unknown() -> None:
     ).to_dict()
     assert available["state"] == "available"
     assert available["available_under_policy"] is True
+    assert available["policy_exposes_delegation"] is True
+    assert available["cli_supports_delegation"] is True
+    assert available["policy_status"] == "exposed"
+    assert available["cli_support_status"] == "supported"
     assert available["delegation_tool_names"] == ["Task"]
     assert available["cli_version"] == "claude 1.2.3"
     assert available["evidence_source"] == "agent_config.delegation_tools"
@@ -446,6 +547,10 @@ def test_delegation_capability_resolver_available_unavailable_unknown() -> None:
     ).to_dict()
     assert unavailable["state"] == "unavailable"
     assert unavailable["available_under_policy"] is False
+    assert unavailable["policy_exposes_delegation"] is False
+    assert unavailable["cli_supports_delegation"] is True
+    assert unavailable["policy_status"] == "not_exposed"
+    assert unavailable["cli_support_status"] == "supported"
     assert unavailable["delegation_tool_names"] == ["delegate"]
     assert unavailable["evidence_source"] == "agent_config.delegation.tools"
 
@@ -457,6 +562,8 @@ def test_delegation_capability_resolver_available_unavailable_unknown() -> None:
     ).to_dict()
     assert unknown["state"] == "unknown"
     assert unknown["available_under_policy"] is None
+    assert unknown["policy_status"] == "unknown_no_contract"
+    assert unknown["cli_support_status"] == "unknown_no_contract"
     assert unknown["delegation_tool_names"] == []
     assert unknown["confidence"] == "low"
     assert "not guessed" in unknown["reason"]
@@ -472,3 +579,73 @@ def test_delegation_capability_codex_contract_available_without_tool_allowlist()
     assert capability["state"] == "available"
     assert capability["configured_allowed_tools"] is None
     assert capability["available_under_policy"] is True
+
+
+def test_delegation_capability_distinguishes_policy_block_from_cli_version_block() -> None:
+    policy_blocked = _resolve_delegation_capability(
+        agent="claude",
+        agent_cfg={
+            "delegation": {
+                "tools": ["Agent"],
+                "confirmed_cli_versions": ["2.1.205 (Claude Code)"],
+            }
+        },
+        policy_cfg={"claude": {"allowed_tools": ["Read", "Edit", "Bash"]}},
+        cli_version_probe={"ok": True, "stdout_excerpt": "2.1.205 (Claude Code)"},
+    ).to_dict()
+    assert policy_blocked["state"] == "unavailable"
+    assert policy_blocked["policy_exposes_delegation"] is False
+    assert policy_blocked["cli_supports_delegation"] is True
+    assert policy_blocked["policy_status"] == "not_exposed"
+    assert policy_blocked["cli_support_status"] == "supported"
+    assert "policy allowed_tools does not expose" in policy_blocked["reason"]
+
+    cli_blocked = _resolve_delegation_capability(
+        agent="gemini",
+        agent_cfg={
+            "delegation": {
+                "tools": ["invoke_agent"],
+                "confirmed_cli_versions": ["0.50.0"],
+            }
+        },
+        policy_cfg={"gemini": {"allowed_tools": ["read_file", "invoke_agent"]}},
+        cli_version_probe={"ok": True, "stdout_excerpt": "0.51.0"},
+    ).to_dict()
+    assert cli_blocked["state"] == "unavailable"
+    assert cli_blocked["policy_exposes_delegation"] is True
+    assert cli_blocked["cli_supports_delegation"] is False
+    assert cli_blocked["policy_status"] == "exposed"
+    assert cli_blocked["cli_support_status"] == "unsupported_cli_version"
+    assert "does not match the confirmed delegation versions" in cli_blocked["reason"]
+
+
+def test_repo_write_policy_keeps_write_tools_and_adds_confirmed_delegation_tools() -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    policies = yaml.safe_load((repo_root / "configs" / "policies.yaml").read_text())["policies"]
+    agents = yaml.safe_load((repo_root / "configs" / "agents.yaml").read_text())["agents"]
+
+    write = policies["write"]
+    claude_tools = write["claude"]["allowed_tools"]
+    gemini_tools = write["gemini"]["allowed_tools"]
+
+    assert write["claude"]["allow_edits"] is True
+    assert {"Read", "Edit", "Bash", "Grep", "Glob"}.issubset(set(claude_tools))
+    assert agents["claude"]["delegation"]["tools"] == ["Agent"]
+    assert "Agent" in claude_tools
+
+    assert write["gemini"]["allow_edits"] is True
+    assert {
+        "read_file",
+        "search_file_content",
+        "write_file",
+        "replace",
+        "write_todos",
+        "run_shell_command",
+    }.issubset(set(gemini_tools))
+    assert agents["gemini"]["delegation"]["tools"] == ["invoke_agent"]
+    assert "invoke_agent" in gemini_tools
+
+    for policy_name in ("safe", "inspect"):
+        policy = policies[policy_name]
+        assert "Agent" not in policy["claude"]["allowed_tools"]
+        assert "invoke_agent" not in policy["gemini"]["allowed_tools"]

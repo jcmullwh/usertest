@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import shutil
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from agent_adapters.gemini_cli import run_gemini
 
 _SHELL_PROBE_MARKER = "shell_probe=ok"
 _TAIL_BYTES = 24_000
+_CODEX_CONTEXT_EXHAUSTED_FRAGMENT = "ran out of room in the model's context window"
 
 
 @dataclass(frozen=True)
@@ -23,13 +25,19 @@ class AgentShellProbeResult:
     stderr_path: Path
     marker_seen: bool
     marker_source: str | None
+    required_commands: tuple[str, ...] = ()
+    required_commands_seen: tuple[str, ...] = ()
+    required_command_outputs: tuple[tuple[str, str], ...] = ()
     error: str | None = None
+    attempt_count: int = 1
+    attempt_history: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         stderr_tail = _read_tail(self.stderr_path)
         stdout_tail = _read_tail(self.raw_events_path)
         last_message = _read_text(self.last_message_path)
-        ok = self.exit_code == 0 and self.marker_seen and self.error is None
+        required_complete = set(self.required_commands_seen) == set(self.required_commands)
+        ok = self.exit_code == 0 and self.marker_seen and required_complete and self.error is None
         reason = None
         if self.error is not None:
             reason = self.error
@@ -37,6 +45,9 @@ class AgentShellProbeResult:
             reason = f"Agent shell probe exited non-zero: exit_code={self.exit_code}"
         elif not self.marker_seen:
             reason = f"Agent shell probe did not emit required marker {_SHELL_PROBE_MARKER!r}."
+        elif not required_complete:
+            missing = sorted(set(self.required_commands) - set(self.required_commands_seen))
+            reason = "Agent shell probe did not complete required commands: " + ", ".join(missing)
         return {
             "kind": "agent_shell_payload",
             "agent": self.agent,
@@ -44,6 +55,9 @@ class AgentShellProbeResult:
             "exit_code": self.exit_code,
             "marker_seen": self.marker_seen,
             "marker_source": self.marker_source,
+            "required_commands": list(self.required_commands),
+            "required_commands_seen": list(self.required_commands_seen),
+            "required_command_outputs": dict(self.required_command_outputs),
             "stdout_excerpt": _excerpt(stdout_tail),
             "stderr_excerpt": _excerpt(stderr_tail),
             "last_message_excerpt": _excerpt(last_message),
@@ -52,6 +66,9 @@ class AgentShellProbeResult:
             "raw_events_path": str(self.raw_events_path),
             "last_message_path": str(self.last_message_path),
             "stderr_path": str(self.stderr_path),
+            "attempt_count": self.attempt_count,
+            "retry_count": max(0, self.attempt_count - 1),
+            "attempt_history": [dict(item) for item in self.attempt_history],
         }
 
 
@@ -68,7 +85,11 @@ def probe_agent_shell_launch(
     codex_ask_for_approval: str | None = None,
     codex_subcommand: str = "exec",
     codex_config_overrides: list[str] | tuple[str, ...] = (),
+    codex_ignore_user_config: bool = True,
+    codex_ignore_rules: bool = True,
     codex_agent_last_message_path: str | None = None,
+    codex_required_commands: list[str] | tuple[str, ...] = (),
+    codex_required_command_outputs: dict[str, str] | None = None,
     claude_output_format: str = "stream-json",
     claude_allowed_tools: list[str] | tuple[str, ...] = (),
     claude_permission_mode: str | None = None,
@@ -77,6 +98,7 @@ def probe_agent_shell_launch(
     gemini_approval_mode: str = "default",
     gemini_allowed_tools: list[str] | tuple[str, ...] = (),
     gemini_include_directories: list[str] | tuple[str, ...] = (),
+    codex_context_exhaustion_retries: int = 2,
 ) -> AgentShellProbeResult:
     """
     Probe shell launchability through the selected agent adapter.
@@ -91,36 +113,67 @@ def probe_agent_shell_launch(
     raw_events_path = artifacts_dir / "raw_events.jsonl"
     last_message_path = artifacts_dir / "agent_last_message.txt"
     stderr_path = artifacts_dir / "agent_stderr.txt"
-    prompt = _probe_prompt(agent_norm)
+    required_commands = tuple(
+        command.strip()
+        for command in codex_required_commands
+        if isinstance(command, str) and command.strip()
+    )
+    required_command_outputs = tuple(
+        (command, expected)
+        for command, expected in (codex_required_command_outputs or {}).items()
+        if command in required_commands and isinstance(expected, str) and expected
+    )
+    prompt = _probe_prompt(agent_norm, required_commands=required_commands)
     prefix = [p for p in command_prefix if isinstance(p, str) and p]
 
     try:
         if agent_norm == "codex":
-            result = run_codex_exec(
-                workspace_dir=workspace_dir,
-                prompt=prompt,
-                raw_events_path=raw_events_path,
-                last_message_path=last_message_path,
-                stderr_path=stderr_path,
-                sandbox=str(codex_sandbox or "read-only"),
-                ask_for_approval=str(codex_ask_for_approval or "never"),
-                binary=binary,
-                subcommand=codex_subcommand,
-                model=model,
-                config_overrides=codex_config_overrides,
-                ignore_rules=True,
-                command_prefix=prefix,
-                env_overrides=env_overrides,
-                agent_last_message_path=codex_agent_last_message_path,
-            )
-            return _result_from_paths(
-                agent=agent_norm,
-                argv=result.argv,
-                exit_code=result.exit_code,
-                raw_events_path=raw_events_path,
-                last_message_path=last_message_path,
-                stderr_path=stderr_path,
-            )
+            attempt_history: list[dict[str, Any]] = []
+            max_attempts = 1 + max(0, int(codex_context_exhaustion_retries))
+            for attempt_number in range(1, max_attempts + 1):
+                result = run_codex_exec(
+                    workspace_dir=workspace_dir,
+                    prompt=prompt,
+                    raw_events_path=raw_events_path,
+                    last_message_path=last_message_path,
+                    stderr_path=stderr_path,
+                    sandbox=str(codex_sandbox or "read-only"),
+                    ask_for_approval=str(codex_ask_for_approval or "never"),
+                    binary=binary,
+                    subcommand=codex_subcommand,
+                    model=model,
+                    config_overrides=codex_config_overrides,
+                    ignore_user_config=codex_ignore_user_config,
+                    ignore_rules=codex_ignore_rules,
+                    command_prefix=prefix,
+                    env_overrides=env_overrides,
+                    agent_last_message_path=codex_agent_last_message_path,
+                )
+                probe_result = _result_from_paths(
+                    agent=agent_norm,
+                    argv=result.argv,
+                    exit_code=result.exit_code,
+                    raw_events_path=raw_events_path,
+                    last_message_path=last_message_path,
+                    stderr_path=stderr_path,
+                    required_commands=required_commands,
+                    required_command_outputs=required_command_outputs,
+                )
+                retryable = _codex_probe_context_exhausted(probe_result)
+                attempt_history.append(
+                    _preserve_probe_attempt(
+                        artifacts_dir=artifacts_dir,
+                        attempt_number=attempt_number,
+                        result=probe_result,
+                        retryable_context_exhaustion=retryable,
+                    )
+                )
+                if not retryable or attempt_number >= max_attempts:
+                    return replace(
+                        probe_result,
+                        attempt_count=attempt_number,
+                        attempt_history=tuple(attempt_history),
+                    )
 
         if agent_norm == "claude":
             result = run_claude_print(
@@ -183,21 +236,74 @@ def probe_agent_shell_launch(
             stderr_path=stderr_path,
             marker_seen=False,
             marker_source=None,
+            required_commands=required_commands,
+            required_command_outputs=required_command_outputs,
             error=str(exc),
         )
 
     raise ValueError(f"Unsupported agent for shell launch probe: {agent!r}")
 
 
-def _probe_prompt(agent: str) -> str:
+def _codex_probe_context_exhausted(result: AgentShellProbeResult) -> bool:
+    if result.exit_code == 0:
+        return False
+    evidence = "\n".join(
+        (
+            _read_tail(result.raw_events_path),
+            _read_text(result.last_message_path),
+            _read_tail(result.stderr_path),
+            result.error or "",
+        )
+    ).lower()
+    return _CODEX_CONTEXT_EXHAUSTED_FRAGMENT in evidence
+
+
+def _preserve_probe_attempt(
+    *,
+    artifacts_dir: Path,
+    attempt_number: int,
+    result: AgentShellProbeResult,
+    retryable_context_exhaustion: bool,
+) -> dict[str, Any]:
+    attempt_dir = artifacts_dir / "attempts" / f"attempt_{attempt_number:03d}"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    copied_paths: dict[str, str | None] = {}
+    for label, source in (
+        ("raw_events_path", result.raw_events_path),
+        ("last_message_path", result.last_message_path),
+        ("stderr_path", result.stderr_path),
+    ):
+        destination = attempt_dir / source.name
+        if source.is_file():
+            shutil.copy2(source, destination)
+            copied_paths[label] = str(destination)
+        else:
+            copied_paths[label] = None
+    return {
+        "attempt_number": attempt_number,
+        "exit_code": result.exit_code,
+        "marker_seen": result.marker_seen,
+        "retryable_context_exhaustion": retryable_context_exhaustion,
+        **copied_paths,
+    }
+
+
+def _probe_prompt(agent: str, *, required_commands: tuple[str, ...] = ()) -> str:
     shell_hint = (
         "Use Bash"
         if agent == "claude"
         else ("Use run_shell_command" if agent == "gemini" else "Use the shell command tool")
     )
+    command_instruction = ""
+    if agent == "codex" and required_commands:
+        command_instruction = (
+            "Run each of these exact, read-only commands separately and do not run any mission "
+            "or repository task:\n" + "".join(f"- `{command}`\n" for command in required_commands)
+        )
     return (
         "Shell capability preflight probe.\n"
-        f"{shell_hint} to run a command that prints exactly {_SHELL_PROBE_MARKER}.\n"
+        + command_instruction
+        + f"{shell_hint} to run a command that prints exactly {_SHELL_PROBE_MARKER}.\n"
         "Do not read or write repository files. After the shell command completes, briefly report "
         "that the preflight probe finished.\n"
     )
@@ -211,6 +317,8 @@ def _result_from_paths(
     raw_events_path: Path,
     last_message_path: Path,
     stderr_path: Path,
+    required_commands: tuple[str, ...] = (),
+    required_command_outputs: tuple[tuple[str, str], ...] = (),
 ) -> AgentShellProbeResult:
     marker_source = _find_shell_marker_source(agent=agent, raw_events_path=raw_events_path)
     return AgentShellProbeResult(
@@ -222,7 +330,57 @@ def _result_from_paths(
         stderr_path=stderr_path,
         marker_seen=marker_source is not None,
         marker_source=marker_source,
+        required_commands=required_commands,
+        required_commands_seen=_successful_required_commands(
+            raw_events_path=raw_events_path,
+            required_commands=required_commands,
+            required_command_outputs=dict(required_command_outputs),
+        ),
+        required_command_outputs=required_command_outputs,
     )
+
+
+def _successful_required_commands(
+    *,
+    raw_events_path: Path,
+    required_commands: tuple[str, ...],
+    required_command_outputs: dict[str, str],
+) -> tuple[str, ...]:
+    seen: list[str] = []
+    for payload in _iter_json_payloads(raw_events_path):
+        item = payload.get("item")
+        item_dict = item if isinstance(item, dict) else {}
+        if item_dict.get("type") != "command_execution" or item_dict.get("exit_code") != 0:
+            continue
+        raw_command = item_dict.get("command")
+        if not isinstance(raw_command, str):
+            continue
+        invoked_command = _extract_invoked_shell_command(raw_command)
+        aggregated_output = item_dict.get("aggregated_output")
+        for required in required_commands:
+            expected_output = required_command_outputs.get(required)
+            if (
+                invoked_command == required
+                and required not in seen
+                and (
+                    expected_output is None
+                    or (isinstance(aggregated_output, str) and expected_output in aggregated_output)
+                )
+            ):
+                seen.append(required)
+    return tuple(seen)
+
+
+def _extract_invoked_shell_command(raw_command: str) -> str:
+    stripped = raw_command.strip()
+    for marker in (" -Command ", " -lc ", " /c "):
+        if marker not in stripped:
+            continue
+        tail = stripped.rsplit(marker, 1)[1].strip()
+        if len(tail) >= 2 and tail[0] == tail[-1] and tail[0] in {"'", '"'}:
+            tail = tail[1:-1]
+        return tail.strip()
+    return stripped
 
 
 def _find_shell_marker_source(*, agent: str, raw_events_path: Path) -> str | None:

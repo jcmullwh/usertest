@@ -118,6 +118,36 @@ def test_maybe_unwrap_shell_command_preserves_windows_path_in_powershell() -> No
     )
 
 
+def test_maybe_unwrap_shell_command_accepts_noprofile_before_command() -> None:
+    argv = [
+        r'"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"',
+        "-NoProfile",
+        "-Command",
+        r'"Get-Content -Raw -Encoding UTF8 -LiteralPath .\atoms.json"',
+    ]
+
+    assert _maybe_unwrap_shell_command(argv) == [
+        "Get-Content",
+        "-Raw",
+        "-Encoding",
+        "UTF8",
+        "-LiteralPath",
+        r".\atoms.json",
+    ]
+
+
+def test_maybe_unwrap_shell_command_rejects_unrecognized_host_options() -> None:
+    argv = [
+        "powershell.exe",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-Content -Raw -LiteralPath atoms.json",
+    ]
+
+    assert _maybe_unwrap_shell_command(argv) == argv
+
+
 def test_maybe_unwrap_shell_command_preserves_windows_path_in_cmd() -> None:
     """
     When unwrapping cmd /c "C:\\...\\python.exe -m pytest", backslashes must survive.
@@ -229,9 +259,7 @@ def test_normalize_codex_events_preserves_windows_path_in_command_execution(
     recorded_command = cmd_event.get("data", {}).get("command", "")
 
     # The Windows path must NOT be corrupted (e.g. C:Python313python.exe)
-    assert "C:" in recorded_command, (
-        f"Drive letter lost. recorded_command={recorded_command!r}"
-    )
+    assert "C:" in recorded_command, f"Drive letter lost. recorded_command={recorded_command!r}"
     assert "\\" in recorded_command, (
         f"Backslash(es) lost from Windows path in normalized command.\n"
         f"Input:  {cmd_string!r}\n"

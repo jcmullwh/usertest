@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -18,15 +19,19 @@ from pathlib import Path
 from typing import Any
 
 from agent_adapters import (
+    build_codex_subscription_config_overrides,
     normalize_claude_events,
     normalize_codex_events,
     normalize_gemini_events,
     probe_agent_shell_launch,
+    probe_codex_login_status,
+    resolve_codex_executable,
     run_claude_print,
     run_codex_exec,
     run_gemini,
     validate_codex_personality_config_overrides,
     validate_codex_reasoning_effort_config_overrides,
+    validate_codex_subscription_config_overrides,
 )
 from agent_adapters.codex_config import toml_basic_string
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
@@ -45,7 +50,7 @@ from sandbox_runner.diagnostics import (
 from runner_core.agent_docs import obfuscate_target_agent_docs
 from runner_core.agent_prompt_files import _materialize_agent_prompt_into_workspace
 from runner_core.artifacts import (
-    _extract_json_object,
+    _extract_json_object_with_receipt,
     _tail_text_for_prompt,
     _write_json,
 )
@@ -53,6 +58,16 @@ from runner_core.artifacts import (
     _read_tail_text as _read_tail_text,
 )
 from runner_core.catalog import load_catalog_config
+from runner_core.codex_execpolicy import (
+    CONTROLLED_CODEX_AUTH_ENV_VARS,
+    CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+    CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE,
+    ControlledCodexExecpolicyOverlay,
+    build_codex_shell_probe_config_overrides,
+    capture_probe_workspace_state,
+    controlled_codex_execpolicy_receipt_errors,
+    install_controlled_codex_execpolicy,
+)
 from runner_core.execution_backend import prepare_execution_backend
 from runner_core.git_helpers import (
     _ensure_git_user_config as _ensure_git_user_config,
@@ -88,6 +103,7 @@ from runner_core.preflight import (
     _build_preflight_command_list,
     _ensure_windows_python_on_path,
     _probe_commands_local,
+    _run_bounded_command_probe,
 )
 from runner_core.prompt import (
     CANONICAL_EXECUTION_NOTES_MD,
@@ -101,6 +117,7 @@ from runner_core.prompt_staging import (
     _stage_agent_prompt_file,
     _stage_agent_prompt_text,
 )
+from runner_core.provenance import capture_runner_implementation_provenance
 from runner_core.python_capability import (
     _PYTHON_COMMAND_PROBE_BUDGET_SECONDS,
     _PYTHON_CONTEXT_PROBE_BUDGET_SECONDS,
@@ -130,6 +147,13 @@ from runner_core.python_runtime import (
     verification_commands_need_pytest,
     verification_commands_need_python,
 )
+from runner_core.retained_oracle_assets import (
+    RETAINED_ORACLE_AGENT_NOTE,
+    retained_oracle_asset_summary,
+    stage_retained_oracle_asset,
+    validate_retained_oracle_asset_source,
+    validate_staged_retained_oracle_asset,
+)
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.shell_capability import (
     _docker_exec_backend_available,
@@ -153,8 +177,11 @@ from runner_core.stderr_diagnostics import (
     _classify_failure_subtype,
     _codex_metadata_capture_from_stderr,
     _extract_claude_quota_exhaustion,
+    _extract_codex_subscription_usage_limit,
+    _extract_raw_events_error_messages,
     _extract_raw_events_plaintext_excerpt,
     _format_claude_quota_exhaustion_stderr,
+    _format_codex_subscription_usage_limit_stderr,
     _is_retryable_provider_capacity_failure,
     _is_retryable_tool_use_id_collision_failure,
     _is_retryable_transient_network_failure,
@@ -165,7 +192,11 @@ from runner_core.stderr_diagnostics import (
 from runner_core.stderr_diagnostics import (
     _sanitize_agent_stderr_text as _sanitize_agent_stderr_text,
 )
-from runner_core.target_acquire import acquire_target
+from runner_core.target_acquire import (
+    acquire_existing_target,
+    acquire_target,
+    remove_acquired_workspace,
+)
 from runner_core.verification_broker import (
     VerificationBrokerAttempt,
     VerificationBrokerContract,
@@ -183,6 +214,7 @@ from runner_core.verification_broker import (
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
 )
+from runner_core.verification_commands import verification_command_safety_errors
 from runner_core.verification_prompts import (
     _build_followup_prompt,
     _build_verification_followup_prompt,
@@ -193,6 +225,29 @@ from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspa
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _codex_subscription_external_wait(text: str) -> dict[str, Any] | None:
+    """Project a provider usage-limit message into a resumable, non-API wait state."""
+    usage_limit = _extract_codex_subscription_usage_limit(text)
+    if usage_limit is None:
+        return None
+    return {
+        "schema_version": 1,
+        "state": "parked",
+        "reason": "codex_chatgpt_subscription_usage_limit",
+        "retryable": True,
+        "retry_disposition": "resume_after_provider_reset",
+        "retry_mode": "resume_same_session",
+        "resume_after": {
+            "raw": usage_limit.get("resume_after_raw"),
+            "timezone": usage_limit.get("resume_after_timezone"),
+        },
+        "provider": "codex",
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+        "settings_url": usage_limit.get("settings_url"),
+    }
 
 
 @dataclass(frozen=True)
@@ -215,15 +270,30 @@ class RunRequest:
     seed: int = 0
     model: str | None = None
     agent_config_overrides: tuple[str, ...] = ()
+    codex_execpolicy_allow_prefixes: tuple[tuple[str, ...], ...] = ()
     agent_system_prompt_file: Path | None = None
     agent_append_system_prompt: str | None = None
     agent_append_system_prompt_file: Path | None = None
+    supervisor_instruction: str | None = None
+    # Explicit user turn for a continued agent conversation. This is distinct from
+    # system-instruction composition because resumed sessions retain their original
+    # instructions and accept feedback through stdin as the next user message.
+    agent_user_prompt: str | None = None
+    # Runner-owned backlog lineage. These fields are persisted in target_ref.json
+    # and outrank legacy mission-name inference and model-authored extensions.
+    evidence_role: str | None = None
+    origin_stage: str | None = None
+    parent_case_id: str | None = None
+    # Exact Codex thread.started.thread_id to continue. Never infer with `--last`.
+    codex_resume_session_id: str | None = None
     keep_workspace: bool = False
     preflight_commands: tuple[str, ...] = ()
     preflight_required_commands: tuple[str, ...] = ()
     verification_commands: tuple[str, ...] = ()
     verification_timeout_seconds: float | None = None
     verification_reuse_mode: str = "off"
+    retained_oracle_assets_root: Path | None = None
+    retained_oracle_asset_spec: dict[str, Any] | None = None
 
     exec_backend: str = "local"
     exec_docker_profile: str = "standard"
@@ -237,6 +307,7 @@ class RunRequest:
     exec_cache: str = "cold"
     exec_cache_dir: Path | None = None
     exec_maintenance_venv_cache: bool = False
+    exec_maintenance_image_metadata_path: Path | None = None
     exec_env: tuple[str, ...] = ()
     exec_keep_container: bool = False
     exec_rebuild_image: bool = False
@@ -244,6 +315,7 @@ class RunRequest:
     agent_rate_limit_backoff_seconds: float = 1.0
     agent_rate_limit_backoff_multiplier: float = 2.0
     agent_followup_attempts: int = 2
+    resume_workspace_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +323,7 @@ class RunResult:
     run_dir: Path
     exit_code: int
     report_validation_errors: list[str]
+    agent_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -270,6 +343,10 @@ class DelegationCapability:
     configured_allowed_tools: list[str] | None
     delegation_tool_names: list[str]
     available_under_policy: bool | None
+    policy_exposes_delegation: bool | None
+    cli_supports_delegation: bool | None
+    policy_status: str
+    cli_support_status: str
     evidence_source: str
     confidence: str
     reason: str
@@ -283,6 +360,10 @@ class DelegationCapability:
             "configured_allowed_tools": self.configured_allowed_tools,
             "delegation_tool_names": list(self.delegation_tool_names),
             "available_under_policy": self.available_under_policy,
+            "policy_exposes_delegation": self.policy_exposes_delegation,
+            "cli_supports_delegation": self.cli_supports_delegation,
+            "policy_status": self.policy_status,
+            "cli_support_status": self.cli_support_status,
             "evidence_source": self.evidence_source,
             "confidence": self.confidence,
             "reason": self.reason,
@@ -673,21 +754,20 @@ def _format_verification_timing_guidance_md(
     if isinstance(insufficient_reason, str) and insufficient_reason.strip():
         lines.append(f"    - fallback reason: {insufficient_reason.strip()}")
     lines.append(
-        "    - recommended first wait: "
-        f"{_format_seconds_for_prompt(recommended_wait)} before checking status"
+        "    - runner expected blocking wait: "
+        f"{_format_seconds_for_prompt(recommended_wait)} before a status check would normally help"
     )
     lines.append(
-        "    - reasonable check cadence: if verification is expected to take minutes, "
-        f"wait near {_format_seconds_for_prompt(check_after)} before checking again; "
-        "one or two checks are acceptable, continuous wait/poll loops are not"
+        "    - model guidance: do not issue repeated wait/poll actions for normal "
+        "completion; the runner owns the wait and will only re-enter you if a fix is needed"
     )
     lines.append(
         "    - hang guard: do not call verification hung until it exceeds "
         f"{_format_seconds_for_prompt(hang_guard)} or shows concrete failure evidence"
     )
     lines.append(
-        "    - use one long wait rather than frequent short polling; do not repeatedly "
-        "poll only to watch progress"
+        "    - internal check cadence: if an operator inspects a long verification manually, "
+        f"wait near {_format_seconds_for_prompt(check_after)} before checking again"
     )
     if isinstance(verification_result_path, str) and verification_result_path.strip():
         lines.append(
@@ -718,6 +798,7 @@ def _format_preflight_summary_md(
     verification_broker_command: str | None,
     agent: str,
     codex_sandbox_mode: str | None,
+    delegation_capability: dict[str, Any] | None = None,
     verification_timing_profile: dict[str, Any] | None = None,
     verification_timing_profile_path: str | None = None,
     verification_result_path: str | None = None,
@@ -789,6 +870,29 @@ def _format_preflight_summary_md(
         f"- Python: {python_label}; pip: {pip_label}",
         f"- Tools: {', '.join(tool_parts)}",
     ]
+    if isinstance(delegation_capability, dict):
+        delegation_state = delegation_capability.get("state")
+        delegation_state_s = (
+            delegation_state
+            if isinstance(delegation_state, str) and delegation_state.strip()
+            else "unknown"
+        )
+        policy_status = delegation_capability.get("policy_status")
+        policy_status_s = (
+            policy_status if isinstance(policy_status, str) and policy_status.strip() else "unknown"
+        )
+        cli_status = delegation_capability.get("cli_support_status")
+        cli_status_s = (
+            cli_status if isinstance(cli_status, str) and cli_status.strip() else "unknown"
+        )
+        tools_raw = delegation_capability.get("delegation_tool_names")
+        tools = [x for x in tools_raw if isinstance(x, str)] if isinstance(tools_raw, list) else []
+        tools_label = ", ".join(tools) if tools else "none"
+        lines.append(
+            "- Delegation: "
+            f"{delegation_state_s} (policy={policy_status_s}; cli={cli_status_s}; "
+            f"tools={tools_label})"
+        )
     if isinstance(pytest_probe, dict):
         pytest_ok = bool(pytest_probe.get("passed") is True)
         reason_code = pytest_probe.get("reason_code")
@@ -813,11 +917,19 @@ def _format_preflight_summary_md(
         ):
             lines.append("- Final handoff verification:")
             lines.append(f"  - timeout_seconds: {timeout_label}")
-            lines.append(f"  - command: `{verification_broker_command.strip()}`")
             lines.append(
-                "  - note: run this once you believe the work is complete; it blocks "
-                "until verification finishes, it must pass before you finish, and you "
-                "must not make further workspace changes after it passes."
+                "  - mode: runner-owned blocking wait; do not launch or poll a "
+                "verification command yourself during normal completion."
+            )
+            lines.append(
+                "  - note: when you believe the work is complete, return the required "
+                "final JSON report. The runner will request verification once, wait for "
+                "the broker/client result, and finalize automatically if it passes."
+            )
+            lines.append(
+                "  - failure handling: if verification fails, the runner will re-enter "
+                "the agent with one compact fix prompt containing the failing command "
+                "tails and artifact paths."
             )
             lines.extend(
                 _format_verification_timing_guidance_md(
@@ -833,22 +945,28 @@ def _format_preflight_summary_md(
             for cmd in verification_commands:
                 lines.append(f"    - `{cmd}`")
 
-    if (
-        agent == "codex"
-        and isinstance(codex_sandbox_mode, str)
-        and codex_sandbox_mode.strip().lower().startswith("workspace-")
-    ):
+    if agent == "codex" and isinstance(codex_sandbox_mode, str):
         sandbox_label = codex_sandbox_mode.strip()
-        lines.append(
-            "- Note: Codex workspace sandbox is enabled "
-            f"(sandbox={sandbox_label}); commands/files outside the workspace may be unavailable. "
-            "If you need a consistent toolchain, consider `--exec-backend docker`."
-        )
-        lines.append(
-            "- Do not treat a blocked shell command as proof that the workspace is read-only. "
-            "When `allow_edits=true` and the sandbox is workspace-write, retry with simpler "
-            "sandbox-compatible commands or file-edit tools before reporting an edit blocker."
-        )
+        if sandbox_label.lower().startswith("workspace-"):
+            lines.append(
+                "- Note: Codex workspace sandbox is enabled "
+                f"(sandbox={sandbox_label}); commands/files outside the workspace may be "
+                "unavailable. If you need a consistent toolchain, consider "
+                "`--exec-backend docker`."
+            )
+            lines.append(
+                "- Do not treat a blocked shell command as proof that the workspace is read-only. "
+                "When `allow_edits=true` and the sandbox is workspace-write, retry with simpler "
+                "sandbox-compatible commands or file-edit tools before reporting an edit blocker."
+            )
+        elif sandbox_label.lower() == "danger-full-access":
+            lines.append(
+                "- Note: Codex unrestricted local sandbox mode is enabled "
+                f"(sandbox={sandbox_label}) because native Windows workspace-write cannot perform "
+                "write missions reliably. Keep all mission changes within the acquired target "
+                "workspace; runner-owned branch, diff, verification, review, and PR gates still "
+                "apply."
+            )
 
     return "\n".join(lines)
 
@@ -1065,23 +1183,15 @@ def _probe_agent_cli_version(
 
     binary_to_run = binary
     if os.name == "nt" and not command_prefix:
-        path = (env or os.environ).get("PATH")
-        resolved = shutil.which(binary, path=path)
-        if resolved:
-            binary_to_run = resolved
+        binary_to_run = resolve_codex_executable(binary, env=env or os.environ)
 
     argv = [binary_to_run, "--version"]
     full_argv = [*command_prefix, *argv] if command_prefix else argv
 
     try:
-        proc = subprocess.run(
+        probe = _run_bounded_command_probe(
             full_argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
+            timeout_seconds=timeout_seconds,
             env=env,
         )
     except FileNotFoundError as e:
@@ -1091,13 +1201,6 @@ def _probe_agent_cli_version(
             "error": "FileNotFoundError",
             "details": str(e),
         }
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False,
-            "argv": full_argv,
-            "error": "timeout",
-            "timeout_seconds": timeout_seconds,
-        }
     except Exception as e:  # noqa: BLE001
         return {
             "ok": False,
@@ -1106,14 +1209,33 @@ def _probe_agent_cli_version(
             "details": str(e),
         }
 
-    stdout = (proc.stdout or "").strip()
-    stderr = (proc.stderr or "").strip()
-    return {
-        "ok": int(proc.returncode or 0) == 0,
+    stdout = (probe.stdout or "").strip()
+    stderr = (probe.stderr or "").strip()
+    common = {
         "argv": full_argv,
-        "exit_code": int(proc.returncode or 0),
+        "exit_code": int(probe.returncode),
         "stdout_excerpt": stdout[:300] if stdout else None,
         "stderr_excerpt": stderr[:300] if stderr else None,
+        "probe_timed_out": bool(probe.timed_out),
+        "probe_tree_cleanup_succeeded": bool(probe.cleanup_succeeded),
+        "probe_tree_cleanup_diagnostic": probe.cleanup_diagnostic,
+    }
+    if probe.timed_out:
+        return {
+            "ok": False,
+            **common,
+            "error": "timeout",
+            "timeout_seconds": timeout_seconds,
+        }
+    if not probe.cleanup_succeeded:
+        return {
+            "ok": False,
+            **common,
+            "error": "probe_cleanup_failed",
+        }
+    return {
+        "ok": int(probe.returncode) == 0,
+        **common,
     }
 
 
@@ -1164,30 +1286,89 @@ def _delegation_tools_from_adapter_contract(
     installed agent version's contract.
     """
 
+    tools, source, _confirmed_cli_versions = _delegation_contract_from_adapter_config(
+        agent_cfg=agent_cfg
+    )
+    return tools, source
+
+
+def _coerce_unique_str_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        values.append(value)
+        seen.add(value)
+    return values
+
+
+def _delegation_contract_from_adapter_config(
+    *,
+    agent_cfg: dict[str, Any],
+) -> tuple[list[str], str | None, list[str]]:
+    """
+    Return delegation tool contract declared by adapter configuration.
+
+    ``delegation.confirmed_cli_versions`` is optional for legacy/test contracts, but production
+    policy should set it when exposing a confirmed tool through ``allowed_tools``.  When present,
+    the capability resolver treats non-matching CLI versions as unsupported rather than silently
+    assuming the tool name still exists.
+    """
+
     raw_tools = agent_cfg.get("delegation_tools")
     source = "agent_config.delegation_tools"
-    if not isinstance(raw_tools, list):
+    confirmed_cli_versions: list[str] = []
+    if isinstance(raw_tools, list):
+        raw_versions = agent_cfg.get("delegation_confirmed_cli_versions")
+        confirmed_cli_versions = _coerce_unique_str_list(raw_versions)
+    else:
         raw_delegation = agent_cfg.get("delegation")
         delegation = raw_delegation if isinstance(raw_delegation, dict) else {}
         raw_tools = delegation.get("tools")
         source = "agent_config.delegation.tools"
+        confirmed_cli_versions = _coerce_unique_str_list(delegation.get("confirmed_cli_versions"))
 
-    if not isinstance(raw_tools, list):
-        return [], None
-
-    tools: list[str] = []
-    seen: set[str] = set()
-    for item in raw_tools:
-        if not isinstance(item, str):
-            continue
-        tool = item.strip()
-        if not tool or tool in seen:
-            continue
-        tools.append(tool)
-        seen.add(tool)
+    tools = _coerce_unique_str_list(raw_tools)
     if not tools:
-        return [], None
-    return tools, source
+        return [], None, []
+    return tools, source, confirmed_cli_versions
+
+
+def _cli_version_matches_confirmed(
+    *,
+    cli_version: str | None,
+    confirmed_cli_versions: list[str],
+) -> bool | None:
+    if not confirmed_cli_versions:
+        return True
+    if not isinstance(cli_version, str) or not cli_version.strip():
+        return None
+
+    observed = cli_version.strip()
+    for raw_expected in confirmed_cli_versions:
+        expected = raw_expected.strip()
+        if not expected:
+            continue
+        if expected.startswith("regex:"):
+            pattern = expected.removeprefix("regex:")
+            try:
+                if re.search(pattern, observed):
+                    return True
+            except re.error:
+                continue
+            continue
+        if expected.endswith("*") and observed.startswith(expected[:-1]):
+            return True
+        if observed == expected:
+            return True
+    return False
 
 
 def _resolve_delegation_capability(
@@ -1199,11 +1380,15 @@ def _resolve_delegation_capability(
 ) -> DelegationCapability:
     agent_norm = agent.strip().lower()
     allowed_tools = _configured_allowed_tools_for_agent(agent=agent_norm, policy_cfg=policy_cfg)
-    delegation_tool_names, evidence_source = _delegation_tools_from_adapter_contract(
-        agent_cfg=agent_cfg
+    delegation_tool_names, evidence_source, confirmed_cli_versions = (
+        _delegation_contract_from_adapter_config(agent_cfg=agent_cfg)
     )
     cli_version = _agent_cli_version_from_probe(cli_version_probe)
     version_probe_copy = dict(cli_version_probe) if isinstance(cli_version_probe, dict) else None
+    cli_version_matches = _cli_version_matches_confirmed(
+        cli_version=cli_version,
+        confirmed_cli_versions=confirmed_cli_versions,
+    )
 
     if not delegation_tool_names:
         return DelegationCapability(
@@ -1213,11 +1398,85 @@ def _resolve_delegation_capability(
             configured_allowed_tools=allowed_tools,
             delegation_tool_names=[],
             available_under_policy=None,
+            policy_exposes_delegation=None,
+            cli_supports_delegation=None,
+            policy_status="unknown_no_contract",
+            cli_support_status="unknown_no_contract",
             evidence_source="none",
             confidence="low",
             reason=(
                 "No delegation tool names were detected from a local CLI probe or documented "
                 "adapter contract; capability is unknown and not guessed."
+            ),
+            cli_version_probe=version_probe_copy,
+        )
+
+    if cli_version_matches is None:
+        return DelegationCapability(
+            state="unknown",
+            agent=agent_norm or agent,
+            cli_version=cli_version,
+            configured_allowed_tools=allowed_tools,
+            delegation_tool_names=delegation_tool_names,
+            available_under_policy=None,
+            policy_exposes_delegation=(
+                None
+                if allowed_tools is None
+                else bool([tool for tool in delegation_tool_names if tool in allowed_tools])
+            ),
+            cli_supports_delegation=None,
+            policy_status=(
+                "no_allowlist"
+                if allowed_tools is None
+                else (
+                    "exposed"
+                    if [tool for tool in delegation_tool_names if tool in allowed_tools]
+                    else "not_exposed"
+                )
+            ),
+            cli_support_status="unknown_cli_version",
+            evidence_source=str(evidence_source or "agent_config"),
+            confidence="low",
+            reason=(
+                "Delegation tools are declared by adapter contract, but the CLI version was "
+                "not available to verify against confirmed versions. Delegation is marked "
+                "unknown rather than guessed."
+            ),
+            cli_version_probe=version_probe_copy,
+        )
+
+    policy_exposes = (
+        True
+        if allowed_tools is None
+        else bool([tool for tool in delegation_tool_names if tool in allowed_tools])
+    )
+    policy_status = (
+        "no_allowlist"
+        if allowed_tools is None
+        else ("exposed" if policy_exposes else "not_exposed")
+    )
+
+    if cli_version_matches is False:
+        expected = ", ".join(confirmed_cli_versions)
+        observed = cli_version or "unknown"
+        return DelegationCapability(
+            state="unavailable",
+            agent=agent_norm or agent,
+            cli_version=cli_version,
+            configured_allowed_tools=allowed_tools,
+            delegation_tool_names=delegation_tool_names,
+            available_under_policy=False,
+            policy_exposes_delegation=policy_exposes,
+            cli_supports_delegation=False,
+            policy_status=policy_status,
+            cli_support_status="unsupported_cli_version",
+            evidence_source=str(evidence_source or "agent_config"),
+            confidence="high",
+            reason=(
+                "Delegation tools are declared by adapter contract, but the installed CLI "
+                f"version ({observed}) does not match the confirmed delegation versions "
+                f"({expected}). Treating this as CLI delegation unsupported until the "
+                "adapter contract is updated."
             ),
             cli_version_probe=version_probe_copy,
         )
@@ -1230,6 +1489,10 @@ def _resolve_delegation_capability(
             configured_allowed_tools=None,
             delegation_tool_names=delegation_tool_names,
             available_under_policy=True,
+            policy_exposes_delegation=True,
+            cli_supports_delegation=True,
+            policy_status=policy_status,
+            cli_support_status="supported",
             evidence_source=str(evidence_source or "agent_config"),
             confidence="high",
             reason=(
@@ -1248,6 +1511,10 @@ def _resolve_delegation_capability(
             configured_allowed_tools=allowed_tools,
             delegation_tool_names=delegation_tool_names,
             available_under_policy=True,
+            policy_exposes_delegation=True,
+            cli_supports_delegation=True,
+            policy_status=policy_status,
+            cli_support_status="supported",
             evidence_source=str(evidence_source or "agent_config"),
             confidence="high",
             reason=(
@@ -1264,11 +1531,15 @@ def _resolve_delegation_capability(
         configured_allowed_tools=allowed_tools,
         delegation_tool_names=delegation_tool_names,
         available_under_policy=False,
+        policy_exposes_delegation=False,
+        cli_supports_delegation=True,
+        policy_status="not_exposed",
+        cli_support_status="supported",
         evidence_source=str(evidence_source or "agent_config"),
         confidence="high",
         reason=(
-            "Delegation tools are declared by adapter contract, but the selected policy "
-            "allowed_tools does not expose any of them."
+            "Delegation tools are declared by adapter contract and supported by the CLI, "
+            "but the selected policy allowed_tools does not expose any of them."
         ),
         cli_version_probe=version_probe_copy,
     )
@@ -1402,6 +1673,26 @@ def _agent_auth_present_docker(
             return True, f"env:{key}"
 
     return False, "missing:env_unset"
+
+
+def _controlled_codex_overlay_required(
+    request: RunRequest,
+    *,
+    has_sandbox_backend: bool,
+) -> bool:
+    """Keep the research exec-policy overlay separate from ordinary session resume.
+
+    A local Stage-3 continuation without explicit prefixes still needs the controlled
+    host-subscription overlay.  A Docker implementation continuation already receives
+    the host ``.codex`` mount and must not be rejected as though it requested the
+    local-only research exec policy.
+    """
+
+    if request.agent != "codex":
+        return False
+    if request.codex_execpolicy_allow_prefixes:
+        return True
+    return bool(request.codex_resume_session_id and not has_sandbox_backend)
 
 
 def _build_auth_missing_hints(
@@ -2940,6 +3231,7 @@ def _run_verification_commands(
                 "message": f"verification finished with terminal_reason={terminal_reason}",
                 "updated_utc": finished_utc,
             },
+            "commands_configured": list(commands),
             "commands": results,
         }
     )
@@ -2977,6 +3269,82 @@ def _run_verification_commands(
         except OSError:
             summary["artifacts_dir_for_agent"] = None
 
+    return summary
+
+
+def capture_local_verification(
+    *,
+    run_dir: Path,
+    cwd: Path,
+    commands: Sequence[str],
+    timeout_seconds: float | None,
+    python_executable: str | None = None,
+) -> dict[str, Any]:
+    """Execute an immutable command list without starting an agent turn.
+
+    This is the deliberately small, host-local counterpart to the normal
+    post-agent verification path.  It is used when an already committed clean
+    implementation head needs a fresh receipt for the exact stage-6 command
+    contract.  The command text is retained byte-for-byte, no workspace mirror
+    is produced, and the canonical summary is written at ``verification.json``
+    in ``run_dir``.
+    """
+
+    resolved_run_dir = run_dir.expanduser().resolve()
+    resolved_cwd = cwd.expanduser().resolve()
+    if not resolved_cwd.is_dir():
+        raise ValueError(f"Verification cwd does not exist: {resolved_cwd}")
+    normalized_commands: list[str] = []
+    for command in commands:
+        if not isinstance(command, str) or not command:
+            raise ValueError("Verification commands must be non-empty strings")
+        if command != command.strip():
+            raise ValueError(
+                "Verification commands must not contain leading or trailing whitespace"
+            )
+        safety_errors = verification_command_safety_errors(command)
+        if safety_errors:
+            raise ValueError(
+                f"Unsafe verification command {command!r}: " + "; ".join(safety_errors)
+            )
+        normalized_commands.append(command)
+    if not normalized_commands:
+        raise ValueError("At least one verification command is required")
+    if len(normalized_commands) != len(set(normalized_commands)):
+        raise ValueError("Verification commands must not contain duplicates")
+    if timeout_seconds is not None:
+        if isinstance(timeout_seconds, bool) or float(timeout_seconds) <= 0:
+            raise ValueError("Verification timeout must be positive when provided")
+        timeout_seconds = float(timeout_seconds)
+
+    resolved_run_dir.mkdir(parents=True, exist_ok=True)
+    if (resolved_run_dir / "verification.json").exists() or (
+        resolved_run_dir / "verification" / "capture"
+    ).exists():
+        raise ValueError(
+            f"Refusing to overwrite an existing verification capture: {resolved_run_dir}"
+        )
+    summary = _run_verification_commands(
+        run_dir=resolved_run_dir,
+        attempt_number=1,
+        commands=normalized_commands,
+        command_prefix=[],
+        cwd=resolved_cwd,
+        timeout_seconds=timeout_seconds,
+        python_executable=python_executable,
+        env_overrides=_augment_env_with_workspace_pythonpath(
+            env_overrides=None,
+            workspace_dir=resolved_cwd,
+            workspace_mount=None,
+        ),
+        artifacts_dir_rel=Path("verification") / "capture",
+        run_dir_mount=None,
+        workspace_dir=None,
+    )
+    summary["capture_mode"] = "local_exact_commands"
+    summary["model_invoked"] = False
+    summary["workspace_mirror_written"] = False
+    _write_json(resolved_run_dir / "verification.json", summary)
     return summary
 
 
@@ -3202,6 +3570,58 @@ def _maybe_codex_login_in_sandbox(
         )
 
 
+def _finalize_controlled_codex_execpolicy(
+    *,
+    overlay: ControlledCodexExecpolicyOverlay,
+    binary: str | None,
+    env_overrides: dict[str, str] | None,
+    config_overrides: Sequence[str] | None,
+    run_dir: Path,
+) -> list[str]:
+    """Run the post-agent host-login proof exactly once, then restore target rules."""
+
+    if "post_login_status" not in overlay.receipt:
+        if binary is None or config_overrides is None:
+            overlay.record_post_login_status(
+                {
+                    "ok": False,
+                    "exit_code": 1,
+                    "expected_status": "Logged in using ChatGPT",
+                    "status_kind": "missing",
+                    "chatgpt_status_exact": False,
+                    "auth_env_vars_blank": {name: False for name in CONTROLLED_CODEX_AUTH_ENV_VARS},
+                    "error_kind": "CodexBinaryUnavailable",
+                }
+            )
+        else:
+            try:
+                status = probe_codex_login_status(
+                    binary=binary,
+                    codex_home=overlay.host_codex_home,
+                    cwd=run_dir,
+                    config_overrides=config_overrides,
+                    env_overrides=env_overrides,
+                )
+                overlay.record_post_login_status(status.to_redacted_dict())
+            except Exception as exc:  # noqa: BLE001
+                overlay.record_post_login_status(
+                    {
+                        "ok": False,
+                        "exit_code": 1,
+                        "expected_status": "Logged in using ChatGPT",
+                        "status_kind": "missing",
+                        "chatgpt_status_exact": False,
+                        "auth_env_vars_blank": {
+                            name: False for name in CONTROLLED_CODEX_AUTH_ENV_VARS
+                        },
+                        "error_kind": type(exc).__name__,
+                    }
+                )
+    errors = overlay.restore()
+    errors.extend(controlled_codex_execpolicy_receipt_errors(overlay.receipt))
+    return list(dict.fromkeys(errors))
+
+
 def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     policy_cfg = config.policies.get(request.policy, {})
     if not isinstance(policy_cfg, dict):
@@ -3229,17 +3649,52 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
 
     acquired = None
+    codex_execpolicy_overlay: ControlledCodexExecpolicyOverlay | None = None
+    controlled_codex_binary: str | None = None
+    controlled_codex_env_overrides: dict[str, str] | None = None
+    controlled_codex_config_overrides: list[str] | None = None
+    codex_session_id: str | None = request.codex_resume_session_id
+    codex_last_invocation_resumed = False
+
+    if request.codex_resume_session_id is not None and request.agent != "codex":
+        raise ValueError("codex_resume_session_id is only valid for the codex agent")
 
     target_slug = slugify(request.repo)
     timestamp = utc_timestamp_compact()
     run_dir = config.runs_dir / target_slug / timestamp / request.agent / str(request.seed)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    has_retained_asset_root = request.retained_oracle_assets_root is not None
+    has_retained_asset_spec = request.retained_oracle_asset_spec is not None
+    if has_retained_asset_root != has_retained_asset_spec:
+        raise ValueError("retained_oracle_asset_transport_incomplete")
+    if has_retained_asset_spec:
+        if str(request.verification_reuse_mode or "").strip().lower() != "off":
+            raise ValueError("retained_oracle_asset_requires_verification_reuse_off")
+        assert request.retained_oracle_assets_root is not None
+        assert request.retained_oracle_asset_spec is not None
+        validate_retained_oracle_asset_source(
+            spec=request.retained_oracle_asset_spec,
+            trusted_runs_root=request.retained_oracle_assets_root,
+        )
+
     run_start_monotonic = time.monotonic()
     run_meta: dict[str, Any] = {
         "schema_version": 1,
         "run_started_utc": _utc_now_z(),
         "phases": {},
+    }
+    runner_implementation = capture_runner_implementation_provenance(config.repo_root)
+    runner_implementation_path = run_dir / "runner_implementation.json"
+    _write_json(runner_implementation_path, runner_implementation)
+    run_meta["runner_implementation"] = {
+        "artifact_path": str(runner_implementation_path),
+        "available": runner_implementation.get("available") is True,
+        "head_commit": runner_implementation.get("head_commit"),
+        "dirty": runner_implementation.get("dirty"),
+        "implementation_identity_sha256": runner_implementation.get(
+            "implementation_identity_sha256"
+        ),
     }
     shell_capability_summary: dict[str, Any] | None = None
     codex_metadata_capture_summary: dict[str, Any] | None = None
@@ -3253,11 +3708,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     workspace_id = f"{target_slug}_{timestamp}_{request.agent}_{request.seed}"
     try:
         preferred_workspace_dir = config.runs_dir / "_workspaces" / workspace_id
-        acquired = acquire_target(
-            repo=request.repo,
-            dest_dir=preferred_workspace_dir,
-            ref=request.ref,
-        )
+        resume_workspace_dir = request.resume_workspace_dir
+        if resume_workspace_dir is not None:
+            acquired = acquire_existing_target(
+                repo=request.repo,
+                workspace_dir=resume_workspace_dir,
+                ref=request.ref,
+            )
+        else:
+            acquired = acquire_target(
+                repo=request.repo,
+                dest_dir=preferred_workspace_dir,
+                ref=request.ref,
+            )
+        using_existing_workspace = acquired.mode == "existing"
 
         _write_json(
             run_dir / "workspace_ref.json",
@@ -3266,8 +3730,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 "workspace_id": workspace_id,
                 "workspace_dir": str(acquired.workspace_dir),
                 "keep_workspace_requested": bool(request.keep_workspace),
-                "will_cleanup_workspace": not (
-                    request.keep_workspace or request.exec_keep_container
+                "will_cleanup_workspace": (
+                    not using_existing_workspace
+                    and not (request.keep_workspace or request.exec_keep_container)
+                ),
+                "resume_workspace_requested": (
+                    str(resume_workspace_dir) if resume_workspace_dir is not None else None
                 ),
             },
         )
@@ -3291,9 +3759,54 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "obfuscate_agent_docs": bool(request.obfuscate_agent_docs),
             "requested_persona_id": request.persona_id,
             "requested_mission_id": request.mission_id,
+            "requested_codex_resume_session_id": request.codex_resume_session_id,
             **({"model": effective_model} if effective_model is not None else {}),
             **({"model_source": model_source} if model_source is not None else {}),
         }
+        if request.retained_oracle_asset_spec is not None:
+            assert request.retained_oracle_assets_root is not None
+            target_ref["retained_oracle_asset_transport"] = {
+                "trusted_runs_root": str(request.retained_oracle_assets_root.resolve()),
+                "spec": request.retained_oracle_asset_spec,
+            }
+        if (
+            isinstance(request.supervisor_instruction, str)
+            and request.supervisor_instruction.strip()
+        ):
+            target_ref["supervisor_instruction"] = request.supervisor_instruction.strip()
+        lineage_values = {
+            "evidence_role": request.evidence_role,
+            "origin_stage": request.origin_stage,
+            "parent_case_id": request.parent_case_id,
+        }
+        if any(value is not None for value in lineage_values.values()):
+            evidence_role = (
+                request.evidence_role.strip() if isinstance(request.evidence_role, str) else ""
+            )
+            origin_stage = (
+                request.origin_stage.strip() if isinstance(request.origin_stage, str) else ""
+            )
+            parent_case_id = (
+                request.parent_case_id.strip() if isinstance(request.parent_case_id, str) else ""
+            )
+            if evidence_role not in {
+                "observation",
+                "research",
+                "implementation",
+                "verification",
+            }:
+                raise ValueError("runner_backlog_lineage_evidence_role_invalid")
+            if not origin_stage:
+                raise ValueError("runner_backlog_lineage_origin_stage_invalid")
+            if evidence_role in {"research", "implementation", "verification"} and not (
+                parent_case_id
+            ):
+                raise ValueError("runner_backlog_lineage_parent_case_id_required")
+            target_ref["backlog_lineage"] = {
+                "evidence_role": evidence_role,
+                "origin_stage": origin_stage,
+                "parent_case_id": parent_case_id or None,
+            }
         if request.model is not None and request.model.strip():
             target_ref["requested_model"] = request.model.strip()
         _write_json(run_dir / "target_ref.json", target_ref)
@@ -3402,6 +3915,25 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         append_text = request.agent_append_system_prompt
         if isinstance(append_text, str) and not append_text.strip():
             append_text = None
+        if request.retained_oracle_asset_spec is not None:
+            append_text = "\n\n".join(
+                part.rstrip()
+                for part in (append_text, RETAINED_ORACLE_AGENT_NOTE)
+                if isinstance(part, str) and part.strip()
+            )
+        if (
+            isinstance(request.supervisor_instruction, str)
+            and request.supervisor_instruction.strip()
+        ):
+            supervisor_section = (
+                "# Runner-owned supervisor execution constraints\n\n"
+                + request.supervisor_instruction.strip()
+            )
+            append_text = "\n\n".join(
+                part.rstrip()
+                for part in (append_text, supervisor_section)
+                if isinstance(part, str) and part.strip()
+            )
 
         if (
             request.agent == "gemini"
@@ -3898,6 +4430,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
         last_message_path = run_dir / "agent_last_message.txt"
         stderr_path = run_dir / "agent_stderr.txt"
+        attempts_meta: list[dict[str, Any]] = []
 
         backend = prepare_execution_backend(
             repo_root=config.repo_root,
@@ -3918,7 +4451,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             workspace_dir_for_agent = normalize_agent_path(workspace_mount)
         else:
             workspace_dir_for_agent = acquired.workspace_dir
-
         staged_system_prompt: Path | None = None
         system_prompt_path_for_agent: str | None = None
         if request.agent_system_prompt_file is not None:
@@ -4082,6 +4614,90 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     workspace_dir=acquired.workspace_dir,
                     env_overrides=agent_env_overrides,
                 )
+            signed_in_codex_resume = bool(
+                request.agent == "codex" and request.codex_resume_session_id is not None
+            )
+            if signed_in_codex_resume:
+                if not bool(request.exec_use_host_agent_login):
+                    raise ValueError("codex_resume_requires_host_subscription_login")
+                validate_codex_subscription_config_overrides(
+                    combined_overrides,
+                    source="signed_in_codex_resume",
+                )
+                agent_env_overrides = dict(agent_env_overrides or {})
+                for auth_env_var in CONTROLLED_CODEX_AUTH_ENV_VARS:
+                    agent_env_overrides[auth_env_var] = ""
+                target_ref["codex_resume_auth"] = {
+                    "auth_mode": "host_chatgpt_subscription_login",
+                    "host_agent_login_required": True,
+                    "api_billing_environment_disabled": True,
+                    "blocked_child_env_vars": list(CONTROLLED_CODEX_AUTH_ENV_VARS),
+                }
+                _write_json(run_dir / "target_ref.json", target_ref)
+
+            controlled_codex_probe_commands: list[str] = []
+            controlled_codex_requested = _controlled_codex_overlay_required(
+                request,
+                has_sandbox_backend=sandbox is not None,
+            )
+            if controlled_codex_requested:
+                if sandbox is not None:
+                    raise ValueError("codex_execpolicy_requires_local_execution_backend")
+                validate_codex_subscription_config_overrides(
+                    combined_overrides,
+                    source="controlled_stage3",
+                )
+                controlled_allow_prefixes = list(request.codex_execpolicy_allow_prefixes)
+                controlled_prefixes = set(request.codex_execpolicy_allow_prefixes)
+                if ("git", "rev-parse") in controlled_prefixes:
+                    controlled_codex_probe_commands.append("git rev-parse --is-inside-work-tree")
+                if ("python",) in controlled_prefixes:
+                    controlled_codex_probe_commands.append("python --version")
+                if ("python",) in set(request.codex_execpolicy_allow_prefixes):
+                    python_candidates = [
+                        (agent_env_overrides or {}).get("USERTEST_PYTHON"),
+                        shutil.which(
+                            "python",
+                            path=(agent_env_overrides or {}).get("PATH"),
+                        ),
+                        sys.executable,
+                        str(
+                            acquired.workspace_dir
+                            / ".venv"
+                            / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                        ),
+                    ]
+                    for candidate in python_candidates:
+                        if not isinstance(candidate, str) or not candidate.strip():
+                            continue
+                        candidate_path = Path(candidate).resolve()
+                        if candidate_path.is_file():
+                            controlled_allow_prefixes.append((str(candidate_path),))
+                if os.name == "nt":
+                    controlled_allow_prefixes.append(("Write-Output",))
+                else:
+                    controlled_allow_prefixes.append(("printf",))
+                codex_execpolicy_overlay = install_controlled_codex_execpolicy(
+                    workspace_dir=acquired.workspace_dir,
+                    run_dir=run_dir,
+                    allow_prefixes=controlled_allow_prefixes,
+                    agent_workspace_path=workspace_dir_for_agent,
+                    activation_probe_required=bool(resolved_inputs.mission.requires_shell),
+                    expected_activation_sandbox_mode=_resolve_codex_sandbox_mode(
+                        request=request,
+                        codex_policy=codex_policy,
+                        has_sandbox_backend=False,
+                    ),
+                )
+            if codex_execpolicy_overlay is not None:
+                agent_env_overrides = dict(agent_env_overrides or {})
+                agent_env_overrides["CODEX_HOME"] = str(codex_execpolicy_overlay.host_codex_home)
+                # The controlled backlog-research path intentionally reuses the host's
+                # ChatGPT subscription login and must never fall back to per-token API billing.
+                for auth_env_var in CONTROLLED_CODEX_AUTH_ENV_VARS:
+                    agent_env_overrides[auth_env_var] = ""
+                controlled_codex_binary = str(codex_binary)
+                controlled_codex_env_overrides = dict(agent_env_overrides)
 
             codex_sandbox_mode: str | None = None
             codex_ask_for_approval: str | None = None
@@ -4100,6 +4716,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
             codex_overrides = list(combined_overrides)
+            controlled_codex_activation_overrides: list[str] | None = None
             codex_instructions_path_for_agent: str | None = system_prompt_path_for_agent
             if staged_append_system_prompt is not None:
                 if staged_system_prompt is not None:
@@ -4138,6 +4755,44 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "model_instructions_file="
                     + toml_basic_string(codex_instructions_path_for_agent)
                 )
+            if signed_in_codex_resume and codex_execpolicy_overlay is None:
+                codex_overrides = build_codex_subscription_config_overrides(
+                    codex_overrides,
+                    source="signed_in_codex_resume_effective",
+                )
+            if codex_execpolicy_overlay is not None:
+                codex_overrides = build_codex_subscription_config_overrides(
+                    codex_overrides,
+                    source="controlled_stage3_mission",
+                    internal_safe_overrides=[
+                        *CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+                        *(
+                            [CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE]
+                            if os.name == "nt"
+                            else []
+                        ),
+                        codex_execpolicy_overlay.project_trust_override,
+                    ],
+                )
+                (
+                    controlled_codex_config_overrides,
+                    controlled_codex_activation_overrides,
+                ) = codex_execpolicy_overlay.bind_effective_config(codex_overrides)
+                codex_overrides = list(controlled_codex_config_overrides)
+                login_status = probe_codex_login_status(
+                    binary=str(codex_binary),
+                    codex_home=codex_execpolicy_overlay.host_codex_home,
+                    cwd=run_dir,
+                    config_overrides=controlled_codex_config_overrides,
+                    env_overrides=agent_env_overrides,
+                )
+                login_status_receipt = login_status.to_redacted_dict()
+                codex_execpolicy_overlay.record_login_status(login_status_receipt)
+                if not login_status.ok:
+                    raise ValueError(
+                        "codex_execpolicy_chatgpt_login_status_failed:"
+                        + str(login_status_receipt.get("status_kind") or "unknown")
+                    )
 
             claude_cfg = config.agents.get("claude", {}) if isinstance(config.agents, dict) else {}
             claude_binary = (
@@ -4238,6 +4893,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             shell_status = "unknown"
             shell_reason = ""
             allowed_tools: list[str] | None = None
+            preflight_external_wait: dict[str, Any] | None = None
+            preflight_external_wait_message = ""
             if request.agent == "claude":
                 raw_allowed = claude_policy.get("allowed_tools")
                 if isinstance(raw_allowed, list):
@@ -4301,6 +4958,27 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     if request.agent == "codex" and backend.run_dir_mount
                     else None
                 )
+                codex_probe_overrides = (
+                    controlled_codex_activation_overrides
+                    if request.agent == "codex"
+                    and codex_execpolicy_overlay is not None
+                    and controlled_codex_activation_overrides is not None
+                    else (
+                        build_codex_shell_probe_config_overrides(codex_overrides)
+                        if request.agent == "codex"
+                        else codex_overrides
+                    )
+                )
+                codex_probe_commands = (
+                    list(controlled_codex_probe_commands)
+                    if request.agent == "codex" and codex_execpolicy_overlay is not None
+                    else []
+                )
+                probe_workspace_before = (
+                    capture_probe_workspace_state(acquired.workspace_dir)
+                    if request.agent == "codex" and codex_execpolicy_overlay is not None
+                    else None
+                )
                 agent_shell_probe = probe_agent_shell_launch(
                     agent=request.agent,
                     workspace_dir=workspace_dir_for_agent,
@@ -4320,8 +4998,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     codex_sandbox=codex_sandbox_mode,
                     codex_ask_for_approval=codex_ask_for_approval,
                     codex_subcommand=str(codex_subcommand),
-                    codex_config_overrides=codex_overrides,
+                    codex_config_overrides=codex_probe_overrides,
+                    codex_ignore_user_config=True,
+                    codex_ignore_rules=(codex_execpolicy_overlay is None or os.name == "nt"),
                     codex_agent_last_message_path=codex_probe_last_message_for_agent,
+                    codex_required_commands=codex_probe_commands,
+                    codex_required_command_outputs={
+                        "git rev-parse --is-inside-work-tree": "true",
+                        "python --version": "Python ",
+                    },
                     claude_output_format=str(claude_output_format),
                     claude_allowed_tools=claude_allowed_tools,
                     claude_permission_mode=claude_permission_mode,
@@ -4329,11 +5014,47 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     gemini_sandbox=gemini_sandbox_enabled,
                     gemini_approval_mode=gemini_approval_mode,
                     gemini_allowed_tools=gemini_allowed_tools,
-                    gemini_include_directories=_gemini_include_directories_for_workspace(
-                        workspace_dir=acquired.workspace_dir
+                    gemini_include_directories=(
+                        _gemini_include_directories_for_workspace(
+                            workspace_dir=acquired.workspace_dir
+                        )
+                        if request.agent == "gemini"
+                        else []
                     ),
                 )
-                preflight_meta["agent_shell_probe"] = agent_shell_probe.to_dict()
+                agent_shell_probe_payload = agent_shell_probe.to_dict()
+                if request.agent == "codex":
+                    preflight_external_wait_message = "\n".join(
+                        str(agent_shell_probe_payload.get(key) or "").strip()
+                        for key in (
+                            "stdout_excerpt",
+                            "stderr_excerpt",
+                            "last_message_excerpt",
+                            "reason",
+                        )
+                        if str(agent_shell_probe_payload.get(key) or "").strip()
+                    )
+                    preflight_external_wait = _codex_subscription_external_wait(
+                        preflight_external_wait_message
+                    )
+                    if preflight_external_wait is not None:
+                        agent_shell_probe_payload["external_wait"] = dict(preflight_external_wait)
+                        preflight_meta["external_wait"] = dict(preflight_external_wait)
+                if probe_workspace_before is not None:
+                    probe_workspace_after = capture_probe_workspace_state(acquired.workspace_dir)
+                    workspace_unchanged = probe_workspace_after == probe_workspace_before
+                    agent_shell_probe_payload["workspace_state_before"] = probe_workspace_before
+                    agent_shell_probe_payload["workspace_state_after"] = probe_workspace_after
+                    agent_shell_probe_payload["workspace_unchanged"] = workspace_unchanged
+                    if not workspace_unchanged:
+                        agent_shell_probe_payload["ok"] = False
+                        agent_shell_probe_payload["reason"] = (
+                            "Agent shell probe changed the acquired workspace before "
+                            "mission execution."
+                        )
+                preflight_meta["agent_shell_probe"] = agent_shell_probe_payload
+                if codex_execpolicy_overlay is not None:
+                    codex_execpolicy_overlay.record_activation_probe(agent_shell_probe_payload)
 
             host_os = _runner_host_os()
             shell_probe_result = _shell_probe_result_from_preflight_meta(preflight_meta)
@@ -4644,6 +5365,42 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "workspace_root_snapshot": preflight_workspace_snapshot,
                 },
             )
+
+            if preflight_external_wait is not None:
+                message = (
+                    "Codex ChatGPT subscription usage is exhausted; mission dispatch is parked "
+                    "until the provider reset. The signed-in subscription route remains required."
+                )
+                hint = (
+                    "Resume this retained workflow after the recorded reset using the same "
+                    "ChatGPT login; do not switch to API billing."
+                )
+                _write_json(
+                    run_dir / "error.json",
+                    {
+                        "type": "AgentExternalWait",
+                        "subtype": "provider_subscription_usage_limit",
+                        "code": "codex_chatgpt_subscription_usage_limit",
+                        "agent": request.agent,
+                        "provider": "codex",
+                        "phase": "agent_shell_probe",
+                        "message": message,
+                        "hint": hint,
+                        "provider_message": preflight_external_wait_message,
+                        "route": "chatgpt_subscription",
+                        "api_fallback_allowed": False,
+                        "external_wait": preflight_external_wait,
+                    },
+                )
+                return RunResult(
+                    run_dir=run_dir,
+                    exit_code=1,
+                    report_validation_errors=[
+                        message,
+                        "code=codex_chatgpt_subscription_usage_limit",
+                        f"hint={hint}",
+                    ],
+                )
 
             if python_validation_required and not python_validation_enabled:
                 probe_remediation = (
@@ -5344,6 +6101,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "exec_network": request.exec_network,
                     "exec_cache": request.exec_cache,
                     "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
+                    "exec_maintenance_image_metadata_path": (
+                        str(request.exec_maintenance_image_metadata_path)
+                        if request.exec_maintenance_image_metadata_path is not None
+                        else None
+                    ),
                     "codex": {
                         "sandbox": codex_sandbox_mode,
                         "ask_for_approval": codex_ask_for_approval,
@@ -5371,6 +6133,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "network": request.exec_network,
                         "cache": request.exec_cache,
                         "maintenance_venv_cache": request.exec_maintenance_venv_cache,
+                        "maintenance_image_metadata_path": (
+                            str(request.exec_maintenance_image_metadata_path)
+                            if request.exec_maintenance_image_metadata_path is not None
+                            else None
+                        ),
                         "container_image": getattr(sandbox, "image_tag", None)
                         if sandbox is not None
                         else None,
@@ -5378,10 +6145,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "verification_gate": {
                         "configured": bool(verification_commands),
                         "mode": verification_reuse_mode,
+                        "runner_owned_blocking_wait": bool(
+                            verification_commands and verification_reuse_mode == "auto"
+                        ),
                         "commands": (
                             [] if verification_reuse_mode == "auto" else verification_commands
                         ),
-                        "final_handoff_command": verification_broker_command,
+                        "final_handoff_command": (
+                            None
+                            if verification_reuse_mode == "auto"
+                            else verification_broker_command
+                        ),
                         "timeout_seconds": effective_verification_timeout_seconds,
                         "timing_profile_path": verification_timing_profile_path_for_agent,
                         "timing_profile": {
@@ -5453,6 +6227,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 verification_broker_command=verification_broker_command,
                 agent=request.agent,
                 codex_sandbox_mode=codex_sandbox_mode,
+                delegation_capability=delegation_capability_summary,
                 verification_timing_profile=verification_timing_profile,
                 verification_timing_profile_path=verification_timing_profile_path_for_agent,
                 verification_result_path=verification_result_path_for_agent,
@@ -5467,7 +6242,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     execution_notes_md = (
                         execution_notes_md.rstrip() + "\n" + shell_command_guidance_md.strip()
                     )
-                prompt = build_prompt_from_template(
+                base_prompt = build_prompt_from_template(
                     template_text=effective_spec.prompt_template_text,
                     variables={
                         "persona_name": effective_spec.persona_name,
@@ -5487,6 +6262,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 raise TemplateSubstitutionError(
                     f"Prompt template substitution failed for {template_path}:\n{e}"
                 ) from e
+            prompt = base_prompt
+            if request.agent_user_prompt is not None:
+                if not request.agent_user_prompt.strip():
+                    raise ValueError("agent_user_prompt must not be blank")
+                prompt = request.agent_user_prompt
+                (run_dir / "prompt.base.txt").write_text(base_prompt, encoding="utf-8")
             (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
 
             if (
@@ -5533,6 +6314,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 last_message_attempt_path: Path,
                 stderr_attempt_path: Path,
             ) -> tuple[int, list[str]]:
+                nonlocal codex_last_invocation_resumed
+                nonlocal codex_session_id
                 if request.agent == "codex":
                     codex_last_message_for_attempt = (
                         _agent_path_for_staged_file(
@@ -5543,6 +6326,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         if backend.run_dir_mount
                         else None
                     )
+                    require_continuation = (
+                        bool(request.codex_resume_session_id) or followup_count > 0
+                    )
+                    resume_session_id = codex_session_id if require_continuation else None
+                    if require_continuation and resume_session_id is None:
+                        raise RuntimeError("codex_continuation_thread_id_unavailable")
+                    codex_last_invocation_resumed = resume_session_id is not None
                     codex_result = run_codex_exec(
                         workspace_dir=workspace_dir_for_agent,
                         prompt=prompt_text,
@@ -5555,11 +6345,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         subcommand=str(codex_subcommand),
                         model=effective_model,
                         config_overrides=codex_overrides,
-                        ignore_rules=True,
+                        ignore_user_config=True,
+                        ignore_rules=(codex_execpolicy_overlay is None or os.name == "nt"),
                         command_prefix=command_prefix,
                         env_overrides=agent_env_overrides,
                         agent_last_message_path=codex_last_message_for_attempt,
+                        resume_session_id=resume_session_id,
                     )
+                    result_thread_id = getattr(codex_result, "thread_id", None)
+                    if isinstance(result_thread_id, str) and result_thread_id.strip():
+                        if resume_session_id is not None and result_thread_id != resume_session_id:
+                            raise RuntimeError("codex_continuation_thread_id_changed")
+                        codex_session_id = result_thread_id
                     return codex_result.exit_code, codex_result.argv
 
                 if request.agent == "claude":
@@ -5627,7 +6424,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             current_prompt = prompt
             rate_limit_retry_count = 0
             followup_count = 0
-            attempts_meta: list[dict[str, Any]] = []
             selected_raw_events_path = raw_events_path
             selected_raw_events_ts_path = raw_events_ts_path
             selected_last_message_path = last_message_path
@@ -5652,6 +6448,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             report_json = None
             report_validation_errors = []
             forced_exit_code: int | None = None
+            parked_external_wait: dict[str, Any] | None = None
+            retained_oracle_asset_staged = False
+            retained_oracle_asset_receipt: dict[str, Any] | None = None
 
             while True:
                 attempt_number = len(attempts_meta) + 1
@@ -5756,7 +6555,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                 finally:
                     if broker_session is not None:
-                        broker_session.stop()
+                        broker_session.stop(
+                            cancel_pending=False,
+                        )
                         broker_request_ids = broker_session.request_ids()
                         broker_results = broker_session.results()
                         broker_attempt_rows = broker_session.artifact_rows()
@@ -5830,15 +6631,24 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                 attempt_report_validation_errors: list[str] = []
                 attempt_report_json: dict[str, Any] | None = None
+                attempt_json_repair: dict[str, Any] | None = None
                 attempt_last_text = ""
                 if last_message_attempt_path.exists():
                     try:
                         attempt_last_text = last_message_attempt_path.read_text(encoding="utf-8")
                     except OSError:
                         attempt_last_text = ""
+                attempt_raw_error_text = (
+                    _extract_raw_events_error_messages(raw_events_attempt_path)
+                    if agent_exit_code != 0 and raw_events_attempt_path.exists()
+                    else ""
+                )
                 if agent_exit_code == 0:
                     try:
-                        attempt_report_json = _extract_json_object(attempt_last_text)
+                        (
+                            attempt_report_json,
+                            attempt_json_repair,
+                        ) = _extract_json_object_with_receipt(attempt_last_text)
                     except Exception as e:  # noqa: BLE001
                         attempt_report_validation_errors = [
                             f"$: failed to parse JSON from agent output: {e}"
@@ -5906,6 +6716,129 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and verification_commands
                 ):
                     broker_reuse_fallback_reason: str | None = None
+                    if (
+                        verification_reuse_mode == "auto"
+                        and broker_latest_result is None
+                        and not attempt_broker_requested
+                    ):
+                        assert broker_session is not None
+                        runner_owned_broker = VerificationBrokerAttempt(
+                            run_dir=broker_physical_root,
+                            attempt_number=attempt_number,
+                            client_root=client_root,
+                            client_root_for_agent=client_root_for_agent,
+                            attempt_root_for_agent=attempt_root_for_agent,
+                            contract=verification_broker_contract,
+                            verifier=_run_broker_verification,
+                            workspace_hash_fn=lambda: compute_workspace_state_hash(
+                                acquired.workspace_dir
+                            ),
+                            utc_now_fn=_utc_now_z,
+                            run_async_verifier=True,
+                            # The agent may already have launched the advertised client
+                            # while its process is returning. Reuse that client's immutable
+                            # token and scripts: rewriting them here can race a late
+                            # PowerShell/Python process and can turn a valid request into an
+                            # invalid-token result.
+                            request_token=broker_session.request_token,
+                            existing_client=broker_session.client,
+                        )
+                        runner_owned_broker.start()
+                        runner_fallback_result: VerificationBrokerRequestResult | None = None
+                        try:
+                            runner_fallback_result = runner_owned_broker.request_and_wait(
+                                request_origin="runner_after_agent_ready",
+                            )
+                        finally:
+                            # A client launched by the agent can finish writing its request
+                            # after the agent process itself returns.  The runner-owned
+                            # fallback shares the same request directory, so stopping it by
+                            # cancelling pending work can race that late client: the fallback
+                            # succeeds while the agent's equivalent request is killed.  Drain
+                            # both requests to terminal results instead.  The settle window is
+                            # for request discovery only; accepted verification still uses its
+                            # normal command deadline.
+                            runner_owned_broker.stop(cancel_pending=False)
+                            if backend.run_dir_mount is None:
+                                try:
+                                    shutil.copytree(
+                                        broker_physical_root / "verification_broker",
+                                        run_dir / "verification_broker",
+                                        dirs_exist_ok=True,
+                                    )
+                                except OSError:
+                                    pass
+                        broker_request_ids = runner_owned_broker.request_ids()
+                        broker_results = runner_owned_broker.results()
+                        broker_attempt_rows = runner_owned_broker.artifact_rows()
+                        valid_request_ids = set(broker_request_ids)
+                        runner_fallback_request_id = (
+                            runner_fallback_result.request_id
+                            if runner_fallback_result is not None
+                            else None
+                        )
+                        # Prefer a late request actually launched by the agent over the
+                        # redundant runner fallback.  Both are drained above, but only the
+                        # agent request proves the agent used the advertised broker path.
+                        late_agent_results = [
+                            result
+                            for result in broker_results
+                            if result.request_id in valid_request_ids
+                            and result.request_id != runner_fallback_request_id
+                        ]
+                        broker_latest_result = (
+                            late_agent_results[-1] if late_agent_results else runner_fallback_result
+                        )
+                        for broker_result, broker_row in zip(
+                            broker_results,
+                            broker_attempt_rows,
+                            strict=False,
+                        ):
+                            summary = getattr(broker_result, "verification_summary", None)
+                            if isinstance(summary, dict):
+                                wall_seconds = summary.get("wall_seconds")
+                                if isinstance(wall_seconds, (int, float)):
+                                    verification_broker_seconds_total += max(
+                                        0.0, float(wall_seconds)
+                                    )
+                            row = dict(broker_row)
+                            if broker_result.request_id == runner_fallback_request_id:
+                                row["request_origin"] = "runner_after_agent_ready"
+                            verification_reuse_requests.append(row)
+                        attempt_broker_requested = bool(broker_attempt_rows or broker_request_ids)
+                        if broker_latest_result is None and broker_results:
+                            broker_latest_result = broker_results[-1]
+                        if broker_latest_result is not None:
+                            latest_request_id = getattr(broker_latest_result, "request_id", None)
+                            if isinstance(latest_request_id, str) and latest_request_id.strip():
+                                attempt_broker_request_id = latest_request_id.strip()
+                            latest_status = getattr(broker_latest_result, "status", None)
+                            if isinstance(latest_status, str) and latest_status.strip():
+                                attempt_broker_response_status = latest_status.strip()
+                            latest_failure_reason = getattr(
+                                broker_latest_result, "failure_reason", None
+                            )
+                            if (
+                                isinstance(latest_failure_reason, str)
+                                and latest_failure_reason.strip()
+                            ):
+                                attempt_broker_response_failure_reason = (
+                                    latest_failure_reason.strip()
+                                )
+                            attempt_broker_missing_required_artifacts = list(
+                                verification_broker_missing_result_artifacts(broker_latest_result)
+                            )
+                            _broker_payload, broker_payload_error = (
+                                validate_verification_broker_response_payload(
+                                    broker_latest_result.to_response_dict(),
+                                    request_id=broker_latest_result.request_id,
+                                )
+                            )
+                            if broker_payload_error is not None:
+                                attempt_broker_response_contract_error = broker_payload_error
+                                attempt_broker_response_failure_reason = (
+                                    "incomplete_broker_response"
+                                )
                     if (
                         verification_reuse_mode == "auto"
                         and broker_latest_result is not None
@@ -5992,6 +6925,38 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                     if attempt_verification_summary is None:
                         attempt_verification_source = "post_agent_rerun"
+                        if request.retained_oracle_asset_spec is not None:
+                            assert request.retained_oracle_assets_root is not None
+                            if not retained_oracle_asset_staged:
+                                retained_oracle_asset_receipt = stage_retained_oracle_asset(
+                                    workspace=acquired.workspace_dir,
+                                    trusted_runs_root=request.retained_oracle_assets_root,
+                                    spec=request.retained_oracle_asset_spec,
+                                )
+                                retained_oracle_asset_staged = True
+                            destination_manifest = validate_staged_retained_oracle_asset(
+                                workspace=acquired.workspace_dir,
+                                spec=request.retained_oracle_asset_spec,
+                            )
+                            assert retained_oracle_asset_receipt is not None
+                            retained_oracle_asset_receipt.update(
+                                {
+                                    "validated_immediately_before_dispatch": True,
+                                    "verification_attempt": attempt_number,
+                                    "verification_dispatch_utc": _utc_now_z(),
+                                    "destination_manifest_sha256": retained_oracle_asset_summary(
+                                        trusted_runs_root=request.retained_oracle_assets_root,
+                                        spec=request.retained_oracle_asset_spec,
+                                    )["manifest_sha256"],
+                                    "destination_manifest_entry_count": len(
+                                        destination_manifest
+                                    ),
+                                }
+                            )
+                            _write_json(
+                                run_dir / "retained_oracle_asset_staging.json",
+                                retained_oracle_asset_receipt,
+                            )
                         verification_kwargs: dict[str, Any] = {
                             "run_dir": run_dir,
                             "attempt_number": attempt_number,
@@ -6146,11 +7111,19 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         for value in (
                             attempt_stderr_text,
                             attempt_last_text.strip() if attempt_last_text else "",
+                            attempt_raw_error_text,
                         )
                         if value
                     ]
                 )
                 failure_subtype = _classify_failure_subtype(failure_text)
+                attempt_external_wait = (
+                    _codex_subscription_external_wait(failure_text)
+                    if request.agent == "codex" and agent_exit_code != 0
+                    else None
+                )
+                if attempt_external_wait is not None:
+                    parked_external_wait = dict(attempt_external_wait)
                 if codex_personality_warning_detected:
                     failure_subtype = "invalid_agent_config"
                 attempt_finished_utc = _utc_now_z()
@@ -6169,8 +7142,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "agent_exec_wall_seconds": agent_exec_wall_seconds,
                     "exit_code": agent_exit_code,
                     "argv": agent_argv,
+                    "agent_session_id": codex_session_id if request.agent == "codex" else None,
+                    "continued_session": bool(
+                        request.agent == "codex" and codex_last_invocation_resumed
+                    ),
                     "failure_subtype": failure_subtype,
                     "report_validation_errors": attempt_report_validation_errors,
+                    "json_syntax_repair": attempt_json_repair,
                     "warnings": attempt_warnings,
                     "verification": {
                         "status": (
@@ -6243,6 +7221,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             attempt_number=attempt_number,
                         )
                 attempts_meta.append(attempt_meta)
+                if attempt_external_wait is not None:
+                    attempt_meta["external_wait"] = dict(attempt_external_wait)
+                    attempt_meta["retry_reason"] = "provider_subscription_usage_limit"
+                    attempt_meta["retry_scheduled"] = False
+                    attempt_meta["retry_disposition"] = "parked_until_resume_after"
 
                 if codex_personality_warning_detected:
                     message = (
@@ -6428,6 +7411,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "rate_limit_retries_used": rate_limit_retry_count,
                     "followup_attempts_configured": followup_attempts,
                     "followup_attempts_used": followup_count,
+                    **(
+                        {"external_wait": parked_external_wait}
+                        if parked_external_wait is not None
+                        else {}
+                    ),
                 },
             )
 
@@ -6561,6 +7549,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 elif status_s == "disabled":
                     verification_reuse_selected_source = "disabled"
                     verification_reuse_fallback_reason = skip_reason
+            if verification_reuse_selected_request_id is not None:
+                verification_reuse_requests.sort(
+                    key=lambda row: row.get("request_id") != verification_reuse_selected_request_id
+                )
             _write_json(run_dir / "verification.json", verification_output_payload)
             _write_json(
                 run_dir / "verification_reuse.json",
@@ -6595,8 +7587,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     report_validation_errors = [
                         f"{request.agent} exited with code {agent_exit_code}"
                     ]
-            if not report_validation_errors and selected_verification_errors:
-                report_validation_errors = selected_verification_errors
+            if selected_verification_errors:
                 _write_json(
                     run_dir / "verification_errors.json",
                     {
@@ -6604,6 +7595,68 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "errors": selected_verification_errors,
                     },
                 )
+                if isinstance(selected_verification_summary, dict):
+                    verification_summary = _normalize_verification_summary(
+                        selected_verification_summary
+                    )
+                    terminal_reason = _verification_terminal_reason(verification_summary)
+                    if terminal_reason != "passed":
+                        forced_exit_code = 1
+                        if not (run_dir / "error.json").exists():
+                            commands = verification_summary.get("commands")
+                            failed_command = (
+                                commands[-1]
+                                if isinstance(commands, list)
+                                and commands
+                                and isinstance(commands[-1], dict)
+                                else {}
+                            )
+                            artifacts_dir = verification_summary.get("artifacts_dir")
+                            artifacts_dir_s = (
+                                artifacts_dir.strip()
+                                if isinstance(artifacts_dir, str) and artifacts_dir.strip()
+                                else None
+                            )
+                            verification_details = {
+                                "summary_path": (
+                                    str(Path(artifacts_dir_s) / "verification.json")
+                                    if artifacts_dir_s is not None
+                                    else None
+                                ),
+                                "artifacts_dir": artifacts_dir_s,
+                                "terminal_reason": terminal_reason,
+                                "failure_reason": verification_summary.get("failure_reason"),
+                                "command": failed_command.get("command"),
+                                "effective_command": failed_command.get("effective_command"),
+                                "exit_code": failed_command.get("exit_code"),
+                                "stdout_path": failed_command.get("stdout_path"),
+                                "stderr_path": failed_command.get("stderr_path"),
+                                "command_prefix": list(command_prefix),
+                            }
+                            _write_json(
+                                run_dir / "error.json",
+                                {
+                                    "type": "VerificationFailed",
+                                    "subtype": terminal_reason,
+                                    "code": selected_verification_errors[0],
+                                    "message": (
+                                        "Verification did not pass; see verification artifacts "
+                                        "for command output and diagnostics."
+                                    ),
+                                    "failure_phase": "verification",
+                                    "exit_code": 1,
+                                    "attempt": (
+                                        selected_attempt_index + 1
+                                        if selected_attempt_index is not None
+                                        else None
+                                    ),
+                                    "details": {
+                                        "errors": selected_verification_errors,
+                                        "verification_summary": verification_details,
+                                    },
+                                    "verification": verification_details,
+                                },
+                            )
         finally:
             if sandbox is not None:
                 capture_container_artifacts(
@@ -6613,6 +7666,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 sandbox.close()
 
         agent_phase_end_monotonic = time.monotonic()
+        if codex_execpolicy_overlay is not None:
+            overlay_errors = _finalize_controlled_codex_execpolicy(
+                overlay=codex_execpolicy_overlay,
+                binary=controlled_codex_binary,
+                env_overrides=controlled_codex_env_overrides,
+                config_overrides=controlled_codex_config_overrides,
+                run_dir=run_dir,
+            )
+            if overlay_errors:
+                report_validation_errors = list(
+                    dict.fromkeys([*report_validation_errors, *overlay_errors])
+                )
+                if agent_exit_code == 0:
+                    agent_exit_code = 1
         if agent_phase_start_monotonic is not None:
             phases = run_meta.get("phases")
             if isinstance(phases, dict):
@@ -6659,6 +7726,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 raw_events_plaintext_excerpt = _extract_raw_events_plaintext_excerpt(
                     raw_events_path
                 )
+            raw_events_error_text = (
+                _extract_raw_events_error_messages(raw_events_path)
+                if raw_events_path.exists()
+                else ""
+            )
 
             last_message_excerpt = last_message_text
             last_message_truncated = False
@@ -6667,11 +7739,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 last_message_truncated = True
 
             provider_message_text = last_message_text
+            if not provider_message_text.strip() and raw_events_error_text.strip():
+                provider_message_text = raw_events_error_text.strip()
             if not provider_message_text.strip() and raw_events_plaintext_excerpt.strip():
                 provider_message_text = raw_events_plaintext_excerpt.strip()
 
             combined_text = "\n".join([x for x in (stderr_text, provider_message_text) if x])
             failure_subtype = _classify_failure_subtype(combined_text)
+            codex_subscription_limit = (
+                _extract_codex_subscription_usage_limit(combined_text)
+                if request.agent == "codex"
+                else None
+            )
             if (
                 stderr_text
                 and failure_subtype
@@ -6737,6 +7816,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             quota_exhaustion: dict[str, Any] | None = None
             if request.agent == "claude":
                 quota_exhaustion = _extract_claude_quota_exhaustion(combined_text)
+
+            if codex_subscription_limit is not None:
+                external_wait_stderr = _format_codex_subscription_usage_limit_stderr(
+                    provider_message=provider_message_text,
+                    resume_after_raw=codex_subscription_limit.get("resume_after_raw"),
+                )
+                stderr_text = external_wait_stderr
+                try:
+                    stderr_path.write_text(stderr_text.rstrip() + "\n", encoding="utf-8")
+                except OSError:
+                    pass
 
             if not stderr_text and quota_exhaustion is not None and provider_message_text.strip():
                 stderr_text = _format_claude_quota_exhaustion_stderr(
@@ -6815,49 +7905,108 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "timezone": quota_exhaustion.get("reset_timezone"),
                     },
                 }
+            if codex_subscription_limit is not None:
+                external_wait = _codex_subscription_external_wait(combined_text)
+                assert external_wait is not None
+                error_payload = {
+                    **error_payload,
+                    "type": "AgentExternalWait",
+                    "subtype": "provider_subscription_usage_limit",
+                    "code": "codex_chatgpt_subscription_usage_limit",
+                    "provider": "codex",
+                    "provider_message": provider_message_text.strip(),
+                    "route": "chatgpt_subscription",
+                    "api_fallback_allowed": False,
+                    "external_wait": external_wait,
+                }
 
             if not (run_dir / "error.json").exists():
                 _write_json(run_dir / "error.json", error_payload)
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
-        raw_ts_f = None
-        raw_ts_iter = None
-        if raw_events_ts_path.exists():
-            try:
-                raw_ts_f = raw_events_ts_path.open("r", encoding="utf-8")
-                raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
-            except OSError:
-                raw_ts_f = None
-                raw_ts_iter = None
 
-        try:
-            if request.agent == "codex":
-                normalize_codex_events(
-                    raw_events_path=raw_events_path,
-                    normalized_events_path=normalized_events_path,
-                    raw_ts_iter=raw_ts_iter,
-                    workspace_root=acquired.workspace_dir,
-                    workspace_mount=workspace_mount,
-                )
-            elif request.agent == "claude":
-                normalize_claude_events(
-                    raw_events_path=raw_events_path,
-                    normalized_events_path=normalized_events_path,
-                    raw_ts_iter=raw_ts_iter,
-                    workspace_root=acquired.workspace_dir,
-                    workspace_mount=workspace_mount,
-                )
-            else:
-                normalize_gemini_events(
-                    raw_events_path=raw_events_path,
-                    normalized_events_path=normalized_events_path,
-                    raw_ts_iter=raw_ts_iter,
-                    workspace_root=acquired.workspace_dir,
-                    workspace_mount=workspace_mount,
-                )
-        finally:
-            if raw_ts_f is not None:
-                raw_ts_f.close()
+        def _normalize_raw_events(
+            *,
+            source_path: Path,
+            destination_path: Path,
+        ) -> None:
+            source_ts_path = source_path.with_suffix(".ts.jsonl")
+            raw_ts_f = None
+            raw_ts_iter = None
+            if source_ts_path.exists():
+                try:
+                    raw_ts_f = source_ts_path.open("r", encoding="utf-8")
+                    raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
+                except OSError:
+                    raw_ts_f = None
+                    raw_ts_iter = None
+            try:
+                if request.agent == "codex":
+                    normalize_codex_events(
+                        raw_events_path=source_path,
+                        normalized_events_path=destination_path,
+                        raw_ts_iter=raw_ts_iter,
+                        workspace_root=acquired.workspace_dir,
+                        workspace_mount=workspace_mount,
+                    )
+                elif request.agent == "claude":
+                    normalize_claude_events(
+                        raw_events_path=source_path,
+                        normalized_events_path=destination_path,
+                        raw_ts_iter=raw_ts_iter,
+                        workspace_root=acquired.workspace_dir,
+                        workspace_mount=workspace_mount,
+                    )
+                else:
+                    normalize_gemini_events(
+                        raw_events_path=source_path,
+                        normalized_events_path=destination_path,
+                        raw_ts_iter=raw_ts_iter,
+                        workspace_root=acquired.workspace_dir,
+                        workspace_mount=workspace_mount,
+                    )
+            finally:
+                if raw_ts_f is not None:
+                    raw_ts_f.close()
+
+        attempt_event_sources = [
+            run_dir / str(attempt["raw_events_path"])
+            for attempt in attempts_meta
+            if isinstance(attempt.get("raw_events_path"), str)
+        ]
+        normalization_source = raw_events_path
+        # A missing selected-attempt artifact has already failed the run closed and
+        # produced a canonical empty placeholder above. Do not reopen the absent source
+        # here and replace that precise terminal cause with a generic FileNotFoundError.
+        if not materialization_errors:
+            if len(attempt_event_sources) == 1:
+                normalization_source = attempt_event_sources[0]
+            elif len(attempt_event_sources) > 1:
+                normalization_source = run_dir / "raw_events.all_attempts.jsonl"
+                with normalization_source.open("wb") as cumulative_f:
+                    for source_path in attempt_event_sources:
+                        content = source_path.read_bytes()
+                        cumulative_f.write(content)
+                        if content and not content.endswith(b"\n"):
+                            cumulative_f.write(b"\n")
+
+                attempt_ts_sources = [
+                    source_path.with_suffix(".ts.jsonl")
+                    for source_path in attempt_event_sources
+                ]
+                if all(source_path.is_file() for source_path in attempt_ts_sources):
+                    cumulative_ts_path = normalization_source.with_suffix(".ts.jsonl")
+                    with cumulative_ts_path.open("wb") as cumulative_ts_f:
+                        for source_path in attempt_ts_sources:
+                            content = source_path.read_bytes()
+                            cumulative_ts_f.write(content)
+                            if content and not content.endswith(b"\n"):
+                                cumulative_ts_f.write(b"\n")
+
+        _normalize_raw_events(
+            source_path=normalization_source,
+            destination_path=normalized_events_path,
+        )
 
         if isinstance(shell_capability_summary, dict):
             _append_shell_capability_normalized_event(
@@ -6960,6 +8109,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             run_dir=run_dir,
             exit_code=final_exit_code,
             report_validation_errors=report_validation_errors,
+            agent_session_id=codex_session_id,
         )
     except Exception as e:  # noqa: BLE001
         message = str(e)
@@ -7018,17 +8168,41 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             else:
                 extra["hint"] = derived_hint
             user_errors.append(f"hint={derived_hint}")
-        _write_json(
-            run_dir / "error.json",
-            {
-                "type": type(e).__name__,
-                "message": message,
-                **({"subtype": subtype} if subtype is not None else {}),
-                **extra,
-            },
+        error_payload = {
+            "type": type(e).__name__,
+            "message": message,
+            **({"subtype": subtype} if subtype is not None else {}),
+            **extra,
+        }
+        error_path = run_dir / "error.json"
+        if error_path.exists():
+            _write_json(
+                run_dir / "postprocess_error.json",
+                {
+                    **error_payload,
+                    "preserved_terminal_error": error_path.name,
+                },
+            )
+        else:
+            _write_json(error_path, error_payload)
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=1,
+            report_validation_errors=user_errors,
+            agent_session_id=codex_session_id,
         )
-        return RunResult(run_dir=run_dir, exit_code=1, report_validation_errors=user_errors)
     finally:
+        if codex_execpolicy_overlay is not None and not codex_execpolicy_overlay.restored:
+            try:
+                _finalize_controlled_codex_execpolicy(
+                    overlay=codex_execpolicy_overlay,
+                    binary=controlled_codex_binary,
+                    env_overrides=controlled_codex_env_overrides,
+                    config_overrides=controlled_codex_config_overrides,
+                    run_dir=run_dir,
+                )
+            except Exception:
+                pass
         cleanup_start_monotonic = time.monotonic()
         try:
             phases = run_meta.get("phases")
@@ -7063,11 +8237,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         cleanup_seconds: float | None = None
         if (
             acquired is not None
+            and acquired.mode != "existing"
             and not (request.keep_workspace or request.exec_keep_container)
             and acquired.workspace_dir.exists()
         ):
             cleanup_wall_start = time.monotonic()
-            shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+            try:
+                remove_acquired_workspace(acquired.workspace_dir)
+            except OSError:
+                pass
             cleanup_seconds = time.monotonic() - cleanup_wall_start
 
         try:

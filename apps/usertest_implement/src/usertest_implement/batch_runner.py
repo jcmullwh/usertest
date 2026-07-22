@@ -15,11 +15,18 @@ from typing import Any
 
 import yaml
 from backlog_repo import (
+    is_generated_backlog_ticket,
     load_atom_actions_yaml,
     reconcile_atom_actions_from_plan_folders,
     write_atom_actions_yaml,
 )
+from backlog_repo.plan_scope import parse_plan_target_contract_markdown
+from runner_core.execution_backend import _load_maintenance_docker_config
 
+from usertest_implement.backlog_refresh import (
+    BacklogRefreshRequest,
+    run_shadow_backlog_refresh,
+)
 from usertest_implement.batch_failure import classify_run_outcome, write_batch_failure
 from usertest_implement.batch_preflight import run_batch_preflight
 from usertest_implement.batch_state import (
@@ -56,7 +63,18 @@ RUN_HISTORY_ARTIFACT_NAMES = {
     "run_meta.json",
     "target_ref.json",
     "ticket_ref.json",
+    "ticket_resume_state.json",
     "timing.json",
+}
+DOCKER_RESOURCE_PLAN_REASON_SUMMARIES = {
+    "per_ticket_image_resolution": (
+        "Maintenance Docker image resolution currently runs inside each ticket run, so "
+        "parallel tickets can contend on pull/build/tag operations."
+    ),
+    "cleanup_on_prepare": (
+        "Maintenance image cleanup is configured to run during Docker profile preparation, "
+        "which mutates shared local Docker image state."
+    ),
 }
 BACKLOG_INPUT_PATHS = (
     Path("apps/usertest_backlog/src/usertest_backlog"),
@@ -70,10 +88,21 @@ BACKLOG_INPUT_PATHS = (
     Path("configs/backlog_stage_guidance_internal_maintenance"),
     Path("configs/repo_intent.md"),
 )
+AUTOMATED_ACTIVE_PLAN_BUCKETS: tuple[str, ...] = (
+    "0.5 - to_triage",
+    "1 - ideas",
+    "1.5 - to_plan",
+    "2 - ready",
+    "3 - in_progress",
+    "4 - for_review",
+)
+TERMINAL_CASE_STATES = frozenset({"resolved", "duplicate", "superseded", "split"})
 
 
-def _sync_ticket_atom_actions(*, repo_root: Path, owner_root: Path) -> None:
-    atom_actions_path = repo_root / "configs" / "backlog_atom_actions.yaml"
+def _sync_ticket_atom_actions(*, owner_root: Path) -> None:
+    """Update queue lifecycle state only in the explicitly configured owner root."""
+
+    atom_actions_path = owner_root / "configs" / "backlog_atom_actions.yaml"
     atom_actions = load_atom_actions_yaml(atom_actions_path)
     reconcile_atom_actions_from_plan_folders(
         atom_actions=atom_actions,
@@ -89,6 +118,8 @@ class BacklogSource:
     runs_dir: Path
     target: str
     breadth_profile: str = "internal_maintenance"
+    research_ref: str = "origin/dev"
+    shadow_state_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +170,52 @@ class TicketRunResult:
     stderr: str
     timed_out: bool
     duration_seconds: float
+
+
+def _configured_owner_root(*, code_root: Path, config: dict[str, Any]) -> Path:
+    """Resolve historical runs, queues, and ledgers independently of code CWD."""
+
+    defaults_raw = config.get("defaults")
+    defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
+    raw = defaults.get("owner_root") or defaults.get("repo_root") or code_root
+    candidate = Path(str(raw)).expanduser()
+    if not candidate.is_absolute():
+        candidate = code_root / candidate
+    return candidate.resolve()
+
+
+def _generated_plan_target_revision(ticket_path: Path) -> str:
+    """Return the immutable stage-6 source revision for one automated plan."""
+
+    try:
+        markdown = ticket_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"Generated ticket is unreadable: {ticket_path}") from exc
+    if not is_generated_backlog_ticket(markdown):
+        raise ValueError(f"Batch candidate is not an automated generated ticket: {ticket_path}")
+    contract = parse_plan_target_contract_markdown(markdown)
+    if not isinstance(contract, dict):
+        raise ValueError(f"Generated ticket has no stage-6 target contract: {ticket_path}")
+    revision = str(contract.get("repo_revision") or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
+        raise ValueError(
+            f"Generated ticket target revision is not an exact commit: {ticket_path}"
+        )
+    return revision.lower()
+
+
+def _validate_candidate_wave_revision(
+    *,
+    candidate: BatchCandidate,
+    wave_base_revision: str,
+) -> None:
+    planned = _generated_plan_target_revision(candidate.ticket_path)
+    if planned != wave_base_revision.lower():
+        raise ValueError(
+            "Generated ticket target revision does not match the pinned batch wave: "
+            f"fingerprint={candidate.fingerprint} planned={planned} "
+            f"wave={wave_base_revision.lower()}"
+        )
 
 
 def _enable_console_backslashreplace(stream: Any) -> None:
@@ -257,6 +334,48 @@ def _repo_head(repo_root: Path) -> str:
     if proc.returncode != 0 or not head:
         raise RuntimeError("Unable to determine current git HEAD.")
     return head
+
+
+def _resolve_wave_base_revision(
+    *,
+    code_root: Path,
+    configured_ref: str,
+    receipt_dir: Path,
+) -> str:
+    """Fetch and pin the exact revision shared by research and implementation."""
+
+    ref = configured_ref.strip()
+    if not ref:
+        raise ValueError("Batch defaults.wave_base_ref must be non-empty")
+    remote_match = re.fullmatch(r"(?P<remote>[^/]+)/(?P<branch>.+)", ref)
+    if remote_match is not None and remote_match.group("remote") not in {
+        "refs",
+    }:
+        remote = remote_match.group("remote")
+        branch = remote_match.group("branch")
+        _run_logged_command(
+            ["git", "fetch", remote, branch],
+            cwd=code_root,
+            log_path=receipt_dir / "wave_base_fetch.log",
+        )
+    proc = _run_logged_command(
+        ["git", "rev-parse", f"{ref}^{{commit}}"],
+        cwd=code_root,
+        log_path=receipt_dir / "wave_base_resolve.log",
+    )
+    revision = proc.stdout.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise RuntimeError(f"Unable to resolve exact batch wave revision from {ref!r}")
+    write_json(
+        receipt_dir / "wave_base_revision.json",
+        {
+            "schema_version": 1,
+            "configured_ref": ref,
+            "resolved_revision": revision,
+            "resolved_at_utc": utc_now_z(),
+        },
+    )
+    return revision
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -393,9 +512,246 @@ def _export_path(source: BacklogSource) -> Path:
     return _compiled_dir(source) / f"{source.target}.tickets_export.json"
 
 
+def _source_key(source: BacklogSource) -> str:
+    return f"{source.runs_dir.resolve()}::{source.target}"
+
+
+def _unique_sources(phases: list[PhaseConfig]) -> list[BacklogSource]:
+    unique: dict[str, BacklogSource] = {}
+    for phase in phases:
+        for source in phase.sources:
+            unique.setdefault(_source_key(source), source)
+    return [unique[key] for key in sorted(unique)]
+
+
+def _artifact_receipt(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"path": str(path), "exists": False, "sha256": None}
+    return {
+        "path": str(path),
+        "exists": True,
+        "sha256": sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _build_terminal_proof(
+    *,
+    code_root: Path,
+    owner_root: Path,
+    phases: list[PhaseConfig],
+    refresh_state: dict[str, SourceRefreshState],
+    wave_base_revision: str,
+) -> dict[str, Any]:
+    """Prove that a full automated wave has no unclosed causal work.
+
+    This is deliberately an end-state proof, not a plan-admission ratchet.  It does
+    not block work because an unrelated pull request exists.  Instead, after every
+    severity has run, it binds the final zero-export result to fresh shadow cycles,
+    the exact researched revision, the canonical case graph, and the generated-only
+    queue.  Nonterminal cases remain visible rather than being mistaken for success.
+    """
+
+    reasons: list[str] = []
+    covered_severities = sorted({severity for phase in phases for severity in phase.severities})
+    required_severities = set(SEVERITY_RANK)
+    missing_severities = sorted(required_severities.difference(covered_severities))
+    if missing_severities:
+        reasons.append("severity_coverage_missing:" + ",".join(missing_severities))
+
+    sources = _unique_sources(phases)
+    low_source_keys = {
+        _source_key(source)
+        for phase in phases
+        if "low" in phase.severities
+        for source in phase.sources
+    }
+    missing_low_sources = [
+        source.name for source in sources if _source_key(source) not in low_source_keys
+    ]
+    if missing_low_sources:
+        reasons.append("low_phase_source_coverage_missing:" + ",".join(missing_low_sources))
+
+    source_proofs: list[dict[str, Any]] = []
+    for source in sources:
+        compiled = _compiled_dir(source)
+        export_path = _export_path(source)
+        shadow_path = compiled / f"{source.target}.shadow_state.json"
+        case_registry_path = compiled / f"{source.target}.case_registry.json"
+        refresh_receipt_path = compiled / f"{source.target}.refresh_receipt.json"
+        source_reasons: list[str] = []
+
+        refresh = refresh_state.get(source.name)
+        if refresh is None or refresh.refreshes < 1:
+            source_reasons.append("fresh_refresh_missing")
+        elif refresh.export_path.resolve() != export_path.resolve():
+            source_reasons.append("refresh_export_path_mismatch")
+
+        export_count: int | None = None
+        try:
+            export_document = _read_json(export_path)
+            exports_raw = export_document.get("exports")
+            if not isinstance(exports_raw, list) or any(
+                not isinstance(item, dict) for item in exports_raw
+            ):
+                source_reasons.append("export_records_invalid")
+            else:
+                export_count = len(exports_raw)
+                if export_count:
+                    source_reasons.append(f"exports_remaining:{export_count}")
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            source_reasons.append("export_unreadable")
+
+        shadow_ready = False
+        validated_cycle_id: str | None = None
+        try:
+            shadow = _read_json(shadow_path)
+            shadow_ready = shadow.get("ready_for_export") is True
+            validated_cycle_id_raw = shadow.get("validated_cycle_id")
+            validated_cycle_id = (
+                validated_cycle_id_raw
+                if isinstance(validated_cycle_id_raw, str) and validated_cycle_id_raw.strip()
+                else None
+            )
+            required_cycles = shadow.get("required_consecutive_cycles")
+            stable_passes = shadow.get("consecutive_stable_passes")
+            if (
+                not shadow_ready
+                or validated_cycle_id is None
+                or isinstance(required_cycles, bool)
+                or not isinstance(required_cycles, int)
+                or isinstance(stable_passes, bool)
+                or not isinstance(stable_passes, int)
+                or stable_passes < required_cycles
+            ):
+                source_reasons.append("shadow_not_ready")
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            source_reasons.append("shadow_unreadable")
+
+        receipt_cycle_id: str | None = None
+        try:
+            receipt = _read_json(refresh_receipt_path)
+            configuration_raw = receipt.get("configuration")
+            configuration = configuration_raw if isinstance(configuration_raw, dict) else {}
+            receipt_cycle_raw = receipt.get("validated_cycle_id")
+            receipt_cycle_id = (
+                receipt_cycle_raw
+                if isinstance(receipt_cycle_raw, str) and receipt_cycle_raw.strip()
+                else None
+            )
+            if Path(str(receipt.get("export_path") or "")).resolve() != export_path.resolve():
+                source_reasons.append("receipt_export_path_mismatch")
+            if (
+                Path(str(receipt.get("shadow_state_path") or "")).resolve()
+                != shadow_path.resolve()
+            ):
+                source_reasons.append("receipt_shadow_path_mismatch")
+            if receipt_cycle_id is None or receipt_cycle_id != validated_cycle_id:
+                source_reasons.append("receipt_validated_cycle_mismatch")
+            if str(configuration.get("research_ref") or "").lower() != wave_base_revision:
+                source_reasons.append("receipt_wave_revision_mismatch")
+            if Path(str(configuration.get("repo_root") or "")).resolve() != code_root.resolve():
+                source_reasons.append("receipt_code_root_mismatch")
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            source_reasons.append("refresh_receipt_unreadable")
+
+        nonterminal_cases: list[dict[str, str]] = []
+        terminal_case_count: int | None = None
+        alias_case_count: int | None = None
+        try:
+            case_registry = _read_json(case_registry_path)
+            cases_raw = case_registry.get("cases")
+            if not isinstance(cases_raw, dict):
+                source_reasons.append("case_registry_cases_invalid")
+            else:
+                terminal_case_count = 0
+                alias_case_count = 0
+                for case_id, raw_case in sorted(cases_raw.items()):
+                    if not isinstance(raw_case, dict):
+                        source_reasons.append(f"case_record_invalid:{case_id}")
+                        continue
+                    state = str(raw_case.get("state") or "active").strip().lower()
+                    if state == "alias" or raw_case.get("alias_of"):
+                        alias_case_count += 1
+                    elif state in TERMINAL_CASE_STATES:
+                        terminal_case_count += 1
+                    else:
+                        nonterminal_cases.append({"case_id": str(case_id), "state": state})
+                if nonterminal_cases:
+                    source_reasons.append(
+                        f"nonterminal_cases_remaining:{len(nonterminal_cases)}"
+                    )
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            source_reasons.append("case_registry_unreadable")
+
+        source_proofs.append(
+            {
+                "name": source.name,
+                "runs_dir": str(source.runs_dir),
+                "target": source.target,
+                "research_revision": source.research_ref,
+                "refresh_count": refresh.refreshes if refresh is not None else 0,
+                "export_count": export_count,
+                "shadow_ready": shadow_ready,
+                "validated_cycle_id": validated_cycle_id,
+                "receipt_validated_cycle_id": receipt_cycle_id,
+                "terminal_case_count": terminal_case_count,
+                "alias_case_count": alias_case_count,
+                "nonterminal_cases": nonterminal_cases,
+                "artifacts": {
+                    "export": _artifact_receipt(export_path),
+                    "shadow_state": _artifact_receipt(shadow_path),
+                    "case_registry": _artifact_receipt(case_registry_path),
+                    "refresh_receipt": _artifact_receipt(refresh_receipt_path),
+                },
+                "passed": not source_reasons,
+                "reasons": source_reasons,
+            }
+        )
+        reasons.extend(f"source:{source.name}:{reason}" for reason in source_reasons)
+
+    active_generated_paths: list[str] = []
+    plans_root = owner_root / ".agents" / "plans"
+    for bucket in AUTOMATED_ACTIVE_PLAN_BUCKETS:
+        bucket_dir = plans_root / bucket
+        if not bucket_dir.is_dir():
+            continue
+        for path in sorted(bucket_dir.glob("*.md"), key=lambda item: item.name.casefold()):
+            try:
+                markdown = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                # An unreadable active ticket cannot be proven non-automated.
+                active_generated_paths.append(str(path))
+                continue
+            if is_generated_backlog_ticket(markdown):
+                active_generated_paths.append(str(path))
+    if active_generated_paths:
+        reasons.append(f"active_generated_plans_remaining:{len(active_generated_paths)}")
+
+    proof: dict[str, Any] = {
+        "schema_version": 1,
+        "recorded_at_utc": utc_now_z(),
+        "code_root": str(code_root.resolve()),
+        "owner_root": str(owner_root.resolve()),
+        "wave_base_revision": wave_base_revision,
+        "covered_severities": covered_severities,
+        "required_severities": sorted(required_severities),
+        "source_proofs": source_proofs,
+        "active_generated_plan_paths": active_generated_paths,
+        "passed": not reasons,
+        "reasons": reasons,
+    }
+    proof["proof_sha256"] = sha256(
+        json.dumps(proof, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return proof
+
+
 def _refresh_backlog(
     *,
     repo_root: Path,
+    owner_root: Path | None = None,
     source: BacklogSource,
     repo_input: str,
     backlog_python: Path,
@@ -403,96 +759,36 @@ def _refresh_backlog(
     model: str,
     batch_dir_path: Path,
 ) -> Path:
-    compiled_dir = _compiled_dir(source)
-    compiled_dir.mkdir(parents=True, exist_ok=True)
+    owner_root = (owner_root or repo_root).resolve()
     env = _batch_subprocess_env(repo_root)
-    common = [
-        "--repo-root",
-        str(repo_root),
-        "--runs-dir",
-        str(source.runs_dir),
-        "--target",
-        source.target,
-    ]
     log_dir = batch_dir_path / "refresh_logs" / source.name
-    _run_logged_command(
-        [
-            str(backlog_python),
-            "-m",
-            "usertest_backlog.cli",
-            "reports",
-            "backlog",
-            *common,
-            "--repo-input",
-            repo_input,
-            "--breadth-profile",
-            source.breadth_profile,
-            "--agent",
-            agent,
-            "--model",
-            model,
-        ],
-        cwd=repo_root,
-        log_path=log_dir / "backlog.log",
-        env=env,
+
+    def _execute(argv: list[str], cwd: Path, label: str) -> None:
+        safe_label = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        _run_logged_command(
+            argv,
+            cwd=cwd,
+            log_path=log_dir / f"{safe_label}.log",
+            env=env,
+        )
+
+    return run_shadow_backlog_refresh(
+        BacklogRefreshRequest(
+            repo_root=repo_root,
+            repo_input=repo_input,
+            runs_dir=source.runs_dir,
+            target=source.target,
+            backlog_python=backlog_python,
+            research_ref=source.research_ref,
+            breadth_profile=source.breadth_profile,
+            agent=agent,
+            model=model,
+            actions_yaml=owner_root / "configs" / "backlog_actions.yaml",
+            atom_actions_yaml=owner_root / "configs" / "backlog_atom_actions.yaml",
+            qualified_shadow_state_path=source.shadow_state_path,
+        ),
+        command_executor=_execute,
     )
-    _run_logged_command(
-        [
-            str(backlog_python),
-            "-m",
-            "usertest_backlog.cli",
-            "reports",
-            "intent-snapshot",
-            *common,
-            "--repo-input",
-            repo_input,
-        ],
-        cwd=repo_root,
-        log_path=log_dir / "intent_snapshot.log",
-        env=env,
-    )
-    _run_logged_command(
-        [
-            str(backlog_python),
-            "-m",
-            "usertest_backlog.cli",
-            "reports",
-            "review-ux",
-            *common,
-            "--repo-input",
-            repo_input,
-            "--breadth-profile",
-            source.breadth_profile,
-            "--agent",
-            agent,
-            "--model",
-            model,
-        ],
-        cwd=repo_root,
-        log_path=log_dir / "review_ux.log",
-        env=env,
-    )
-    export_path = _export_path(source)
-    _run_logged_command(
-        [
-            str(backlog_python),
-            "-m",
-            "usertest_backlog.cli",
-            "reports",
-            "export-tickets",
-            *common,
-            "--repo-input",
-            repo_input,
-            "--stage",
-            "ready_for_ticket",
-            "--out-json",
-            str(export_path),
-        ],
-        cwd=repo_root,
-        log_path=log_dir / "export_tickets.log",
-        env=env,
-    )
-    return export_path
 
 
 def _load_candidates(
@@ -591,6 +887,8 @@ def _load_ready_queue_candidates(
         try:
             markdown = ticket_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            continue
+        if not is_generated_backlog_ticket(markdown):
             continue
         fingerprint_match = re.search(
             r"^-\s*Fingerprint:\s*`([^`]+)`\s*$",
@@ -694,6 +992,8 @@ def _ready_queue_has_work(repo_root: Path) -> bool:
             markdown = ticket_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        if not is_generated_backlog_ticket(markdown):
+            continue
         export_kind_match = re.search(
             r"^-\s*Export kind:\s*`([^`]+)`\s*$",
             markdown,
@@ -717,6 +1017,7 @@ def _ready_queue_has_work(repo_root: Path) -> bool:
 def _collect_wave_candidates(
     *,
     repo_root: Path,
+    owner_root: Path | None = None,
     repo_input: str,
     backlog_python: Path,
     refresh_agent: str,
@@ -727,11 +1028,12 @@ def _collect_wave_candidates(
     processed: set[str],
     refresh_state: dict[str, SourceRefreshState],
 ) -> list[BatchCandidate]:
+    owner_root = (owner_root or repo_root).resolve()
     by_key: dict[str, BatchCandidate] = {}
     for source in sources:
         export_path = _export_path(source)
         for candidate in _load_ready_queue_candidates(
-            repo_root=repo_root,
+            repo_root=owner_root,
             source_name=source.name,
             export_path=export_path,
             severities=severities,
@@ -749,7 +1051,7 @@ def _collect_wave_candidates(
                 item.ticket_key,
             ),
         )
-    if _ready_queue_has_work(repo_root):
+    if _ready_queue_has_work(owner_root):
         _print("QUEUE_READY candidates=0 refresh_skipped=true")
         return []
 
@@ -761,37 +1063,30 @@ def _collect_wave_candidates(
             shared_inputs_fingerprint=shared_inputs_fingerprint,
         )
         current_state = refresh_state.get(source.name)
-        if (
-            current_state is not None
-            and current_state.input_fingerprint == source_fingerprint
-            and current_state.export_path.exists()
-        ):
-            current_state.reuses += 1
-            export_path = current_state.export_path
-            _print(
-                f"REUSE source={source.name} fingerprint={source_fingerprint[:12]} "
-                f"export={export_path}"
-            )
-        else:
-            export_path = _refresh_backlog(
-                repo_root=repo_root,
-                source=source,
-                repo_input=repo_input,
-                backlog_python=backlog_python,
-                agent=refresh_agent,
-                model=refresh_model,
-                batch_dir_path=batch_dir_path,
-            )
-            refresh_state[source.name] = SourceRefreshState(
-                input_fingerprint=source_fingerprint,
-                export_path=export_path,
-                refreshes=(current_state.refreshes if current_state is not None else 0) + 1,
-                reuses=(current_state.reuses if current_state is not None else 0),
-            )
-            _print(
-                f"REFRESH source={source.name} fingerprint={source_fingerprint[:12]} "
-                f"export={export_path}"
-            )
+        # Reaching this branch means no implementation-ready work remains. A prior
+        # export cannot be reused: plan folders and outcome ledgers can change without
+        # changing run-history metadata, and regeneration must earn a fresh two-cycle
+        # shadow receipt immediately before export.
+        export_path = _refresh_backlog(
+            repo_root=repo_root,
+            owner_root=owner_root,
+            source=source,
+            repo_input=repo_input,
+            backlog_python=backlog_python,
+            agent=refresh_agent,
+            model=refresh_model,
+            batch_dir_path=batch_dir_path,
+        )
+        refresh_state[source.name] = SourceRefreshState(
+            input_fingerprint=source_fingerprint,
+            export_path=export_path,
+            refreshes=(current_state.refreshes if current_state is not None else 0) + 1,
+            reuses=(current_state.reuses if current_state is not None else 0),
+        )
+        _print(
+            f"REFRESH source={source.name} fingerprint={source_fingerprint[:12]} "
+            f"export={export_path}"
+        )
         for candidate in _load_candidates(
             source_name=source.name,
             export_path=export_path,
@@ -817,7 +1112,7 @@ def _claim_ticket(*, candidate: BatchCandidate, repo_root: Path) -> Path:
         to_bucket="3 - in_progress",
         dry_run=False,
     ).resolve()
-    _sync_ticket_atom_actions(repo_root=repo_root, owner_root=candidate.owner_root)
+    _sync_ticket_atom_actions(owner_root=candidate.owner_root)
     return path
 
 
@@ -828,7 +1123,7 @@ def _requeue_ticket(*, candidate: BatchCandidate, repo_root: Path) -> Path:
         to_bucket="2 - ready",
         dry_run=False,
     ).resolve()
-    _sync_ticket_atom_actions(repo_root=repo_root, owner_root=candidate.owner_root)
+    _sync_ticket_atom_actions(owner_root=candidate.owner_root)
     return path
 
 
@@ -839,7 +1134,7 @@ def _move_ticket_for_review(*, candidate: BatchCandidate, repo_root: Path) -> Pa
         to_bucket="4 - for_review",
         dry_run=False,
     ).resolve()
-    _sync_ticket_atom_actions(repo_root=repo_root, owner_root=candidate.owner_root)
+    _sync_ticket_atom_actions(owner_root=candidate.owner_root)
     return path
 
 
@@ -854,13 +1149,193 @@ def _pick_launchable_candidate_index(
     return None
 
 
+def _run_common_settings(
+    *,
+    run_settings_path: Path,
+    run_settings_profile: str,
+) -> dict[str, Any]:
+    if not run_settings_path.exists():
+        return {}
+    settings_doc = _load_yaml(run_settings_path)
+    profiles = settings_doc.get("profiles", {})
+    profile_name = (
+        run_settings_profile
+        if run_settings_profile.strip()
+        else str(settings_doc.get("default_profile") or "default")
+    )
+    if not isinstance(profiles, dict) or not isinstance(profiles.get(profile_name), dict):
+        return {}
+    profile = profiles[profile_name]
+    run_common = profile.get("run_common", {})
+    return dict(run_common) if isinstance(run_common, dict) else {}
+
+
+def _bool_setting(value: object, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _docker_resource_reason(reason_id: str) -> dict[str, str]:
+    return {
+        "reason_id": reason_id,
+        "summary": DOCKER_RESOURCE_PLAN_REASON_SUMMARIES[reason_id],
+    }
+
+
+def _build_docker_resource_plan(
+    *,
+    repo_root: Path,
+    exec_backend: str,
+    run_settings_path: Path,
+    run_settings_profile: str,
+    repo_input: str,
+    maintenance_image_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Build the batch-level audit plan for Docker resource use.
+
+    The resulting plan is the scheduler contract for Docker-backed batch launches.  The
+    Docker-wide scheduler guard may only be omitted when this plan proves image resolution is
+    batch-scoped and cleanup will not mutate shared Docker state during ticket execution.
+    """
+
+    backend = exec_backend.strip().lower()
+    if backend != "docker":
+        return None
+
+    run_common = _run_common_settings(
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+    )
+    requested_profile_raw = run_common.get("exec_docker_profile")
+    requested_profile = (
+        requested_profile_raw.strip()
+        if isinstance(requested_profile_raw, str) and requested_profile_raw.strip()
+        else None
+    )
+    from usertest_implement.shared import (
+        _maintenance_profile_is_eligible,
+        _resolve_exec_docker_profile,
+    )
+
+    maintenance_eligible = _maintenance_profile_is_eligible(
+        repo_root=repo_root,
+        repo_input=repo_input,
+    )
+    docker_profile = _resolve_exec_docker_profile(
+        exec_backend=backend,
+        requested_profile=requested_profile,
+        maintenance_eligible=maintenance_eligible,
+    )
+
+    cache_mode = str(run_common.get("exec_cache") or "warm").strip().lower() or "warm"
+    warm_cache = cache_mode == "warm"
+    maintenance_venv_cache_configured = _bool_setting(
+        run_common.get("maintenance_venv_cache"),
+        default=True,
+    )
+    maintenance_venv_cache = bool(warm_cache and maintenance_venv_cache_configured)
+    cleanup_on_prepare = False
+    if docker_profile == "maintenance":
+        maintenance_cfg = _load_maintenance_docker_config(repo_root=repo_root)
+        cleanup_on_prepare = bool(
+            maintenance_cfg.cleanup_enabled and maintenance_cfg.cleanup_on_prepare
+        )
+
+    pre_resolved_image_ref = None
+    pre_resolved_metadata_path = None
+    pre_resolved_image_available = False
+    if docker_profile == "maintenance" and isinstance(maintenance_image_metadata, dict):
+        image_ref = maintenance_image_metadata.get("image_ref")
+        metadata_path = maintenance_image_metadata.get("path")
+        if isinstance(image_ref, str) and image_ref.strip():
+            pre_resolved_image_available = True
+            pre_resolved_image_ref = image_ref.strip()
+        if isinstance(metadata_path, str) and metadata_path.strip():
+            pre_resolved_metadata_path = metadata_path.strip()
+
+    unsafe_reasons: list[dict[str, str]] = []
+    if not pre_resolved_image_available:
+        unsafe_reasons.append(_docker_resource_reason("per_ticket_image_resolution"))
+    if cleanup_on_prepare:
+        unsafe_reasons.append(_docker_resource_reason("cleanup_on_prepare"))
+    parallel_safe = not unsafe_reasons
+    scheduler_guard = (
+        {
+            "unchanged": False,
+            "conflict_key": None,
+            "omitted_conflict_key": "batch_resource:docker",
+            "summary": (
+                "Docker-backed tickets may launch concurrently when their ticket conflict "
+                "keys are disjoint because image resolution is batch-scoped and Docker "
+                "cleanup is not run during ticket execution."
+            ),
+        }
+        if parallel_safe
+        else {
+            "unchanged": True,
+            "conflict_key": "batch_resource:docker",
+            "summary": (
+                "Docker-backed tickets remain serialized by the existing batch resource "
+                "conflict key."
+            ),
+        }
+    )
+
+    return {
+        "schema_version": 1,
+        "generated_at": utc_now_z(),
+        "exec_backend": backend,
+        "docker_profile": docker_profile,
+        "configured_docker_profile": requested_profile,
+        "docker_profile_eligible": maintenance_eligible,
+        "cache_mode": cache_mode,
+        "warm_cache": warm_cache,
+        "maintenance_venv_cache_configured": maintenance_venv_cache_configured,
+        "maintenance_venv_cache": maintenance_venv_cache,
+        "maintenance_venv_cache_strategy": (
+            "per-worker-writable-copy"
+            if docker_profile == "maintenance" and maintenance_venv_cache
+            else "disabled"
+        ),
+        "cleanup_on_prepare": cleanup_on_prepare,
+        "pre_resolved_image_available": pre_resolved_image_available,
+        "pre_resolved_image_ref": pre_resolved_image_ref,
+        "pre_resolved_metadata_path": pre_resolved_metadata_path,
+        "pre_resolved_image": maintenance_image_metadata if pre_resolved_image_available else None,
+        "parallel_safe": parallel_safe,
+        "unsafe_reasons": unsafe_reasons,
+        "scheduler_guard": scheduler_guard,
+    }
+
+
+def _docker_resource_plan_is_parallel_safe(
+    docker_resource_plan: dict[str, Any] | None,
+) -> bool:
+    return (
+        isinstance(docker_resource_plan, dict)
+        and docker_resource_plan.get("parallel_safe") is True
+    )
+
+
 def _add_batch_resource_conflicts(
     candidate: BatchCandidate,
     *,
     exec_backend: str,
+    docker_resource_plan: dict[str, Any] | None = None,
 ) -> BatchCandidate:
     extra_keys: tuple[str, ...] = ()
-    if exec_backend.strip().lower() == "docker":
+    if (
+        exec_backend.strip().lower() == "docker"
+        and not _docker_resource_plan_is_parallel_safe(docker_resource_plan)
+    ):
         extra_keys = ("batch_resource:docker",)
     if not extra_keys:
         return candidate
@@ -893,6 +1368,10 @@ def _run_ticket_process(
     settings_path: Path,
     settings_profile: str,
     ticket_timeout_seconds: float | None,
+    implementation_ref: str | None = None,
+    implementation_runs_dir: Path | None = None,
+    ledger_path: Path | None = None,
+    maintenance_image_metadata_path: Path | None = None,
 ) -> TicketRunResult:
     command = [
         str(implement_python),
@@ -913,8 +1392,21 @@ def _run_ticket_process(
         worker.agent,
         "--no-move-on-start",
     ]
+    if implementation_ref is not None:
+        command.extend(["--ref", implementation_ref])
+    if implementation_runs_dir is not None:
+        command.extend(["--runs-dir", str(implementation_runs_dir)])
+    if ledger_path is not None:
+        command.extend(["--ledger", str(ledger_path)])
     if worker.model is not None:
         command.extend(["--model", worker.model])
+    if maintenance_image_metadata_path is not None:
+        command.extend(
+            [
+                "--exec-maintenance-image-metadata",
+                str(maintenance_image_metadata_path),
+            ]
+        )
 
     started = time.monotonic()
     proc = subprocess.Popen(
@@ -1010,7 +1502,7 @@ def _build_workers(config: dict[str, Any]) -> list[WorkerTemplate]:
     return workers
 
 
-def _build_phases(config: dict[str, Any], *, repo_root: Path) -> list[PhaseConfig]:
+def _build_phases(config: dict[str, Any], *, data_root: Path) -> list[PhaseConfig]:
     phases_raw = config.get("phases", [])
     phases: list[PhaseConfig] = []
     for item in phases_raw:
@@ -1038,11 +1530,20 @@ def _build_phases(config: dict[str, Any], *, repo_root: Path) -> list[PhaseConfi
             sources.append(
                 BacklogSource(
                     name=source_name,
-                    runs_dir=(repo_root / runs_dir_raw).resolve(),
+                    runs_dir=(data_root / runs_dir_raw).resolve(),
                     target=target,
                     breadth_profile=str(
                         source_raw.get("breadth_profile") or "internal_maintenance"
                     ).strip(),
+                    research_ref=str(
+                        source_raw.get("research_ref") or "origin/dev"
+                    ).strip(),
+                    shadow_state_path=(
+                        (data_root / str(source_raw["shadow_state_path"])).resolve()
+                        if isinstance(source_raw.get("shadow_state_path"), str)
+                        and str(source_raw["shadow_state_path"]).strip()
+                        else None
+                    ),
                 )
             )
         if sources:
@@ -1050,6 +1551,33 @@ def _build_phases(config: dict[str, Any], *, repo_root: Path) -> list[PhaseConfi
     if not phases:
         raise ValueError("Batch config must define at least one phase")
     return phases
+
+
+def _pin_phase_research_revision(
+    phases: list[PhaseConfig],
+    *,
+    revision: str,
+) -> list[PhaseConfig]:
+    """Bind every same-repository source to the immutable wave revision."""
+
+    return [
+        PhaseConfig(
+            name=phase.name,
+            severities=set(phase.severities),
+            sources=[
+                BacklogSource(
+                    name=source.name,
+                    runs_dir=source.runs_dir,
+                    target=source.target,
+                    breadth_profile=source.breadth_profile,
+                    research_ref=revision,
+                    shadow_state_path=source.shadow_state_path,
+                )
+                for source in phase.sources
+            ],
+        )
+        for phase in phases
+    ]
 
 
 def _record_outcome(
@@ -1119,6 +1647,49 @@ def _update_state_lists(
         ]
 
 
+def _record_launch_wave_decision(
+    state: dict[str, Any],
+    *,
+    phase_name: str,
+    cycle: int,
+    exec_backend: str,
+    candidates: list[BatchCandidate],
+) -> dict[str, Any]:
+    docker_resource_plan = state.get("docker_resource_plan")
+    docker_plan_parallel_safe = (
+        _docker_resource_plan_is_parallel_safe(docker_resource_plan)
+        if isinstance(docker_resource_plan, dict)
+        else None
+    )
+    docker_conflict_key_applied = any(
+        "batch_resource:docker" in candidate.execution_conflict_keys
+        for candidate in candidates
+    )
+    wave = {
+        "schema_version": 1,
+        "phase": phase_name,
+        "cycle": cycle,
+        "recorded_utc": utc_now_z(),
+        "exec_backend": exec_backend.strip().lower(),
+        "candidate_count": len(candidates),
+        "docker_resource_plan_parallel_safe": docker_plan_parallel_safe,
+        "docker_conflict_key_applied": docker_conflict_key_applied,
+        "docker_conflict_key": (
+            "batch_resource:docker" if docker_conflict_key_applied else None
+        ),
+        "candidate_conflict_keys": [
+            {
+                "fingerprint": candidate.fingerprint,
+                "execution_domain": candidate.execution_domain,
+                "execution_conflict_keys": list(candidate.execution_conflict_keys),
+            }
+            for candidate in candidates
+        ],
+    }
+    state.setdefault("launch_waves", []).append(wave)
+    return wave
+
+
 def _phase_blocker_id(failure_class: str, handoff_summary: dict[str, Any] | None) -> str:
     if (
         isinstance(handoff_summary, dict)
@@ -1152,7 +1723,11 @@ def _drain_phase(
     repo_input: str,
     refresh_state: dict[str, SourceRefreshState],
     exec_backend: str,
+    owner_root: Path | None = None,
+    wave_base_revision: str | None = None,
+    maintenance_image_metadata_path: Path | None = None,
 ) -> None:
+    owner_root = (owner_root or repo_root).resolve()
     defaults = config.get("defaults", {})
     refresh_agent = str(defaults.get("refresh_agent") or workers[0].agent)
     refresh_model = str(defaults.get("refresh_model") or workers[0].model or LATEST_CODEX_MODEL)
@@ -1194,6 +1769,7 @@ def _drain_phase(
         _print(f"PHASE {phase.name} cycle={cycle}")
         candidates = _collect_wave_candidates(
             repo_root=repo_root,
+            owner_root=owner_root,
             repo_input=repo_input,
             backlog_python=backlog_python,
             refresh_agent=refresh_agent,
@@ -1205,14 +1781,37 @@ def _drain_phase(
             refresh_state=refresh_state,
         )
         candidates = [
-            _add_batch_resource_conflicts(candidate, exec_backend=exec_backend)
+            _add_batch_resource_conflicts(
+                candidate,
+                exec_backend=exec_backend,
+                docker_resource_plan=(
+                    state.get("docker_resource_plan")
+                    if isinstance(state.get("docker_resource_plan"), dict)
+                    else None
+                ),
+            )
             for candidate in candidates
         ]
         if not candidates:
             _print(f"DONE phase={phase.name} cycles={cycle - 1}")
             return
 
+        wave_decision = _record_launch_wave_decision(
+            state,
+            phase_name=phase.name,
+            cycle=cycle,
+            exec_backend=exec_backend,
+            candidates=candidates,
+        )
+        persist_state(batch_dir_path, state)
         _print(f"WAVE phase={phase.name} cycle={cycle} candidates={len(candidates)}")
+        if exec_backend.strip().lower() == "docker":
+            _print(
+                f"WAVE_DOCKER_GUARD phase={phase.name} cycle={cycle} "
+                f"parallel_safe={wave_decision['docker_resource_plan_parallel_safe']} "
+                f"docker_conflict_key_applied="
+                f"{wave_decision['docker_conflict_key_applied']}"
+            )
         queue = list(candidates)
         next_worker_index = 0
         active_conflict_keys: set[str] = set()
@@ -1227,6 +1826,11 @@ def _drain_phase(
                     if launch_index is None:
                         break
                     candidate = queue.pop(launch_index)
+                    if wave_base_revision is not None:
+                        _validate_candidate_wave_revision(
+                            candidate=candidate,
+                            wave_base_revision=wave_base_revision,
+                        )
                     worker = workers[next_worker_index % len(workers)]
                     next_worker_index += 1
                     claimed_path = _claim_ticket(candidate=candidate, repo_root=repo_root)
@@ -1267,6 +1871,17 @@ def _drain_phase(
                         settings_path=settings_path,
                         settings_profile=settings_profile,
                         ticket_timeout_seconds=ticket_timeout_seconds,
+                        implementation_ref=wave_base_revision,
+                        implementation_runs_dir=(
+                            candidate.owner_root / "runs" / "usertest_implement"
+                        ),
+                        ledger_path=(
+                            candidate.owner_root
+                            / ".agents"
+                            / "state"
+                            / "backlog_implement_actions.yaml"
+                        ),
+                        maintenance_image_metadata_path=maintenance_image_metadata_path,
                     )
                     in_flight[future] = (candidate, worker, candidate.execution_conflict_keys)
 
@@ -1419,10 +2034,12 @@ def _drain_phase(
 def run_batch(*, repo_root: Path, config_path: Path) -> int:
     config = _load_batch_config(config_path)
     workers = _build_workers(config)
-    phases = _build_phases(config, repo_root=repo_root)
-    defaults = config.get("defaults", {})
+    defaults_raw = config.get("defaults")
+    defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
+    owner_root = _configured_owner_root(code_root=repo_root, config=config)
+    phases = _build_phases(config, data_root=owner_root)
     batch_id = new_batch_id()
-    batch_dir_path = batch_dir(repo_root, batch_id)
+    batch_dir_path = batch_dir(owner_root, batch_id)
     batch_dir_path.mkdir(parents=True, exist_ok=True)
 
     run_settings_path = (
@@ -1430,18 +2047,24 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
         / str(defaults.get("run_settings_path") or "configs/usertest_implement_settings.yaml")
     ).resolve()
     run_settings_profile = str(defaults.get("run_settings_profile") or "default")
-    repo_input = str(defaults.get("repo_input") or repo_root)
-    exec_backend = "docker"
-    if run_settings_path.exists():
-        settings_doc = _load_yaml(run_settings_path)
-        profiles = settings_doc.get("profiles", {})
-        default_profile_name = str(settings_doc.get("default_profile") or run_settings_profile)
-        profile_name = run_settings_profile or default_profile_name
-        if isinstance(profiles, dict) and isinstance(profiles.get(profile_name), dict):
-            profile = profiles[profile_name]
-            run_common = profile.get("run_common", {})
-            if isinstance(run_common, dict):
-                exec_backend = str(run_common.get("exec_backend") or exec_backend)
+    repo_input = str(defaults.get("repo_input") or owner_root)
+    run_common = _run_common_settings(
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+    )
+    exec_backend = str(run_common.get("exec_backend") or "docker")
+    preliminary_docker_resource_plan = _build_docker_resource_plan(
+        repo_root=repo_root,
+        exec_backend=exec_backend,
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+        repo_input=repo_input,
+    )
+    exec_docker_profile = (
+        str(preliminary_docker_resource_plan.get("docker_profile") or "standard")
+        if preliminary_docker_resource_plan is not None
+        else "standard"
+    )
 
     preflight = run_batch_preflight(
         repo_root=repo_root,
@@ -1452,6 +2075,22 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
             for worker in workers
         ],
         exec_backend=exec_backend,
+        exec_docker_profile=exec_docker_profile,
+        resolve_maintenance_image=bool(
+            exec_backend.strip().lower() == "docker" and exec_docker_profile == "maintenance"
+        ),
+    )
+    docker_resource_plan = _build_docker_resource_plan(
+        repo_root=repo_root,
+        exec_backend=exec_backend,
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+        repo_input=repo_input,
+        maintenance_image_metadata=(
+            preflight.get("maintenance_image_metadata")
+            if isinstance(preflight.get("maintenance_image_metadata"), dict)
+            else None
+        ),
     )
     state = build_initial_state(
         batch_id=batch_id,
@@ -1462,13 +2101,40 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
             {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
             for worker in workers
         ],
+        docker_resource_plan=docker_resource_plan,
     )
+    state["code_root"] = str(repo_root.resolve())
+    state["owner_root"] = str(owner_root)
+    state["repo_input"] = repo_input
     state["global_blockers"] = list(preflight.get("blockers", []))
     if state["global_blockers"]:
         state["status"] = "blocked"
         persist_state(batch_dir_path, state)
         _write_batch_token_monitoring_artifacts(batch_dir_path)
         return 2
+    try:
+        wave_base_revision = _resolve_wave_base_revision(
+            code_root=repo_root,
+            configured_ref=str(defaults.get("wave_base_ref") or "origin/dev"),
+            receipt_dir=batch_dir_path / "preflight",
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        state["global_blockers"].append(
+            {
+                "blocker_id": "wave_base_revision",
+                "class": "baseline_repo_regression",
+                "summary": str(exc),
+                "evidence": {"type": type(exc).__name__},
+                "created_utc": utc_now_z(),
+            }
+        )
+        state["status"] = "blocked"
+        persist_state(batch_dir_path, state)
+        _write_batch_token_monitoring_artifacts(batch_dir_path)
+        return 2
+    phases = _pin_phase_research_revision(phases, revision=wave_base_revision)
+    state["wave_base_revision"] = wave_base_revision
+    state["wave_base_ref"] = str(defaults.get("wave_base_ref") or "origin/dev")
     persist_state(batch_dir_path, state)
 
     backlog_python = _venv_python(repo_root, "usertest_backlog")
@@ -1479,6 +2145,12 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
         raise FileNotFoundError(implement_python)
 
     refresh_state: dict[str, SourceRefreshState] = {}
+    maintenance_image_metadata_path: Path | None = None
+    maintenance_image_metadata = preflight.get("maintenance_image_metadata")
+    if isinstance(maintenance_image_metadata, dict):
+        raw_metadata_path = maintenance_image_metadata.get("path")
+        if isinstance(raw_metadata_path, str) and raw_metadata_path.strip():
+            maintenance_image_metadata_path = Path(raw_metadata_path).resolve()
     try:
         for phase in phases:
             _drain_phase(
@@ -1495,11 +2167,37 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
                 repo_input=repo_input,
                 refresh_state=refresh_state,
                 exec_backend=exec_backend,
+                owner_root=owner_root,
+                wave_base_revision=wave_base_revision,
+                maintenance_image_metadata_path=maintenance_image_metadata_path,
             )
             if state.get("status") == "blocked":
                 break
         else:
-            state["status"] = "completed"
+            terminal_proof = _build_terminal_proof(
+                code_root=repo_root,
+                owner_root=owner_root,
+                phases=phases,
+                refresh_state=refresh_state,
+                wave_base_revision=wave_base_revision,
+            )
+            terminal_proof_path = batch_dir_path / "terminal_proof.json"
+            write_json(terminal_proof_path, terminal_proof)
+            state["terminal_proof"] = {
+                "path": str(terminal_proof_path),
+                "sha256": sha256(terminal_proof_path.read_bytes()).hexdigest(),
+                "proof_sha256": terminal_proof["proof_sha256"],
+                "passed": terminal_proof["passed"],
+                "reasons": terminal_proof["reasons"],
+            }
+            # A successfully drained pass is allowed to hand freshly created PRs to
+            # the outer review/outcome reconciler.  Only the explicit proof may call
+            # the overall automated backlog complete.
+            state["status"] = (
+                "completed"
+                if terminal_proof["passed"] is True
+                else "awaiting_terminal_proof"
+            )
     except Exception as exc:
         state.setdefault("global_blockers", []).append(
             {
@@ -1517,11 +2215,21 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     persist_state(batch_dir_path, state)
     _write_batch_token_monitoring_artifacts(batch_dir_path)
     print(str(batch_dir_path))
-    return 0 if state.get("status") == "completed" else 2
+    return (
+        0
+        if state.get("status") in {"completed", "awaiting_terminal_proof"}
+        else 2
+    )
 
 
-def batch_status(*, repo_root: Path, batch_id: str | None = None) -> int:
-    batch_dir_path = batch_dir(repo_root, batch_id) if batch_id else latest_batch_dir(repo_root)
+def batch_status(
+    *,
+    repo_root: Path,
+    batch_id: str | None = None,
+    owner_root: Path | None = None,
+) -> int:
+    state_root = (owner_root or repo_root).resolve()
+    batch_dir_path = batch_dir(state_root, batch_id) if batch_id else latest_batch_dir(state_root)
     if batch_dir_path is None:
         print(json.dumps({"status": "missing"}, indent=2, ensure_ascii=False))
         return 1
@@ -1539,8 +2247,14 @@ def batch_status(*, repo_root: Path, batch_id: str | None = None) -> int:
     return 0
 
 
-def batch_recover(*, repo_root: Path, batch_id: str | None = None) -> int:
-    batch_dir_path = batch_dir(repo_root, batch_id) if batch_id else latest_batch_dir(repo_root)
+def batch_recover(
+    *,
+    repo_root: Path,
+    batch_id: str | None = None,
+    owner_root: Path | None = None,
+) -> int:
+    state_root = (owner_root or repo_root).resolve()
+    batch_dir_path = batch_dir(state_root, batch_id) if batch_id else latest_batch_dir(state_root)
     if batch_dir_path is None:
         raise SystemExit("No batch directory found to recover.")
     state = load_json(state_path(batch_dir_path))
@@ -1576,7 +2290,7 @@ def batch_recover(*, repo_root: Path, batch_id: str | None = None) -> int:
             to_bucket=destination_bucket,
             dry_run=False,
         )
-        _sync_ticket_atom_actions(repo_root=repo_root, owner_root=owner_root)
+        _sync_ticket_atom_actions(owner_root=owner_root)
         recovered.append(
             {"fingerprint": fingerprint, "to_bucket": destination_bucket, "path": str(new_path)}
         )
@@ -1597,7 +2311,7 @@ def batch_recover(*, repo_root: Path, batch_id: str | None = None) -> int:
             to_bucket="2 - ready",
             dry_run=False,
         )
-        _sync_ticket_atom_actions(repo_root=repo_root, owner_root=owner_root)
+        _sync_ticket_atom_actions(owner_root=owner_root)
         recovered.append(
             {"fingerprint": fingerprint, "to_bucket": "2 - ready", "path": str(new_path)}
         )
@@ -1627,11 +2341,13 @@ def add_batch_subcommands(subparsers: argparse._SubParsersAction[argparse.Argume
 
     status_p = batch_sub.add_parser("status", help="Show batch state JSON.")
     status_p.add_argument("--batch-id", help="Optional batch id. Defaults to the latest batch.")
+    status_p.add_argument("--owner-root", type=Path)
 
     recover_p = batch_sub.add_parser(
         "recover", help="Recover stale in-progress tickets for the latest batch."
     )
     recover_p.add_argument("--batch-id", help="Optional batch id. Defaults to the latest batch.")
+    recover_p.add_argument("--owner-root", type=Path)
 
     def _cmd_batch_run(args: argparse.Namespace) -> int:
         repo_root = (
@@ -1643,13 +2359,21 @@ def add_batch_subcommands(subparsers: argparse._SubParsersAction[argparse.Argume
         repo_root = (
             Path(args.repo_root).resolve() if args.repo_root is not None else Path.cwd().resolve()
         )
-        return batch_status(repo_root=repo_root, batch_id=getattr(args, "batch_id", None))
+        return batch_status(
+            repo_root=repo_root,
+            batch_id=getattr(args, "batch_id", None),
+            owner_root=getattr(args, "owner_root", None),
+        )
 
     def _cmd_batch_recover(args: argparse.Namespace) -> int:
         repo_root = (
             Path(args.repo_root).resolve() if args.repo_root is not None else Path.cwd().resolve()
         )
-        return batch_recover(repo_root=repo_root, batch_id=getattr(args, "batch_id", None))
+        return batch_recover(
+            repo_root=repo_root,
+            batch_id=getattr(args, "batch_id", None),
+            owner_root=getattr(args, "owner_root", None),
+        )
 
     run_p.set_defaults(func=_cmd_batch_run)
     status_p.set_defaults(func=_cmd_batch_status)
