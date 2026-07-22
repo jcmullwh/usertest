@@ -20,6 +20,9 @@ def test_effective_handoff_flags_follow_dependency_chain() -> None:
     assert batch_preflight._effective_handoff_flags(
         {"commit": True, "push": True, "pr": True}
     ) == (True, True, True)
+    assert batch_preflight._effective_handoff_flags(
+        {"commit": "true", "push": "false", "pr": "true"}
+    ) == (True, False, False)
 
 
 def _completed(argv: list[str], *, returncode: int = 0) -> subprocess.CompletedProcess[str]:

@@ -60,12 +60,26 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _coerce_handoff_bool(*, key: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"Setting {key!r} must be a boolean value")
+
+
 def _effective_handoff_flags(run_settings: dict[str, Any]) -> tuple[bool, bool, bool]:
     """Apply the run command's commit -> push -> PR dependency chain."""
 
-    commit = bool(run_settings.get("commit", False))
-    push = commit and bool(run_settings.get("push", False))
-    pr = push and bool(run_settings.get("pr", False))
+    commit = _coerce_handoff_bool(key="commit", value=run_settings.get("commit", False))
+    push = commit and _coerce_handoff_bool(
+        key="push", value=run_settings.get("push", False)
+    )
+    pr = push and _coerce_handoff_bool(key="pr", value=run_settings.get("pr", False))
     return commit, push, pr
 
 
