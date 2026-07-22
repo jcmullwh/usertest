@@ -59,7 +59,9 @@ def _source() -> dict[str, object]:
                 "case_distributions": {
                     "raw_to_disposition_seconds": _distribution(total=100, median=48),
                     "lifecycle_wall_seconds": _distribution(total=90, median=44),
-                    "lineage_to_disposition_seconds": _distribution(total=110, median=52),
+                    "lineage_to_disposition_seconds": _distribution(
+                        total=110, median=52
+                    ),
                     "direct_active_seconds": _distribution(total=30, median=15),
                     "direct_total_tokens": _distribution(total=2_000, median=1_000),
                     "inclusive_total_tokens": _distribution(total=2_600, median=1_300),
@@ -191,6 +193,88 @@ def test_empty_distributions_render_as_unknown_instead_of_measured_zero() -> Non
     assert row["manual_actions"]["active_seconds"]["total"] is None
 
 
+def test_active_cohort_burden_is_visible_before_final_disposition() -> None:
+    mod = _load_module()
+    source = _source()
+    source.update(
+        {
+            "case_count": 5,
+            "active_case_count": 5,
+            "active_case_lifecycle_ids": [f"lifecycle:{index}" for index in range(5)],
+            "by_disposition": {},
+            "case_distributions": {
+                "error_clusters": _distribution(
+                    count=5, total=3, median=0, p75=1, p90=2
+                ),
+                "supervisor_interventions": _distribution(
+                    count=5, total=0, median=0, p75=0, p90=0
+                ),
+                "manual_actions": _distribution(
+                    count=5, total=133, median=8, p75=41, p90=76
+                ),
+                "manual_active_seconds": {
+                    "count": 0,
+                    "total": 0.0,
+                    "median": None,
+                    "p75": None,
+                    "p90": None,
+                },
+            },
+            "errors": {
+                "cluster_count": 3,
+                "occurrence_count": 3,
+                "self_healed_cluster_count": 0,
+                "externally_resolved_cluster_count": 3,
+                "unresolved_terminal_cluster_count": 0,
+            },
+            "interventions": {"count": 0},
+            "manual_actions": {
+                "count": 133,
+                "required_for_progress_count": 122,
+                "policy_mandated_count": 0,
+                "passive_observation_count": 6,
+                "measurement_administration_count": 26,
+                "avoidable_count": 133,
+                "unavoidable_count": 0,
+                "unclassified_count": 0,
+            },
+            "automation_score_v1": {
+                "certified_case_count": 0,
+                "withheld_case_count": 5,
+                "terminal_case_count": 0,
+            },
+            "completeness": {
+                "case_count": 5,
+                "complete": False,
+                "ratios": {"required_milestones_complete": 0.0},
+            },
+            "reconciliation": {"ok": False},
+        }
+    )
+
+    projection = mod.build_dashboard_projection(source)
+    summary = projection["cohort_summary"]
+
+    assert summary["case_count"] == 5
+    assert summary["active_case_count"] == 5
+    assert summary["disposition_pending_case_count"] == 5
+    assert summary["errors"]["clusters"]["total"] == 3
+    assert summary["errors"]["occurrences"] == 3
+    assert summary["manual_actions"]["actions"]["total"] == 133
+    assert summary["manual_actions"]["required_for_progress"] == 122
+    assert summary["automation_score_v1"]["withheld_case_count"] == 5
+    assert summary["reconciliation_ok"] is False
+
+    html = mod.render_dashboard_html(projection)
+    assert "All observed cases" in html
+    assert "Active lifecycles" in html
+    assert "Disposition pending" in html
+    assert "Error clusters" in html
+    assert "Manual actions" in html
+    assert ">133<" in html
+    assert ">incomplete<" in html
+
+
 def test_comparison_deltas_are_computed_factually() -> None:
     mod = _load_module()
 
@@ -236,9 +320,7 @@ def test_reporter_compare_cohorts_document_is_flattened_without_causal_claims() 
                 "before_case_count": 1,
                 "after_case_count": 2,
                 "case_count_delta": 1,
-                "accounting_delta": {
-                    "all_in": {"gross": {"total_tokens": -500}}
-                },
+                "accounting_delta": {"all_in": {"gross": {"total_tokens": -500}}},
             }
         },
     }
@@ -294,12 +376,16 @@ def test_projection_rejects_invalid_or_ambiguous_source_values() -> None:
     bad_count = deepcopy(_source())
     bad_count["by_disposition"]["already_addressed"]["case_count"] = -1
 
-    with pytest.raises(mod.GeneratedDashboardContractError, match="must not be negative"):
+    with pytest.raises(
+        mod.GeneratedDashboardContractError, match="must not be negative"
+    ):
         mod.build_dashboard_projection(bad_count)
 
     bad_disposition = deepcopy(_source())
     bad_disposition["by_disposition"]["mystery"] = {"case_count": 1}
-    with pytest.raises(mod.GeneratedDashboardContractError, match="unsupported disposition"):
+    with pytest.raises(
+        mod.GeneratedDashboardContractError, match="unsupported disposition"
+    ):
         mod.build_dashboard_projection(bad_disposition)
 
 
@@ -345,7 +431,9 @@ def test_materialization_is_deterministic_and_check_detects_stale_output(
         )
 
 
-def test_cli_writes_default_artifact_names(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_writes_default_artifact_names(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     mod = _load_module()
     source_path = tmp_path / "cohort_metrics.json"
     source_path.write_text(json.dumps(_source()), encoding="utf-8")

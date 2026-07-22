@@ -81,6 +81,14 @@ def _integer_or_none(value: object, *, label: str) -> int | None:
     return result
 
 
+def _boolean_or_none(value: object, *, label: str) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise GeneratedDashboardContractError(f"{label} must be null or boolean")
+    return value
+
+
 def _path(value: Mapping[str, Any], dotted: str) -> object:
     current: object = value
     for part in dotted.split("."):
@@ -144,7 +152,9 @@ def _ratio_or_none(value: object, *, label: str) -> int | float | None:
     if ratio is not None and ratio > 1:
         if ratio <= 100:
             return ratio / 100
-        raise GeneratedDashboardContractError(f"{label} must be between 0 and 1 or 0 and 100")
+        raise GeneratedDashboardContractError(
+            f"{label} must be between 0 and 1 or 0 and 100"
+        )
     return ratio
 
 
@@ -179,7 +189,9 @@ def _source_dispositions(source: Mapping[str, Any]) -> dict[str, Mapping[str, An
                 )
             rows[row_disposition] = row
     else:
-        raise GeneratedDashboardContractError("by_disposition must be an object or list")
+        raise GeneratedDashboardContractError(
+            "by_disposition must be an object or list"
+        )
     unsupported = sorted(set(rows).difference(DISPOSITIONS))
     if unsupported:
         raise GeneratedDashboardContractError(
@@ -191,11 +203,13 @@ def _source_dispositions(source: Mapping[str, Any]) -> dict[str, Mapping[str, An
 def _project_timing(row: Mapping[str, Any], *, prefix: str) -> dict[str, Any]:
     aliases = {
         "raw_to_disposition_seconds": (
+            "case_distributions.atom_to_disposition_seconds",
             "case_distributions.raw_to_disposition_seconds",
             "time.raw_to_disposition_seconds",
             "timing.raw_to_disposition_seconds",
         ),
         "lifecycle_to_disposition_seconds": (
+            "case_distributions.admission_to_disposition_seconds",
             "case_distributions.lifecycle_wall_seconds",
             "case_distributions.lifecycle_to_disposition_seconds",
             "time.lifecycle_to_disposition_seconds",
@@ -212,6 +226,7 @@ def _project_timing(row: Mapping[str, Any], *, prefix: str) -> dict[str, Any]:
             "timing.pr_creation_seconds",
         ),
         "verified_outcome_seconds": (
+            "case_distributions.pr_create_to_outcome_seconds",
             "case_distributions.verified_outcome_seconds",
             "time.verified_outcome_seconds",
             "timing.verified_outcome_seconds",
@@ -252,11 +267,13 @@ def _project_timing(row: Mapping[str, Any], *, prefix: str) -> dict[str, Any]:
             "timing.external_wait_seconds",
         ),
         "unclassified_wall_seconds": (
+            "case_distributions.unclassified_seconds",
             "case_distributions.unclassified_wall_seconds",
             "time.unclassified_wall_seconds",
             "timing.unclassified_wall_seconds",
         ),
         "worker_resource_seconds": (
+            "case_distributions.all_in_accounted_resource_seconds",
             "case_distributions.worker_resource_seconds",
             "time.worker_resource_seconds",
             "timing.worker_resource_seconds",
@@ -334,7 +351,9 @@ def _project_completeness(
     )
     if coverage is None and case_count and certified_value is not None:
         coverage = certified_value / case_count
-    status = _text_or_none(source_map.get("status"), label=f"{prefix}.completeness.status")
+    status = _text_or_none(
+        source_map.get("status"), label=f"{prefix}.completeness.status"
+    )
     if status is None:
         complete = source_map.get("complete")
         if complete is True:
@@ -451,6 +470,31 @@ def _project_disposition(
                 "manual_actions.policy_mandated_count",
                 label=f"{prefix}.manual_actions.policy_mandated_count",
             ),
+            "passive_observations": _count_from(
+                row,
+                "manual_actions.passive_observation_count",
+                label=f"{prefix}.manual_actions.passive_observation_count",
+            ),
+            "measurement_administration": _count_from(
+                row,
+                "manual_actions.measurement_administration_count",
+                label=f"{prefix}.manual_actions.measurement_administration_count",
+            ),
+            "avoidable": _count_from(
+                row,
+                "manual_actions.avoidable_count",
+                label=f"{prefix}.manual_actions.avoidable_count",
+            ),
+            "unavoidable": _count_from(
+                row,
+                "manual_actions.unavoidable_count",
+                label=f"{prefix}.manual_actions.unavoidable_count",
+            ),
+            "unclassified": _count_from(
+                row,
+                "manual_actions.unclassified_count",
+                label=f"{prefix}.manual_actions.unclassified_count",
+            ),
             "active_seconds": _stats_from(
                 row,
                 "case_distributions.manual_active_seconds",
@@ -461,7 +505,9 @@ def _project_disposition(
         "automation_score_v1": {
             "certified_case_count": certified,
             "withheld_case_count": withheld,
-            "gross": _stats(automation.get("gross"), label=f"{prefix}.automation.gross"),
+            "gross": _stats(
+                automation.get("gross"), label=f"{prefix}.automation.gross"
+            ),
             "avoidable": _stats(
                 automation.get("avoidable"), label=f"{prefix}.automation.avoidable"
             ),
@@ -488,6 +534,76 @@ def _project_disposition(
     }
 
 
+def _project_cohort_summary(
+    source: Mapping[str, Any],
+    *,
+    disposition_rows: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project observed burden before every lifecycle has a final disposition."""
+
+    dispositioned_case_count = 0
+    for disposition, row in disposition_rows.items():
+        count = _count_from(
+            row,
+            "case_count",
+            label=f"by_disposition.{disposition}.case_count",
+        )
+        if count is None:
+            raise GeneratedDashboardContractError(
+                f"by_disposition.{disposition}.case_count is required"
+            )
+        dispositioned_case_count += count
+
+    case_count = _count_from(source, "case_count", label="cohort_metrics.case_count")
+    if case_count is None:
+        case_count = dispositioned_case_count
+    if dispositioned_case_count > case_count:
+        raise GeneratedDashboardContractError(
+            "disposition case counts must not exceed cohort_metrics.case_count"
+        )
+
+    projected_source = dict(source)
+    projected_source["case_count"] = case_count
+    result = _project_disposition("all_cases", projected_source)
+    result.pop("disposition")
+
+    active_case_count = _count_from(
+        source,
+        "active_case_count",
+        label="cohort_metrics.active_case_count",
+    )
+    if active_case_count is None:
+        active_ids = source.get("active_case_lifecycle_ids")
+        if isinstance(active_ids, list):
+            active_case_count = len(active_ids)
+
+    automation = source.get("automation_score_v1")
+    automation_map = automation if isinstance(automation, Mapping) else {}
+    terminal_case_count = _count_from(
+        automation_map,
+        "terminal_case_count",
+        label="cohort_metrics.automation_score_v1.terminal_case_count",
+    )
+    if terminal_case_count is None:
+        terminal_case_count = dispositioned_case_count
+
+    reconciliation = source.get("reconciliation")
+    reconciliation_map = reconciliation if isinstance(reconciliation, Mapping) else {}
+    result.update(
+        {
+            "active_case_count": active_case_count,
+            "terminal_case_count": terminal_case_count,
+            "dispositioned_case_count": dispositioned_case_count,
+            "disposition_pending_case_count": case_count - dispositioned_case_count,
+            "reconciliation_ok": _boolean_or_none(
+                reconciliation_map.get("ok"),
+                label="cohort_metrics.reconciliation.ok",
+            ),
+        }
+    )
+    return result
+
+
 def _fingerprint_text(value: object) -> str | None:
     if isinstance(value, str):
         return value.strip() or None
@@ -499,7 +615,9 @@ def _fingerprint_text(value: object) -> str | None:
     return None
 
 
-def _numeric_leaves(value: Mapping[str, Any], *, prefix: str = "") -> list[tuple[str, Any]]:
+def _numeric_leaves(
+    value: Mapping[str, Any], *, prefix: str = ""
+) -> list[tuple[str, Any]]:
     leaves: list[tuple[str, Any]] = []
     for key in sorted(value):
         candidate = value[key]
@@ -544,7 +662,9 @@ def _factual_comparison_rows(
         disposition_counts if isinstance(disposition_counts, Mapping) else {}
     )
     per_disposition = document.get("per_disposition")
-    per_disposition_map = per_disposition if isinstance(per_disposition, Mapping) else {}
+    per_disposition_map = (
+        per_disposition if isinstance(per_disposition, Mapping) else {}
+    )
     for disposition in sorted(disposition_count_map):
         group = per_disposition_map.get(disposition)
         group_map = group if isinstance(group, Mapping) else {}
@@ -630,7 +750,9 @@ def _direction(
 ) -> str:
     if objective not in OBJECTIVES:
         return "unknown"
-    delta = after - before if before is not None and after is not None else absolute_delta
+    delta = (
+        after - before if before is not None and after is not None else absolute_delta
+    )
     if delta is None:
         return "unknown"
     if delta == 0 or objective == "neutral":
@@ -672,7 +794,9 @@ def _project_comparison(row: Mapping[str, Any], *, index: int) -> dict[str, Any]
         _first(row, ("objective", "metric_objective")), label=f"{prefix}.objective"
     )
     if objective is not None:
-        objective = {"lower": "decrease", "higher": "increase"}.get(objective, objective)
+        objective = {"lower": "decrease", "higher": "increase"}.get(
+            objective, objective
+        )
         if objective not in OBJECTIVES:
             raise GeneratedDashboardContractError(
                 f"{prefix}.objective must be decrease, increase, or neutral"
@@ -761,15 +885,15 @@ def build_dashboard_projection(
         version_boundaries if isinstance(version_boundaries, Mapping) else {}
     )
     raw_version_warnings = source.get("version_warnings")
-    warning_rows = raw_version_warnings if isinstance(raw_version_warnings, list) else []
+    warning_rows = (
+        raw_version_warnings if isinstance(raw_version_warnings, list) else []
+    )
     version_warning_codes = sorted(
         {
             str(code)
             for warning in warning_rows
             for code in (
-                [warning.get("code")]
-                if isinstance(warning, Mapping)
-                else [warning]
+                [warning.get("code")] if isinstance(warning, Mapping) else [warning]
             )
             if isinstance(code, str) and code.strip()
         }
@@ -783,7 +907,9 @@ def build_dashboard_projection(
                 _first(source, ("metric_version", "metric_definition_version")),
                 label="cohort_metrics.metric_version",
             ),
-            "cohort_id": _text_or_none(source.get("cohort_id"), label="cohort_metrics.cohort_id"),
+            "cohort_id": _text_or_none(
+                source.get("cohort_id"), label="cohort_metrics.cohort_id"
+            ),
             "generated_at": _text_or_none(
                 _first(source, ("generated_at", "as_of")),
                 label="cohort_metrics.generated_at",
@@ -795,6 +921,10 @@ def build_dashboard_projection(
             ),
             "version_warning_codes": version_warning_codes,
         },
+        "cohort_summary": _project_cohort_summary(
+            source,
+            disposition_rows=rows,
+        ),
         "dispositions": [
             _project_disposition(disposition, rows.get(disposition))
             for disposition in DISPOSITIONS
@@ -825,6 +955,74 @@ def _validate_stats(value: object, *, label: str) -> None:
             _number_or_none(stats[field], label=f"{label}.{field}")
 
 
+def _validate_metrics_projection(row: Mapping[str, Any], *, label: str) -> None:
+    _integer_or_none(row.get("case_count"), label=f"{label}.case_count")
+    for group_name in ("timing", "tokens"):
+        group = _mapping(row.get(group_name), label=f"{label}.{group_name}")
+        for metric_name, metric in group.items():
+            _validate_stats(metric, label=f"{label}.{group_name}.{metric_name}")
+    errors = _mapping(row.get("errors"), label=f"{label}.errors")
+    _validate_stats(errors.get("clusters"), label=f"{label}.errors.clusters")
+    for field in (
+        "occurrences",
+        "self_healed_clusters",
+        "externally_resolved_clusters",
+        "unresolved_terminal_clusters",
+    ):
+        _integer_or_none(errors.get(field), label=f"{label}.errors.{field}")
+    interventions = _mapping(row.get("interventions"), label=f"{label}.interventions")
+    _validate_stats(
+        interventions.get("supervising_agent"),
+        label=f"{label}.interventions.supervising_agent",
+    )
+    manual = _mapping(row.get("manual_actions"), label=f"{label}.manual_actions")
+    _validate_stats(manual.get("actions"), label=f"{label}.manual_actions.actions")
+    _validate_stats(
+        manual.get("active_seconds"), label=f"{label}.manual_actions.active_seconds"
+    )
+    for field in (
+        "required_for_progress",
+        "policy_mandated",
+        "passive_observations",
+        "measurement_administration",
+        "avoidable",
+        "unavoidable",
+        "unclassified",
+    ):
+        _integer_or_none(manual.get(field), label=f"{label}.manual_actions.{field}")
+    automation = _mapping(
+        row.get("automation_score_v1"), label=f"{label}.automation_score_v1"
+    )
+    _validate_stats(automation.get("gross"), label=f"{label}.automation.gross")
+    _validate_stats(automation.get("avoidable"), label=f"{label}.automation.avoidable")
+    for field in ("certified_case_count", "withheld_case_count"):
+        _integer_or_none(automation.get(field), label=f"{label}.automation.{field}")
+    for field in (
+        "touchless_terminal_yield",
+        "pipeline_autonomous_rate",
+        "human_touch_free_rate",
+    ):
+        ratio = _number_or_none(
+            automation.get(field), label=f"{label}.automation.{field}"
+        )
+        if ratio is not None and ratio > 1:
+            raise GeneratedDashboardContractError(
+                f"{label}.automation.{field} must not exceed 1"
+            )
+    completeness = _mapping(row.get("completeness"), label=f"{label}.completeness")
+    for field in ("certified_case_count", "withheld_case_count"):
+        _integer_or_none(completeness.get(field), label=f"{label}.completeness.{field}")
+    if completeness.get("status") not in {"complete", "partial", "unknown"}:
+        raise GeneratedDashboardContractError(f"{label}.completeness.status is invalid")
+    coverage = _number_or_none(
+        completeness.get("coverage"), label=f"{label}.completeness.coverage"
+    )
+    if coverage is not None and coverage > 1:
+        raise GeneratedDashboardContractError(
+            f"{label}.completeness.coverage must not exceed 1"
+        )
+
+
 def validate_dashboard_projection(value: object) -> Mapping[str, Any]:
     """Validate the stable machine-readable dashboard contract."""
 
@@ -835,13 +1033,19 @@ def validate_dashboard_projection(value: object) -> Mapping[str, Any]:
         raise GeneratedDashboardContractError("dashboard.document_type is invalid")
     source = _mapping(projection.get("source"), label="dashboard.source")
     if source.get("schema_version") not in SUPPORTED_SOURCE_SCHEMA_VERSIONS:
-        raise GeneratedDashboardContractError("dashboard.source.schema_version is unsupported")
+        raise GeneratedDashboardContractError(
+            "dashboard.source.schema_version is unsupported"
+        )
     _text_or_none(source.get("cohort_id"), label="dashboard.source.cohort_id")
     digest = _text_or_none(source.get("sha256"), label="dashboard.source.sha256")
-    if digest is None or len(digest) != 64 or any(
-        character not in string.hexdigits for character in digest
+    if (
+        digest is None
+        or len(digest) != 64
+        or any(character not in string.hexdigits for character in digest)
     ):
-        raise GeneratedDashboardContractError("dashboard.source.sha256 must be a SHA-256 digest")
+        raise GeneratedDashboardContractError(
+            "dashboard.source.sha256 must be a SHA-256 digest"
+        )
     comparison_digests = _list(
         source.get("comparison_sha256s"), label="dashboard.source.comparison_sha256s"
     )
@@ -849,8 +1053,10 @@ def validate_dashboard_projection(value: object) -> Mapping[str, Any]:
         digest_text = _text_or_none(
             comparison_digest, label=f"dashboard.source.comparison_sha256s[{index}]"
         )
-        if digest_text is None or len(digest_text) != 64 or any(
-            character not in string.hexdigits for character in digest_text
+        if (
+            digest_text is None
+            or len(digest_text) != 64
+            or any(character not in string.hexdigits for character in digest_text)
         ):
             raise GeneratedDashboardContractError(
                 f"dashboard.source.comparison_sha256s[{index}] must be a SHA-256 digest"
@@ -864,17 +1070,38 @@ def validate_dashboard_projection(value: object) -> Mapping[str, Any]:
         label="dashboard.source.version_warning_codes",
     )
     for index, warning_code in enumerate(warning_codes):
-        if _text_or_none(
-            warning_code,
-            label=f"dashboard.source.version_warning_codes[{index}]",
-        ) is None:
+        if (
+            _text_or_none(
+                warning_code,
+                label=f"dashboard.source.version_warning_codes[{index}]",
+            )
+            is None
+        ):
             raise GeneratedDashboardContractError(
                 "dashboard.source.version_warning_codes must contain strings"
             )
 
+    cohort_summary = _mapping(
+        projection.get("cohort_summary"), label="dashboard.cohort_summary"
+    )
+    _validate_metrics_projection(cohort_summary, label="cohort_summary")
+    for field in (
+        "active_case_count",
+        "terminal_case_count",
+        "dispositioned_case_count",
+        "disposition_pending_case_count",
+    ):
+        _integer_or_none(cohort_summary.get(field), label=f"cohort_summary.{field}")
+    _boolean_or_none(
+        cohort_summary.get("reconciliation_ok"),
+        label="cohort_summary.reconciliation_ok",
+    )
+
     dispositions = _list(projection.get("dispositions"), label="dashboard.dispositions")
     if len(dispositions) != len(DISPOSITIONS):
-        raise GeneratedDashboardContractError("dashboard must contain every disposition")
+        raise GeneratedDashboardContractError(
+            "dashboard must contain every disposition"
+        )
     seen: list[str] = []
     for index, value in enumerate(dispositions):
         row = _mapping(value, label=f"dashboard.dispositions[{index}]")
@@ -883,69 +1110,7 @@ def validate_dashboard_projection(value: object) -> Mapping[str, Any]:
         )
         assert disposition is not None
         seen.append(disposition)
-        _integer_or_none(row.get("case_count"), label=f"{disposition}.case_count")
-        for group_name in ("timing", "tokens"):
-            group = _mapping(row.get(group_name), label=f"{disposition}.{group_name}")
-            for metric_name, metric in group.items():
-                _validate_stats(metric, label=f"{disposition}.{group_name}.{metric_name}")
-        errors = _mapping(row.get("errors"), label=f"{disposition}.errors")
-        _validate_stats(errors.get("clusters"), label=f"{disposition}.errors.clusters")
-        for field in (
-            "occurrences",
-            "self_healed_clusters",
-            "externally_resolved_clusters",
-            "unresolved_terminal_clusters",
-        ):
-            _integer_or_none(errors.get(field), label=f"{disposition}.errors.{field}")
-        interventions = _mapping(
-            row.get("interventions"), label=f"{disposition}.interventions"
-        )
-        _validate_stats(
-            interventions.get("supervising_agent"),
-            label=f"{disposition}.interventions.supervising_agent",
-        )
-        manual = _mapping(row.get("manual_actions"), label=f"{disposition}.manual_actions")
-        _validate_stats(manual.get("actions"), label=f"{disposition}.manual_actions.actions")
-        _validate_stats(
-            manual.get("active_seconds"), label=f"{disposition}.manual_actions.active_seconds"
-        )
-        for field in ("required_for_progress", "policy_mandated"):
-            _integer_or_none(manual.get(field), label=f"{disposition}.manual_actions.{field}")
-        automation = _mapping(
-            row.get("automation_score_v1"), label=f"{disposition}.automation_score_v1"
-        )
-        _validate_stats(automation.get("gross"), label=f"{disposition}.automation.gross")
-        _validate_stats(
-            automation.get("avoidable"), label=f"{disposition}.automation.avoidable"
-        )
-        for field in ("certified_case_count", "withheld_case_count"):
-            _integer_or_none(
-                automation.get(field), label=f"{disposition}.automation.{field}"
-            )
-        for field in ("touchless_terminal_yield", "pipeline_autonomous_rate", "human_touch_free_rate"):
-            ratio = _number_or_none(automation.get(field), label=f"{disposition}.automation.{field}")
-            if ratio is not None and ratio > 1:
-                raise GeneratedDashboardContractError(
-                    f"{disposition}.automation.{field} must not exceed 1"
-                )
-        completeness = _mapping(
-            row.get("completeness"), label=f"{disposition}.completeness"
-        )
-        for field in ("certified_case_count", "withheld_case_count"):
-            _integer_or_none(
-                completeness.get(field), label=f"{disposition}.completeness.{field}"
-            )
-        if completeness.get("status") not in {"complete", "partial", "unknown"}:
-            raise GeneratedDashboardContractError(
-                f"{disposition}.completeness.status is invalid"
-            )
-        coverage = _number_or_none(
-            completeness.get("coverage"), label=f"{disposition}.completeness.coverage"
-        )
-        if coverage is not None and coverage > 1:
-            raise GeneratedDashboardContractError(
-                f"{disposition}.completeness.coverage must not exceed 1"
-            )
+        _validate_metrics_projection(row, label=disposition)
     if tuple(seen) != DISPOSITIONS:
         raise GeneratedDashboardContractError("dashboard disposition order is invalid")
 
@@ -953,7 +1118,9 @@ def validate_dashboard_projection(value: object) -> Mapping[str, Any]:
     for index, value in enumerate(comparisons):
         row = _mapping(value, label=f"dashboard.comparisons[{index}]")
         for field in ("before", "after", "absolute_delta", "percentage_delta"):
-            _number_or_none(row.get(field), label=f"comparisons[{index}].{field}", nonnegative=False)
+            _number_or_none(
+                row.get(field), label=f"comparisons[{index}].{field}", nonnegative=False
+            )
         direction = row.get("observed_direction")
         if direction not in {"improved", "regressed", "unchanged", "unknown"}:
             raise GeneratedDashboardContractError(
@@ -1039,6 +1206,35 @@ def render_dashboard_html(projection_value: object) -> str:
 
     projection = validate_dashboard_projection(projection_value)
     source = _mapping(projection["source"], label="dashboard.source")
+    cohort = _mapping(projection["cohort_summary"], label="dashboard.cohort_summary")
+    cohort_errors = _mapping(cohort["errors"], label="cohort_summary.errors")
+    cohort_clusters = _mapping(
+        cohort_errors["clusters"], label="cohort_summary.errors.clusters"
+    )
+    cohort_interventions = _mapping(
+        cohort["interventions"], label="cohort_summary.interventions"
+    )
+    cohort_supervisor = _mapping(
+        cohort_interventions["supervising_agent"],
+        label="cohort_summary.interventions.supervising_agent",
+    )
+    cohort_manual = _mapping(
+        cohort["manual_actions"], label="cohort_summary.manual_actions"
+    )
+    cohort_manual_actions = _mapping(
+        cohort_manual["actions"], label="cohort_summary.manual_actions.actions"
+    )
+    cohort_automation = _mapping(
+        cohort["automation_score_v1"], label="cohort_summary.automation_score_v1"
+    )
+    reconciliation = cohort.get("reconciliation_ok")
+    reconciliation_text = (
+        "complete"
+        if reconciliation is True
+        else "incomplete"
+        if reconciliation is False
+        else "unknown"
+    )
     disposition_rows: list[str] = []
     for value in projection["dispositions"]:
         row = _mapping(value, label="dashboard.disposition")
@@ -1071,7 +1267,7 @@ def render_dashboard_html(projection_value: object) -> str:
         )
         disposition_rows.append(
             "<tr>"
-            f"<th scope=\"row\">{escape(_human_label(str(row['disposition'])))}</th>"
+            f'<th scope="row">{escape(_human_label(str(row["disposition"])))}</th>'
             f"<td>{_format_number(row.get('case_count'), decimals=0)}</td>"
             f"<td>{_format_duration(_mapping(timing['raw_to_disposition_seconds'], label='timing.raw'))}</td>"
             f"<td>{_format_duration(_mapping(timing['lifecycle_to_disposition_seconds'], label='timing.lifecycle'))}</td>"
@@ -1122,7 +1318,8 @@ def render_dashboard_html(projection_value: object) -> str:
     generated_at = escape(str(source.get("generated_at") or "unknown"))
     metric_version = escape(str(source.get("metric_version") or "unknown"))
     version_warning_codes = _list(
-        source.get("version_warning_codes"), label="dashboard.source.version_warning_codes"
+        source.get("version_warning_codes"),
+        label="dashboard.source.version_warning_codes",
     )
     version_notice = (
         '<p class="notice">Version boundary warning: '
@@ -1144,6 +1341,10 @@ def render_dashboard_html(projection_value: object) -> str:
     h1, h2 {{ letter-spacing: -.02em; }}
     .meta {{ display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; color: #aebbc8; }}
     .notice {{ border-left: .3rem solid #65a7ff; padding: .75rem 1rem; background: #17212b; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .75rem; margin: 1rem 0 2rem; }}
+    .card {{ border: 1px solid #31404d; border-radius: .6rem; padding: .9rem 1rem; background: #151d24; }}
+    .card .value {{ display: block; margin-top: .35rem; font-size: 1.55rem; color: #b8d7ff; }}
+    .card .label {{ color: #aebbc8; font-size: .82rem; }}
     .table-wrap {{ overflow-x: auto; border: 1px solid #31404d; border-radius: .6rem; }}
     table {{ border-collapse: collapse; width: 100%; min-width: 1500px; font-size: .86rem; }}
     th, td {{ border-bottom: 1px solid #2b3945; padding: .65rem .7rem; text-align: left; vertical-align: top; }}
@@ -1162,10 +1363,26 @@ def render_dashboard_html(projection_value: object) -> str:
     <span>Cohort: <code>{cohort_id}</code></span>
     <span>Metric version: <code>{metric_version}</code></span>
     <span>Generated: <code>{generated_at}</code></span>
-    <span>Source: <code>{escape(str(source['sha256']))}</code></span>
+    <span>Source: <code>{escape(str(source["sha256"]))}</code></span>
   </div>
   <p class="notice">Observed measurements only. Missing evidence is shown as <strong>unknown</strong>; no value is estimated as zero.</p>
   {version_notice}
+
+  <h2>All observed cases</h2>
+  <p>Current burden includes active and disposition-pending lifecycles; it is not hidden until closure.</p>
+  <div class="cards">
+    <div class="card"><span class="label">Cases</span><span class="value">{_format_number(cohort.get("case_count"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Active lifecycles</span><span class="value">{_format_number(cohort.get("active_case_count"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Disposition pending</span><span class="value">{_format_number(cohort.get("disposition_pending_case_count"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Terminal lifecycles</span><span class="value">{_format_number(cohort.get("terminal_case_count"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Error clusters</span><span class="value">{_format_number(cohort_clusters.get("total"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Error occurrences</span><span class="value">{_format_number(cohort_errors.get("occurrences"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Supervisor interventions</span><span class="value">{_format_number(cohort_supervisor.get("total"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Manual actions</span><span class="value">{_format_number(cohort_manual_actions.get("total"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Required manual actions</span><span class="value">{_format_number(cohort_manual.get("required_for_progress"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Automation cases withheld</span><span class="value">{_format_number(cohort_automation.get("withheld_case_count"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Accounting reconciliation</span><span class="value">{escape(reconciliation_text)}</span></div>
+  </div>
 
   <h2>Metrics by final disposition</h2>
   <div class="table-wrap">
@@ -1178,7 +1395,7 @@ def render_dashboard_html(projection_value: object) -> str:
         <th>Errors</th><th>Supervisor interventions</th><th>Manual actions</th>
         <th>Automation gross</th><th>Automation avoidable</th><th>Telemetry completeness</th>
       </tr></thead>
-      <tbody>{''.join(disposition_rows)}</tbody>
+      <tbody>{"".join(disposition_rows)}</tbody>
     </table>
   </div>
 
@@ -1190,7 +1407,7 @@ def render_dashboard_html(projection_value: object) -> str:
         <th>Before value</th><th>After value</th><th>Absolute Δ</th><th>Percentage Δ</th>
         <th>Sample size</th><th>Coverage</th><th>Observed direction</th>
       </tr></thead>
-      <tbody>{''.join(comparison_rows)}</tbody>
+      <tbody>{"".join(comparison_rows)}</tbody>
     </table>
   </div>
   <footer>Dashboard projection schema v{PROJECTION_SCHEMA_VERSION}. Rendering is deterministic from the retained machine-readable source.</footer>
@@ -1230,12 +1447,16 @@ def materialize_dashboard(
     html_text = render_dashboard_html(projection)
     if check:
         mismatches = []
-        for path, expected in ((json_output, projection_text), (html_output, html_text)):
+        for path, expected in (
+            (json_output, projection_text),
+            (html_output, html_text),
+        ):
             if not path.exists() or path.read_text(encoding="utf-8") != expected:
                 mismatches.append(str(path))
         if mismatches:
             raise GeneratedDashboardContractError(
-                "generated dashboard artifacts are stale or missing: " + ", ".join(mismatches)
+                "generated dashboard artifacts are stale or missing: "
+                + ", ".join(mismatches)
             )
     else:
         _write_text_atomic(json_output, projection_text)
@@ -1247,9 +1468,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Render generated cohort lifecycle metrics as a standalone dashboard."
     )
-    parser.add_argument("cohort_metrics", type=Path, help="Generated cohort_metrics.json")
+    parser.add_argument(
+        "cohort_metrics", type=Path, help="Generated cohort_metrics.json"
+    )
     parser.add_argument("--html-output", type=Path, help="Standalone HTML output path")
-    parser.add_argument("--json-output", type=Path, help="Validated JSON projection path")
+    parser.add_argument(
+        "--json-output", type=Path, help="Validated JSON projection path"
+    )
     parser.add_argument(
         "--comparison",
         action="append",
@@ -1268,7 +1493,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     source_path = args.cohort_metrics.resolve()
-    html_output = (args.html_output or source_path.with_name("metrics_dashboard.html")).resolve()
+    html_output = (
+        args.html_output or source_path.with_name("metrics_dashboard.html")
+    ).resolve()
     json_output = (
         args.json_output or source_path.with_name("metrics_dashboard.json")
     ).resolve()
