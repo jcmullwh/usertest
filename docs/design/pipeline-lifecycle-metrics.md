@@ -68,6 +68,15 @@ interval is known; otherwise active/resource classification remains unknown whil
 interval remains reportable. A child launched from verified controller context is automatic and
 uses its subprocess interval as active resource time unless a more precise value is supplied.
 
+A nonzero process exit or launch exception automatically emits `error.occurred`; it can no longer
+exist only in terminal output while generated error metrics remain zero. Retry attempts are grouped
+from lifecycle identity, stage, operation, working directory, and the redacted command fingerprint.
+Use `--attempt-group-id` when a retry deliberately changes the command. A later successful attempt
+in the same group emits `error.resolved`, classifies the resolution from the proven actor/origin,
+and attributes the successful retry work unit as the resolution cost. Until that evidence exists,
+the cluster remains open (or becomes unresolved when its lifecycle terminates); success is never
+inferred from elapsed time or from a controller merely continuing.
+
 Each exec or recorded action receives a unique concrete work unit by default. An inherited parent
 work unit is retained as a dependency, not reused as the child's identity. A caller-supplied
 `--work-unit-id` is an exact concrete identity; atomically rebinding it to another action is rejected

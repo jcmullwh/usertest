@@ -171,6 +171,101 @@ def test_telemetry_exec_rejects_reused_explicit_work_unit(tmp_path: Path) -> Non
         main(common)
     assert len(events.read_text(encoding="utf-8").splitlines()) == 2
 
+
+def test_telemetry_exec_records_and_resolves_measured_retry_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    marker = tmp_path / "retry-succeeded.marker"
+    parent = LifecycleContext(
+        case_lifecycle_id="life:measured-retry",
+        case_id="case:measured-retry",
+        cycle_id="cycle:measured-retry",
+        work_unit_id="work:controller-parent",
+        system_fingerprint={"controller_context_verified": "true"},
+    )
+    for name, value in lifecycle_context_env(parent).items():
+        monkeypatch.setenv(name, value)
+    command = [
+        "telemetry",
+        "exec",
+        "--events",
+        str(events),
+        "--",
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; import sys; marker=Path(sys.argv[1]); "
+            "prior=int(marker.read_text(encoding='utf-8')) if marker.exists() else 0; "
+            "marker.write_text(str(prior + 1), encoding='utf-8'); "
+            "raise SystemExit(0 if prior >= 2 else 7)"
+        ),
+        str(marker),
+    ]
+
+    assert _invoke(command) == 7
+    first_rows = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    assert [row["event_type"] for row in first_rows] == [
+        "action.started",
+        "action.completed",
+        "error.occurred",
+    ]
+    failure = first_rows[-1]
+    assert failure["attributes"]["error_kind"] == "process_exit_nonzero"
+    assert failure["attributes"]["exit_code"] == 7
+    assert failure["attributes"]["terminal"] is False
+    assert failure["parent_event_id"] == first_rows[1]["event_id"]
+    first_case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))["cases"][
+        0
+    ]
+    assert first_case["errors"]["cluster_count"] == 1
+    assert first_case["errors"]["occurrence_count"] == 1
+    assert first_case["errors"]["open_cluster_count"] == 1
+
+    assert _invoke(command) == 7
+    retry_rows = [
+        json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()
+    ]
+    assert retry_rows[-1]["event_type"] == "error.occurred"
+    assert retry_rows[-1]["error_cluster_id"] == failure["error_cluster_id"]
+    retry_case = json.loads(
+        (tmp_path / "case_metrics.json").read_text(encoding="utf-8")
+    )["cases"][0]
+    assert retry_case["errors"]["cluster_count"] == 1
+    assert retry_case["errors"]["occurrence_count"] == 2
+
+    assert _invoke(command) == 0
+    rows = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    assert [row["event_type"] for row in rows] == [
+        "action.started",
+        "action.completed",
+        "error.occurred",
+        "action.started",
+        "action.completed",
+        "error.occurred",
+        "action.started",
+        "action.completed",
+        "error.resolved",
+    ]
+    resolution = rows[-1]
+    assert resolution["error_cluster_id"] == failure["error_cluster_id"]
+    assert resolution["attributes"]["resolution_mode"] == "self_healed_controller"
+    assert resolution["attributes"]["resolution_work_unit_ids"] == [
+        rows[-2]["context"]["work_unit_id"]
+    ]
+    assert resolution["attributes"]["resolution_cost_attribution_complete"] is True
+    assert (
+        resolution["attributes"]["telemetry_exec_attempt_group_id"]
+        == failure["attributes"]["telemetry_exec_attempt_group_id"]
+    )
+    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))["cases"][0]
+    assert case["errors"]["cluster_count"] == 1
+    assert case["errors"]["occurrence_count"] == 2
+    assert case["errors"]["self_healed_cluster_count"] == 1
+    assert case["errors"]["open_cluster_count"] == 0
+    assert case["errors"]["clusters"][0]["resolution_cost_attribution_complete"] is True
+
+
 def test_telemetry_action_record_retains_manual_burden(tmp_path: Path) -> None:
     events = tmp_path / "lifecycle_events.jsonl"
     code = _invoke(

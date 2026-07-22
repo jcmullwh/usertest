@@ -83,6 +83,13 @@ manual actions are deduplicated by their IDs and retain actor, milestone, avoida
 required-for-progress, timestamps, and active seconds. `supervising_agent` normalizes to the
 supervisor actor.
 
+The measured CLI boundary emits an occurrence for every nonzero process exit or launch exception.
+Repeated failures with the same retry-group and failure signature remain occurrences in one open
+cluster. A successful correlated retry is the required resolution evidence and links its concrete
+work unit through `resolution_work_unit_ids`; controller, supervisor, human, and unknown-external
+origins map to their corresponding resolution modes. An uncorrelated later success does not close
+an error cluster.
+
 ## Automation score
 
 `automation_score_v1` uses fixed milestone paths by exact disposition. Scores are percentages from

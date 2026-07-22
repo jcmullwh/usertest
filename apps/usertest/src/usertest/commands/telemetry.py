@@ -132,6 +132,14 @@ def add_telemetry_command(
         ),
     )
     execute.add_argument(
+        "--attempt-group-id",
+        help=(
+            "Stable retry-group identity. Successful attempts resolve prior measured "
+            "failures in the same group; when omitted, a group is derived from the "
+            "verified lifecycle context and command boundary."
+        ),
+    )
+    execute.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command argv, normally supplied after --.",
@@ -300,6 +308,67 @@ def _concrete_action_work_identity(
     return concrete_work_unit_id, inherited_work_unit_id, dependencies
 
 
+def _telemetry_exec_attempt_group_id(
+    args: argparse.Namespace,
+    context: LifecycleContext,
+    *,
+    command_fingerprint: str,
+) -> str:
+    explicit = str(args.attempt_group_id or "").strip()
+    if args.attempt_group_id is not None and not explicit:
+        raise ValueError("--attempt-group-id must not be empty")
+    if explicit:
+        return explicit
+    scope_id = (
+        context.case_lifecycle_id
+        or context.cycle_id
+        or context.work_unit_id
+        or f"unscoped:{uuid.uuid4()}"
+    )
+    cwd = str(args.cwd.resolve()) if args.cwd is not None else str(Path.cwd().resolve())
+    correlation_key = "\n".join(
+        (
+            scope_id,
+            context.stage or "",
+            context.milestone_id or "",
+            context.work_unit_id or "",
+            str(args.operation),
+            cwd,
+            command_fingerprint,
+        )
+    )
+    return f"exec-attempt-group:{uuid.uuid5(uuid.NAMESPACE_URL, correlation_key)}"
+
+
+def _open_telemetry_exec_errors(
+    events_path: Path,
+    *,
+    attempt_group_id: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    open_clusters: dict[str, dict[str, Any]] = {}
+    for event in read_lifecycle_events(events_path):
+        cluster_id = event.error_cluster_id
+        if cluster_id is None:
+            continue
+        if event.attributes.get("telemetry_exec_attempt_group_id") != attempt_group_id:
+            continue
+        if event.event_type == "error.occurred":
+            open_clusters[cluster_id] = dict(event.attributes)
+        elif event.event_type == "error.resolved":
+            open_clusters.pop(cluster_id, None)
+    return list(open_clusters.items())
+
+
+def _telemetry_exec_resolution_mode(actor: str) -> str:
+    if actor == "controller":
+        return "self_healed_controller"
+    if actor == "supervising_agent":
+        return "resolved_supervisor"
+    if actor == "human":
+        return "resolved_human"
+    return "resolved_external"
+
+
 def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
     context, verified_parent = _context_from_args(args)
     actor, initiator, origin = _event_actor(args, verified_parent=verified_parent)
@@ -310,6 +379,12 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
     if explicit_active_seconds is not None and explicit_active_seconds < 0:
         raise ValueError("--active-seconds must be non-negative")
     redacted = redact_command(command)
+    command_fingerprint = fingerprint_command(redacted)
+    attempt_group_id = _telemetry_exec_attempt_group_id(
+        args,
+        context,
+        command_fingerprint=command_fingerprint,
+    )
     action_id = f"action:{uuid.uuid4()}"
     invocation_id = f"invocation:{uuid.uuid4()}"
     concrete_work_unit_id, inherited_work_unit_id, dependencies = (
@@ -364,7 +439,8 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
                 dependency_ids=dependencies,
                 command_family=command_family(command),
                 redacted_command=redacted,
-                command_fingerprint=fingerprint_command(redacted),
+                command_fingerprint=command_fingerprint,
+                telemetry_exec_attempt_group_id=attempt_group_id,
             ),
             beneficiary_case_lifecycle_ids=tuple(
                 args.beneficiary_case_lifecycle_id
@@ -410,47 +486,112 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
             resource_time_unknown_reason = "manual_boundary_child_time_unattributable"
         else:
             resource_time_unknown_reason = "external_boundary_time_unattributable"
+    completed_event = make_lifecycle_event(
+        "action.completed",
+        child_context,
+        idempotency_key=f"{action_id}:completed",
+        occurred_at=ended_at,
+        started_at=started_at,
+        ended_at=ended_at,
+        active_seconds=active_seconds,
+        attributes=_action_attributes(
+            args,
+            action_id=action_id,
+            telemetry_exec_timing_version=2,
+            parent_work_unit_id=inherited_work_unit_id,
+            dependency_ids=dependencies,
+            command_family=command_family(command),
+            redacted_command=redacted,
+            command_fingerprint=command_fingerprint,
+            telemetry_exec_attempt_group_id=attempt_group_id,
+            subprocess_wall_seconds=subprocess_wall_seconds,
+            active_seconds_source=(
+                "explicit"
+                if explicit_active_seconds is not None
+                else "verified_automatic_subprocess_wall"
+                if child_is_automatic
+                else "unknown"
+            ),
+            resource_time_unknown=not resource_time_complete,
+            resource_time_unknown_reason=resource_time_unknown_reason,
+            exit_code=result_code,
+            result="success" if result_code == 0 else "failure",
+            execution_error_type=(
+                type(execution_error).__name__ if execution_error is not None else None
+            ),
+        ),
+        beneficiary_case_lifecycle_ids=tuple(args.beneficiary_case_lifecycle_id),
+        **common,
+    )
     append_lifecycle_event(
         args.events,
-        make_lifecycle_event(
-            "action.completed",
-            child_context,
-            idempotency_key=f"{action_id}:completed",
-            occurred_at=ended_at,
-            started_at=started_at,
-            ended_at=ended_at,
-            active_seconds=active_seconds,
-            attributes=_action_attributes(
-                args,
-                action_id=action_id,
-                telemetry_exec_timing_version=2,
-                parent_work_unit_id=inherited_work_unit_id,
-                dependency_ids=dependencies,
-                command_family=command_family(command),
-                redacted_command=redacted,
-                command_fingerprint=fingerprint_command(redacted),
-                subprocess_wall_seconds=subprocess_wall_seconds,
-                active_seconds_source=(
-                    "explicit"
-                    if explicit_active_seconds is not None
-                    else "verified_automatic_subprocess_wall"
-                    if child_is_automatic
-                    else "unknown"
-                ),
-                resource_time_unknown=not resource_time_complete,
-                resource_time_unknown_reason=resource_time_unknown_reason,
-                exit_code=result_code,
-                result="success" if result_code == 0 else "failure",
-                execution_error_type=(
-                    type(execution_error).__name__ if execution_error is not None else None
-                ),
-            ),
-            beneficiary_case_lifecycle_ids=tuple(
-                args.beneficiary_case_lifecycle_id
-            ),
-            **common,
-        ),
+        completed_event,
     )
+    open_errors = _open_telemetry_exec_errors(
+        args.events,
+        attempt_group_id=attempt_group_id,
+    )
+    if result_code != 0:
+        error_kind = (
+            f"subprocess_exception:{type(execution_error).__name__}"
+            if execution_error is not None
+            else "process_exit_nonzero"
+        )
+        matching_clusters = [
+            cluster_id
+            for cluster_id, attributes in open_errors
+            if attributes.get("error_kind") == error_kind
+            and attributes.get("command_fingerprint") == command_fingerprint
+        ]
+        cluster_id = (
+            matching_clusters[-1] if matching_clusters else f"error:telemetry-exec:{uuid.uuid4()}"
+        )
+        append_lifecycle_event(
+            args.events,
+            make_lifecycle_event(
+                "error.occurred",
+                child_context,
+                idempotency_key=f"{cluster_id}:occurrence:{action_id}",
+                occurred_at=ended_at,
+                parent_event_id=completed_event.event_id,
+                error_cluster_id=cluster_id,
+                beneficiary_case_lifecycle_ids=tuple(args.beneficiary_case_lifecycle_id),
+                attributes={
+                    "error_kind": error_kind,
+                    "exit_code": result_code,
+                    "action_id": action_id,
+                    "command_family": command_family(command),
+                    "command_fingerprint": command_fingerprint,
+                    "telemetry_exec_attempt_group_id": attempt_group_id,
+                    "terminal": False,
+                },
+                **common,
+            ),
+        )
+    elif open_errors:
+        resolution_mode = _telemetry_exec_resolution_mode(actor)
+        for cluster_id, attributes in open_errors:
+            append_lifecycle_event(
+                args.events,
+                make_lifecycle_event(
+                    "error.resolved",
+                    child_context,
+                    idempotency_key=f"{cluster_id}:resolved",
+                    occurred_at=ended_at,
+                    parent_event_id=completed_event.event_id,
+                    error_cluster_id=cluster_id,
+                    beneficiary_case_lifecycle_ids=tuple(args.beneficiary_case_lifecycle_id),
+                    attributes={
+                        "error_kind": attributes.get("error_kind"),
+                        "resolution_mode": resolution_mode,
+                        "resolution_action_id": action_id,
+                        "resolution_work_unit_ids": [concrete_work_unit_id],
+                        "resolution_cost_attribution_complete": True,
+                        "telemetry_exec_attempt_group_id": attempt_group_id,
+                    },
+                    **common,
+                ),
+            )
     _refresh_metrics_after_write(args.events)
     if execution_error is not None:
         raise execution_error
