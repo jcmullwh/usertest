@@ -59,7 +59,9 @@ def test_run_dry_run_prints_settings_loaded_commit_push_pr_defaults(
     assert request["commit"] is True
     assert request["push"] is True
     assert request["pr"] is True
+    assert request["exec_keep_container"] is False
     assert payload["settings"]["auto_loaded"] is True
     assert payload["settings"]["applied"]["commit"] is True
     assert payload["settings"]["applied"]["push"] is True
     assert payload["settings"]["applied"]["pr"] is True
+    assert payload["settings"]["applied"]["exec_keep_container"] is False

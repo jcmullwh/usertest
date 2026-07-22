@@ -418,8 +418,7 @@ def write_triage_xlsx(report: dict[str, Any], out_path: Path) -> None:
         openpyxl = importlib.import_module("openpyxl")
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise RuntimeError(
-            "XLSX output requested but `openpyxl` is not installed. "
-            "Install it or omit --out-xlsx."
+            "XLSX output requested but `openpyxl` is not installed. Install it or omit --out-xlsx."
         ) from exc
 
     workbook = openpyxl.Workbook()

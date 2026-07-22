@@ -1,0 +1,85 @@
+{
+  "schema_version": 3,
+  "as_of": "2026-07-21T16:44:21Z",
+  "current_run_id": "qualification-cycle-4b51384d-20260721",
+  "summary_cards": [
+    {
+      "label": "Current pipeline state",
+      "value": "Stages 1-2 complete; Stage 3 acquisition fix green",
+      "detail": "The exact merged-revision cycle completed Stage 1 and Stage 2 with 20 verified Sol/high calls. It stopped before the first Stage-3 research call because the trusted-root config assumed the target repository was adjacent to the detached checkout. BDS-209 now passes the exact failed-path preflight and the complete application suite locally.",
+      "tone": "warn"
+    },
+    {
+      "label": "Latest run efficiency",
+      "value": "20 calls; 0 author corrections; 1 acquisition stop",
+      "detail": "All authored Stage-1 and Stage-2 outputs completed once with signed-in subscription provenance. No model output was discarded or corrected. The stopped artifacts are retained for a Stage-3 boundary replay; no full restart has been performed.",
+      "tone": "warn"
+    },
+    {
+      "label": "Full qualification",
+      "value": "0 / 2 cycles",
+      "detail": "Stages 3-6 did not run, so the cycle is incomplete and unscored. There is no new claim about case precision, research readiness, plan quality, ticket throughput, or outcomes.",
+      "tone": "bad"
+    },
+    {
+      "label": "Next delivery gate",
+      "value": "Land BDS-209; replay Stage 3; rerun exact revision",
+      "detail": "Publish the portable repo-input trust binding, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary without regenerating Stage 1/2, then start one fresh exact merged-revision end-to-end cycle.",
+      "tone": "warn"
+    }
+  ],
+  "run": {
+    "run_id": "qualification-cycle-4b51384d-20260721",
+    "entry_kind": "lifecycle_run",
+    "lifecycle_id": "pipeline-cycle:4b51384d:20260721",
+    "lifecycle_kind": "pipeline_cycle",
+    "rework": {
+      "author_invocations": 20,
+      "continuation_launches": 0,
+      "stage_reruns": 0,
+      "full_restarts": 0,
+      "summary": "The cycle made 20 fresh signed-in Sol/high calls: 19 in Stage 1 and one in Stage 2. None required correction, discard, or restart. The Stage-3 acquisition stop happened before a research call, and the completed upstream artifacts remain retained."
+    },
+    "label": "Exact-revision qualification cycle through Stage-2 completion",
+    "scope": "Preparation and release-shadow execution at merged controller revision 4b51384d over the output-blind 2,854-atom internal-maintenance corpus. Exports were disabled. Host ChatGPT subscription authentication was required, API billing variables were blank, Docker was not invoked, and no source, image, container, ticket, or retained artifact was removed.",
+    "timing": {
+      "start_at": "2026-07-21T15:33:08Z",
+      "end_at": null,
+      "elapsed_seconds": 4273,
+      "coverage": "active",
+      "display": "1 h 11 m active",
+      "note": "Exact model-free preparation took 426.121 seconds. The release-shadow attempt took 2,994.767 seconds through Stage-2 completion and the deterministic Stage-3 acquisition stop. The complete usertest_backlog application suite plus Ruff took 252.686 seconds after the narrow correction. Long model work was observed at roughly ten-minute intervals; no timeout was shortened."
+    },
+    "furthest_stage": "Stage 2 complete; Stage 3 stopped before research authoring",
+    "current_state": "The exact 4b51384d cycle retains complete Stage-1 and Stage-2 artifacts and 20 verified model invocation manifests. Stage 3 selected work but made no research call because `..` in the repository-owned trusted-root config resolved under the detached U: checkout while `--repo-input` named I:\\code\\usertest. The portable `${repo_input}` correction now resolves that exact source as the approved host root without weakening Docker or platform routing.",
+    "outcome": "0 successful qualification cycles; 0 exports; 0 newly implemented cases; 20 authored calls retained; one deterministic Stage-3 acquisition blocker corrected locally",
+    "errors": {
+      "count": 1,
+      "count_kind": "deduplicated_clusters",
+      "summary": "BDS-209 is the sole new stop in this lifecycle: trusted-root configuration encoded a checkout-layout assumption. Repeated diagnostics and the initial wrong-PYTHONPATH test launch are not counted as separate product defects.",
+      "cluster_ids": [
+        "BDS-209"
+      ]
+    },
+    "automatic_self_corrections": {
+      "count": 0,
+      "count_kind": "deduplicated_clusters",
+      "summary": "No model-authored output needed correction. The only correction is deterministic controller/configuration work before Stage-3 authoring began.",
+      "cluster_ids": []
+    },
+    "supervisor_interventions": {
+      "count": 1,
+      "count_kind": "deduplicated_clusters",
+      "summary": "Supervision diagnosed BDS-209 from the exact launcher receipt and added a portable repository-input trust binding. No problem record, priority decision, research claim, or plan was manually rewritten.",
+      "cluster_ids": [
+        "BDS-209"
+      ]
+    },
+    "next_action": "Commit and publish BDS-209, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary, then run a fresh exact merged-revision shadow through all six stages before scoring.",
+    "tone": "warn",
+    "data_quality": "Preparation sealed 2,854 atoms with zero model calls in 426.121 seconds at exact revision 4b51384d. The launcher receipt records signed-in ChatGPT status, blank API billing variables, gpt-5.6-sol with high reasoning, 2,994.767 seconds, and exit two at the trusted-root error. The cycle contains 20 verified invocation manifests, complete Stage-1 and Stage-2 documents, and no Stage-3 model invocation. The exact failed-path preflight now resolves I:\\code\\usertest as both approved source and source identity. The complete app suite passed 845 tests with two expected skips out of 847 collected, and Ruff passed, in 252.686 seconds. These facts prove boundary recovery locally, not end-to-end qualification.",
+    "source_ids": [
+      "backlog_depth_supervision_issue_ledger"
+    ]
+  }
+}

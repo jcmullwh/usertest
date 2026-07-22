@@ -14,6 +14,7 @@ from runner_core.runner import (
     _resolve_shell_capability,
     _shell_probe_result_from_preflight_meta,
 )
+from runner_core.shell_capability import _resolve_codex_sandbox_mode
 
 
 def _install_task_requires_shell_mission(target_repo: Path) -> None:
@@ -104,6 +105,31 @@ def test_shell_capability_resolver_available_blocked_and_unprobed() -> None:
     ).to_dict()
     assert unprobed["state"] == "unprobed"
     assert unprobed["reason_code"] == "codex_windows_shell_unprobed"
+
+
+def test_native_windows_local_codex_write_uses_functioning_unrestricted_sandbox() -> None:
+    write_request = SimpleNamespace(policy="write")
+    safe_request = SimpleNamespace(policy="safe")
+    policy = {"sandbox": "workspace-write"}
+
+    assert _resolve_codex_sandbox_mode(
+        request=write_request,
+        codex_policy=policy,
+        has_sandbox_backend=False,
+        platform_os_name="nt",
+    ) == "danger-full-access"
+    assert _resolve_codex_sandbox_mode(
+        request=write_request,
+        codex_policy=policy,
+        has_sandbox_backend=False,
+        platform_os_name="posix",
+    ) == "workspace-write"
+    assert _resolve_codex_sandbox_mode(
+        request=safe_request,
+        codex_policy={"sandbox": "read-only"},
+        has_sandbox_backend=False,
+        platform_os_name="nt",
+    ) == "read-only"
 
 
 def test_shell_capability_resolver_classifies_codex_windows_probe_failures() -> None:
@@ -351,6 +377,76 @@ def test_shell_required_agent_probe_failure_blocks_dispatch_and_writes_report(
     events = list(iter_events_jsonl(result.run_dir / "normalized_events.jsonl"))
     assert events[-1]["type"] == "preflight_shell_capability"
     assert events[-1]["data"]["shell_capability"] == shell_capability
+
+
+def test_shell_probe_subscription_limit_is_parked_not_misclassified_as_policy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_task_requires_shell_mission(target)
+
+    provider_message = (
+        "You've hit your usage limit. Visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at "
+        "Jul 18th, 2026 2:33 AM."
+    )
+    probe_payload = {
+        "kind": "agent_shell_payload",
+        "agent": "codex",
+        "ok": False,
+        "exit_code": 1,
+        "marker_seen": False,
+        "stdout_excerpt": "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "probe-thread"}),
+                json.dumps({"type": "error", "message": provider_message}),
+                json.dumps({"type": "turn.failed", "error": {"message": provider_message}}),
+            ]
+        ),
+        "stderr_excerpt": "Shell snapshot not supported yet for PowerShell",
+        "last_message_excerpt": "",
+        "reason": "Agent shell probe exited non-zero: exit_code=1",
+    }
+    monkeypatch.setattr(runner_mod, "_runner_host_os", lambda: "Windows")
+    monkeypatch.setattr(
+        runner_mod,
+        "probe_agent_shell_launch",
+        lambda **_: SimpleNamespace(to_dict=lambda: dict(probe_payload)),
+    )
+
+    result = run_once(
+        RunnerConfig(
+            repo_root=repo_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": "codex"}},
+            policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+        ),
+        RunRequest(repo=str(target), agent="codex", policy="safe", exec_backend="local"),
+    )
+
+    assert result.exit_code == 1
+    assert any(
+        error == "code=codex_chatgpt_subscription_usage_limit"
+        for error in result.report_validation_errors
+    )
+    error = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error["type"] == "AgentExternalWait"
+    assert error["subtype"] == "provider_subscription_usage_limit"
+    assert error["phase"] == "agent_shell_probe"
+    assert error["route"] == "chatgpt_subscription"
+    assert error["api_fallback_allowed"] is False
+    assert error["external_wait"]["state"] == "parked"
+    assert error["external_wait"]["resume_after"]["raw"] == ("Jul 18th, 2026 2:33 AM")
+    assert error["external_wait"]["retry_mode"] == "resume_same_session"
+    assert not (result.run_dir / "agent_attempts.json").exists()
+
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight["meta"]["external_wait"] == error["external_wait"]
+    assert preflight["meta"]["agent_shell_probe"]["external_wait"] == (error["external_wait"])
 
 
 def test_shell_required_backend_probe_failure_blocks_dispatch_and_classifies(

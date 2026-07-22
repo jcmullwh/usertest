@@ -115,13 +115,7 @@ def test_triage_atoms_clusters_and_links_tickets(
     )
 
     impl_run_dir = (
-        tmp_path
-        / "runs"
-        / "usertest_implement"
-        / "usertest"
-        / "20260201T010203Z"
-        / "codex"
-        / "0"
+        tmp_path / "runs" / "usertest_implement" / "usertest" / "20260201T010203Z" / "codex" / "0"
     )
     impl_run_dir.mkdir(parents=True, exist_ok=True)
     (impl_run_dir / "ticket_ref.json").write_text(
@@ -262,13 +256,7 @@ def test_triage_atoms_joins_plans_and_runs_by_fingerprint(
     (complete_bucket / f"20260201_{fp_other}_done.md").write_text("# done\n", encoding="utf-8")
 
     impl_run_dir = (
-        tmp_path
-        / "runs"
-        / "usertest_implement"
-        / "usertest"
-        / "20260201T010203Z"
-        / "codex"
-        / "0"
+        tmp_path / "runs" / "usertest_implement" / "usertest" / "20260201T010203Z" / "codex" / "0"
     )
     impl_run_dir.mkdir(parents=True, exist_ok=True)
     (impl_run_dir / "ticket_ref.json").write_text(
@@ -313,8 +301,7 @@ def test_triage_atoms_can_exclude_sources(tmp_path: Path, monkeypatch: pytest.Mo
                 json.dumps(
                     {
                         "atom_id": (
-                            "usertest/20260201T000000Z/codex/0:"
-                            "agent_last_message_artifact:1"
+                            "usertest/20260201T000000Z/codex/0:agent_last_message_artifact:1"
                         ),
                         "run_id": "usertest/20260201T000000Z/codex/0",
                         "run_rel": "usertest/20260201T000000Z/codex/0",
@@ -322,7 +309,7 @@ def test_triage_atoms_can_exclude_sources(tmp_path: Path, monkeypatch: pytest.Mo
                         "timestamp_utc": "2026-02-01T00:00:00Z",
                         "source": "agent_last_message_artifact",
                         "severity_hint": "low",
-                        "text": "{\"kind\":\"task_run_v1\",\"status\":\"success\"}",
+                        "text": '{"kind":"task_run_v1","status":"success"}',
                     }
                 ),
                 json.dumps(

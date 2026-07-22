@@ -1,7 +1,27 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+from backlog_core import (
+    assess_research_readiness,
+    assess_selection_readiness,
+    assign_plan_revision_id,
+    bind_plan_outcome_oracle,
+    infer_live_verification_requirement,
+)
+from backlog_repo.plan_scope import build_plan_target_contract
+
 from usertest_backlog.shared import *
+from usertest_backlog.workflows.depth_contracts import (
+    assess_repo_grounding,
+    change_plan_quality_errors,
+    read_only_stage_tools,
+    read_repo_revision,
+    research_contract_view,
+    stage_include_directories,
+)
+from usertest_backlog.workflows.planning_healing import run_stage6_live_case
 
 
 def _render_change_plans_markdown(
@@ -40,6 +60,11 @@ def _render_change_plans_markdown(
             lines.append(f"### {cid}")
             lines.append("")
 
+            plan_revision_id = _coerce_string(plan.get("plan_revision_id"))
+            if plan_revision_id:
+                lines.append(f"- Plan revision ID: `{plan_revision_id}`")
+                lines.append("- Plan revision source: `server_content_addressed_v1`")
+
             status = _coerce_string(plan.get("change_plan_status")) or "planned"
             lines.append(f"- Status: `{status}`")
 
@@ -70,11 +95,28 @@ def _render_change_plans_markdown(
                 for step in implementation_steps[:12]:
                     lines.append(f"  - {step}")
 
+            targets = plan.get("change_targets")
+            if isinstance(targets, list) and targets:
+                lines.append("- Exact change targets:")
+                for target in targets[:12]:
+                    if not isinstance(target, dict):
+                        continue
+                    path = target.get("path") or "(missing path)"
+                    symbols = target.get("symbols") or []
+                    symbol_text = ", ".join(map(str, symbols)) if symbols else "file-level"
+                    lines.append(f"  - `{path}` ({symbol_text}): {target.get('change') or ''}")
+
             verification_steps = _coerce_string_list(plan.get("verification_steps"))
             if verification_steps:
                 lines.append("- Verification steps:")
                 for step in verification_steps[:12]:
                     lines.append(f"  - {step}")
+
+            verification_commands = _coerce_string_list(plan.get("verification_commands"))
+            if verification_commands:
+                lines.append("- Verification commands:")
+                for command in verification_commands[:12]:
+                    lines.append(f"  - `{command}`")
 
             success_criteria = _coerce_string_list(plan.get("success_criteria"))
             if success_criteria:
@@ -96,6 +138,7 @@ def _render_change_plans_markdown(
 def _run_implementation_planning_stage(
     *,
     repo_root: Path,
+    target_repo_roots_by_problem: dict[str, Path] | None = None,
     problem_records: list[dict[str, Any]],
     research_dossiers: list[dict[str, Any]],
     solution_options: list[dict[str, Any]],
@@ -109,13 +152,16 @@ def _run_implementation_planning_stage(
     cfg: RunnerConfig,
     dry_run: bool,
     stage_guidance_text: str,
+    external_corrections_by_problem: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Run stage 6 implementation planning and write the stage artifacts."""
+    """Run stage 6 using orchestrator prompts and per-problem target workspaces."""
     import json as _json
 
     stage = "implementation_planning"
     stage_artifacts_dir = artifacts_dir / stage
     stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    invocation_tracker = ModelInvocationTracker(stage_artifacts_dir)
+    live_prompt_expected_count = 0
 
     template_path = pipeline_manifest.change_planner_template
     if template_path is None:
@@ -127,6 +173,7 @@ def _run_implementation_planning_stage(
     if not repo_intent_path.exists():
         raise FileNotFoundError(f"Missing repo intent doc: {repo_intent_path}")
     repo_intent_text = repo_intent_path.read_text(encoding="utf-8", errors="replace")
+    orchestrator_head_revision = read_repo_revision(repo_root)
 
     records_by_id: dict[str, dict[str, Any]] = {
         str(item.get("problem_id")): item
@@ -153,6 +200,10 @@ def _run_implementation_planning_stage(
     template_text = pipeline_manifest.template_text(template_path)
 
     all_plans: list[dict[str, Any]] = []
+    seen_plan_revision_ids: set[str] = set()
+    rejected_plans: list[dict[str, Any]] = []
+    planning_correction_runs: list[dict[str, Any]] = []
+    planning_outcomes: list[dict[str, Any]] = []
     warnings_list: list[str] = []
     status: str = "ok"
 
@@ -170,14 +221,109 @@ def _run_implementation_planning_stage(
             warnings_list.append(f"implementation_planning_missing_selected_option: {pid}")
 
         rec = records_by_id.get(pid) or {}
-        dossier = dossiers_by_id.get(pid) or {}
+        dossier = research_contract_view(dossiers_by_id.get(pid))
+        target_repo_root = (
+            target_repo_roots_by_problem.get(pid)
+            if target_repo_roots_by_problem is not None
+            else None
+        )
+        expected_case_id = _coerce_string(decision.get("case_id")) or _coerce_string(
+            rec.get("case_id")
+        )
+        research_ready, research_blockers = assess_research_readiness(dossier)
+        if research_ready:
+            receipt_ready, receipt_blockers = verify_persisted_research_evidence(dossier)
+            if not receipt_ready:
+                research_ready = False
+                research_blockers = [
+                    f"persisted_research_evidence_invalid:{blocker}" for blocker in receipt_blockers
+                ]
+        research_revision = _coerce_string(dossier.get("repo_revision")) or ""
+        if target_repo_root is None:
+            grounded = False
+            grounding_reasons = ["target_workspace_missing"]
+            case_repo_context = {
+                "requested_revision": research_revision,
+                "access": "read_only",
+            }
+        else:
+            grounded, grounding_reasons, case_repo_context = assess_repo_grounding(
+                target_repo_root, research_revision
+            )
+        selection_ready, selection_blockers = assess_selection_readiness(
+            decision,
+            options=list(options_by_id.values()),
+            research=dossier,
+        )
+        falsification = decision.get("falsification_review")
+        falsification_verdict = (
+            _coerce_string(falsification.get("verdict"))
+            if isinstance(falsification, dict)
+            else None
+        )
+        if (
+            not research_ready
+            or falsification_verdict != "accept"
+            or not selection_ready
+            or expected_case_id is None
+            or not grounded
+        ):
+            reasons = []
+            if not research_ready:
+                reasons.append("research_not_ready: " + ", ".join(research_blockers))
+            if falsification_verdict != "accept":
+                reasons.append(
+                    f"selection_not_falsification_accepted: {falsification_verdict or 'missing'}"
+                )
+            if not selection_ready:
+                reasons.append("selection_not_ready: " + ", ".join(selection_blockers))
+            if expected_case_id is None:
+                reasons.append("case_id_missing")
+            if not grounded:
+                reasons.append("repository_not_grounded: " + ", ".join(grounding_reasons))
+            warnings_list.extend(
+                f"implementation_planning_blocked: {pid}: {item}" for item in reasons
+            )
+            rejected_plans.append(
+                {
+                    "problem_id": pid,
+                    "selected_option_id": selected_option_id,
+                    "planning_status": "blocked",
+                    "reasons": reasons,
+                }
+            )
+            continue
+        prompt_dossier = research_prompt_projection(dossier)
+        requires_live_verification, live_verification_reasons = infer_live_verification_requirement(
+            rec, dossier
+        )
 
         prompt = (
             template_text.replace("{{REPO_INTENT_MD}}", repo_intent_text)
             .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+            .replace(
+                "{{REPO_CONTEXT_JSON}}",
+                _json.dumps(case_repo_context, ensure_ascii=False, indent=2),
+            )
             .replace("{{PROBLEM_RECORD_JSON}}", _json.dumps(rec, ensure_ascii=False, indent=2))
-            .replace("{{RESEARCH_DOSSIER_JSON}}", _json.dumps(dossier, ensure_ascii=False, indent=2))
-            .replace("{{SELECTION_DECISION_JSON}}", _json.dumps(decision, ensure_ascii=False, indent=2))
+            .replace(
+                "{{RESEARCH_DOSSIER_JSON}}",
+                _json.dumps(prompt_dossier, ensure_ascii=False, indent=2),
+            )
+            .replace(
+                "{{SELECTION_DECISION_JSON}}", _json.dumps(decision, ensure_ascii=False, indent=2)
+            )
+            .replace(
+                "{{LIVE_VERIFICATION_REQUIREMENT_JSON}}",
+                _json.dumps(
+                    {
+                        "requires_live_verification": requires_live_verification,
+                        "reasons": live_verification_reasons,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
         )
 
         tag = f"implementation_planning_{idx:03d}"
@@ -195,28 +341,88 @@ def _run_implementation_planning_stage(
 
             slug = pid.removeprefix("problem:").strip() or pid.strip()
             plan1_id = f"plan:{slug}:1"
+            case_id = (
+                _coerce_string(decision.get("case_id"))
+                or _coerce_string(rec.get("case_id"))
+                or f"case:{slug}"
+            )
 
             base_plan = {
                 "change_plan_id": plan1_id,
+                "case_id": case_id,
                 "problem_id": pid,
                 "selected_option_id": selected_option_id or "(no selected_option_id)",
                 "title": _coerce_string(rec.get("title")) or f"Plan for {pid}",
-                "problem": _coerce_string(rec.get("problem")) or "dry_run: synthesized problem summary",
-                "user_impact": _coerce_string(rec.get("user_impact")) or "dry_run: synthesized user impact",
+                "problem": _coerce_string(rec.get("problem"))
+                or "dry_run: synthesized problem summary",
+                "user_impact": _coerce_string(rec.get("user_impact"))
+                or "dry_run: synthesized user impact",
                 "proposed_fix": (
                     _coerce_string(decision.get("selected_option", {}).get("summary"))
                     if isinstance(decision.get("selected_option"), dict)
                     else None
                 )
                 or "dry_run: synthesized proposed fix",
+                "repo_revision": research_revision,
+                "change_targets": [
+                    {
+                        "action": "modify",
+                        "path": (
+                            "apps/usertest_backlog/src/usertest_backlog/workflows/"
+                            "implementation_planning.py"
+                        ),
+                        "symbols": ["_run_implementation_planning_stage"],
+                        "change": "dry_run: apply the selected mechanism at the named stage boundary",
+                    }
+                ],
                 "implementation_steps": [
-                    "Identify change location(s) based on research dossier",
-                    "Apply the selected approach with minimal surface area",
+                    (
+                        "Update `apps/usertest_backlog/src/usertest_backlog/workflows/"
+                        "implementation_planning.py` at `_run_implementation_planning_stage` "
+                        "according to the selected mechanism."
+                    ),
+                    "Add the corresponding regression fixture to the named test module.",
                 ],
                 "verification_steps": [
-                    "Run relevant unit/integration tests",
-                    "Re-run the failing scenario (or fixture) to confirm resolution",
+                    "Execute the focused backlog workflow tests with the recorded command.",
                 ],
+                "verification_commands": [
+                    (
+                        "pdm -p apps/usertest_backlog run pytest "
+                        "tests/test_reports_backlog_command.py -q"
+                    )
+                ],
+                "outcome_verification_roles": {
+                    "original_scenario": None,
+                    "live": None,
+                    "mitigation_effect": None,
+                    "recurrence": None,
+                },
+                "before_after_reproduction": {
+                    "original_scenario": "dry_run: no original scenario was executed",
+                    "before_change": None,
+                    "after_change": None,
+                    "proof_limitation": "Dry-run mode does not execute research or reproduction.",
+                    "alternate_verification": (
+                        "Run the focused workflow test command after a real evidence-sufficient run."
+                    ),
+                },
+                "compatibility_and_failure_modes": {
+                    "preserved_behaviors": ["Existing staged artifact envelopes remain readable."],
+                    "intentional_changes": [],
+                    "failure_modes": ["Reject output that does not satisfy the depth contract."],
+                    "migration_required": False,
+                },
+                "causal_coverage": (
+                    decision.get("selected_option", {}).get("causal_coverage")
+                    if isinstance(decision.get("selected_option"), dict)
+                    else {}
+                )
+                or {"mechanism_addressed": "dry_run placeholder"},
+                "requires_live_verification": requires_live_verification,
+                "live_verification_rationale": (
+                    "Dry-run cannot establish whether the originating runtime behavior changed."
+                ),
                 "success_criteria": [
                     "The original failure no longer reproduces",
                     "A regression test prevents recurrence",
@@ -232,64 +438,178 @@ def _run_implementation_planning_stage(
 
             plans_payload: list[dict[str, Any]] = [base_plan]
 
-            # Exercise split-plan handling: when the selected family is comprehensive, synthesize
-            # a second plan that focuses on verification/docs, cross-linked via related IDs.
-            if _coerce_string(decision.get("selected_family_id")) == "most_comprehensive":
-                plan2_id = f"plan:{slug}:2"
-                plans_payload[0]["related_change_plan_ids"] = [plan2_id]
-                plans_payload.append(
-                    {
-                        **base_plan,
-                        "change_plan_id": plan2_id,
-                        "title": f"{base_plan['title']} (follow-up verification)",
-                        "implementation_steps": [
-                            "Add focused regression tests for edge cases",
-                            "Update docs/help text if user-visible behavior changed",
-                        ],
-                        "verification_steps": [
-                            "Run full test suite (or relevant subset) to confirm no regressions",
-                        ],
-                        "success_criteria": [
-                            "Tests cover the class of failure described in research",
-                        ],
-                        "related_change_plan_ids": [plan1_id],
-                    }
-                )
-
             parsed_plans, parse_warnings = parse_change_plan_list(
-                _json.dumps(plans_payload, ensure_ascii=False)
+                _json.dumps(plans_payload, ensure_ascii=False),
+                allow_pending_target_contract=True,
             )
             warnings_list.extend(parse_warnings)
         else:
-            try:
-                response = run_stage_prompt_json(
-                    stage=stage,
-                    prompt=prompt,
-                    out_dir=run_out_dir,
-                    tag=tag,
-                    agent=agent,
-                    model=model,
-                    cfg=cfg,
+            live_prompt_expected_count += 1
+            assert target_repo_root is not None
+            assert expected_case_id is not None
+            assert selected_option_id is not None
+            external_correction = (
+                external_corrections_by_problem.get(pid)
+                if external_corrections_by_problem is not None
+                else None
+            )
+            planning_result = run_stage6_live_case(
+                problem_id=pid,
+                case_id=expected_case_id,
+                selected_option_id=selected_option_id,
+                index=idx,
+                planner_prompt=prompt,
+                stage_artifacts_dir=stage_artifacts_dir,
+                target_repo_root=target_repo_root,
+                repo_revision=research_revision,
+                problem_record=rec,
+                research_dossier=dossier,
+                selection_decision=decision,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                initial_resume_session_id=(
+                    _coerce_string(external_correction.get("agent_session_id"))
+                    if isinstance(external_correction, Mapping)
+                    else None
+                ),
+                author_cost_seconds=(
+                    external_correction.get("original_author_cost_seconds")
+                    if isinstance(external_correction, Mapping)
+                    else None
+                ),
+                external_feedback=(
+                    external_correction.get("feedback")
+                    if isinstance(external_correction, Mapping)
+                    and isinstance(external_correction.get("feedback"), Mapping)
+                    else None
+                ),
+            )
+            planning_correction_runs.append(
+                {
+                    "problem_id": pid,
+                    "case_id": expected_case_id,
+                    "selected_option_id": selected_option_id,
+                    **planning_result["role_run"],
+                }
+            )
+            planning_outcome = {
+                "problem_id": pid,
+                "case_id": expected_case_id,
+                "selected_option_id": selected_option_id,
+                "planning_status": planning_result["status"],
+                "metrics": planning_result["metrics"],
+                "research_required": planning_result["research_required"],
+                "partial_valid_plans": planning_result["partial_valid_plans"],
+            }
+            planning_outcomes.append(planning_outcome)
+            if planning_result["status"] == "planned":
+                parsed_plans = list(planning_result["plans"])
+            else:
+                if planning_result["status"] == "research_required":
+                    status = "research_required" if status == "ok" else status
+                    reasons = [
+                        reason
+                        for item in planning_result["research_required"]
+                        for reason in item.get("reasons", [])
+                        if isinstance(reason, str)
+                    ] or ["planner_returned_grounded_material_evidence_gap"]
+                else:
+                    status = "error"
+                    reasons = ["planner_correction_incomplete:" + planning_result["status"]]
+                warnings_list.extend(f"implementation_planning_blocked: {pid}: {r}" for r in reasons)
+                rejected_plans.append(
+                    {
+                        "problem_id": pid,
+                        "selected_option_id": selected_option_id,
+                        "planning_status": planning_result["status"],
+                        "reasons": reasons,
+                        "research_required": planning_result["research_required"],
+                        "partial_valid_plans": planning_result["partial_valid_plans"],
+                    }
                 )
-                parsed_plans, parse_warnings = parse_change_plan_list(response)
-                warnings_list.extend(parse_warnings)
-            except Exception as exc:  # noqa: BLE001
-                status = "error"
-                warnings_list.append(f"change_planner_error: {pid}: {exc}")
                 continue
 
         for plan in parsed_plans:
+            # The model never owns lifecycle identity. Assign a deterministic server
+            # content address after runner grounding and before readiness validation.
+            # The target contract is derived from the clean research revision; model
+            # output cannot provide or override its file/symbol hashes and ranges.
+            target_contract_error: str | None = None
+            outcome_oracle_error: str | None = None
+            try:
+                plan = {
+                    **plan,
+                    "target_contract": build_plan_target_contract(
+                        plan,
+                        repo_root=target_repo_root,
+                    ),
+                }
+            except (OSError, UnicodeError, ValueError) as exc:
+                target_contract_error = str(exc)
+            if plan.get("_dry_run_synthesized") is not True:
+                try:
+                    plan = bind_plan_outcome_oracle(
+                        plan,
+                        research=dossier,
+                        selection=decision,
+                    )
+                except ValueError as exc:
+                    outcome_oracle_error = str(exc)
+            plan = assign_plan_revision_id(plan)
+            plan_errors: list[str] = []
+            if target_contract_error is not None:
+                plan_errors.append(
+                    f"change_plan_target_contract_invalid:{pid}:{target_contract_error}"
+                )
+            if outcome_oracle_error is not None:
+                plan_errors.append(
+                    f"change_plan_outcome_oracle_invalid:{pid}:{outcome_oracle_error}"
+                )
             plan_pid = _coerce_string(plan.get("problem_id"))
             if plan_pid is not None and plan_pid != pid:
-                warnings_list.append(
+                plan_errors.append(
                     f"change_plan_problem_id_mismatch: expected={pid} got={plan_pid}"
                 )
             plan_oid = _coerce_string(plan.get("selected_option_id"))
-            if selected_option_id is not None and plan_oid is not None and plan_oid != selected_option_id:
-                warnings_list.append(
+            if (
+                selected_option_id is not None
+                and plan_oid is not None
+                and plan_oid != selected_option_id
+            ):
+                plan_errors.append(
                     f"change_plan_selected_option_id_mismatch: problem_id={pid} "
                     f"expected={selected_option_id} got={plan_oid}"
                 )
+            plan_errors.extend(
+                change_plan_quality_errors(
+                    plan,
+                    expected_revision=research_revision,
+                    expected_case_id=expected_case_id,
+                    repo_root=target_repo_root,
+                    problem_record=rec,
+                    research_dossier=dossier,
+                    selection_decision=decision,
+                )
+            )
+            plan_revision_id = _coerce_string(plan.get("plan_revision_id"))
+            if plan_revision_id is not None and plan_revision_id in seen_plan_revision_ids:
+                plan_errors.append(f"change_plan_duplicate_plan_revision_id: {plan_revision_id}")
+            if plan_errors:
+                status = "error"
+                warnings_list.extend(plan_errors)
+                rejected_plans.append(
+                    {
+                        "problem_id": pid,
+                        "selected_option_id": selected_option_id,
+                        "change_plan_id": plan.get("change_plan_id"),
+                        "planning_status": "invalid_output",
+                        "reasons": plan_errors,
+                    }
+                )
+                continue
+            assert plan_revision_id is not None
+            seen_plan_revision_ids.add(plan_revision_id)
             all_plans.append(plan)
 
     stage_doc = build_stage_document(
@@ -301,6 +621,53 @@ def _run_implementation_planning_stage(
             "option_count": len(solution_options),
             "decision_count": len(selection_decisions),
             "change_plan_count": len(all_plans),
+            "rejected_plan_count": len(rejected_plans),
+            "rejected_plans": rejected_plans,
+            "planning_correction_runs": planning_correction_runs,
+            "planning_outcomes": planning_outcomes,
+            "planning_self_healing_metrics": {
+                "live_case_count": len(planning_outcomes),
+                "planned_case_count": sum(
+                    outcome.get("planning_status") == "planned"
+                    for outcome in planning_outcomes
+                ),
+                "research_required_case_count": sum(
+                    outcome.get("planning_status") == "research_required"
+                    for outcome in planning_outcomes
+                ),
+                "partial_valid_plan_count": sum(
+                    len(outcome.get("partial_valid_plans") or [])
+                    for outcome in planning_outcomes
+                ),
+                "repairable_paused_or_stalled_case_count": sum(
+                    str(outcome.get("planning_status") or "").startswith(
+                        ("repairable_paused:", "stalled:")
+                    )
+                    for outcome in planning_outcomes
+                ),
+                "total_attempt_count": sum(
+                    int(outcome.get("metrics", {}).get("attempt_count") or 0)
+                    for outcome in planning_outcomes
+                ),
+                "total_correction_cost_seconds": sum(
+                    float(
+                        outcome.get("metrics", {}).get("total_correction_cost_seconds") or 0.0
+                    )
+                    for outcome in planning_outcomes
+                ),
+                "accepted_good": None,
+                "accepted_bad": None,
+                "false_rejected": None,
+                "ground_truth_note": "runtime_ground_truth_unavailable",
+            },
+            "orchestrator_head_revision": orchestrator_head_revision,
+            "orchestrator_repo_root": str(repo_root.resolve()),
+            "target_workspace_count": len(
+                {str(path.resolve()) for path in (target_repo_roots_by_problem or {}).values()}
+            )
+            if target_repo_roots_by_problem is not None
+            else 0,
+            "repo_access": "read_only",
             "dry_run": dry_run,
             "implementation_planning_status": status,
             "implementation_planning_warnings": warnings_list,
@@ -311,10 +678,19 @@ def _run_implementation_planning_stage(
             "change_plans_md": str(out_md),
         },
     )
+    stage_doc = attach_stage_model_invocation_contract(
+        stage_doc,
+        agent=agent,
+        dry_run=dry_run,
+        manifest_refs=invocation_tracker.collect(),
+        invocation_expected=live_prompt_expected_count > 0,
+    )
 
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_md.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(_json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    out_json.write_text(
+        _json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
     title = out_json.stem.removesuffix(".change_plans") or "Change Plans"
     out_md.write_text(
@@ -329,8 +705,6 @@ def _run_implementation_planning_stage(
     print(f"[stage6] wrote {out_json}", file=sys.stderr)
     print(f"[stage6] wrote {out_md}", file=sys.stderr)
     return stage_doc
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

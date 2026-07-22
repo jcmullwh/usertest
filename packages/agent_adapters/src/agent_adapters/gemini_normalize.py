@@ -19,6 +19,7 @@ from agent_adapters.failure_artifacts import (
     write_command_failure_artifacts,
     write_tool_failure_artifacts,
 )
+from agent_adapters.read_attestation import observed_read_attestation
 
 _MAX_OUTPUT_EXCERPT_CHARS = 2_000
 _MAX_TOOL_CONTEXT_BYTES = 1_000_000
@@ -323,6 +324,10 @@ def normalize_gemini_events(
                     path_str = path_raw.strip()
                     bytes_read = -1
                     out_path = path_str
+                    attestation: dict[str, Any] = {
+                        "content_observed": False,
+                        "whole_file_observed": False,
+                    }
                     if workspace_root is not None:
                         candidate = _map_sandbox_path_str(
                             path_str,
@@ -334,9 +339,25 @@ def normalize_gemini_events(
                         if candidate.exists() and candidate.is_file():
                             bytes_read = candidate.stat().st_size
                             out_path = _safe_relpath(candidate, workspace_root)
+                            observed_text = (
+                                _coerce_text(payload.get("output"))
+                                or _coerce_text(payload.get("content"))
+                            )
+                            attestation = observed_read_attestation(
+                                path=candidate,
+                                observed_text=observed_text,
+                                source_exit_code=0 if not is_error else 1,
+                                allow_partial=True,
+                            )
                     event = make_event(
                         "read_file",
-                        {"path": out_path, "bytes": bytes_read},
+                        {
+                            "path": out_path,
+                            "bytes": bytes_read,
+                            "read_source": "tool",
+                            "source_exit_code": 0 if not is_error else 1,
+                            **attestation,
+                        },
                         ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")

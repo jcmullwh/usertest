@@ -1,6 +1,7 @@
 """Staged-backlog workflow package."""
 
 __all__ = [
+    "depth_contracts",
     "implementation_planning",
     "prioritization",
     "problem_mining",

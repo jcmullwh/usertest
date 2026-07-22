@@ -16,6 +16,7 @@ from agent_adapters.delegation import (
 )
 from agent_adapters.events import make_event
 from agent_adapters.failure_artifacts import write_command_failure_artifacts
+from agent_adapters.read_attestation import observed_read_attestation
 
 READLIKE_COMMANDS = {
     "cat",
@@ -34,6 +35,11 @@ _WINDOWS_DRIVE_POSIX_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
 _WINDOWS_DRIVE_CLEAN_RE = re.compile(r"^([a-zA-Z]):/{2,}")
 _WINDOWS_ABS_PATH_RE = re.compile(r"[A-Za-z]:\\")
 _MAX_OUTPUT_EXCERPT_CHARS = 2_000
+_POWERSHELL_INERT_HOST_SWITCHES = {
+    "-nologo",
+    "-noninteractive",
+    "-noprofile",
+}
 
 
 def _excerpt_text(text: str, *, max_chars: int = _MAX_OUTPUT_EXCERPT_CHARS) -> tuple[str, bool]:
@@ -147,35 +153,63 @@ def _split_command(command: str) -> list[str]:
             return command.split()
 
 
+def _strip_wrapper_quotes(value: str) -> str:
+    stripped = value.strip()
+    while len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        stripped = stripped[1:-1].strip()
+    return stripped
+
+
+def _split_powershell_inner_command(command: str) -> list[str]:
+    """Split one PowerShell command while preserving relative Windows backslashes."""
+
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        return []
+    return [_strip_wrapper_quotes(token) for token in tokens]
+
+
 def _maybe_unwrap_shell_command(argv: list[str]) -> list[str]:
     if len(argv) < 3:
         return argv
 
-    exe = argv[0].replace("\\", "/").lower()
+    exe = _strip_wrapper_quotes(argv[0]).replace("\\", "/").lower()
     base = exe.rsplit("/", 1)[-1]
-    arg1 = argv[1].lower()
+    arg1 = _strip_wrapper_quotes(argv[1]).lower()
 
     if base in {"bash", "sh"} and arg1 in {"-lc", "-c"}:
-        inner = argv[2]
+        inner = _strip_wrapper_quotes(argv[2])
         if isinstance(inner, str) and inner.strip():
             inner_argv = _split_command(inner)
             return inner_argv or argv
         return argv
 
     if base in {"cmd", "cmd.exe"} and arg1 == "/c":
-        inner = argv[2]
+        inner = _strip_wrapper_quotes(argv[2])
         if isinstance(inner, str) and inner.strip():
             inner_argv = _split_command(inner)
             return inner_argv or argv
         return argv
 
-    if base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"} and arg1 in {
-        "-command",
-        "-c",
-    }:
-        inner = argv[2]
-        if isinstance(inner, str) and inner.strip():
-            inner_argv = _split_command(inner)
+    if base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        command_index = 1
+        seen_host_switches: set[str] = set()
+        while command_index < len(argv):
+            host_switch = _strip_wrapper_quotes(argv[command_index]).casefold()
+            if host_switch not in _POWERSHELL_INERT_HOST_SWITCHES:
+                break
+            if host_switch in seen_host_switches:
+                return argv
+            seen_host_switches.add(host_switch)
+            command_index += 1
+        if command_index + 2 != len(argv) or _strip_wrapper_quotes(
+            argv[command_index]
+        ).casefold() not in {"-command", "-c"}:
+            return argv
+        inner = _strip_wrapper_quotes(argv[command_index + 1])
+        if inner:
+            inner_argv = _split_powershell_inner_command(inner)
             return inner_argv or argv
         return argv
 
@@ -222,6 +256,19 @@ def _resolve_candidate_path(
 
     p = Path(token)
     return p if p.is_absolute() else (base_dir / p)
+
+
+def _portable_powershell_path_token(token: str) -> str:
+    """Render a PowerShell path token for the host doing offline normalization.
+
+    Codex traces can be normalized on a different operating system from the one
+    that produced them. PowerShell accepts backslashes as path separators on
+    Windows, while ``Path`` on a POSIX normalizer treats them as literal filename
+    characters. Restrict this conversion to already-recognized PowerShell path
+    operands rather than changing arbitrary command arguments.
+    """
+
+    return token.replace("\\", "/")
 
 
 def _infer_read_candidate_paths(
@@ -292,9 +339,101 @@ def _maybe_emit_read_events(
     workspace_root: Path | None,
     workspace_mount: str | None,
     ts_iter: Iterator[str] | None,
+    stdout_text: str,
+    source_exit_code: int,
     fallback_ts: str | None = None,
 ) -> Iterable[dict[str, Any]]:
     if workspace_root is None:
+        return []
+    range_read = _powershell_exact_range_read(argv)
+    if range_read is not None:
+        path_token, skip_lines, first_lines = range_read
+        effective_cwd = cwd if cwd is not None else workspace_root
+        candidate = _resolve_candidate_path(
+            _portable_powershell_path_token(path_token),
+            base_dir=effective_cwd,
+            workspace_root=workspace_root,
+            workspace_mount=workspace_mount,
+        )
+        if candidate is None or not candidate.is_file():
+            return []
+        try:
+            file_text = candidate.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            return []
+        normalized_file = file_text.replace("\r\n", "\n").replace("\r", "\n")
+        selected_text = "".join(
+            normalized_file.splitlines(keepends=True)[skip_lines : skip_lines + first_lines]
+        )
+        normalized_stdout = stdout_text.replace("\r\n", "\n").replace("\r", "\n")
+        observed_text = (
+            selected_text
+            if normalized_stdout == selected_text
+            or (not selected_text.endswith("\n") and normalized_stdout == selected_text + "\n")
+            else None
+        )
+        attestation = observed_read_attestation(
+            path=candidate,
+            observed_text=observed_text,
+            source_exit_code=source_exit_code,
+            allow_partial=True,
+        )
+        return [
+            make_event(
+                "read_file",
+                {
+                    "path": _safe_relpath(candidate, workspace_root),
+                    "bytes": attestation.get("file_size_bytes"),
+                    "read_source": "shell_command",
+                    "attestation_kind": "exact_line_range",
+                    "source_exit_code": source_exit_code,
+                    "requested_skip_lines": skip_lines,
+                    "requested_first_lines": first_lines,
+                    **attestation,
+                },
+                ts=(next(ts_iter, fallback_ts) if ts_iter is not None else fallback_ts),
+            )
+        ]
+    if any(token in CHAIN_OPERATORS for token in argv):
+        return []
+    command = argv[0].casefold() if argv else ""
+    if command == "cat":
+        path_tokens = argv[1:]
+    elif command == "type" and os.name == "nt":
+        path_tokens = argv[1:]
+    elif command in {"get-content", "gc"}:
+        args = argv[1:]
+        if "-raw" not in {token.casefold() for token in args}:
+            return []
+        path_token: str | None = None
+        index = 0
+        while index < len(args):
+            token = args[index]
+            folded = token.casefold()
+            if folded == "-raw":
+                index += 1
+                continue
+            if folded == "-literalpath":
+                if path_token is not None or index + 1 >= len(args):
+                    return []
+                path_token = args[index + 1]
+                index += 2
+                continue
+            if folded == "-encoding":
+                if index + 1 >= len(args) or args[index + 1].casefold() != "utf8":
+                    return []
+                index += 2
+                continue
+            if token.startswith("-") or path_token is not None:
+                return []
+            path_token = token
+            index += 1
+        path_tokens = (
+            [_portable_powershell_path_token(path_token)] if path_token is not None else []
+        )
+    else:
+        return []
+    if len(path_tokens) != 1:
         return []
     out: list[dict[str, Any]] = []
 
@@ -306,25 +445,94 @@ def _maybe_emit_read_events(
                 return fallback_ts
         return fallback_ts
 
-    for candidate in _infer_read_candidate_paths(
-        argv=argv,
-        cwd=cwd,
+    effective_cwd = cwd if cwd is not None else workspace_root
+    candidate = _resolve_candidate_path(
+        path_tokens[0],
+        base_dir=effective_cwd,
         workspace_root=workspace_root,
         workspace_mount=workspace_mount,
-    ):
-        if not candidate.exists() or not candidate.is_file():
-            continue
+    )
+    if candidate is not None and candidate.exists() and candidate.is_file():
+        attestation = observed_read_attestation(
+            path=candidate,
+            observed_text=stdout_text,
+            source_exit_code=source_exit_code,
+            allow_partial=False,
+            allow_single_terminal_newline=command in {"get-content", "gc"},
+        )
         out.append(
             make_event(
                 "read_file",
                 {
                     "path": _safe_relpath(candidate, workspace_root),
-                    "bytes": candidate.stat().st_size,
+                    "bytes": attestation.get("file_size_bytes"),
+                    "read_source": "shell_command",
+                    "source_exit_code": source_exit_code,
+                    **attestation,
                 },
                 ts=_next_ts(),
             )
         )
     return out
+
+
+def _powershell_exact_range_read(argv: list[str]) -> tuple[str, int, int] | None:
+    """Recognize one output-attestable PowerShell file slice and nothing broader."""
+    if "|" not in argv or argv.count("|") != 1:
+        return None
+    pipe_index = argv.index("|")
+    source = argv[:pipe_index]
+    selector = argv[pipe_index + 1 :]
+    if not source or source[0].casefold() not in {"get-content", "gc"}:
+        return None
+    path_token: str | None = None
+    encoding_seen = False
+    index = 1
+    while index < len(source):
+        token = source[index]
+        folded = token.casefold()
+        if folded == "-encoding":
+            if encoding_seen or index + 1 >= len(source):
+                return None
+            if source[index + 1].casefold() != "utf8":
+                return None
+            encoding_seen = True
+            index += 2
+            continue
+        if folded == "-literalpath":
+            if path_token is not None or index + 1 >= len(source):
+                return None
+            path_token = source[index + 1]
+            index += 2
+            continue
+        return None
+    if path_token is None or not encoding_seen:
+        return None
+    if not selector or selector[0].casefold() not in {"select-object", "select"}:
+        return None
+    values: dict[str, int] = {}
+    index = 1
+    while index < len(selector):
+        option = selector[index].casefold()
+        if option not in {"-skip", "-first"} or option in values or index + 1 >= len(selector):
+            return None
+        try:
+            value = int(selector[index + 1])
+        except ValueError:
+            return None
+        values[option] = value
+        index += 2
+    skip_lines = values.get("-skip")
+    first_lines = values.get("-first")
+    if (
+        skip_lines is None
+        or first_lines is None
+        or skip_lines < 0
+        or first_lines < 1
+        or first_lines > 2_000
+    ):
+        return None
+    return path_token, skip_lines, first_lines
 
 
 def normalize_codex_events(
@@ -387,6 +595,7 @@ def normalize_codex_events(
             event = make_event("delegation_result", data, ts=_next_ts())
             out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
             return True
+
         for raw_line, payload in _iter_codex_raw_lines(raw_events_path):
             if ts_iter is None:
                 line_ts = _next_raw_ts()
@@ -496,13 +705,13 @@ def normalize_codex_events(
                     "command": _format_argv(argv),
                     "exit_code": exit_code,
                 }
+                stdout_text = msg.get("stdout") if isinstance(msg.get("stdout"), str) else ""
 
                 if cwd is not None:
                     data["cwd"] = _render_path(cwd)
 
                 if exit_code != 0:
                     command_failure_idx += 1
-                    stdout_text = msg.get("stdout") if isinstance(msg.get("stdout"), str) else ""
                     stderr_text = msg.get("stderr") if isinstance(msg.get("stderr"), str) else ""
                     duration_raw = msg.get("duration")
                     duration = duration_raw if isinstance(duration_raw, dict) else None
@@ -537,6 +746,8 @@ def normalize_codex_events(
                     workspace_root=workspace_root,
                     workspace_mount=workspace_mount,
                     ts_iter=ts_iter,
+                    stdout_text=stdout_text,
+                    source_exit_code=exit_code,
                     fallback_ts=line_ts,
                 ):
                     out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")
@@ -679,13 +890,16 @@ def normalize_codex_events(
                 "command": _format_argv(argv),
                 "exit_code": exit_code,
             }
+            stdout_text = next(
+                (
+                    value
+                    for key in ("stdout", "output", "aggregated_output")
+                    if isinstance((value := item.get(key)), str) and value
+                ),
+                "",
+            )
             if exit_code != 0:
                 command_failure_idx += 1
-                stdout_text = (
-                    item.get("stdout")
-                    if isinstance(item.get("stdout"), str)
-                    else (item.get("output") if isinstance(item.get("output"), str) else "")
-                )
                 stderr_text = item.get("stderr") if isinstance(item.get("stderr"), str) else ""
                 data["failure_artifacts"] = write_command_failure_artifacts(
                     run_dir=run_dir,
@@ -721,6 +935,8 @@ def normalize_codex_events(
                 workspace_root=workspace_root,
                 workspace_mount=workspace_mount,
                 ts_iter=ts_iter,
+                stdout_text=stdout_text,
+                source_exit_code=exit_code,
                 fallback_ts=line_ts,
             ):
                 out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")

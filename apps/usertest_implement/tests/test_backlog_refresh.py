@@ -10,13 +10,20 @@ def test_refresh_backlog_exports_ready_for_ticket_only(monkeypatch: object, tmp_
     repo_root = tmp_path
     (repo_root / "runs" / "usertest" / "usertest").mkdir(parents=True, exist_ok=True)
 
-    calls: list[tuple[str, list[str]]] = []
+    requests: list[object] = []
 
-    def _capture(argv: list[str], *, cwd: Path, label: str) -> None:
-        assert cwd == repo_root
-        calls.append((label, argv))
+    def _capture(request: object) -> Path:
+        requests.append(request)
+        return (
+            repo_root
+            / "runs"
+            / "usertest"
+            / "usertest"
+            / "_compiled"
+            / "usertest.tickets_export.json"
+        )
 
-    monkeypatch.setattr(run_commands, "_run_workflow_step", _capture)
+    monkeypatch.setattr(run_commands, "run_shadow_backlog_refresh", _capture)
 
     args = Namespace(
         backlog_runs_dir=None,
@@ -25,12 +32,17 @@ def test_refresh_backlog_exports_ready_for_ticket_only(monkeypatch: object, tmp_
         backlog_model=None,
         review_agent=None,
         review_model=None,
+        backlog_research_ref="origin/dev",
+        backlog_breadth_profile="internal_maintenance",
+        backlog_actions_yaml=None,
+        backlog_atom_actions_yaml=None,
     )
 
     run_commands._refresh_backlog_for_ticket_implementation(args=args, repo_root=repo_root)
 
-    export_calls = [argv for label, argv in calls if label == "reports export-tickets"]
-    assert len(export_calls) == 1
-    export_cmd = export_calls[0]
-    assert "--stage" in export_cmd
-    assert export_cmd[export_cmd.index("--stage") + 1] == "ready_for_ticket"
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.research_ref == "origin/dev"
+    assert request.breadth_profile == "internal_maintenance"
+    assert request.agent == "codex"
+    assert request.target == "usertest"

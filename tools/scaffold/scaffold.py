@@ -2036,7 +2036,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         projects=selected,
         fix=fix,
     )
-    lint_test_env = _build_lint_test_env(repo_root=repo_root, projects=selected, task_name=task_name)
+    # Selection limits execution; tests still exercise the checkout's complete first-party graph.
+    source_projects = projects if task_name == "test" else selected
+    lint_test_env = _build_lint_test_env(
+        repo_root=repo_root,
+        projects=source_projects,
+        task_name=task_name,
+    )
 
     failures: list[str] = []
     for project in selected:

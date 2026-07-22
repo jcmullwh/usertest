@@ -34,6 +34,16 @@ python_version = "3.11"
 strict = true
 warn_unused_configs = true
 
+[tool.deptry]
+known_first_party = ["usertest_implement"]
+
+[tool.deptry.per_rule_ignores]
+# These local paths make the app the composition root for runner_core's bare internal
+# dependencies; token monitoring remains deliberately best-effort telemetry.
+DEP001 = ["token_monitoring"]
+DEP002 = ["agent-adapters", "normalized_events", "reporter", "sandbox_runner"]
+DEP003 = ["token_monitoring"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

@@ -96,6 +96,54 @@ def test_normalize_gemini_events_emits_expected_events(tmp_path: Path) -> None:
     ).strip() == "denied"
 
 
+def test_gemini_read_attests_only_tool_result_content(tmp_path: Path) -> None:
+    source = tmp_path / "src.py"
+    source.write_text(
+        "def observed():\n    return 1\n\ndef unseen():\n    return 2\n",
+        encoding="utf-8",
+    )
+    partial = "def observed():\n    return 1\n"
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "tool_use",
+                        "tool_name": "read_file",
+                        "tool_id": "t1",
+                        "parameters": {"file_path": "src.py"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "tool_result",
+                        "tool_id": "t1",
+                        "status": "success",
+                        "output": partial,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = tmp_path / "normalized.jsonl"
+
+    normalize_gemini_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    read = next(
+        event for event in iter_events_jsonl(normalized) if event["type"] == "read_file"
+    )
+    assert read["data"]["content_observed"] is True
+    assert read["data"]["whole_file_observed"] is False
+    assert read["data"]["observed_content"] == partial
+
+
 def test_normalize_gemini_events_maps_workspace_mount_paths(tmp_path: Path) -> None:
     (tmp_path / "USERS.md").write_text("# Users\n", encoding="utf-8")
 

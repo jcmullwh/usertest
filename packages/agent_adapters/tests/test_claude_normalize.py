@@ -106,6 +106,72 @@ def test_normalize_claude_events_emits_tool_events(tmp_path: Path) -> None:
     assert any(e["type"] == "read_file" for e in events)
 
 
+def test_claude_read_attests_only_the_unique_observed_range(tmp_path: Path) -> None:
+    source = tmp_path / "src.py"
+    source.write_text(
+        "def observed():\n    return 1\n\ndef unseen():\n    return 2\n",
+        encoding="utf-8",
+    )
+    partial = "def observed():\n    return 1\n"
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "tool_read",
+                                    "name": "Read",
+                                    "input": {"file_path": "src.py"},
+                                }
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tool_read",
+                                    "content": partial,
+                                    "is_error": False,
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = tmp_path / "normalized.jsonl"
+
+    normalize_claude_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    read = next(
+        event for event in iter_events_jsonl(normalized) if event["type"] == "read_file"
+    )
+    assert read["data"]["content_observed"] is True
+    assert read["data"]["whole_file_observed"] is False
+    assert read["data"]["observed_content"] == partial
+    assert read["data"]["observed_start_line"] == 1
+    assert read["data"]["observed_end_line"] == 3
+
+
 def test_normalize_claude_events_writes_command_failure_artifacts(tmp_path: Path) -> None:
     raw = tmp_path / "raw.jsonl"
     raw.write_text(

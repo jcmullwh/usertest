@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-MAX_ATTACHMENT_EXCERPT_CHARS = 1_200
+MAX_ATTACHMENT_EXCERPT_CHARS = 25_000
 MAX_ERROR_FALLBACK_CHARS = 2_000
 
 _SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
@@ -265,10 +265,21 @@ def render_failure_text(
                 continue
             excerpt_head = entry.get("excerpt_head")
             if isinstance(excerpt_head, str) and excerpt_head.strip():
+                excerpt = excerpt_head.strip()
+                excerpt_tail = entry.get("excerpt_tail")
+                if (
+                    entry.get("truncated") is True
+                    and isinstance(excerpt_tail, str)
+                    and excerpt_tail.strip()
+                ):
+                    excerpt += (
+                        "\n...[middle omitted; full content retained by artifact_ref]...\n"
+                        + excerpt_tail.strip()
+                    )
                 lines.append(f"{path} excerpt:")
                 lines.append(
                     _truncate_text(
-                        excerpt_head.strip(),
+                        excerpt,
                         max_chars=MAX_ATTACHMENT_EXCERPT_CHARS,
                         marker="\n...[truncated_attachment_excerpt]...",
                     )

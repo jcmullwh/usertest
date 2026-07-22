@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maintenance-image case: atom-to-PR audit</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #5f6b76;
+      --line: #d9e0e7;
+      --paper: #ffffff;
+      --wash: #f4f7fa;
+      --navy: #153c5b;
+      --blue: #2b6f9f;
+      --good: #166534;
+      --good-bg: #edf9f0;
+      --warn: #8a4b08;
+      --warn-bg: #fff7e8;
+      --bad: #9b1c1c;
+      --bad-bg: #fff0f0;
+      --info: #174b76;
+      --info-bg: #eef7ff;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--wash);
+      color: var(--ink);
+      font: 15px/1.58 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1180px; margin: 0 auto; background: var(--paper); min-height: 100vh; }
+    header {
+      padding: 48px 56px 38px;
+      color: #fff;
+      background: linear-gradient(125deg, #102f49, #1d597d 72%, #2b7193);
+    }
+    header h1 { margin: 0 0 10px; max-width: 900px; font-size: clamp(2rem, 4vw, 3.2rem); line-height: 1.08; }
+    header p { max-width: 900px; margin: 8px 0 0; color: #dceaf3; font-size: 1.05rem; }
+    header .meta { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { display: inline-block; padding: 5px 10px; border: 1px solid #ffffff55; border-radius: 999px; font-size: .82rem; }
+    nav {
+      position: sticky; top: 0; z-index: 2; padding: 10px 32px;
+      border-bottom: 1px solid var(--line); background: #ffffffee; backdrop-filter: blur(8px);
+      display: flex; flex-wrap: wrap; gap: 8px 18px;
+    }
+    nav a { color: var(--navy); text-decoration: none; font-size: .86rem; font-weight: 650; }
+    section { padding: 38px 56px; border-bottom: 1px solid var(--line); }
+    h2 { margin: 0 0 18px; color: var(--navy); font-size: 1.65rem; line-height: 1.2; }
+    h3 { margin: 28px 0 10px; color: var(--navy); font-size: 1.14rem; }
+    p { margin: 9px 0 13px; }
+    a { color: #175f91; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; overflow-wrap: anywhere; }
+    .lead { font-size: 1.13rem; max-width: 920px; }
+    .callout { margin: 18px 0; padding: 16px 18px; border-left: 5px solid var(--info); border-radius: 4px; background: var(--info-bg); }
+    .callout.good { border-color: var(--good); background: var(--good-bg); }
+    .callout.warn { border-color: var(--warn); background: var(--warn-bg); }
+    .callout.bad { border-color: var(--bad); background: var(--bad-bg); }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; margin: 18px 0; }
+    .card { grid-column: span 4; border: 1px solid var(--line); border-radius: 8px; padding: 17px; background: #fff; }
+    .card.wide { grid-column: span 6; }
+    .card .kicker { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: .72rem; font-weight: 750; }
+    .card .big { display: block; margin: 5px 0 1px; color: var(--navy); font-size: 1.8rem; font-weight: 780; line-height: 1.1; }
+    .card p { margin: 7px 0 0; color: var(--muted); font-size: .9rem; }
+    .bar { height: 8px; margin: 10px 0 6px; border-radius: 999px; background: #e6ebef; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: var(--blue); }
+    .bar > span.good { background: #2a8d4b; }
+    .bar > span.warn { background: #d18321; }
+    .bar > span.bad { background: #c44040; }
+    .table-wrap { overflow-x: auto; margin: 15px 0 23px; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { padding: 10px 11px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #edf3f7; color: var(--navy); }
+    tbody tr:nth-child(even) td { background: #fafbfd; }
+    .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .status-good { color: var(--good); font-weight: 750; }
+    .status-warn { color: var(--warn); font-weight: 750; }
+    .status-bad { color: var(--bad); font-weight: 750; }
+    .timeline { margin: 22px 0 0 10px; padding-left: 24px; border-left: 3px solid #b7c8d4; }
+    .event { position: relative; margin: 0 0 24px; }
+    .event::before { content: ""; position: absolute; left: -32px; top: 5px; width: 13px; height: 13px; border: 3px solid #fff; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 1px #8aa3b4; }
+    .event .date { color: var(--muted); font-weight: 700; font-size: .82rem; }
+    .event h3 { margin: 2px 0 4px; }
+    ul, ol { padding-left: 22px; }
+    li { margin: 5px 0; }
+    .path-list li { margin-bottom: 9px; }
+    .nowrap { white-space: nowrap; }
+    .placeholder { outline: 3px dashed #d28320; outline-offset: 3px; background: #fff8e9; }
+    .small { color: var(--muted); font-size: .84rem; }
+    footer { padding: 30px 56px 48px; color: var(--muted); background: #f6f8fa; }
+    @media (max-width: 800px) {
+      header, section, footer { padding-left: 22px; padding-right: 22px; }
+      nav { padding-left: 18px; padding-right: 18px; }
+      .card, .card.wide { grid-column: span 12; }
+    }
+    @media print {
+      body { background: white; }
+      main { max-width: none; }
+      nav { display: none; }
+      section { break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Maintenance-image case: atom-to-PR audit</h1>
+    <p>A source-grounded reconstruction of one automated-backlog case, with separate accounting for model turns, controller failures, validator findings, and supervisor guidance.</p>
+    <div class="meta">
+      <span class="chip">Case: maintenance-image-burst-retention-unbounded</span>
+      <span class="chip">Ticket: 03f0d43eb78e28fa</span>
+      <span class="chip">Snapshot: 15 July 2026</span>
+      <span class="chip">Companion data: JSON</span>
+    </div>
+  </header>
+
+  <nav aria-label="Report sections">
+    <a href="#answer">Answer</a>
+    <a href="#throughput">Throughput</a>
+    <a href="#counting">Counting</a>
+    <a href="#timeline">Evolution</a>
+    <a href="#errors-guidance">Errors &amp; guidance</a>
+    <a href="#stages">Stage findings</a>
+    <a href="#implementation">Implementation &amp; PR</a>
+    <a href="#current-status">Current status</a>
+    <a href="#evidence">Evidence</a>
+  </nav>
+
+  <section id="answer">
+    <h2>Executive answer</h2>
+    <p class="lead"><strong>The case is real, the final research established the actual mechanism, and the final plan addresses that mechanism.</strong> The resulting code is a meaningful mitigation rather than a cosmetic patch. It is not yet proven resolved, and the pipeline is not yet self-maintaining.</p>
+
+    <div class="grid">
+      <div class="card">
+        <span class="kicker">Problem validity</span>
+        <span class="big status-good">Supported</span>
+        <p>Fresh managed identities grew from 1 to 49 while automatic cleanup reported zero deletions; operator recovery later removed 49 obsolete IDs.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">Causal depth</span>
+        <span class="big status-good">Established</span>
+        <p>A controlled age intervention changed retention from 49 to 3 and removed 46, binding the failure to count-or-age semantics.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">Solution depth</span>
+        <span class="big status-good">Mechanism-level</span>
+        <p>The change budgets physical identities before relevant storage writes while preserving current, protected, and referenced identities.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">Code outcome</span>
+        <span class="big status-warn">Mitigated</span>
+        <p>The fail-first replay, the complete non-Docker <code>runner_core</code> suite, affected application tests, and the maintenance-specific PR checks pass. Live Docker proof remains deferred.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">Live outcome</span>
+        <span class="big status-bad">0 / 1</span>
+        <p>No live Docker recovery arm, recurrence check, or durable outcome receipt has completed.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">Autonomous chain</span>
+        <span class="big status-bad">Not proven</span>
+        <p>Stage 1 mining was not replayed live, and the later chain required substantial supervision and cross-run assembly.</p>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <strong>Most important limitation:</strong> this is an authenticated reconstruction of one case, not one uninterrupted autonomous run. The first Stage 2 records were hand-authored fixtures; a later subscription-backed Stage 2 run authenticated prioritization of the real atoms, but there is still no live proof that Stage 1 would mine and group them on its own.
+    </div>
+  </section>
+
+  <section id="throughput">
+    <h2>What made it through—and what did not</h2>
+    <p>The denominator here is exactly one maintenance-image case. These percentages are a case trace, not a general quality estimate.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Milestone</th><th class="num">Result</th><th>Faithful interpretation</th></tr></thead>
+        <tbody>
+          <tr><td>Evidence-supported real case</td><td class="num status-good">1 / 1 (100%)</td><td>Retrospective evidence audit only; it does not estimate miner precision.</td></tr>
+          <tr><td>Live Stage 1 mining demonstrated</td><td class="num status-bad">0 / 1 (0%)</td><td>The initial problem/priority inputs were fixtures.</td></tr>
+          <tr><td>Causally sufficient research</td><td class="num status-good">1 / 1 (100%)</td><td>Sufficient at numbered attempt 19, after 15 completed reports.</td></tr>
+          <tr><td>Semantically ready final plan</td><td class="num status-good">1 / 1 (100%)</td><td>Only after a mechanically green plan's three material defects were corrected.</td></tr>
+          <tr><td>Materialized implementation ticket</td><td class="num status-good">1 / 1 (100%)</td><td>One implementation ticket, zero research tickets; no existing ticket was moved or removed.</td></tr>
+          <tr><td>Draft pull request</td><td class="num status-good">1 / 1 (100%)</td><td><a href="https://github.com/jcmullwh/usertest/pull/213">PR #213</a>, still draft and unmerged.</td></tr>
+          <tr><td>Focused code/test mitigation</td><td class="num status-warn">1 / 1 (100% bounded)</td><td>Focused verification passed through the last finalized run; a later full-suite correction remained in flight.</td></tr>
+          <tr><td>Live verified / resolved</td><td class="num status-bad">0 / 1 (0%)</td><td>No Docker test body or live recovery proof ran.</td></tr>
+          <tr><td>Durable OutcomeRecord</td><td class="num status-bad">0 / 1 (0%)</td><td>The ticket remains in <code>2 - ready</code>; workflow state is not durably reconciled to the PR.</td></tr>
+          <tr><td>Qualification streak</td><td class="num status-bad">0 / 2 (0%)</td><td>Automated export remains disabled.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="counting">
+    <h2>Counting rules: why “attempt 48” was misleading</h2>
+    <p>No grand total is given. The populations below measure different layers and overlap: a validator may emit multiple findings in one model turn; one guidance item may be delivered repeatedly; a wrapper invocation may fail before any model exists.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Unit</th><th>Definition</th><th>Not equivalent to</th></tr></thead>
+        <tbody>
+          <tr><td>Invocation manifest</td><td>One wrapper-created invocation record, including pre-turn launch failures.</td><td>A model turn</td></tr>
+          <tr><td>Authored model turn</td><td>One verified response from a subscription-backed model session.</td><td>A unique defect or a commit</td></tr>
+          <tr><td>Stage 3 numbered record</td><td>A ledger entry that may be a model report, verifier-only snapshot, or model-free recovery.</td><td>A model attempt</td></tr>
+          <tr><td>Completed report</td><td>A completed Terra report on disk. The filesystem count includes numbered, side, and orphan reports.</td><td>A canonical case or stage outcome</td></tr>
+          <tr><td>Validator error occurrence</td><td>One emitted error entry at one checkpoint.</td><td>An independent root cause</td></tr>
+          <tr><td>Exact error identity</td><td>One byte-identical error string after grouping.</td><td>A semantic defect class</td></tr>
+          <tr><td>Guidance source unit</td><td>One original top-level instruction.</td><td>Every prompt injection of it</td></tr>
+          <tr><td>Guidance delivery</td><td>One atomic item injected into one prompt; repetition counts again.</td><td>A discovered defect</td></tr>
+          <tr><td>Verification outcome</td><td>Pass/fail for one runner-recorded model turn's configured checks.</td><td>The number of failing assertions</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <strong>Concrete correction:</strong> the Stage 3 ledger had 48 records, but only 40 were model reports; seven were verifier-only and one was model-free. The broader filesystem held 62 completed reports because it also contained 11 side reports and 11 orphan reports. Calling these “48 attempts on the same thing” conflates controller bookkeeping with authored turns.
+    </div>
+  </section>
+
+  <section id="timeline">
+    <h2>How the system evolved</h2>
+    <div class="timeline">
+      <div class="event">
+        <span class="date">4 July 2026</span>
+        <h3>First weak signal</h3>
+        <p>Automatic cleanup retained two tags representing one physical identity, deleted nothing, and reported no error. By itself, this was not proof of an unbounded burst.</p>
+      </div>
+      <div class="event">
+        <span class="date">7 July 2026</span>
+        <h3>The failure class became visible</h3>
+        <p>The same cleanup path retained 98 tags representing 49 unique hashes and again deleted nothing. This established recurrence and growth, but not yet the causal condition.</p>
+      </div>
+      <div class="event">
+        <span class="date">13 July 2026</span>
+        <h3>Operator recovery supplied consequence evidence</h3>
+        <p>After storage exhaustion, 49 obsolete image IDs were manually removed. The receipt explicitly separated stopped-container and build-cache mechanisms from this image-retention case.</p>
+      </div>
+      <div class="event">
+        <span class="date">14 July 2026</span>
+        <h3>Stage 3 established the mechanism—and then overran</h3>
+        <p>Six experiments showed 49 fresh identities retained versus three retained and 46 removed under an age control. Causal sufficiency existed at attempt label 19 after 15 reports, but 47 more completed reports followed.</p>
+      </div>
+      <div class="event">
+        <span class="date">15 July 2026</span>
+        <h3>Authenticated Stage 2 repaired lineage provenance</h3>
+        <p>A 9.35-second Terra run prioritized one P1 problem at confidence 0.93 with no corrections and verified signed-in subscription provenance. This happened after the research chronologically, so it proves the reconstructed chain, not original uninterrupted orchestration.</p>
+      </div>
+      <div class="event">
+        <span class="date">15 July 2026</span>
+        <h3>Optioning moved from unsafe cap to contextual identity policy</h3>
+        <p>The initial hard-cap concept correctly stopped as insufficient because deletion safety, active references, and tag-versus-ID accounting were unresolved. The final option budgets physical identities before storage writes while protecting current and referenced identities.</p>
+      </div>
+      <div class="event">
+        <span class="date">15 July 2026</span>
+        <h3>Planning passed mechanics before it passed meaning</h3>
+        <p>A mechanically ready plan still contained three material semantic defects. An independent audit forced a same-planner correction; the final plan reached zero material findings.</p>
+      </div>
+      <div class="event">
+        <span class="date">15 July 2026</span>
+        <h3>One exact ticket was exported without queue cleanup</h3>
+        <p>A contract-parity defect first blocked export before any write. After six focused tests and Ruff, the unchanged chain produced one implementation ticket and zero research tickets. No existing ticket was moved or removed.</p>
+      </div>
+      <div class="event">
+        <span class="date">15 July 2026</span>
+        <h3>One author session implemented the plan and opened draft PR #213</h3>
+        <p>Fourteen finalized model turns produced eight commits across eleven files. Guidance drove excessive integration-test work and one wrong package placement, but the same author corrected both the package boundary and the metadata defect exposed by the complete suite. The final non-Docker code/test gate and maintenance-specific PR jobs passed.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="errors-guidance">
+    <h2>Errors and supervisor guidance, quantified</h2>
+    <p>The table keeps denominators separate. “Error” below means a recorded event under that layer's contract, not necessarily a distinct semantic flaw.</p>
+
+    <h3>Recorded errors and failures</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Layer</th><th class="num">Population</th><th class="num">Failures/findings</th><th>What the count actually means</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Stage 3 numbered validator</td>
+            <td class="num">48 ledger records</td>
+            <td class="num">170 occurrences<br>105 exact identities<br>65 repeats</td>
+            <td>22 occurrences appeared before causal sufficiency; 148 (87.1%) appeared after. The 65-repeat count is occurrences beyond each exact string's first appearance.</td>
+          </tr>
+          <tr>
+            <td>Stages 4–6 wrapper</td>
+            <td class="num">484 manifests</td>
+            <td class="num">409 client-version failures<br>1 boundary reset</td>
+            <td>These 410 failures happened before a usable authored response; only 74 manifests contain verified model turns.</td>
+          </tr>
+          <tr>
+            <td>Stages 4–6 validator</td>
+            <td class="num">74 authored turns</td>
+            <td class="num">94 entries<br>61 exact identities<br>33 repeats</td>
+            <td>Persisted <code>attempt_history.validation_errors</code>, deduplicated to verified authored responses by prompt/response hash: Stage 4: 3/2; Stage 5: 20/9; Stage 6: 71/50. This is the authored-response ledger, not every error line later delivered in correction prompts.</td>
+          </tr>
+          <tr>
+            <td>Stages 4–6 correction feedback</td>
+            <td class="num">37 correction prompts</td>
+            <td class="num">138 delivered error lines<br>77 exact identities<br>61 repeats</td>
+            <td>Every deterministic error line serialized under <code>Deterministic parse and quality errors</code>: Stage 4: 3/2; Stage 5: 19/9; Stage 6: 116/66. This is what the model was actually told. It is reproducible but overlaps the 94/61 authored-response ledger, so the two populations must not be added.</td>
+          </tr>
+          <tr>
+            <td>Implementation runner</td>
+            <td class="num">14 finalized model turns</td>
+            <td class="num">6 failed verification<br>8 passed</td>
+            <td>Turn outcomes, not defect counts. The same author session accumulated 4,987.6 seconds of attempt wall time, including verification, and 3,380.9 seconds inside Codex execution.</td>
+          </tr>
+          <tr>
+            <td>Implementation controller</td>
+            <td class="num">10 wrapper invocations</td>
+            <td class="num">1 retained pre-model failure</td>
+            <td>The scoped run corpus retains one branch-pathspec failure and nine model-bearing invocations. The supervisor transcript separately retains a missing-monorepo-<code>PYTHONPATH</code> launch and a PowerShell argument-quoting failure; they are not added to the wrapper-run count.</td>
+          </tr>
+          <tr>
+            <td>PR-event CI at final head</td>
+            <td class="num">Package jobs</td>
+            <td class="num">3 base-red packages<br>0 maintenance-specific failures</td>
+            <td>At <code>e3f988b8</code>, <code>runner_core</code> project/smoke jobs and maintenance-image validation passed. <code>agent_adapters</code>, <code>backlog_miner</code>, and <code>usertest_backlog</code> failed independently on the base comparison run.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Guidance delivered</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Layer</th><th>Source/block count</th><th>Delivered requirement count</th><th>Quality assessment</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Stage 3</td>
+            <td>11 distinct blocks; 49 top-level source units</td>
+            <td>197 atomic deliveries across 39 prompts; 175 reached completed reports. 148 deliveries (75.1%) were repetition beyond the 49 source units.</td>
+            <td><span class="status-good">102 correct-stage (51.8%)</span>; <span class="status-bad">68 wrong/excessive (34.5%)</span>; <span class="status-warn">27 mixed (13.7%)</span>.</td>
+          </tr>
+          <tr>
+            <td>Stages 4–6</td>
+            <td>14 deliveries; 13 byte-distinct blocks</td>
+            <td>51 enumerated finding/action instances, representing 42 exact-distinct items; plus 18 preserve and 11 forbidden-scope guardrail instances.</td>
+            <td>Initial rejection of the unsafe hard-cap was productive. Cost-based stopping with unresolved Stage 6 findings was not. Guardrails are not extra defects.</td>
+          </tr>
+          <tr>
+            <td>Implementation</td>
+            <td>9 named phases (S0, G1–G8); 21 byte-unique blocks; 178 manually segmented source clauses</td>
+            <td>97 cumulative block deliveries, of which 76 were repeats. Weighting the 178 source clauses by every repeated prompt gives 832 clause-deliveries, 654 of them repeats.</td>
+            <td>Same-session correction was productive, but G5/G6 forced the wrong package boundary and an excessive isolated-DIND ratchet. Guidance text grew from 1,066 to 14,507 characters (13.6×).</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid">
+      <div class="card wide">
+        <span class="kicker">Stage 3 overrun</span>
+        <span class="big">47 extra reports</span>
+        <div class="bar"><span class="bad" style="width:75.8%"></span></div>
+        <p>47 of 62 completed reports (75.8%) and 8,219 of 10,885 seconds (75.5%) came after causal sufficiency.</p>
+      </div>
+      <div class="card wide">
+        <span class="kicker">Implementation test ratchet</span>
+        <span class="big">1,078.183 seconds</span>
+        <div class="bar"><span class="warn" style="width:21.6%"></span></div>
+        <p>Three turns consumed 21.6% of finalized implementation attempt wall time. Of that, 1,047.811 seconds was agent execution. The isolated-DIND test bodies were never executed.</p>
+      </div>
+    </div>
+
+    <h3>Where guidance helped</h3>
+    <ul>
+      <li>Feedback went back to the same author/session, preserving useful work instead of discarding every nondeterministic imperfection.</li>
+      <li>The initial Stage 4/5 stop prevented an unsafe “delete harder” patch from advancing.</li>
+      <li>An independent semantic audit caught three defects that deterministic ticket readiness missed.</li>
+      <li>Three multi-attempt implementation runs self-healed real test failures on the next same-author turn.</li>
+      <li>The finalized verification used an 86,400-second allowance with result reuse disabled.</li>
+    </ul>
+
+    <h3>Where guidance hurt or became waste</h3>
+    <ul>
+      <li>Stage 3 was repeatedly asked to prove prospective solution behavior. That work belonged to optioning, planning, and outcome verification, and it drove most post-sufficiency churn.</li>
+      <li>Stage 6 was stopped on cost after a 37→8→2→3→4 validator trajectory instead of receiving focused correction. Exact <code>this</code>/<code>the</code> wording drift repeated.</li>
+      <li>The Stage 6 plan selected a <code>runner_core</code> location for a test that needed <code>usertest_implement</code>; implementation guidance G5/G6 then locked that path in with “modify only” constraints. This caused a real PR CI collection failure, and G7 had to relocate it.</li>
+      <li>The isolated-DIND ratchet produced 1,010 gross insertions and 354 gross deletions across three turns. Those are churn figures, not the final PR diff, and the test bodies were not run.</li>
+      <li>Five later commits still missed a metadata assertion because the full relevant suite was not executed early enough.</li>
+    </ul>
+  </section>
+
+  <section id="stages">
+    <h2>Stage-by-stage evidence</h2>
+
+    <h3>Stage 1: three real atoms, but mining remains unproven</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Atom</th><th>Observed evidence</th><th>SHA-256</th></tr></thead>
+        <tbody>
+          <tr><td>4 July cleanup</td><td>2 tags / 1 hash retained; 0 deletes; 0 errors.</td><td><code>49a805636091c0b28d8f4cd791e749ab6903f6b66b980b96327e7f749c0169b1</code></td></tr>
+          <tr><td>7 July cleanup</td><td>98 tags / 49 hashes retained; 0 deletes; 0 errors.</td><td><code>b5aa29292f70e3804273a0a7f3a9e5fcdb92fcec252e61f8c21b61b1c2f4544d</code></td></tr>
+          <tr><td>13 July recovery</td><td>49 obsolete image IDs manually removed after exhaustion.</td><td><code>f9b3dd2eae013325d4252161ee1ebec4248abc5da317be7b62e32602451292be</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Stage 2: later authenticated prioritization</h3>
+    <p>One Terra turn completed in 9.35 seconds with no corrections. It assigned P1, confidence 0.93, pre-score 0.6011, and breadth 0.85. Subscription provenance passed and API fallback was disabled. This proves that the current Stage 2 can prioritize the canonical problem from the supplied evidence; it does not prove live mining.</p>
+
+    <h3>Stage 3: partial reproduction was sufficient, not blocked</h3>
+    <p>The final dossier covered all three atoms with six experiments and no verifier errors, blockers, or material unknowns. “Partial” correctly reflects that no live Docker exhaustion/recovery was performed. It did not prevent causal handoff because the production cleanup function and the count-or-age mechanism were directly exercised.</p>
+    <div class="callout good">
+      <strong>Mechanism:</strong> a fresh identity is retained when it is within either the count rank or the age window. In a burst of 49 fresh identities, the age side keeps every entry, so <code>keep_local_count: 5</code> does not create deletion candidates. Aging the same population produced 46 removals and three retained identities.
+    </div>
+
+    <h3>Stages 4–5: the unsafe surface fix was rejected</h3>
+    <p>The initial “hard cap” direction was not allowed to advance because it did not resolve physical-identity accounting, current/protected context, or active-reference safety. The final selected option was <code>option:pre-resolution-bounded-identity-cleanup-with-contextual-protection</code>. Its outcome contract permits at most <strong>mitigated</strong> until post-change proof exists.</p>
+
+    <h3>Stage 6: deterministic readiness was necessary but insufficient</h3>
+    <p>The first mechanically green result took four authenticated turns and 644.7 model seconds, yet an independent review found three material defects. The same planner then corrected the final plan in two turns (one material finding, then zero). The final plan is bound to revision <code>51e35fb…</code>, hash <code>51c821cd…</code>, and revision ID <code>planrev:sha256:ed4d010e…</code>.</p>
+
+    <h3>Export: one parity bug, then an exact materialization</h3>
+    <p>The first production export stopped before writes with <code>outcome_role_selected_positive_contract_ids_invalid</code>. The exporter had incorrectly required a Stage 3 positive-outcome-contract ID for a valid server-bound fail-first replay selected at Stage 5. Six focused tests plus Ruff closed that contract-parity defect; the unchanged chain then wrote one implementation ticket and zero research tickets.</p>
+  </section>
+
+  <section id="implementation">
+    <h2>Implementation and draft PR</h2>
+    <p>The same subscription-backed Terra author session remained attached across correction turns. Through the final implementation run (<code>20260715T171250Z</code>), it completed 14 model turns: eight verification-passed and six verification-failed. The attempts consumed 4,987.6 seconds wall time including verification and 3,380.9 seconds of Codex execution. Eight commits changed 11 files with 1,812 insertions and 66 deletions.</p>
+
+    <div class="grid">
+      <div class="card">
+        <span class="kicker">Model turns</span><span class="big">14</span>
+        <p>One exact author session; three initial turns repeated a false read-only diagnosis.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">Commits</span><span class="big">8</span>
+        <p>Final pushed head <code>e3f988b8</code> on draft PR <a href="https://github.com/jcmullwh/usertest/pull/213">#213</a>.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">Non-Docker gate</span><span class="big">Passed</span>
+        <p>Original replay, 435 passing <code>runner_core</code> tests with one skip, 10 affected application tests, and three isolated-DIND tests collected but not executed.</p>
+      </div>
+    </div>
+
+    <h3>What the code changes</h3>
+    <ul>
+      <li>Applies <code>keep_local_count</code> as an absolute budget for ordinary managed <em>physical image identities</em>, not raw tags.</li>
+      <li>Groups local and published aliases by physical identity.</li>
+      <li>Preserves configured, current, running, and otherwise protected identities across aliases.</li>
+      <li>Runs cleanup before the batch scratch build and before direct resolver pull/build storage writes.</li>
+      <li>Keeps prewrite, post-resolution, and manual cleanup results distinct.</li>
+      <li>Reports actual post-cleanup inventory and blockers such as external tags or container references.</li>
+    </ul>
+
+    <h3>Why this is not merely a surface patch</h3>
+    <p>The visible symptom was disk exhaustion. Simply emitting a warning, deleting more old tags, or adding another cleanup call after a build would not fix the failure. The final change addresses three causal dimensions established by research and optioning:</p>
+    <ol>
+      <li><strong>Eligibility:</strong> fresh age must not override the absolute ordinary-identity budget.</li>
+      <li><strong>Timing:</strong> capacity must be reclaimed before operations that need Docker storage.</li>
+      <li><strong>Identity/safety:</strong> multiple tags for one image must not inflate accounting, and protected or referenced identities must remain protected.</li>
+    </ol>
+
+    <h3>What remains unproven</h3>
+    <ul>
+      <li>Actual reclamation against an isolated Docker daemon.</li>
+      <li>Successful recovery of both constrained storage-write arms.</li>
+      <li>No over-deletion of external/current/container-referenced identities in a live daemon.</li>
+      <li>Recurrence-free behavior in a later automated backlog cycle.</li>
+      <li>A durable OutcomeRecord linked to the ticket, plan revision, branch, and PR.</li>
+    </ul>
+
+    <div class="callout warn">
+      <strong>Honest disposition:</strong> implemented + tests verified at the complete non-Docker affected-package boundary + mitigated. It is not live verified or resolved. No Docker test body was run, consistent with the explicit approval boundary.
+    </div>
+  </section>
+
+  <section id="current-status" data-status="FINALIZED_CODE_TEST_SNAPSHOT">
+    <h2>Finalized code/test and PR status</h2>
+    <p>The final same-author correction completed, committed, and was pushed. This remains a bounded code/test snapshot, not a live-resolution claim.</p>
+    <div class="table-wrap">
+      <table>
+        <tbody>
+          <tr><th>Draft PR</th><td><a href="https://github.com/jcmullwh/usertest/pull/213">#213</a>, open and draft</td></tr>
+          <tr><th>Final head</th><td><code>e3f988b8e391ad020e746d3bc3937fca53cf6363</code>; eight commits above base <code>450a7332</code></td></tr>
+          <tr><th>Final run</th><td><code>U:\usertest_backlog_component_validation\runs\usertest_implement\usertest_20260715T143437Z_codex_0\20260715T171250Z\codex\0</code></td></tr>
+          <tr><th>Attempt 1</th><td>Corrected top-level prewrite versus nested post-resolution metadata. The complete runner suite then exposed two <code>USERTEST_PYTHON</code> test-isolation failures.</td></tr>
+          <tr><th>Attempt 2</th><td>Removed inherited <code>USERTEST_PYTHON</code> from the two affected tests. The unchanged replay retained five identities at limit five; 435 <code>runner_core</code> tests and 10 affected application tests passed, with one runner skip; three DIND tests collected only.</td></tr>
+          <tr><th>PR-event CI</th><td>Run <a href="https://github.com/jcmullwh/usertest/actions/runs/29437882891">29437882891</a>: maintenance-specific jobs passed. Only the three independently base-red project jobs failed.</td></tr>
+          <tr><th>Workflow adoption</th><td>Model-free run <code>20260715T180528368226Z</code> recaptured the exact two Stage-6 commands and bound the unchanged ticket, plan, head, hosted remote, and PR. Ticket bytes and the <code>2 - ready</code> bucket were preserved; lifecycle is <code>awaiting_review</code>.</td></tr>
+          <tr><th>Outcome boundary</th><td><code>implemented</code> / <code>tests_verified</code> / <code>mitigated</code>; not <code>live_verified</code>, <code>resolved</code>, or recurrence-free. No durable OutcomeRecord exists yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="baseline">
+    <h2>What this says about baseline readiness</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Objective</th><th>Status</th><th>Evidence-based assessment</th></tr></thead>
+        <tbody>
+          <tr><td>Mine actual problems from available data</td><td class="status-warn">Partially demonstrated</td><td>The atoms are real and later prioritization is authenticated; live Stage 1 discovery/grouping remains 0/1 demonstrated.</td></tr>
+          <tr><td>Research root cause rather than surface symptom</td><td class="status-good">Demonstrated for this case</td><td>The intervention distinguishes fresh from aged retention and traces the production cleanup symbol.</td></tr>
+          <tr><td>Self-heal nondeterministic errors</td><td class="status-warn">Working but inefficient</td><td>Same-author correction succeeded, but 76% of Stage 3 report volume followed after sufficiency and guidance repetition was high.</td></tr>
+          <tr><td>Produce a decision-complete plan</td><td class="status-good">Demonstrated after audit</td><td>The final plan reached zero material defects; deterministic readiness alone had falsely accepted a three-defect predecessor.</td></tr>
+          <tr><td>Implement the real mechanism</td><td class="status-good">Demonstrated at code level</td><td>The final diff changes eligibility, timing, identity accounting, and safety boundaries.</td></tr>
+          <tr><td>Prove the problem is solved</td><td class="status-bad">Not yet</td><td>No live Docker recovery, recurrence result, or durable OutcomeRecord.</td></tr>
+          <tr><td>Operate without close supervision</td><td class="status-bad">Not yet</td><td>PR adoption is now model-free and reproducible, but pre-turn failures, wrong-stage guidance, manual stage reconstruction, review, and outcome verification still require supervision.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The right next milestone is not “zero bad output.” It is one complete, non-destructive case lifecycle in which Stage 1 is genuinely live, each stage exits when its own evidence is sufficient, correctable defects return to the same author, and the final outcome remains bounded until live evidence exists.</p>
+  </section>
+
+  <section id="evidence">
+    <h2>Evidence index</h2>
+    <p>The <a href="maintenance-image-atom-to-pr-audit.json">JSON companion</a> contains the structured counts, definitions, hashes, and finalized code/test snapshot.</p>
+    <ul class="path-list">
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/stage2_maintenance_image_current_terra_20260715T144500Z/prioritized_problems.json">Authenticated Stage 2 priority record</a></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/stage3_maintenance_image_final_terra_20260714T005030Z/research_dossier.json">Canonical Stage 3 research dossier</a></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/stage4_maintenance_replay_contract_correction_20260715T012500Z/solution_options.json">Final Stage 4 option</a></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/stage5_maintenance_revised_replay_reassessment_20260715T013000Z/solution_selection.continued.json">Final Stage 5 selection</a></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/stage6_maintenance_image_decision_complete_20260715T123600Z/change_plans.json">Final Stage 6 plan</a> — SHA-256 <code>51c821cd9cf685d7f7347386878a62c360c8af94c717d51266b6ccbcabdafe13</code></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/maintenance_ticket_export_20260715T150000Z/maintenance_image.tickets_export.json">Ticket export</a> — SHA-256 <code>423e8af26029e122306e0d7fab46471419f5bb08a94b31e9840307b15c8a4aa6</code></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/maintenance_ticket_export_20260715T150000Z/materialization_receipt.json">Materialization receipt</a> — SHA-256 <code>1d49220de6e346f255e1cd79920d003fa33f5b8fecf3ad72c748750203829393</code></li>
+      <li><a href="file:///I:/code/usertest/.agents/plans/2%20-%20ready/20260715_03f0d43eb78e28fa_Bound-ordinary-maintenance-image-retention-before-storage-writes.md">Materialized local ticket</a></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/usertest_implement/usertest_20260715T143437Z_codex_0/20260715T171250Z/codex/0/">Final implementation run directory</a></li>
+      <li><a href="file:///U:/usertest_backlog_component_validation/runs/usertest_implement/_handoff_adoptions/03f0d43eb78e28fa/20260715T180528368226Z/">Exact plan-command PR-adoption receipt</a></li>
+      <li><a href="https://github.com/jcmullwh/usertest/pull/213">Draft PR #213</a></li>
+      <li><a href="https://github.com/jcmullwh/usertest/actions/runs/29433871787">Base-branch CI comparison run</a></li>
+      <li><a href="https://github.com/jcmullwh/usertest/actions/runs/29437882891">Final-head PR-event CI run</a></li>
+    </ul>
+
+    <h3>Method</h3>
+    <p>This report was assembled from retained atoms, stage artifacts, manifests, prompt/response records, validator outputs, implementation runner records, Git history, and GitHub PR/CI state. Counts are reported only against their stated populations. Hashes are included where the retained chain provided them. Claims about effectiveness are deliberately split into research confidence, code/test evidence, live-runtime evidence, and durable workflow state.</p>
+  </section>
+
+  <footer>
+    <p><strong>Disposition at audited snapshot:</strong> one evidence-supported case produced one causally grounded plan, one materialized implementation ticket, one draft PR, and one exact non-destructive PR-adoption receipt. The implementation is a code-tested mitigation. Resolution and autonomous self-maintenance remain unproven.</p>
+    <p class="small">Generated 2026-07-15 and finalized after implementation head <code>e3f988b8</code> completed its same-author correction and PR-event CI.</p>
+  </footer>
+</main>
+</body>
+</html>

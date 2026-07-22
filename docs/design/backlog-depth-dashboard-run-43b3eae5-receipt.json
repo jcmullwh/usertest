@@ -1,0 +1,87 @@
+{
+  "schema_version": 3,
+  "as_of": "2026-07-21T15:33:08Z",
+  "current_run_id": "qualification-cycle-43b3eae5-20260721",
+  "summary_cards": [
+    {
+      "label": "Current pipeline state",
+      "value": "Stage 1 authored; replay green; cycle unscored",
+      "detail": "The exact merged-revision cycle completed all 19 Stage-1 model calls and wrote two newly mined records plus current relation decisions. Runner postprocessing then stopped on BDS-208 before Stage 2. A model-free replay of the retained outputs now passes on the correction without changing or adding a model invocation, but the stopped release cycle does not count as successful.",
+      "tone": "warn"
+    },
+    {
+      "label": "Latest run efficiency",
+      "value": "19 calls; 0 author corrections; 1 runner stop",
+      "detail": "All 19 signed-in Sol/high calls completed with verified provenance. No author output required correction or restart. The only stop was a deterministic runner provenance defect after relation review; the successful 48.2 minutes of model work was retained and replayed rather than regenerated.",
+      "tone": "warn"
+    },
+    {
+      "label": "Full qualification",
+      "value": "0 / 2 cycles",
+      "detail": "The current cycle did not pass Stage 1 postprocessing and is not scored. No claim is made about precision, recall, plan quality, or end-to-end qualification from this stopped run.",
+      "tone": "bad"
+    },
+    {
+      "label": "Next delivery gate",
+      "value": "Land BDS-208, then rerun exact revision",
+      "detail": "The correction passes the complete usertest_backlog project and an exact retained-output Stage-1 replay. It must pass PR-event CI and merge before a new exact-revision sealed cycle can count toward the two-cycle gate.",
+      "tone": "warn"
+    }
+  ],
+  "run": {
+    "run_id": "qualification-cycle-43b3eae5-20260721",
+    "entry_kind": "lifecycle_run",
+    "lifecycle_id": "pipeline-cycle:43b3eae5:20260721",
+    "lifecycle_kind": "pipeline_cycle",
+    "rework": {
+      "author_invocations": 19,
+      "continuation_launches": 0,
+      "stage_reruns": 0,
+      "full_restarts": 0,
+      "summary": "The sealed cycle used 19 fresh signed-in Sol/high invocations: six primary mining passes, six coverage/depth reviews, routed and exact cross-partition synthesis with independent review, and three relation-review batches. None was corrected, discarded, or restarted. The failed postprocessing was replayed model-free from the retained checkpoint."
+    },
+    "label": "Exact-revision qualification cycle through retained Stage-1 recovery",
+    "scope": "Preparation and first release-shadow execution at merged controller revision 43b3eae5 over the sealed 2,854-atom internal-maintenance corpus. Exports were disabled. Host ChatGPT subscription authentication was required, API billing variables were blank, Docker was not invoked, and no source, image, container, ticket, or retained artifact was removed.",
+    "timing": {
+      "start_at": "2026-07-21T13:50:28Z",
+      "end_at": "2026-07-21T15:33:08Z",
+      "elapsed_seconds": 6160,
+      "coverage": "complete",
+      "display": "1 h 43 m complete",
+      "note": "Wall time from exact preparation through PR #222 merge and the start of the next exact-revision lifecycle. Exact preparation took 694.820 seconds. The sealed phase-one attempt took 2,889.428 seconds before the deterministic Stage-1 binding stop. The retained model-free Stage-1 replay took 3.3 seconds, and the complete usertest_backlog test project plus Ruff and diff checks took 278.7 seconds. Long work was observed at roughly ten-minute intervals; no timeout was shortened."
+    },
+    "furthest_stage": "Stage 1 model work complete; deterministic postprocessing recovered locally",
+    "current_state": "The release-shadow attempt is retained as failed and unscored at exact revision 43b3eae5. It produced 19 verified model invocation manifests, two newly mined problem records, 28 relation decisions in three batches, and no ticket mutations. The model correctly kept the existing Claude ENOSPC storage child separate. BDS-208 fixed the runner's attempt to rebind that authenticated Stage-3 child to the current keep-separate response; PR #222 merged at 4b51384d, and the next exact-revision cycle completed both Stage 1 and Stage 2.",
+    "outcome": "0 successful qualification cycles; 0 exports; 0 newly implemented cases; Stage-1 authored output retained and locally recoverable; one deterministic runner defect found",
+    "errors": {
+      "count": 2,
+      "count_kind": "deduplicated_clusters",
+      "summary": "BDS-207 was the preparation-side manifest-comparison defect that had to land before this exact cycle could start. BDS-208 was the sole stop inside the current sealed run: historical split provenance was mistaken for a new Stage-1 split. Repeated validation text and preparation launch attempts are not counted as separate defects.",
+      "cluster_ids": [
+        "BDS-207",
+        "BDS-208"
+      ]
+    },
+    "automatic_self_corrections": {
+      "count": 0,
+      "count_kind": "deduplicated_clusters",
+      "summary": "No model-authored result required feedback or correction in this run. Every Stage-1 invocation completed once. The recovery was deterministic runner correction and checkpoint replay, not an author self-correction.",
+      "cluster_ids": []
+    },
+    "supervisor_interventions": {
+      "count": 2,
+      "count_kind": "deduplicated_clusters",
+      "summary": "Supervision diagnosed and corrected BDS-207 to make exact preparation possible, then diagnosed BDS-208 after the first sealed cycle reached relation application. Both are general pipeline-mechanics changes; no substantive problem record or relation decision was manually rewritten.",
+      "cluster_ids": [
+        "BDS-207",
+        "BDS-208"
+      ]
+    },
+    "next_action": "Continue the new exact-revision lifecycle at 4b51384d; retain this stopped cycle as unscored historical evidence.",
+    "tone": "warn",
+    "data_quality": "Preparation receipt records exit zero at exact revision 43b3eae5, 2,854 eligible atoms, zero model calls, zero ticket mutations, and zero Docker. The phase-one launcher records signed-in ChatGPT status, blank API billing variables, model gpt-5.6-sol with high reasoning, 2,889.428 seconds, and exit two at the exact BDS-208 binding error. The retained replay receipt records 2 new plus 26 carried records, 23 canonical work units, 2,854 updated atoms, 28 decisions, three relation batches, and 19 unchanged model manifests. The complete application suite passed 843 tests with two expected skips; Ruff and diff checks passed. These facts establish mechanics recovery, not a successful or scored end-to-end cycle.",
+    "source_ids": [
+      "backlog_depth_supervision_issue_ledger"
+    ]
+  }
+}

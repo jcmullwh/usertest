@@ -46,7 +46,8 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
     target_repo = tmp_path / "target_repo"
     target_repo.mkdir(parents=True, exist_ok=True)
     ticket_path = tmp_path / "ticket.md"
-    ticket_path.write_text("# ticket\n", encoding="utf-8")
+    ticket_markdown = "# ticket\n- Fingerprint: `fp`\n"
+    ticket_path.write_text(ticket_markdown, encoding="utf-8")
     ledger_path = tmp_path / "ledger.yaml"
 
     parser = build_parser()
@@ -80,8 +81,8 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
         export_kind="implementation",
         stage="ready_for_ticket",
         owner_root=None,
-        idea_path=None,
-        ticket_markdown="# ticket\n",
+        idea_path=ticket_path,
+        ticket_markdown=ticket_markdown,
         tickets_export_path=None,
         export_index=None,
     )
@@ -165,7 +166,8 @@ def test_push_failure_resume_state_uses_resolved_branch_not_remediation_placehol
     target_repo = tmp_path / "target_repo"
     target_repo.mkdir(parents=True, exist_ok=True)
     ticket_path = tmp_path / "ticket.md"
-    ticket_path.write_text("# ticket\n", encoding="utf-8")
+    ticket_markdown = "# ticket\n- Fingerprint: `fp`\n"
+    ticket_path.write_text(ticket_markdown, encoding="utf-8")
 
     parser = build_parser()
     args = parser.parse_args(
@@ -199,8 +201,8 @@ def test_push_failure_resume_state_uses_resolved_branch_not_remediation_placehol
         export_kind="implementation",
         stage="ready_for_ticket",
         owner_root=None,
-        idea_path=None,
-        ticket_markdown="# ticket\n",
+        idea_path=ticket_path,
+        ticket_markdown=ticket_markdown,
         tickets_export_path=None,
         export_index=None,
     )

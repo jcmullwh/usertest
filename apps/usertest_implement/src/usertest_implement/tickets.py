@@ -3,19 +3,157 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
+from backlog_repo.outcomes import (
+    extract_outcome_markdown,
+    reconcile_outcome_records,
+    upsert_outcome_markdown,
+)
 from backlog_repo.plan_index import (
     DISCARDED_PLAN_BUCKET,
+    archive_plan_ticket_file,
     dedupe_actioned_plan_ticket_files,
     dedupe_queued_plan_ticket_files_when_actioned_exists,
     scan_plan_ticket_index,
+)
+from backlog_repo.ticket_provenance import (
+    canonical_plan_sha256,
+    canonical_ticket_body_sha256,
 )
 
 _REQUIRED_STAGE_BY_KIND: dict[str, str] = {
     "implementation": "ready_for_ticket",
     "research": "research_required",
 }
+
+_PLAN_BUCKETS = frozenset(
+    {
+        "0.1 - deferred",
+        DISCARDED_PLAN_BUCKET,
+        "0.5 - to_triage",
+        "1 - ideas",
+        "1.5 - to_plan",
+        "2 - ready",
+        "3 - in_progress",
+        "4 - for_review",
+        "5 - complete",
+        "6 - archived",
+    }
+)
+
+
+def repair_ticket_newline_expansion(
+    *,
+    path: Path,
+    expected_ticket_body_sha256: str,
+    expected_local_plan_sha256: str,
+) -> dict[str, object] | None:
+    """Repair proven Windows newline multiplication without changing ticket meaning.
+
+    Historical outcome transitions decoded raw CRCRLF bytes and then wrote the
+    resulting text through Windows newline translation. That can double every
+    logical newline on each lifecycle write. Repair is intentionally narrow: every
+    normalized newline run must be even, halving those runs must reproduce both
+    immutable provenance hashes exactly, and the embedded outcome object must remain
+    equivalent after parsing.
+    """
+
+    before_bytes = path.read_bytes()
+    try:
+        before = before_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Ticket is not valid UTF-8: {path}") from exc
+    before_body = canonical_ticket_body_sha256(before)
+    before_plan = canonical_plan_sha256(before)
+    if (
+        before_body == expected_ticket_body_sha256
+        and before_plan == expected_local_plan_sha256
+    ):
+        return None
+
+    outcome_matches = list(
+        re.finditer(
+            r"\n?<!-- backlog-outcome:start -->.*?<!-- backlog-outcome:end -->\n?",
+            before,
+            flags=re.DOTALL,
+        )
+    )
+    if len(outcome_matches) > 1:
+        return None
+    outcome_match = outcome_matches[0] if outcome_matches else None
+    immutable = (
+        before[: outcome_match.start()] + before[outcome_match.end() :]
+        if outcome_match is not None
+        else before
+    )
+    normalized = re.sub(r"\r+\n", "\n", immutable).replace("\r", "\n")
+    runs = list(re.finditer(r"\n+", normalized))
+    if not runs or any(
+        len(match.group(0)) % 2
+        and match.start() != 0
+        and match.end() != len(normalized)
+        for match in runs
+    ):
+        return None
+    repaired = re.sub(
+        r"\n+",
+        lambda match: "\n" * (len(match.group(0)) // 2),
+        normalized,
+    )
+    if outcome_match is not None:
+        normalized_outcome = re.sub(
+            r"\r+\n", "\n", outcome_match.group(0)
+        ).replace("\r", "\n")
+        repaired = (
+            repaired.rstrip("\n")
+            + "\n\n"
+            + normalized_outcome.strip("\n")
+            + "\n"
+        )
+    repaired_body = canonical_ticket_body_sha256(repaired)
+    repaired_plan = canonical_plan_sha256(repaired)
+    if (
+        repaired_body != expected_ticket_body_sha256
+        or repaired_plan != expected_local_plan_sha256
+    ):
+        return None
+    if extract_outcome_markdown(before) != extract_outcome_markdown(repaired):
+        return None
+
+    repaired_bytes = repaired.encode("utf-8")
+    path.write_bytes(repaired_bytes)
+    return {
+        "schema_version": 1,
+        "status": "repaired",
+        "classification": "proven_windows_newline_multiplication",
+        "ticket_path": str(path.resolve()),
+        "before_file_sha256": sha256(before_bytes).hexdigest(),
+        "after_file_sha256": sha256(repaired_bytes).hexdigest(),
+        "before_ticket_body_sha256": before_body,
+        "before_local_plan_sha256": before_plan,
+        "ticket_body_sha256": repaired_body,
+        "local_plan_sha256": repaired_plan,
+        "newline_runs_repaired": len(runs),
+    }
+
+
+def _markdown_with_monotonic_outcome(
+    markdown: str,
+    outcome_record: dict[str, object] | None,
+) -> str:
+    existing = extract_outcome_markdown(markdown)
+    if outcome_record is None:
+        if existing is None:
+            raise ValueError("Cannot complete ticket without a validated outcome record")
+        return markdown
+    effective = (
+        reconcile_outcome_records(existing, outcome_record)
+        if existing is not None
+        else outcome_record
+    )
+    return upsert_outcome_markdown(markdown, effective)
 
 
 @dataclass(frozen=True)
@@ -27,6 +165,10 @@ class TicketIndexEntry:
 
 
 def build_ticket_index(*, owner_root: Path) -> dict[str, TicketIndexEntry]:
+    # Historical same-bucket duplicates cannot be represented by the strict index.
+    # Repair only explicitly generated copies first; manual, IDEA, and unknown bytes
+    # remain protected by the repair contract.
+    dedupe_actioned_plan_ticket_files(owner_root=owner_root)
     raw = scan_plan_ticket_index(owner_root=owner_root)
     out: dict[str, TicketIndexEntry] = {}
     for fingerprint, meta in raw.items():
@@ -128,7 +270,10 @@ def move_ticket_file(
     fingerprint: str,
     to_bucket: str,
     dry_run: bool,
+    outcome_record: dict[str, object] | None = None,
 ) -> Path:
+    if to_bucket not in _PLAN_BUCKETS:
+        raise ValueError(f"Unknown plan bucket: {to_bucket}")
     if not dry_run:
         dedupe_actioned_plan_ticket_files(owner_root=owner_root)
         dedupe_queued_plan_ticket_files_when_actioned_exists(owner_root=owner_root)
@@ -171,11 +316,23 @@ def move_ticket_file(
     # If it's already in the destination bucket, treat as a no-op.
     already_paths = sorted(bucket_to_paths.get(to_bucket, []), key=lambda p: str(p))
     if already_paths:
+        if not dry_run and to_bucket == "5 - complete":
+            existing_path = already_paths[0]
+            markdown = existing_path.read_text(encoding="utf-8", errors="replace")
+            updated_markdown = _markdown_with_monotonic_outcome(markdown, outcome_record)
+            if updated_markdown != markdown:
+                existing_path.write_text(updated_markdown, encoding="utf-8")
         if not dry_run and to_bucket == DISCARDED_PLAN_BUCKET:
             for path in sorted(entry.paths, key=lambda p: str(p)):
                 if path in already_paths:
                     continue
-                path.unlink(missing_ok=True)
+                archive_plan_ticket_file(
+                    owner_root=owner_root,
+                    path=path,
+                    disposition="duplicate",
+                    related_fingerprint=fingerprint,
+                    reason="Explicitly discarded copy already exists",
+                )
         return already_paths[0]
 
     # Choose a sensible source bucket based on intended promotion direction.
@@ -225,11 +382,14 @@ def move_ticket_file(
         src_path = candidates[0]
     plans_dir = owner_root / ".agents" / "plans"
     dest_dir = plans_dir / to_bucket
-    if not dest_dir.exists() or not dest_dir.is_dir():
-        raise ValueError(f"Bucket directory does not exist: {dest_dir}")
     dest_path = dest_dir / src_path.name
     if dry_run:
         return dest_path
+    if to_bucket == "5 - complete":
+        markdown = src_path.read_text(encoding="utf-8", errors="replace")
+        updated_markdown = _markdown_with_monotonic_outcome(markdown, outcome_record)
+        if updated_markdown != markdown:
+            src_path.write_text(updated_markdown, encoding="utf-8")
     dest_dir.mkdir(parents=True, exist_ok=True)
     src_path.replace(dest_path)
     dedupe_actioned_plan_ticket_files(owner_root=owner_root)
@@ -249,8 +409,13 @@ def parse_ticket_markdown_metadata(markdown: str) -> dict[str, str]:
     meta: dict[str, str] = {}
     for key, label in (
         ("fingerprint", "Fingerprint"),
+        ("case_id", "Case ID"),
+        ("plan_revision_id", "Plan revision ID"),
+        ("change_plan_id", "Change plan ID"),
         ("export_kind", "Export kind"),
         ("stage", "Stage"),
+        ("outcome_state", "Outcome state"),
+        ("requires_live_verification", "Requires live verification"),
     ):
         match = re.search(
             rf"^-\s*{re.escape(label)}:\s*`([^`]+)`\s*$",

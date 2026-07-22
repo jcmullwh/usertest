@@ -9,6 +9,7 @@ dependencies = [
   "backlog_core @ file:///${PROJECT_ROOT}/../../packages/backlog_core",
   "backlog_miner @ file:///${PROJECT_ROOT}/../../packages/backlog_miner",
   "backlog_repo @ file:///${PROJECT_ROOT}/../../packages/backlog_repo",
+  "jsonschema>=4.26.0",
   "normalized_events @ file:///${PROJECT_ROOT}/../../packages/normalized_events",
   "pyyaml>=6.0.3",
   "reporter @ file:///${PROJECT_ROOT}/../../packages/reporter",
@@ -48,6 +49,12 @@ warn_unused_configs = true
 [tool.deptry]
 # Drop-in snippets are transplantable scaffolding and should not affect dependency linting.
 extend_exclude = ["^\\.agents/dropins/"]
+known_first_party = ["usertest_backlog"]
+
+[tool.deptry.per_rule_ignores]
+# These packages are loaded through the composed runner/research runtime and source
+# bootstrap rather than imported statically by this application module.
+DEP002 = ["normalized_events", "sandbox_runner"]
 
 [tool.ruff]
 target-version = "py311"

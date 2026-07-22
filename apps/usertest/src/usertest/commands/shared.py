@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 _WINDOWS_OFFLINE_FIRST_SUCCESS_CMD = (
-    r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
+    "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/offline_first_success.ps1"
 )
 _POSIX_OFFLINE_FIRST_SUCCESS_CMD = "bash ./scripts/offline_first_success.sh"
 

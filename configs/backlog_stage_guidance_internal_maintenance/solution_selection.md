@@ -1,68 +1,48 @@
-# Stage 5 guidance: solution selection (internal maintenance)
+# Stage 5 guidance: neutral internal-maintenance selection
 
-## Goal
+Choose provisionally by evidence-backed causal coverage. Family IDs are compatibility
+labels, not a ranking. Do not favor a shared contract, canonical source, or class-level
+mechanism unless at least two independent consumers or failure paths have evidence refs;
+repeated observations of one path count once.
+That rule governs broad problem claims and new reusable abstractions. It does not prohibit a
+single evidenced operation from crossing multiple existing call sites or components,
+extending an existing helper, or requiring ordering and protection changes. Keep such work
+single-path when the edits are necessary for the same reachable operation, and inspect
+affected callers for compatibility.
 
-Choose among the existing option set. Do not create new options. The selection must
-reference one of the configured family IDs and explain why the other options were not
-chosen.
-
-## What to favor for this repo
-
-- Incremental changes over new top-level commands unless evidence breadth is compelling.
-- Changes that are consistent with the existing composable-command philosophy described in
-  `configs/repo_intent.md`.
-- Changes that solve the problem class within existing surfaces when observation breadth
-  across runs and agents shows a repeated pattern.
-- Changes that fix the underlying mechanism instead of introducing case-by-case behavior
-  for each observed failure mode.
-- `most_direct` when the recurrence is a single mechanism and the direct fix fully
-  resolves it, even if that mechanism has appeared in multiple runs.
-- `most_robust` when the main value is validation, guardrails, or defense-in-depth on
-  top of the direct fix because the direct fix alone still leaves credible recurrence
-  vectors.
-- `most_comprehensive` when repeated observations point to one subsystem-level gap or
-  missing shared contract, and the comprehensive option fixes that class of failure
-  while staying within existing command/config surface area.
-- When both `most_robust` and `most_comprehensive` stay inside existing surfaces, prefer
-  `most_comprehensive` if it establishes the clearer shared contract, canonical source
-  of truth, or class-level mechanism rather than merely adding guardrails.
-
-## What to avoid
-
-- Do not create a new option not in the stage-4 option set.
-- Do not select an option based on convenience, ease, or speed. Select based on fit with
-  repo intent and evidence.
-- Do not use banned steering terms: fastest, quickest, easiest, simplest, lowest-effort.
-- Do not choose a hardcoded special-case fix when the observed recurrence suggests a
-  shared mechanism that should be handled directly.
-- Do not treat `repeated_variant` alone as an automatic mandate for `most_robust`.
-- Do not require cross-context breadth for internal class-level hardening that stays
-  within existing user-visible surfaces.
-- Do not use `most_robust` as the default middle choice just because `most_direct`
-  seems narrow and `most_comprehensive` seems broader.
-- Do not reject `most_comprehensive` solely because missions, targets, or repo_inputs
-  are structurally 1 in internal-maintenance mode.
-- Do not describe a class-level internal fix as "too broad" when its surface area is
-  still limited to an existing subsystem and the repeated observations are all pointing
-  at the same mechanism.
-- Do not skip `why_other_options_were_not_selected`. This field is required.
-
-## UX review trigger
-
-Set `needs_ux_review=true` when:
-- The selected option proposes a new user-visible command, flag, or mode.
-- The change surface includes `new_command`, `new_top_level_mode`, `new_config_schema`,
-  `breaking_change`, or `new_api`.
-- The selected option's breadth assessment is broader than the research supports.
-
-## Output contract
-
-A selection decision must include:
-- `problem_id`
-- `selected_option_id`
-- `selected_family_id`
-- `selection_rationale`
-- `repo_intent_alignment`
-- `why_other_options_were_not_selected`
-- `needs_ux_review` (boolean)
-- `selection_status` = `"selected"`
+Compare mechanism fit, unsupported assumptions, residual paths, compatibility risk, and
+testability. Set UX review from the actual surface. An independent repository-aware
+falsification pass then tries to disprove the selection. It may cite only exact runner-owned
+`mechanism_evidence_id` values for the selected mechanism across typed exception, output,
+control, harness, static, and live evidence. The server content-addresses the review.
+Critical causal/interface/change-surface findings cannot be accepted; residual compatibility
+risk requires evidence, rationale, and verification.
+The falsifier must also decide whether the option's outcome strategy proves intended
+maintenance behavior rather than only suppressing an error, returning exit zero, or emitting
+a new marker. It reviews and content-addresses that strategy even when Stage 3 retained an
+executed positive contract. Such a contract is baseline/additional evidence, not an exclusive
+post-change gate: a surface-only baseline does not block a sufficient option strategy and
+cannot rescue a surface-only strategy. Stage 5 approves prospective semantics for Stage 6;
+only later execution can establish resolved or live-verified evidence.
+Separate unsupported facts about the current mechanism, requirements, consumers, protection
+signals, or reachable control surface from explicit prospective design. A new finite threshold,
+configurable bound/default, identity/alias rule, or interface extension may proceed without
+proof that the old implementation already intended it when tradeoffs, safety constraints, and
+Stage-6/outcome verification are bounded. Unsupported pre-build recovery, manual/shared
+consumer, active/protected/external-reference, or verification claims still block. Return to
+Stage 3 only for an indispensable missing present-state fact, not to choose the future policy.
+Trace the reachable operation through its earliest same-resource failure boundary. Reject a
+later-only intervention because, after the boundary, it cannot recover the operation; do not
+remove an evidenced earlier intervention as unsupported breadth merely because it crosses
+existing components.
+Maximize safe useful throughput: a reported partial supporting-operation error need not abort
+when verification proves a safe postcondition, sufficient actual progress, and successful
+continuation. Reject swallowed errors and assumed progress, as well as needless
+abort-on-any-error behavior. A benchmark value or current default may inform a prospective
+default or test case, but cannot become a universal supported maximum without a repository
+requirement or capacity basis.
+Valid `reject` and `insufficient_evidence` findings return content-addressed feedback to the
+original selector session. The selector may choose another existing option or request a
+revised zero-to-three option set from the original optioner session; every new selection gets
+a fresh independent falsifier. Structural errors return only to their authoring role. A
+stalled ancillary labeler uses a neutral server-owned label and cannot invalidate selection.

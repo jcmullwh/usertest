@@ -17,7 +17,7 @@ profiles:
       exec_use_host_agent_login: true
       exec_use_target_sandbox_cli_install: false
       exec_docker_profile: null
-      exec_keep_container: true
+      exec_keep_container: false
       exec_cache: warm
       exec_cache_dir: null
       maintenance_venv_cache: true

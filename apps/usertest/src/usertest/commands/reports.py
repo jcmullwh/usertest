@@ -314,9 +314,15 @@ def _cmd_report(args: argparse.Namespace) -> int:
                 return None
             return last
 
-        raw_events_path = run_dir / "raw_events.jsonl"
-        if not raw_events_path.exists():
-            raise FileNotFoundError(f"Missing {raw_events_path}")
+        selected_raw_events_path = run_dir / "raw_events.jsonl"
+        if not selected_raw_events_path.exists():
+            raise FileNotFoundError(f"Missing {selected_raw_events_path}")
+        cumulative_raw_events_path = run_dir / "raw_events.all_attempts.jsonl"
+        raw_events_path = (
+            cumulative_raw_events_path
+            if cumulative_raw_events_path.is_file()
+            else selected_raw_events_path
+        )
 
         agent_name: str | None = None
         target_ref_path = run_dir / "target_ref.json"

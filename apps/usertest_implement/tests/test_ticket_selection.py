@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from usertest_implement.selection import (
+    _compose_ticket_blob,
     _resolve_default_branch_name,
     _should_move_ticket_to_review,
 )
@@ -34,6 +35,81 @@ def test_repository_default_settings_pin_long_verification_timeout() -> None:
     ]
 
     assert timeout_seconds == 10800
+
+
+def test_repository_default_settings_discard_execution_containers() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    settings_path = repo_root / "configs" / "usertest_implement_settings.yaml"
+    settings = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+
+    keep_container = settings["profiles"]["default"]["run_common"][
+        "exec_keep_container"
+    ]
+
+    assert keep_container is False
+
+
+def test_initial_ticket_prompt_projects_large_research_history_without_mutation(
+    tmp_path: Path,
+) -> None:
+    proof = {
+        "case_id": "case:root-cause",
+        "experiments": [{"result": "causal intervention reproduced the symptom"}],
+        "root_cause_hypotheses": [{"mechanism": "verification errors entered schema channel"}],
+        "inspected_files": ["packages/runner_core/src/runner_core/runner.py"],
+        "evidence_assignment": {
+            "expected_atom_ids": ["atom:one"],
+            "atom_receipts": [
+                {
+                    "atom_id": "atom:one",
+                    "atom_sha256": "a" * 64,
+                    "atom_snapshot": {"raw": "z" * 120_000},
+                }
+            ],
+            "origin_attachment_evidence": {
+                "manifest_file": "origin_evidence/manifest.json",
+                "run_context": {"raw": "q" * 120_000},
+            },
+        },
+        "research_attempts": [{"transcript": "x" * 120_000}],
+        "evidence_verification": {"raw": "y" * 120_000},
+    }
+    ticket_markdown = (
+        "# Ticket\n\n"
+        "### Full verified research proof\n\n"
+        f"```json\n{json.dumps(proof, indent=2)}\n```\n\n"
+        "## Implementation plan\n\nChange the verified root mechanism.\n"
+    )
+    ticket_path = tmp_path / "ticket.md"
+    ticket_path.write_text(ticket_markdown, encoding="utf-8")
+    selected = SelectedTicket(
+        fingerprint="1234567890abcdef",
+        title="Ticket",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=ticket_path,
+        ticket_markdown=ticket_markdown,
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    prompt = _compose_ticket_blob(selected)
+
+    assert len(prompt) < 20_000
+    assert "causal intervention reproduced the symptom" in prompt
+    assert "verification errors entered schema channel" in prompt
+    assert "packages/runner_core/src/runner_core/runner.py" in prompt
+    assert "atom:one" in prompt
+    assert "origin_evidence/manifest.json" in prompt
+    assert "atom_snapshot_receipt" in prompt
+    assert "run_context_receipt" in prompt
+    assert "x" * 1000 not in prompt
+    assert "z" * 1000 not in prompt
+    assert "q" * 1000 not in prompt
+    assert "full_proof_sha256" in prompt
+    assert json.dumps(str(ticket_path))[1:-1] in prompt
+    assert ticket_path.read_text(encoding="utf-8") == ticket_markdown
 
 
 def test_resolve_default_branch_name_uses_rerun_suffix_when_remote_branch_exists(

@@ -1,18 +1,31 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
 import random
 import tempfile
+import time
 import warnings
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
-from agent_adapters import run_claude_print, run_codex_exec, run_gemini
+from agent_adapters import (
+    CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
+    CODEX_OPENAI_SUBSCRIPTION_BASE_URL,
+    CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS,
+    CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+    CodexLoginStatusResult,
+    build_codex_subscription_config_overrides,
+    codex_subscription_config_errors,
+    probe_codex_login_status,
+    run_claude_print,
+    run_codex_exec,
+    run_gemini,
+)
 from backlog_core import (
     build_merge_candidates,
     compute_backlog_coverage,
@@ -20,15 +33,341 @@ from backlog_core import (
     parse_ticket_list,
 )
 from runner_core import RunnerConfig
+from runner_core.stderr_diagnostics import (
+    _extract_codex_subscription_usage_limit,
+    _extract_raw_events_error_messages,
+)
 
 _PROMPT_MANIFEST_FILENAME = "manifest.json"
 
-_CODEX_HOST_LOGIN_BLOCKED_ENV_VARS = (
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "OPENAI_API_BASE",
-    "OPENAI_ORG_ID",
-)
+_CODEX_HOST_LOGIN_BLOCKED_ENV_VARS = CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS
+
+_CODEX_CHATGPT_CONFIG_OVERRIDES = CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES
+
+_CODEX_AUTH_RECEIPT_SUFFIX = ".codex_auth_receipt.json"
+
+
+def _canonical_host_codex_home() -> Path:
+    """Return the canonical host credential cache without copying it."""
+
+    configured = os.environ.get("CODEX_HOME")
+    return Path(configured or (Path.home() / ".codex")).expanduser().resolve()
+
+
+def _codex_process_env_overrides(*, codex_home: Path) -> dict[str, str]:
+    """Build child-only overrides that rule out API/provider environment fallback."""
+
+    overrides = {name: "" for name in _CODEX_HOST_LOGIN_BLOCKED_ENV_VARS}
+    overrides["CODEX_HOME"] = str(codex_home)
+    return overrides
+
+
+def _redacted_login_status(status: CodexLoginStatusResult) -> dict[str, Any]:
+    """Remove command/config values and local paths from a login status receipt."""
+
+    redacted = status.to_redacted_dict()
+    argv = redacted.pop("argv", [])
+    codex_home = redacted.pop("codex_home", "")
+    redacted["argv_sha256"] = _json_digest(argv)
+    redacted["codex_home_sha256"] = _sha256_text(str(codex_home))
+    return redacted
+
+
+def _artifact_attestation(path: Path) -> dict[str, Any]:
+    """Describe one prompt artifact without retaining its contents."""
+
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return {"filename": path.name, "exists": False, "size_bytes": 0, "sha256": None}
+    return {
+        "filename": path.name,
+        "exists": True,
+        "size_bytes": len(payload),
+        "sha256": sha256(payload).hexdigest(),
+    }
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically replace one JSON artifact in its destination directory."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+            temp_path = Path(handle.name)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _codex_auth_receipt_path(raw_events_path: Path) -> Path:
+    filename = raw_events_path.name
+    raw_suffix = ".raw_events.jsonl"
+    tag = filename[: -len(raw_suffix)] if filename.endswith(raw_suffix) else raw_events_path.stem
+    return raw_events_path.with_name(f"{tag}{_CODEX_AUTH_RECEIPT_SUFFIX}")
+
+
+def _canonical_session_id(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = UUID(value.strip())
+    except (ValueError, AttributeError):
+        return None
+    canonical = str(parsed)
+    return canonical if value.strip().casefold() == canonical else None
+
+
+def _write_pending_codex_auth_receipt(*, receipt_path: Path, prompt: str) -> None:
+    """Replace any prior verified proof before a new invocation can start."""
+
+    payload: dict[str, Any] = {
+        "schema_version": 2,
+        "status": "pending",
+        "prompt_sha256": _sha256_text(prompt),
+        "chatgpt_subscription_auth_verified": False,
+    }
+    payload["receipt_sha256"] = _json_digest(payload)
+    _write_json_atomic(receipt_path, payload)
+
+
+def _write_codex_auth_receipt(
+    *,
+    receipt_path: Path,
+    prompt: str,
+    codex_home: Path,
+    configured_overrides: list[str],
+    effective_overrides: list[str],
+    process_env_overrides: dict[str, str],
+    preflight: CodexLoginStatusResult,
+    postcheck: CodexLoginStatusResult,
+    model_attempted: bool,
+    model_exit_code: int | None,
+    agent_session_id: str | None,
+    resumed_from_session_id: str | None,
+    raw_events_path: Path,
+    last_message_path: Path,
+    stderr_path: Path,
+    external_wait_detected: bool = False,
+) -> None:
+    """Persist a self-hashed, secret-free proof for one Codex prompt invocation."""
+
+    model_succeeded = model_attempted and model_exit_code == 0
+    environment_verified = bool(
+        process_env_overrides.get("CODEX_HOME") == str(codex_home)
+        and all(
+            process_env_overrides.get(name) == "" for name in _CODEX_HOST_LOGIN_BLOCKED_ENV_VARS
+        )
+    )
+    routing_config_errors = codex_subscription_config_errors(effective_overrides)
+    routing_config_verified = not routing_config_errors
+    canonical_session_id = _canonical_session_id(agent_session_id)
+    canonical_resumed_id = (
+        _canonical_session_id(resumed_from_session_id)
+        if resumed_from_session_id is not None
+        else None
+    )
+    session_continuity_verified = bool(
+        canonical_session_id is not None
+        and (
+            resumed_from_session_id is None
+            or (canonical_resumed_id is not None and canonical_session_id == canonical_resumed_id)
+        )
+    )
+    route_verified = bool(
+        preflight.ok
+        and postcheck.ok
+        and environment_verified
+        and routing_config_verified
+        and session_continuity_verified
+    )
+    external_wait_verified = bool(
+        external_wait_detected
+        and model_attempted
+        and model_exit_code is not None
+        and model_exit_code != 0
+        and route_verified
+    )
+    fully_verified = bool(route_verified and model_succeeded)
+    payload: dict[str, Any] = {
+        "schema_version": 2,
+        "status": (
+            "verified"
+            if fully_verified
+            else "external_wait_verified"
+            if external_wait_verified
+            else "failed"
+        ),
+        "auth_mode": "canonical_host_chatgpt_subscription_cache",
+        "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
+        "openai_base_url": CODEX_OPENAI_SUBSCRIPTION_BASE_URL,
+        "api_fallback_allowed": False,
+        "credential_cache_copied": False,
+        "canonical_codex_home_sha256": _sha256_text(str(codex_home)),
+        "prompt_sha256": _sha256_text(prompt),
+        "configured_overrides_count": len(configured_overrides),
+        "configured_overrides_sha256": _json_digest(configured_overrides),
+        "effective_overrides": list(effective_overrides),
+        "effective_overrides_sha256": _json_digest(effective_overrides),
+        "canonical_route_overrides": list(_CODEX_CHATGPT_CONFIG_OVERRIDES),
+        "routing_config_verified": routing_config_verified,
+        "routing_config_errors": routing_config_errors,
+        "process_environment": {
+            "codex_home_is_canonical": process_env_overrides.get("CODEX_HOME") == str(codex_home),
+            "blanked_variables": {
+                name: process_env_overrides.get(name) == ""
+                for name in _CODEX_HOST_LOGIN_BLOCKED_ENV_VARS
+            },
+            "verified": environment_verified,
+        },
+        "preflight": _redacted_login_status(preflight),
+        "model_activation": {
+            "attempted": model_attempted,
+            "exit_code": model_exit_code,
+            "succeeded": model_succeeded,
+            "agent_session_id": agent_session_id,
+            "resumed_from_session_id": resumed_from_session_id,
+            "session_continuity_verified": session_continuity_verified,
+            "artifacts": {
+                "raw_events": _artifact_attestation(raw_events_path),
+                "last_message": _artifact_attestation(last_message_path),
+                "stderr": _artifact_attestation(stderr_path),
+            },
+        },
+        "postcheck": _redacted_login_status(postcheck),
+        "chatgpt_subscription_auth_verified": fully_verified or external_wait_verified,
+        "external_wait_attested": external_wait_verified,
+    }
+    payload["receipt_sha256"] = _json_digest(payload)
+    _write_json_atomic(receipt_path, payload)
+
+
+def verify_codex_auth_receipt(
+    *,
+    receipt_path: Path,
+    prompt: str,
+    raw_events_path: Path,
+    last_message_path: Path,
+    stderr_path: Path,
+    allow_external_wait: bool = False,
+) -> list[str]:
+    """Verify one finalized generic Codex subscription receipt and its artifacts."""
+
+    try:
+        raw = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return [f"codex_auth_receipt_unreadable:{type(exc).__name__}"]
+    if not isinstance(raw, dict):
+        return ["codex_auth_receipt_not_object"]
+    errors: list[str] = []
+    expected_hash = _json_digest(
+        {key: value for key, value in raw.items() if key != "receipt_sha256"}
+    )
+    if raw.get("receipt_sha256") != expected_hash:
+        errors.append("codex_auth_receipt_hash_changed")
+    schema_version = raw.get("schema_version")
+    if schema_version not in {1, 2}:
+        errors.append("codex_auth_receipt_schema_version_invalid")
+    exact_fields = {
+        "status": "external_wait_verified" if allow_external_wait else "verified",
+        "auth_mode": "canonical_host_chatgpt_subscription_cache",
+        "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
+        "openai_base_url": CODEX_OPENAI_SUBSCRIPTION_BASE_URL,
+        "api_fallback_allowed": False,
+        "credential_cache_copied": False,
+        "prompt_sha256": _sha256_text(prompt),
+        "chatgpt_subscription_auth_verified": True,
+    }
+    for field_name, expected in exact_fields.items():
+        if raw.get(field_name) != expected:
+            errors.append(f"codex_auth_receipt_{field_name}_invalid")
+    canonical_route = raw.get("canonical_route_overrides")
+    if canonical_route != list(_CODEX_CHATGPT_CONFIG_OVERRIDES):
+        errors.append("codex_auth_receipt_canonical_route_overrides_invalid")
+    effective_raw = raw.get("effective_overrides")
+    effective = effective_raw if isinstance(effective_raw, list) else []
+    if not isinstance(effective_raw, list) or not all(isinstance(item, str) for item in effective):
+        errors.append("codex_auth_receipt_effective_overrides_invalid")
+    else:
+        if raw.get("effective_overrides_sha256") != _json_digest(effective):
+            errors.append("codex_auth_receipt_effective_overrides_hash_changed")
+        errors.extend(
+            "codex_auth_receipt_" + error for error in codex_subscription_config_errors(effective)
+        )
+    if raw.get("routing_config_verified") is not True or raw.get("routing_config_errors") != []:
+        errors.append("codex_auth_receipt_routing_config_not_verified")
+    process_raw = raw.get("process_environment")
+    process = process_raw if isinstance(process_raw, dict) else {}
+    blank_raw = process.get("blanked_variables")
+    blank = blank_raw if isinstance(blank_raw, dict) else {}
+    if process.get("codex_home_is_canonical") is not True or process.get("verified") is not True:
+        errors.append("codex_auth_receipt_process_environment_invalid")
+    if not all(blank.get(name) is True for name in _CODEX_HOST_LOGIN_BLOCKED_ENV_VARS):
+        errors.append("codex_auth_receipt_process_environment_not_blank")
+    for status_field in ("preflight", "postcheck"):
+        status_raw = raw.get(status_field)
+        status = status_raw if isinstance(status_raw, dict) else {}
+        status_blank_raw = status.get("auth_env_vars_blank")
+        status_blank = status_blank_raw if isinstance(status_blank_raw, dict) else {}
+        if status.get("ok") is not True or status.get("chatgpt_status_exact") is not True:
+            errors.append(f"codex_auth_receipt_{status_field}_not_chatgpt")
+        if not all(status_blank.get(name) is True for name in _CODEX_HOST_LOGIN_BLOCKED_ENV_VARS):
+            errors.append(f"codex_auth_receipt_{status_field}_environment_not_blank")
+    activation_raw = raw.get("model_activation")
+    activation = activation_raw if isinstance(activation_raw, dict) else {}
+    if allow_external_wait:
+        exit_code = activation.get("exit_code")
+        if (
+            raw.get("external_wait_attested") is not True
+            or activation.get("attempted") is not True
+            or isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or exit_code == 0
+            or activation.get("succeeded") is not False
+            or _codex_subscription_wait_from_raw_events(raw_events_path) is None
+        ):
+            errors.append("codex_auth_receipt_external_wait_activation_invalid")
+    elif (
+        activation.get("attempted") is not True
+        or activation.get("exit_code") != 0
+        or activation.get("succeeded") is not True
+    ):
+        errors.append("codex_auth_receipt_model_activation_invalid")
+    if schema_version == 2:
+        session_id = _canonical_session_id(activation.get("agent_session_id"))
+        resumed_raw = activation.get("resumed_from_session_id")
+        resumed_id = _canonical_session_id(resumed_raw) if resumed_raw is not None else None
+        if session_id is None:
+            errors.append("codex_auth_receipt_agent_session_id_invalid")
+        if resumed_raw is not None and (resumed_id is None or resumed_id != session_id):
+            errors.append("codex_auth_receipt_resumed_session_mismatch")
+        if activation.get("session_continuity_verified") is not True:
+            errors.append("codex_auth_receipt_session_continuity_not_verified")
+    artifacts_raw = activation.get("artifacts")
+    artifacts = artifacts_raw if isinstance(artifacts_raw, dict) else {}
+    for kind, path in (
+        ("raw_events", raw_events_path),
+        ("last_message", last_message_path),
+        ("stderr", stderr_path),
+    ):
+        observed = _artifact_attestation(path)
+        if observed.get("exists") is not True:
+            errors.append(f"codex_auth_receipt_artifact_missing:{kind}")
+        elif artifacts.get(kind) != observed:
+            errors.append(f"codex_auth_receipt_artifact_changed:{kind}")
+    return list(dict.fromkeys(errors))
 
 
 @dataclass(frozen=True)
@@ -47,6 +386,67 @@ class PromptManifest:
     orphan_template: str
     merge_judge_template: str
     labeler_template: str
+
+
+@dataclass(frozen=True)
+class BacklogPromptResult:
+    """One content-retained agent invocation with exact continuation identity."""
+
+    response: str
+    agent_session_id: str | None
+    resumed_from_session_id: str | None
+    workspace_dir: Path | None
+    prompt_path: Path
+    response_path: Path
+    raw_events_path: Path
+    last_message_path: Path
+    stderr_path: Path
+    auth_receipt_path: Path | None
+    elapsed_seconds: float
+
+
+class BacklogProviderExternalWait(BaseException):
+    """Control-flow signal for one adapter-attested provider-global subscription wait.
+
+    This deliberately does not inherit from ``Exception``: model-output correction loops catch
+    ordinary invocation failures as repairable author errors. A provider-global wait is neither
+    model output nor case-local, so it must cross those loops unchanged until orchestration parks.
+    """
+
+    def __init__(self, external_wait: dict[str, Any]) -> None:
+        self.external_wait = json.loads(json.dumps(external_wait, ensure_ascii=False))
+        super().__init__("codex_chatgpt_subscription_usage_limit")
+
+
+def _codex_external_wait_artifact_path(raw_events_path: Path) -> Path:
+    filename = raw_events_path.name
+    suffix = ".raw_events.jsonl"
+    tag = filename[: -len(suffix)] if filename.endswith(suffix) else raw_events_path.stem
+    return raw_events_path.with_name(f"{tag}.external_wait.json")
+
+
+def _codex_subscription_wait_from_raw_events(raw_events_path: Path) -> dict[str, Any] | None:
+    error_text = _extract_raw_events_error_messages(raw_events_path)
+    usage_limit = _extract_codex_subscription_usage_limit(error_text)
+    if usage_limit is None:
+        return None
+    return {
+        "schema_version": 1,
+        "status": "parked_external_wait",
+        "scope": "backlog_model_pipeline",
+        "reason": "codex_chatgpt_subscription_usage_limit",
+        "provider": "codex",
+        "state": "parked",
+        "retry_mode": "resume_same_session",
+        "retry_disposition": "resume_after_provider_reset",
+        "resume_after": {
+            "raw": usage_limit.get("resume_after_raw"),
+            "timezone": usage_limit.get("resume_after_timezone"),
+        },
+        "settings_url": usage_limit.get("settings_url"),
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+    }
 
 
 _CHANGE_SURFACE_KIND_ENUM = {
@@ -132,16 +532,13 @@ def _coerce_float_01(value: Any) -> float:
             _warn_nonfatal_fallback(
                 code="invalid_confidence_string",
                 message=(
-                    "Received non-numeric confidence string from labeler output; "
-                    "coercing to 0.0."
+                    "Received non-numeric confidence string from labeler output; coercing to 0.0."
                 ),
             )
             return 0.0
     _warn_nonfatal_fallback(
         code="invalid_confidence_type",
-        message=(
-            "Received non-numeric confidence value from labeler output; coercing to 0.0."
-        ),
+        message=("Received non-numeric confidence value from labeler output; coercing to 0.0."),
     )
     return 0.0
 
@@ -161,9 +558,7 @@ def _ticket_anchor(ticket: dict[str, Any]) -> str:
     """
 
     title = _coerce_string(ticket.get("title")) or ""
-    evidence = sorted(
-        item for item in ticket.get("evidence_atom_ids", []) if isinstance(item, str)
-    )
+    evidence = sorted(item for item in ticket.get("evidence_atom_ids", []) if isinstance(item, str))
     return json.dumps({"title": title.lower(), "evidence": evidence}, ensure_ascii=False)
 
 
@@ -189,9 +584,7 @@ def _tickets_match_atom_scope(
 
     for ticket in tickets:
         evidence_ids = [
-            item
-            for item in ticket.get("evidence_atom_ids", [])
-            if isinstance(item, str)
+            item for item in ticket.get("evidence_atom_ids", []) if isinstance(item, str)
         ]
         if any(atom_id not in allowed_atom_ids for atom_id in evidence_ids):
             return False
@@ -293,8 +686,6 @@ def _json_digest(payload: Any) -> str:
     return sha256(stable.encode("utf-8")).hexdigest()
 
 
-
-
 def _sha256_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
@@ -376,6 +767,7 @@ def _select_evidence_atoms(
 
     return selected_atoms, selected_ids
 
+
 def _manifest_string_list(value: Any, *, field_name: str) -> tuple[str, ...]:
     """Validate manifest field as a non-empty list of template names.
 
@@ -443,8 +835,7 @@ def _ensure_prompt_template_exists(prompts_dir: Path, template_name: str) -> Non
     path = prompts_dir / template_name
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(
-            "Missing prompt template "
-            f"`{template_name}` in prompts directory `{prompts_dir}`."
+            f"Missing prompt template `{template_name}` in prompts directory `{prompts_dir}`."
         )
 
 
@@ -643,10 +1034,7 @@ def _normalize_labeler_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not kinds_norm:
         _warn_nonfatal_fallback(
             code="labeler_unknown_change_surface",
-            message=(
-                "Labeler output omitted valid change-surface kinds; defaulting to "
-                "`unknown`."
-            ),
+            message=("Labeler output omitted valid change-surface kinds; defaulting to `unknown`."),
         )
         kinds_norm = ["unknown"]
 
@@ -764,9 +1152,7 @@ def _consensus_labeler_payload(payloads: list[dict[str, Any]]) -> tuple[dict[str
         )
 
     variants = [
-        _normalize_labeler_payload(payload)
-        for payload in payloads
-        if isinstance(payload, dict)
+        _normalize_labeler_payload(payload) for payload in payloads if isinstance(payload, dict)
     ]
     if not variants:
         return (
@@ -797,9 +1183,7 @@ def _consensus_labeler_payload(payloads: list[dict[str, Any]]) -> tuple[dict[str
     ]
     consensus_user_visible = _majority_vote_bool(user_visible_values, default=False)
 
-    component_values = [
-        _coerce_string(variant.get("component")) or "" for variant in variants
-    ]
+    component_values = [_coerce_string(variant.get("component")) or "" for variant in variants]
     consensus_component = _majority_vote_str(component_values, default="unknown")
     if consensus_component not in _LABELER_COMPONENT_ENUM:
         consensus_component = "unknown"
@@ -1131,6 +1515,10 @@ def _agent_binary(cfg: RunnerConfig, agent: str, default: str) -> str:
     ----------
     cfg:
         Runner configuration.
+    workspace_dir:
+        Optional existing checkout to expose as the agent's working directory. Backlog
+        prompts always run with read-only execution semantics; callers should also pass
+        a read-only tool allowlist for backends whose sandbox is tool-based.
     agent:
         Agent identifier.
     default:
@@ -1184,10 +1572,7 @@ def _agent_output_format(cfg: RunnerConfig, agent: str, default: str = "stream-j
             return value.strip()
     _warn_nonfatal_fallback(
         code="agent_output_format_defaulted",
-        message=(
-            f"No output_format configured for agent={agent!r}; defaulting to "
-            f"{default!r}."
-        ),
+        message=(f"No output_format configured for agent={agent!r}; defaulting to {default!r}."),
     )
     return default
 
@@ -1215,24 +1600,7 @@ def _codex_overrides(cfg: RunnerConfig) -> list[str]:
     return []
 
 
-@contextmanager
-def _codex_host_login_env() -> Any:
-    """
-    Prefer host login state (~/.codex) over API-key env auth for Codex backlog mining.
-    """
-    previous: dict[str, str] = {}
-    for key in _CODEX_HOST_LOGIN_BLOCKED_ENV_VARS:
-        if key in os.environ:
-            previous[key] = os.environ.pop(key)
-    try:
-        yield
-    finally:
-        for key in _CODEX_HOST_LOGIN_BLOCKED_ENV_VARS:
-            os.environ.pop(key, None)
-        os.environ.update(previous)
-
-
-def run_backlog_prompt(
+def run_backlog_prompt_result(
     *,
     agent: str,
     prompt: str,
@@ -1243,8 +1611,9 @@ def run_backlog_prompt(
     workspace_dir: Path | None = None,
     allowed_tools: list[str] | None = None,
     include_directories: list[str] | None = None,
-) -> str:
-    """Execute a single backlog prompt and persist raw agent artifacts.
+    resume_session_id: str | None = None,
+) -> BacklogPromptResult:
+    """Execute one backlog prompt and retain its exact continuation identity.
 
     Parameters
     ----------
@@ -1269,8 +1638,8 @@ def run_backlog_prompt(
 
     Returns
     -------
-    str
-        Assistant output text extracted from adapter events.
+    BacklogPromptResult
+        Assistant output plus content-retained transport and session provenance.
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1280,13 +1649,33 @@ def run_backlog_prompt(
     last_message_path = out_dir / f"{tag}.last_message.txt"
     stderr_path = out_dir / f"{tag}.stderr.txt"
 
-    prompt_path.write_text(prompt, encoding="utf-8")
+    prompt_path.write_text(prompt, encoding="utf-8", newline="\n")
     _clear_agent_output_files(response_path)
+    invocation_started = time.monotonic()
 
     def _read_and_persist_response() -> str:
         response = _read_text(last_message_path)
-        response_path.write_text(response, encoding="utf-8")
+        response_path.write_text(response, encoding="utf-8", newline="\n")
         return response
+
+    def _result(
+        *, response: str, session_id: str | None, workspace: Path | None
+    ) -> BacklogPromptResult:
+        return BacklogPromptResult(
+            response=response,
+            agent_session_id=session_id,
+            resumed_from_session_id=resume_session_id,
+            workspace_dir=workspace,
+            prompt_path=prompt_path,
+            response_path=response_path,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            auth_receipt_path=(
+                _codex_auth_receipt_path(raw_events_path) if agent == "codex" else None
+            ),
+            elapsed_seconds=max(0.0, time.monotonic() - invocation_started),
+        )
 
     workspace: Path | None = None
     if workspace_dir is not None:
@@ -1297,7 +1686,7 @@ def run_backlog_prompt(
             ignore_cleanup_errors=(os.name == "nt"),
         ) as temp_dir:
             workspace = Path(temp_dir)
-            _run_agent_in_workspace(
+            session_id = _run_agent_in_workspace(
                 agent=agent,
                 workspace=workspace,
                 prompt=prompt,
@@ -1308,10 +1697,16 @@ def run_backlog_prompt(
                 cfg=cfg,
                 allowed_tools=allowed_tools,
                 include_directories=include_directories,
+                resume_session_id=resume_session_id,
             )
-            return _read_and_persist_response()
+            return _result(
+                response=_read_and_persist_response(),
+                session_id=session_id,
+                # Temporary workspaces are intentionally gone when this function returns.
+                workspace=None,
+            )
 
-    _run_agent_in_workspace(
+    session_id = _run_agent_in_workspace(
         agent=agent,
         workspace=workspace,
         prompt=prompt,
@@ -1322,9 +1717,41 @@ def run_backlog_prompt(
         cfg=cfg,
         allowed_tools=allowed_tools,
         include_directories=include_directories,
+        resume_session_id=resume_session_id,
     )
 
-    return _read_and_persist_response()
+    return _result(
+        response=_read_and_persist_response(),
+        session_id=session_id,
+        workspace=workspace.resolve(),
+    )
+
+
+def run_backlog_prompt(
+    *,
+    agent: str,
+    prompt: str,
+    out_dir: Path,
+    tag: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    workspace_dir: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
+) -> str:
+    """Backward-compatible text-only wrapper around :func:`run_backlog_prompt_result`."""
+
+    return run_backlog_prompt_result(
+        agent=agent,
+        prompt=prompt,
+        out_dir=out_dir,
+        tag=tag,
+        model=model,
+        cfg=cfg,
+        workspace_dir=workspace_dir,
+        allowed_tools=allowed_tools,
+        include_directories=include_directories,
+    ).response
 
 
 def _run_agent_in_workspace(
@@ -1339,35 +1766,177 @@ def _run_agent_in_workspace(
     cfg: RunnerConfig,
     allowed_tools: list[str] | None = None,
     include_directories: list[str] | None = None,
-) -> None:
+    resume_session_id: str | None = None,
+) -> str | None:
     tools = [t for t in (allowed_tools or []) if isinstance(t, str) and t.strip()]
-    include_dirs = [
-        d for d in (include_directories or []) if isinstance(d, str) and d.strip()
-    ]
+    include_dirs = [d for d in (include_directories or []) if isinstance(d, str) and d.strip()]
     _clear_agent_output_files(raw_events_path, last_message_path, stderr_path)
     if agent == "codex":
-        with _codex_host_login_env():
-            result = run_codex_exec(
-                workspace_dir=workspace,
+        binary = _agent_binary(cfg, "codex", "codex")
+        receipt_path = _codex_auth_receipt_path(raw_events_path)
+        _write_pending_codex_auth_receipt(receipt_path=receipt_path, prompt=prompt)
+        codex_home = _canonical_host_codex_home()
+        process_env_overrides = _codex_process_env_overrides(codex_home=codex_home)
+        configured_overrides = _codex_overrides(cfg)
+        effective_overrides = build_codex_subscription_config_overrides(
+            configured_overrides,
+            source="backlog_prompt",
+        )
+        preflight = probe_codex_login_status(
+            binary=binary,
+            codex_home=codex_home,
+            cwd=workspace,
+            config_overrides=effective_overrides,
+            env_overrides=process_env_overrides,
+        )
+        result: Any | None = None
+        model_attempted = False
+        primary_error: BaseException | None = None
+        provider_external_wait: dict[str, Any] | None = None
+        postcheck: CodexLoginStatusResult
+        try:
+            if not preflight.ok:
+                primary_error = RuntimeError(
+                    "Codex backlog prompt blocked: canonical host login did not report "
+                    "exactly `Logged in using ChatGPT` before model activation."
+                )
+            else:
+                model_attempted = True
+                try:
+                    result = run_codex_exec(
+                        workspace_dir=workspace,
+                        prompt=prompt,
+                        raw_events_path=raw_events_path,
+                        last_message_path=last_message_path,
+                        stderr_path=stderr_path,
+                        sandbox="read-only",
+                        ask_for_approval="never",
+                        binary=binary,
+                        model=model,
+                        config_overrides=effective_overrides,
+                        ignore_user_config=True,
+                        ignore_rules=True,
+                        skip_git_repo_check=True,
+                        env_overrides=process_env_overrides,
+                        resume_session_id=resume_session_id,
+                    )
+                except Exception as exc:
+                    primary_error = exc
+                else:
+                    if getattr(result, "exit_code", 0) != 0:
+                        provider_external_wait = _codex_subscription_wait_from_raw_events(
+                            raw_events_path
+                        )
+                        if provider_external_wait is None:
+                            excerpt = _stderr_excerpt(stderr_path)
+                            detail = f": {excerpt}" if excerpt else ""
+                            primary_error = RuntimeError(
+                                f"Codex backlog prompt failed exit_code={result.exit_code}{detail}"
+                            )
+        finally:
+            postcheck = probe_codex_login_status(
+                binary=binary,
+                codex_home=codex_home,
+                cwd=workspace,
+                config_overrides=effective_overrides,
+                env_overrides=process_env_overrides,
+            )
+            _write_codex_auth_receipt(
+                receipt_path=receipt_path,
+                prompt=prompt,
+                codex_home=codex_home,
+                configured_overrides=configured_overrides,
+                effective_overrides=effective_overrides,
+                process_env_overrides=process_env_overrides,
+                preflight=preflight,
+                postcheck=postcheck,
+                model_attempted=model_attempted,
+                model_exit_code=(
+                    int(getattr(result, "exit_code", 1)) if result is not None else None
+                ),
+                agent_session_id=(
+                    str(getattr(result, "thread_id", "")).strip() or None
+                    if result is not None
+                    else None
+                ),
+                resumed_from_session_id=resume_session_id,
+                raw_events_path=raw_events_path,
+                last_message_path=last_message_path,
+                stderr_path=stderr_path,
+                external_wait_detected=provider_external_wait is not None,
+            )
+        if provider_external_wait is not None:
+            external_wait_receipt_errors = verify_codex_auth_receipt(
+                receipt_path=receipt_path,
                 prompt=prompt,
                 raw_events_path=raw_events_path,
                 last_message_path=last_message_path,
                 stderr_path=stderr_path,
-                sandbox="read-only",
-                ask_for_approval="never",
-                binary=_agent_binary(cfg, "codex", "codex"),
-                model=model,
-                config_overrides=_codex_overrides(cfg),
-                ignore_rules=True,
-                skip_git_repo_check=True,
+                allow_external_wait=True,
             )
-        if getattr(result, "exit_code", 0) != 0:
-            excerpt = _stderr_excerpt(stderr_path)
-            detail = f": {excerpt}" if excerpt else ""
+            if not external_wait_receipt_errors:
+                external_wait_path = _codex_external_wait_artifact_path(raw_events_path)
+                provider_external_wait.update(
+                    {
+                        "agent_session_id": (
+                            str(getattr(result, "thread_id", "")).strip() or None
+                            if result is not None
+                            else None
+                        ),
+                        "resumed_from_session_id": resume_session_id,
+                        "workspace_dir": str(workspace.resolve()),
+                        "raw_events_path": str(raw_events_path.resolve()),
+                        "auth_receipt_path": str(receipt_path.resolve()),
+                        "external_wait_artifact": str(external_wait_path.resolve()),
+                        "auth_attestation": {
+                            "preflight_chatgpt_login_verified": True,
+                            "postcheck_chatgpt_login_verified": True,
+                            "subscription_route_verified": True,
+                            "api_billing_environment_disabled": True,
+                        },
+                    }
+                )
+                provider_external_wait["checkpoint_sha256"] = _json_digest(
+                    provider_external_wait
+                )
+                _write_json_atomic(external_wait_path, provider_external_wait)
+                primary_error = BacklogProviderExternalWait(provider_external_wait)
+            else:
+                primary_error = RuntimeError(
+                    "Codex backlog prompt external-wait subscription receipt invalid: "
+                    + ", ".join(external_wait_receipt_errors)
+                )
+        if primary_error is None:
+            receipt_errors = verify_codex_auth_receipt(
+                receipt_path=receipt_path,
+                prompt=prompt,
+                raw_events_path=raw_events_path,
+                last_message_path=last_message_path,
+                stderr_path=stderr_path,
+            )
+            if receipt_errors:
+                primary_error = RuntimeError(
+                    "Codex backlog prompt subscription receipt invalid: "
+                    + ", ".join(receipt_errors)
+                )
+        if not postcheck.ok:
             raise RuntimeError(
-                f"Codex backlog prompt failed exit_code={result.exit_code}{detail}"
+                "Codex backlog prompt rejected: canonical host login did not report "
+                "exactly `Logged in using ChatGPT` after model activation."
+            ) from primary_error
+        if primary_error is not None:
+            raise primary_error
+        session_id = (
+            str(getattr(result, "thread_id", "")).strip() or None if result is not None else None
+        )
+        if resume_session_id is not None and session_id != resume_session_id:
+            raise RuntimeError(
+                "backlog_prompt_codex_session_continuity_failed:"
+                f"expected={resume_session_id}:actual={session_id}"
             )
-        return
+        return session_id
+    if resume_session_id is not None:
+        raise ValueError("backlog_prompt_resume_session_requires_codex")
     if agent == "claude":
         result = run_claude_print(
             workspace_dir=workspace,
@@ -1384,10 +1953,8 @@ def _run_agent_in_workspace(
         if getattr(result, "exit_code", 0) != 0:
             excerpt = _stderr_excerpt(stderr_path)
             detail = f": {excerpt}" if excerpt else ""
-            raise RuntimeError(
-                f"Claude backlog prompt failed exit_code={result.exit_code}{detail}"
-            )
-        return
+            raise RuntimeError(f"Claude backlog prompt failed exit_code={result.exit_code}{detail}")
+        return None
     if agent == "gemini":
         result = run_gemini(
             workspace_dir=workspace,
@@ -1397,7 +1964,7 @@ def _run_agent_in_workspace(
             stderr_path=stderr_path,
             binary=_agent_binary(cfg, "gemini", "gemini"),
             output_format=_agent_output_format(cfg, "gemini"),
-            sandbox=False,
+            sandbox=True,
             model=model,
             approval_mode="default",
             allowed_tools=tools,
@@ -1406,10 +1973,8 @@ def _run_agent_in_workspace(
         if getattr(result, "exit_code", 0) != 0:
             excerpt = _stderr_excerpt(stderr_path)
             detail = f": {excerpt}" if excerpt else ""
-            raise RuntimeError(
-                f"Gemini backlog prompt failed exit_code={result.exit_code}{detail}"
-            )
-        return
+            raise RuntimeError(f"Gemini backlog prompt failed exit_code={result.exit_code}{detail}")
+        return None
     raise ValueError(f"Unsupported backlog agent: {agent!r}")
 
 
@@ -1967,12 +2532,7 @@ def _run_single_miner(
     input_manifest_digest = _json_digest(input_manifest)
     cached_manifest = _load_json_dict(input_manifest_path)
 
-    if (
-        resume
-        and not force
-        and tickets_json_path.exists()
-        and cached_manifest == input_manifest
-    ):
+    if resume and not force and tickets_json_path.exists() and cached_manifest == input_manifest:
         cached = _load_cached_tickets(tickets_json_path)
         allowed_atom_ids = set(input_manifest["atom_ids"])
         if _tickets_match_atom_scope(cached, allowed_atom_ids=allowed_atom_ids):
@@ -2172,8 +2732,7 @@ def _fallback_merge_ticket(left: dict[str, Any], right: dict[str, Any]) -> dict[
         _warn_nonfatal_fallback(
             code="merge_fallback_empty",
             message=(
-                "Fallback dedupe produced no merged ticket; reusing left candidate as "
-                "best effort."
+                "Fallback dedupe produced no merged ticket; reusing left candidate as best effort."
             ),
         )
     return merged_list[0] if merged_list else dict(left)
@@ -2427,11 +2986,7 @@ def _run_orphan_passes(
 
         selection_seed = seed + pass_idx * 911
         rng = random.Random(selection_seed)
-        sample_n = (
-            min(sample_size, len(orphan_atoms))
-            if sample_size > 0
-            else len(orphan_atoms)
-        )
+        sample_n = min(sample_size, len(orphan_atoms)) if sample_size > 0 else len(orphan_atoms)
         run_cap = 8
         subset = _sample_with_run_cap(
             orphan_atoms,
@@ -2501,7 +3056,11 @@ def run_backlog_ensemble(
     merge_keep_anchor_pairs: bool = False,
     orphan_pass: int,
 ) -> dict[str, Any]:
-    """Execute full backlog mining pipeline and return tickets plus run metadata.
+    """Run the legacy one-pass miner for analysis only.
+
+    This compatibility API is intentionally non-exporting. Authoritative automated
+    backlog work must use the staged case/research/option/selection/plan pipeline so
+    lineage, self-healing, and outcome contracts are retained exactly once.
 
     Parameters
     ----------
@@ -2548,6 +3107,12 @@ def run_backlog_ensemble(
         Ticket payload and miners metadata.
     """
 
+    warnings.warn(
+        "run_backlog_ensemble is legacy analysis-only output and is not eligible "
+        "for automated ticket export; use the six-stage reports backlog pipeline",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     jobs = _build_miner_jobs(
         atoms=atoms,
@@ -2637,6 +3202,9 @@ def run_backlog_ensemble(
     miners_failed = sum(1 for item in job_meta if item.get("status") == "parse_failed")
 
     return {
+        "pipeline_kind": "legacy_one_pass_analysis",
+        "analysis_only": True,
+        "export_eligible": False,
         "tickets": unique_tickets,
         "miners_meta": {
             "miners_total": len(jobs),
