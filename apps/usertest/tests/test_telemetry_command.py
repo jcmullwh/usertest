@@ -214,6 +214,8 @@ def test_telemetry_exec_records_and_resolves_measured_retry_failure(
     assert failure["attributes"]["error_kind"] == "process_exit_nonzero"
     assert failure["attributes"]["exit_code"] == 7
     assert failure["attributes"]["terminal"] is False
+    assert failure["attributes"]["accounting_scope"] == "support"
+    assert failure["attributes"]["work_scope"] == "outside_platform"
     assert failure["parent_event_id"] == first_rows[1]["event_id"]
     first_case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))["cases"][
         0
@@ -250,6 +252,8 @@ def test_telemetry_exec_records_and_resolves_measured_retry_failure(
     resolution = rows[-1]
     assert resolution["error_cluster_id"] == failure["error_cluster_id"]
     assert resolution["attributes"]["resolution_mode"] == "self_healed_controller"
+    assert resolution["attributes"]["accounting_scope"] == "support"
+    assert resolution["attributes"]["work_scope"] == "outside_platform"
     assert resolution["attributes"]["resolution_work_unit_ids"] == [
         rows[-2]["context"]["work_unit_id"]
     ]
@@ -264,6 +268,9 @@ def test_telemetry_exec_records_and_resolves_measured_retry_failure(
     assert case["errors"]["self_healed_cluster_count"] == 1
     assert case["errors"]["open_cluster_count"] == 0
     assert case["errors"]["clusters"][0]["resolution_cost_attribution_complete"] is True
+    reconciliation_codes = {item["code"] for item in case["reconciliation"]["issues"]}
+    assert "work_unit_scope_conflict" not in reconciliation_codes
+    assert "work_unit_token_scope_conflict" not in reconciliation_codes
 
 
 def test_telemetry_action_record_retains_manual_burden(tmp_path: Path) -> None:

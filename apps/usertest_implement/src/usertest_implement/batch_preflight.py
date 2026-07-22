@@ -106,12 +106,15 @@ def _github_cli_ready(*, repo_root: Path, preflight_dir: Path) -> bool:
     return user_proc.returncode == 0 and repo_proc.returncode == 0
 
 
-def _git_branch(repo_root: Path) -> str:
+def _git_branch(repo_root: Path) -> str | None:
     proc = _run(["git", "branch", "--show-current"], cwd=repo_root)
     branch = proc.stdout.strip()
-    if proc.returncode != 0 or not branch:
+    if proc.returncode != 0:
         raise RuntimeError("Unable to determine git branch.")
-    return branch
+    # A clean controller runtime is intentionally allowed to be pinned at an
+    # immutable detached HEAD. Branch identity is optional provenance; the
+    # commit below is the authoritative execution and CI identity.
+    return branch or None
 
 
 def _git_head(repo_root: Path) -> str:
@@ -224,6 +227,27 @@ def run_batch_preflight(
     preflight_dir = batch_dir / "preflight"
     preflight_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve cheap, foundational repository identity before any whole-repo
+    # qualification. A malformed repository must not consume the dominant
+    # preflight interval before failing.
+    branch = _git_branch(repo_root)
+    head_sha = _git_head(repo_root)
+    checkout_mode = "branch" if branch is not None else "detached"
+    (preflight_dir / "git_identity.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "checkout_mode": checkout_mode,
+                "branch": branch,
+                "head_sha": head_sha,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     if bool(defaults.get("require_clean_git", True)):
         proc = _run(["git", "status", "--porcelain"], cwd=repo_root)
         _write_log(preflight_dir / "git_status.log", proc)
@@ -293,8 +317,6 @@ def run_batch_preflight(
                 )
             )
 
-    branch = _git_branch(repo_root)
-    head_sha = _git_head(repo_root)
     base_ci_run_url: str | None = None
     require_base_ci = bool(defaults.get("require_ci_green_for_base", True))
     require_github = require_base_ci or _batch_remote_handoff_requested(
@@ -330,8 +352,8 @@ def run_batch_preflight(
                 "list",
                 "--workflow",
                 "CI",
-                "--branch",
-                branch,
+                "--commit",
+                head_sha,
                 "--limit",
                 "50",
                 "--json",
@@ -560,6 +582,7 @@ def run_batch_preflight(
 
     return {
         "branch": branch,
+        "checkout_mode": checkout_mode,
         "head_sha": head_sha,
         "base_ci_run_url": base_ci_run_url,
         "maintenance_image_metadata": maintenance_image_metadata,

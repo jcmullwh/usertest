@@ -403,6 +403,69 @@ def test_manual_action_interval_does_not_imply_active_time() -> None:
     )
 
 
+def test_legacy_telemetry_exec_errors_reuse_paired_action_scopes() -> None:
+    group_id = "exec-attempt-group:legacy-scope"
+    events = [
+        _event(
+            "action.completed",
+            "life:legacy-telemetry-exec",
+            at="2026-07-21T00:00:01Z",
+            work_unit_id="work:failed-attempt",
+            action_id="action:failed-attempt",
+            actor="supervising_agent",
+            work_scope="qualification",
+            active_seconds=1,
+            started_at="2026-07-21T00:00:00Z",
+            ended_at="2026-07-21T00:00:01Z",
+            telemetry_exec_attempt_group_id=group_id,
+        ),
+        _event(
+            "error.occurred",
+            "life:legacy-telemetry-exec",
+            at="2026-07-21T00:00:01Z",
+            work_unit_id="work:failed-attempt",
+            actor="supervising_agent",
+            error_cluster_id="error:legacy-scope",
+            telemetry_exec_attempt_group_id=group_id,
+        ),
+        _event(
+            "action.completed",
+            "life:legacy-telemetry-exec",
+            at="2026-07-21T00:00:02Z",
+            work_unit_id="work:successful-attempt",
+            action_id="action:successful-attempt",
+            actor="supervising_agent",
+            work_scope="qualification",
+            active_seconds=1,
+            started_at="2026-07-21T00:00:01Z",
+            ended_at="2026-07-21T00:00:02Z",
+            telemetry_exec_attempt_group_id=group_id,
+        ),
+        _event(
+            "error.resolved",
+            "life:legacy-telemetry-exec",
+            at="2026-07-21T00:00:02Z",
+            work_unit_id="work:successful-attempt",
+            actor="supervising_agent",
+            error_cluster_id="error:legacy-scope",
+            resolution_mode="resolved_supervisor",
+            resolution_work_unit_ids=["work:successful-attempt"],
+            resolution_cost_attribution_complete=True,
+            telemetry_exec_attempt_group_id=group_id,
+        ),
+    ]
+
+    report = aggregate_case_metrics(events)
+
+    issue_codes = {item["code"] for item in report["reconciliation"]["issues"]}
+    assert "work_unit_scope_conflict" not in issue_codes
+    assert "work_unit_token_scope_conflict" not in issue_codes
+    units = {unit["work_unit_id"]: unit for unit in report["work_units"]}
+    for work_unit_id in ("work:failed-attempt", "work:successful-attempt"):
+        assert units[work_unit_id]["scope"] == "support"
+        assert units[work_unit_id]["token_scope"] == "qualification"
+
+
 def test_legacy_manual_exec_wall_time_is_migrated_to_unknown() -> None:
     common = {
         "action_id": "action:legacy-exec",

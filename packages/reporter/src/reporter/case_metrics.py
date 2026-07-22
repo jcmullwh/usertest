@@ -893,6 +893,13 @@ def _work_scope(
         return "shared"
     if event_type.startswith("intervention") or event_type.startswith("action"):
         return "support"
+    if event_type.startswith("error") and _string(
+        _field(event, "telemetry_exec_attempt_group_id")
+    ):
+        # telemetry-exec error events describe the same concrete support action
+        # as their action.started/action.completed parents. Older streams did
+        # not copy the explicit accounting scope onto the error event.
+        return "support"
     if owner_case_id is None or len(beneficiary_case_ids) > 1:
         return "shared"
     return "direct"
@@ -942,6 +949,12 @@ def _canonical_token_scope(event: Mapping[str, Any]) -> str | None:
         canonical = aliases.get(normalized)
         if canonical is not None:
             return canonical
+
+    if _string(_field(event, "telemetry_exec_attempt_group_id")) is not None:
+        # Legacy telemetry-exec error events omitted work_scope. Do not infer a
+        # conflicting scope from the actor; the paired action event remains the
+        # authoritative source for this concrete work unit.
+        return None
 
     actor = _normalize_label(
         _string(_field(event, "actor_type", "actor", "origin")) or ""

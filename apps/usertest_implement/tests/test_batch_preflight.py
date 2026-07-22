@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -10,8 +11,141 @@ from runner_core.execution_backend import MaintenanceDockerConfig
 from usertest_implement import batch_preflight
 
 
-def _completed(argv: list[str], *, returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(argv, returncode, stdout="", stderr="")
+def _completed(
+    argv: list[str], *, returncode: int = 0, stdout: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+
+
+def test_git_branch_accepts_detached_head(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        batch_preflight,
+        "_run",
+        lambda argv, **kwargs: _completed(argv, stdout="\n"),
+    )
+
+    assert batch_preflight._git_branch(tmp_path) is None
+
+
+def test_batch_preflight_resolves_detached_identity_before_local_qualification(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "default_profile": "local_exercise",
+                "profiles": {
+                    "local_exercise": {"run_common": {"push": False, "pr": False}}
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    events: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        events.append("run:" + " ".join(argv))
+        return _completed(argv)
+
+    monkeypatch.setattr(batch_preflight, "_run", fake_run)
+    monkeypatch.setattr(
+        batch_preflight,
+        "_git_branch",
+        lambda _: events.append("identity:branch") or None,
+    )
+    monkeypatch.setattr(
+        batch_preflight,
+        "_git_head",
+        lambda _: events.append("identity:head") or "abc123",
+    )
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+
+    result = batch_preflight.run_batch_preflight(
+        repo_root=tmp_path,
+        batch_dir=tmp_path / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": True,
+                "require_ci_green_for_base": False,
+                "run_settings_path": str(settings_path),
+                "run_settings_profile": "local_exercise",
+            }
+        },
+        worker_roster=[],
+        exec_backend="host",
+    )
+
+    assert result["branch"] is None
+    assert result["checkout_mode"] == "detached"
+    assert result["head_sha"] == "abc123"
+    assert events[:2] == ["identity:branch", "identity:head"]
+    identity = json.loads(
+        (tmp_path / "batch" / "preflight" / "git_identity.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert identity == {
+        "branch": None,
+        "checkout_mode": "detached",
+        "head_sha": "abc123",
+        "schema_version": 1,
+    }
+
+
+def test_batch_preflight_qualifies_ci_by_commit_when_detached(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    called: list[list[str]] = []
+    ci_runs = json.dumps(
+        [
+            {
+                "databaseId": 7,
+                "headSha": "abc123",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "createdAt": "2026-07-22T00:00:00Z",
+                "url": "https://example.test/actions/7",
+            }
+        ]
+    )
+
+    def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        called.append(argv)
+        if argv[:3] == ["gh", "run", "list"]:
+            return _completed(argv, stdout=ci_runs)
+        return _completed(argv)
+
+    monkeypatch.setattr(batch_preflight, "_run", fake_run)
+    monkeypatch.setattr(batch_preflight, "_git_branch", lambda _: None)
+    monkeypatch.setattr(batch_preflight, "_git_head", lambda _: "abc123")
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+
+    result = batch_preflight.run_batch_preflight(
+        repo_root=tmp_path,
+        batch_dir=tmp_path / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": False,
+                "require_ci_green_for_base": True,
+            }
+        },
+        worker_roster=[],
+        exec_backend="host",
+    )
+
+    ci_query = next(argv for argv in called if argv[:3] == ["gh", "run", "list"])
+    assert ci_query[ci_query.index("--commit") + 1] == "abc123"
+    assert "--branch" not in ci_query
+    assert result["base_ci_run_url"] == "https://example.test/actions/7"
+    assert result["blockers"] == []
 
 
 def test_batch_preflight_skips_github_auth_for_local_exercise_profile(

@@ -664,8 +664,22 @@ def test_docker_resource_plan_is_rendered_to_batch_state_and_artifacts(tmp_path:
     persisted_summary = json.loads(summary_path(batch_dir).read_text(encoding="utf-8"))
     persisted_plan = json.loads(docker_resource_plan_path(batch_dir).read_text(encoding="utf-8"))
     assert persisted_state["docker_resource_plan"] == plan
+    assert persisted_state["batch_checkout_mode"] == "branch"
     assert persisted_summary["docker_resource_plan"] == plan
     assert persisted_plan == plan
+
+
+def test_initial_batch_state_retains_detached_checkout_mode() -> None:
+    state = build_initial_state(
+        batch_id="20260709T000000Z",
+        batch_commit="abc123",
+        batch_branch=None,
+        base_ci_run_url="https://example.test/actions/7",
+        workers=[],
+    )
+
+    assert state["batch_branch"] is None
+    assert state["batch_checkout_mode"] == "detached"
 
 
 def test_pick_launchable_candidate_index_respects_conflict_keys(tmp_path: Path) -> None:
