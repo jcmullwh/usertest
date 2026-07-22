@@ -5,7 +5,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from run_artifacts.lifecycle_events import TelemetryArtifactError
+from run_artifacts.lifecycle_events import (
+    LifecycleContext,
+    TelemetryArtifactError,
+    lifecycle_context_env,
+)
 
 from usertest.cli import main
 
@@ -33,17 +37,105 @@ def test_telemetry_exec_records_redacted_unknown_boundary(tmp_path: Path) -> Non
             "--api-key=sk-this-must-never-be-retained",
         ]
     )
+
     assert code == 0
     rows = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
     assert [row["event_type"] for row in rows] == ["action.started", "action.completed"]
     assert rows[0]["context"]["work_unit_id"] == rows[1]["context"]["work_unit_id"]
     assert all(row["origin"] == "unknown_external" for row in rows)
+    assert rows[1]["active_seconds"] is None
+    assert rows[1]["attributes"]["active_seconds_source"] == "unknown"
+    assert rows[1]["attributes"]["resource_time_unknown"] is True
+    assert rows[1]["attributes"]["subprocess_wall_seconds"] >= 0
     serialized = json.dumps(rows)
     assert "sk-this-must-never-be-retained" not in serialized
     assert "redacted" in serialized.casefold()
     assert (tmp_path / "case_metrics.json").is_file()
     assert (tmp_path / "cohort_metrics.json").is_file()
 
+
+def test_telemetry_exec_does_not_infer_supervisor_active_time_from_child_wall(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    code = _invoke(
+        [
+            "telemetry",
+            "exec",
+            "--events",
+            str(events),
+            "--case-lifecycle-id",
+            "life-supervisor-launch",
+            "--case-id",
+            "case-supervisor-launch",
+            "--actor",
+            "supervising_agent",
+            "--",
+            sys.executable,
+            "-c",
+            "print('automated child')",
+        ]
+    )
+
+    assert code == 0
+    rows = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    completed = rows[1]
+    assert completed["active_seconds"] is None
+    assert completed["attributes"]["subprocess_wall_seconds"] >= 0
+    assert completed["attributes"]["resource_time_unknown"] is True
+    assert (
+        completed["attributes"]["resource_time_unknown_reason"]
+        == "manual_boundary_child_time_unattributable"
+    )
+
+    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))[
+        "cases"
+    ][0]
+    assert case["manual_actions"]["active_seconds"] is None
+    assert case["manual_actions"]["known_active_seconds"] == 0
+    assert case["accounting"]["all_in"]["gross"]["active_seconds"] is None
+    assert (
+        case["accounting"]["all_in"]["gross"]["wall_clock_interval_union_seconds"]
+        >= 0
+    )
+
+
+def test_telemetry_exec_verified_controller_child_is_automatic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    parent = LifecycleContext(
+        cycle_id="controller-cycle",
+        system_fingerprint={"controller_context_verified": "true"},
+    )
+    for name, value in lifecycle_context_env(parent).items():
+        monkeypatch.setenv(name, value)
+
+    assert (
+        _invoke(
+            [
+                "telemetry",
+                "exec",
+                "--events",
+                str(events),
+                "--",
+                sys.executable,
+                "-c",
+                "print('automatic child')",
+            ]
+        )
+        == 0
+    )
+
+    completed = json.loads(events.read_text(encoding="utf-8").splitlines()[1])
+    assert completed["actor_type"] == "controller"
+    assert completed["origin"] == "automatic"
+    assert completed["active_seconds"] >= 0
+    assert (
+        completed["attributes"]["active_seconds_source"]
+        == "verified_automatic_subprocess_wall"
+    )
+    assert completed["attributes"]["resource_time_unknown"] is False
 
 def test_telemetry_action_record_retains_manual_burden(tmp_path: Path) -> None:
     events = tmp_path / "lifecycle_events.jsonl"

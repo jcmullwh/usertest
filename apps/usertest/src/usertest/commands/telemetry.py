@@ -120,6 +120,15 @@ def add_telemetry_command(
     _add_action_arguments(execute)
     execute.add_argument("--cwd", type=Path)
     execute.add_argument(
+        "--active-seconds",
+        type=float,
+        help=(
+            "Explicit active time inside the measured subprocess interval. "
+            "Without this value, direct human, supervisor, and unknown boundaries "
+            "retain active time as unknown."
+        ),
+    )
+    execute.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command argv, normally supplied after --.",
@@ -277,6 +286,11 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
     context, verified_parent = _context_from_args(args)
     actor, initiator, origin = _event_actor(args, verified_parent=verified_parent)
     command = _clean_command(list(args.command))
+    explicit_active_seconds = (
+        float(args.active_seconds) if args.active_seconds is not None else None
+    )
+    if explicit_active_seconds is not None and explicit_active_seconds < 0:
+        raise ValueError("--active-seconds must be non-negative")
     redacted = redact_command(command)
     action_id = f"action:{uuid.uuid4()}"
     invocation_id = f"invocation:{uuid.uuid4()}"
@@ -324,6 +338,7 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
             attributes=_action_attributes(
                 args,
                 action_id=action_id,
+                telemetry_exec_timing_version=2,
                 command_family=command_family(command),
                 redacted_command=redacted,
                 command_fingerprint=fingerprint_command(redacted),
@@ -352,7 +367,26 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
         execution_error = exc
         result_code = 1
     ended_at = utc_now()
-    active_seconds = max(0.0, time.monotonic() - started_monotonic)
+    subprocess_wall_seconds = max(0.0, time.monotonic() - started_monotonic)
+    active_seconds = (
+        explicit_active_seconds
+        if explicit_active_seconds is not None
+        else subprocess_wall_seconds
+        if child_is_automatic
+        else None
+    )
+    resource_time_complete = (
+        active_seconds is not None
+        and active_seconds + 1e-6 >= subprocess_wall_seconds
+    )
+    resource_time_unknown_reason: str | None = None
+    if not resource_time_complete:
+        if explicit_active_seconds is not None:
+            resource_time_unknown_reason = "subprocess_interval_partially_classified"
+        elif args.actor in {"human", "supervising_agent"}:
+            resource_time_unknown_reason = "manual_boundary_child_time_unattributable"
+        else:
+            resource_time_unknown_reason = "external_boundary_time_unattributable"
     append_lifecycle_event(
         args.events,
         make_lifecycle_event(
@@ -366,9 +400,20 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
             attributes=_action_attributes(
                 args,
                 action_id=action_id,
+                telemetry_exec_timing_version=2,
                 command_family=command_family(command),
                 redacted_command=redacted,
                 command_fingerprint=fingerprint_command(redacted),
+                subprocess_wall_seconds=subprocess_wall_seconds,
+                active_seconds_source=(
+                    "explicit"
+                    if explicit_active_seconds is not None
+                    else "verified_automatic_subprocess_wall"
+                    if child_is_automatic
+                    else "unknown"
+                ),
+                resource_time_unknown=not resource_time_complete,
+                resource_time_unknown_reason=resource_time_unknown_reason,
                 exit_code=result_code,
                 result="success" if result_code == 0 else "failure",
                 execution_error_type=(

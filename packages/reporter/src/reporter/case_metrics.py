@@ -644,6 +644,8 @@ def _new_work_unit(work_unit_id: str) -> dict[str, Any]:
         "tokens_explicit": False,
         "cost_unknown": False,
         "cost_unknown_reasons": set(),
+        "resource_time_unknown": False,
+        "resource_time_unknown_reasons": set(),
         "active_seconds": None,
         "machine_wait_seconds": None,
         "external_wait_seconds": None,
@@ -693,6 +695,21 @@ def _duration_seconds(event: Mapping[str, Any]) -> float | None:
             timing.get("elapsed_seconds", timing.get("duration_seconds", timing.get("seconds")))
         )
     return None
+
+
+def _legacy_exec_active_time_unattributable(event: Mapping[str, Any]) -> bool:
+    """Identify pre-v2 exec boundaries whose wall time was mislabeled active."""
+
+    if _field(event, "telemetry_exec_timing_version") is not None:
+        return False
+    if _string(_field(event, "redacted_command")) is None or _string(
+        _field(event, "command_fingerprint")
+    ) is None:
+        return False
+    origin = _string(_field(event, "origin"))
+    if origin is not None and _normalize_label(origin) == "automatic":
+        return False
+    return _canonical_actor(event) in {"human", "supervisor", "external", "unknown"}
 
 
 def _wait_seconds(event: Mapping[str, Any], field: str) -> float | None:
@@ -1073,6 +1090,18 @@ def _merge_work_cost(
         reason = _string(_field(event, "cost_unknown_reason", "prior_cost_unknown_reason"))
         if reason is not None:
             work["cost_unknown_reasons"].add(reason)
+    legacy_exec_time_unknown = _legacy_exec_active_time_unattributable(event)
+    if legacy_exec_time_unknown:
+        work["resource_time_unknown"] = True
+        work["resource_time_unknown_reasons"].add(
+            "legacy_manual_exec_subprocess_wall_unattributable"
+        )
+    resource_time_unknown = _bool_field(event, "resource_time_unknown")
+    if resource_time_unknown is True:
+        work["resource_time_unknown"] = True
+        reason = _string(_field(event, "resource_time_unknown_reason"))
+        if reason is not None:
+            work["resource_time_unknown_reasons"].add(reason)
     tokens, explicit_tokens, token_issues = _extract_tokens(event)
     for code in token_issues:
         _issue(issues, code, work_unit_id=work_unit_id)
@@ -1084,7 +1113,7 @@ def _merge_work_cost(
             work["tokens"] = tokens
             work["tokens_explicit"] = True
 
-    duration = _duration_seconds(event)
+    duration = None if legacy_exec_time_unknown else _duration_seconds(event)
     if duration is not None:
         previous_duration = work["active_seconds"]
         if previous_duration is not None and not math.isclose(previous_duration, duration):
@@ -1525,7 +1554,11 @@ def _collect_events(events: list[dict[str, Any]]) -> tuple[
                     item["completed_at"] = action_end
                 elif event_type.endswith("completed"):
                     item["completed_at"] = timestamp
-                explicit_active = _duration_seconds(event)
+                explicit_active = (
+                    None
+                    if _legacy_exec_active_time_unattributable(event)
+                    else _duration_seconds(event)
+                )
                 if explicit_active is not None:
                     item["active_seconds"] = explicit_active
                 if avoidable is not None:
@@ -1780,6 +1813,13 @@ def _finalize_work_units(
                 work_unit_id=work_unit_id,
                 detail=",".join(sorted(work["cost_unknown_reasons"])) or None,
             )
+        if work["resource_time_unknown"]:
+            _issue(
+                issues,
+                "work_unit_resource_time_unknown",
+                work_unit_id=work_unit_id,
+                detail=",".join(sorted(work["resource_time_unknown_reasons"])) or None,
+            )
         if "model.invocation.completed" in event_types and not work["tokens_explicit"]:
             code = (
                 "token_receipt_unmaterialized"
@@ -1938,6 +1978,8 @@ def _cost_for_work_ids(
     avoidable_waits = {category: 0.0 for category in WAIT_CATEGORIES}
     unknown_gross_cost_work_units = 0
     unknown_avoidable_cost_work_units = 0
+    unknown_gross_resource_time_work_units = 0
+    unknown_avoidable_resource_time_work_units = 0
 
     for work_unit_id in sorted(work_unit_ids):
         work = work_units[work_unit_id]
@@ -1945,6 +1987,10 @@ def _cost_for_work_ids(
             unknown_gross_cost_work_units += 1
             if work.get("avoidable") is not False:
                 unknown_avoidable_cost_work_units += 1
+        if work.get("resource_time_unknown") is True:
+            unknown_gross_resource_time_work_units += 1
+            if work.get("avoidable") is not False:
+                unknown_avoidable_resource_time_work_units += 1
         active_seconds = work.get("active_seconds")
         machine_wait_seconds = work.get("machine_wait_seconds")
         external_wait_seconds = work.get("external_wait_seconds")
@@ -2042,16 +2088,22 @@ def _cost_for_work_ids(
         + avoidable_machine_wait_seconds
         + avoidable_external_wait_seconds
     )
-    gross_time_complete = unknown_gross_cost_work_units == 0
-    avoidable_time_complete = unknown_avoidable_cost_work_units == 0
+    gross_time_complete = (
+        unknown_gross_cost_work_units == 0
+        and unknown_gross_resource_time_work_units == 0
+    )
+    avoidable_time_complete = (
+        unknown_avoidable_cost_work_units == 0
+        and unknown_avoidable_resource_time_work_units == 0
+    )
     gross_wall = (
         wall
-        if gross_time_complete
+        if unknown_gross_cost_work_units == 0
         else {key: None for key in wall}
     )
     avoidable_wall_published = (
         avoidable_wall
-        if avoidable_time_complete
+        if unknown_avoidable_cost_work_units == 0
         else {key: None for key in avoidable_wall}
     )
     gross_waits_published: dict[str, float | None] = {}
@@ -2088,6 +2140,9 @@ def _cost_for_work_ids(
             "known_wait_seconds_by_category": gross_waits,
             "known_accounted_resource_seconds": gross_accounted_seconds,
             "unknown_cost_work_units": unknown_gross_cost_work_units,
+            "unknown_resource_time_work_units": (
+                unknown_gross_resource_time_work_units
+            ),
             **gross_wall,
         },
         "avoidable": {
@@ -2113,6 +2168,9 @@ def _cost_for_work_ids(
             "known_wait_seconds_by_category": avoidable_waits,
             "known_accounted_resource_seconds": avoidable_accounted_seconds,
             "unknown_cost_work_units": unknown_avoidable_cost_work_units,
+            "unknown_resource_time_work_units": (
+                unknown_avoidable_resource_time_work_units
+            ),
             **avoidable_wall_published,
         },
         "completeness": {
@@ -2124,6 +2182,9 @@ def _cost_for_work_ids(
             "interval_work_units": len(intervals),
             "work_units": len(work_unit_ids),
             "unknown_cost_work_units": unknown_gross_cost_work_units,
+            "unknown_resource_time_work_units": (
+                unknown_gross_resource_time_work_units
+            ),
             "cost_complete": gross_time_complete,
             "token_ratio": gross_token_cost["dimension_completeness"]["total_tokens"][
                 "ratio"
@@ -2516,18 +2577,10 @@ def _serialize_actions(items: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
             measurement_administration_count += 1
         actor = _string(item.get("actor")) or "unknown"
         by_actor[actor] += 1
-        started_at = item.get("started_at")
-        completed_at = item.get("completed_at")
         explicit_active = item.get("active_seconds")
         elapsed_seconds: float | None = (
             float(explicit_active) if isinstance(explicit_active, (int, float)) else None
         )
-        if elapsed_seconds is None and isinstance(started_at, datetime) and isinstance(
-            completed_at, datetime
-        ):
-            candidate = (completed_at - started_at).total_seconds()
-            if candidate >= 0:
-                elapsed_seconds = candidate
         if elapsed_seconds is not None:
             active_seconds += elapsed_seconds
         else:
@@ -2624,6 +2677,10 @@ def _serialize_work_unit(work: Mapping[str, Any]) -> dict[str, Any]:
         "manual": work["manual"],
         "cost_unknown": work["cost_unknown"],
         "cost_unknown_reasons": sorted(work["cost_unknown_reasons"]),
+        "resource_time_unknown": work["resource_time_unknown"],
+        "resource_time_unknown_reasons": sorted(
+            work["resource_time_unknown_reasons"]
+        ),
         "tokens": dict(tokens) if isinstance(tokens, Mapping) else None,
         "active_seconds": work["active_seconds"],
         "machine_wait_seconds": work["machine_wait_seconds"],

@@ -62,6 +62,12 @@ The command is executed with propagated lifecycle context. The persisted command
 fingerprinted. A direct CLI launch with no verified controller parent stays `unknown_external`
 unless `--actor` supplies a proven human or supervising-agent origin.
 
+The subprocess interval is always retained as wall-clock evidence. It is not inferred to be
+human or supervising-agent active time. Supply `--active-seconds` only when active time inside that
+interval is known; otherwise active/resource classification remains unknown while the wall
+interval remains reportable. A child launched from verified controller context is automatic and
+uses its subprocess interval as active resource time unless a more precise value is supplied.
+
 For unavoidable browser, UI, approval, or other external actions, record the completed action:
 
 ```powershell

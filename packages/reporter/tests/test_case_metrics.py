@@ -361,6 +361,86 @@ def test_action_start_and_completion_share_nested_action_identity() -> None:
     assert case["manual_actions"]["items"][0]["id"] == "action:paired"
 
 
+def test_manual_action_interval_does_not_imply_active_time() -> None:
+    started = _event(
+        "action.started",
+        "life:unknown-action-time",
+        at="2026-07-21T00:00:00Z",
+        action_id="action:unknown-time",
+        actor="supervising_agent",
+        manual=True,
+        work_unit_id="work:unknown-action-time",
+        started_at="2026-07-21T00:00:00Z",
+    )
+    completed = _event(
+        "action.completed",
+        "life:unknown-action-time",
+        at="2026-07-21T00:00:03Z",
+        action_id="action:unknown-time",
+        actor="supervising_agent",
+        manual=True,
+        work_unit_id="work:unknown-action-time",
+        started_at="2026-07-21T00:00:00Z",
+        ended_at="2026-07-21T00:00:03Z",
+        resource_time_unknown=True,
+        resource_time_unknown_reason="manual_boundary_child_time_unattributable",
+    )
+
+    [case] = aggregate_case_metrics([started, completed])["cases"]
+
+    assert case["manual_actions"]["count"] == 1
+    assert case["manual_actions"]["active_seconds"] is None
+    assert case["manual_actions"]["known_active_seconds"] == 0
+    assert case["manual_actions"]["missing_active_seconds_count"] == 1
+    gross = case["accounting"]["all_in"]["gross"]
+    assert gross["active_seconds"] is None
+    assert gross["known_active_seconds"] == 0
+    assert gross["unknown_resource_time_work_units"] == 1
+    assert gross["wall_clock_interval_union_seconds"] == 3
+    assert any(
+        issue["code"] == "work_unit_resource_time_unknown"
+        for issue in case["reconciliation"]["issues"]
+    )
+
+
+def test_legacy_manual_exec_wall_time_is_migrated_to_unknown() -> None:
+    common = {
+        "action_id": "action:legacy-exec",
+        "actor": "supervising_agent",
+        "manual": True,
+        "work_unit_id": "work:legacy-exec",
+        "redacted_command": "python tools/continuous_implement_loop.py",
+        "command_fingerprint": "legacy-command-fingerprint",
+        "started_at": "2026-07-21T00:00:00Z",
+    }
+    started = _event(
+        "action.started",
+        "life:legacy-exec",
+        at="2026-07-21T00:00:00Z",
+        **common,
+    )
+    completed = _event(
+        "action.completed",
+        "life:legacy-exec",
+        at="2026-07-21T00:07:26Z",
+        ended_at="2026-07-21T00:07:26Z",
+        active_seconds=446,
+        **common,
+    )
+
+    [case] = aggregate_case_metrics([started, completed])["cases"]
+
+    assert case["manual_actions"]["count"] == 1
+    assert case["manual_actions"]["active_seconds"] is None
+    assert case["manual_actions"]["known_active_seconds"] == 0
+    gross = case["accounting"]["all_in"]["gross"]
+    assert gross["active_seconds"] is None
+    assert gross["known_active_seconds"] == 0
+    assert gross["wall_clock_interval_union_seconds"] == 446
+    [work] = case["accounting"]["all_in"]["work_unit_ids"]
+    assert work == "work:legacy-exec"
+
+
 def test_jsonl_loader_and_missing_reconciliation_withhold_certification(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.jsonl"
     events = [

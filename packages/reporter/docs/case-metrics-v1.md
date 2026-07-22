@@ -47,6 +47,12 @@ inside the observed interval span and gaps between lineage opening and final dis
 - summed active, manual-active, machine-wait, and external-wait time;
 - interval-union wall time and unclassified time.
 
+`resource_time_unknown` withholds active and wait totals for the affected cost view while preserving
+known resource subtotals and interval-union wall time. Manual-action active time is never inferred
+from its start/end interval. Pre-v2 `telemetry exec` events from manual, supervisor, or unknown
+external boundaries are treated as resource-time-unknown because those producers recorded child
+subprocess wall time in `active_seconds`.
+
 `disposition.verified` fixes the PR disposition boundary at verified PR creation.
 `outcome.verified` is later post-disposition accounting and does not extend atom/admission/lineage
 to disposition.
