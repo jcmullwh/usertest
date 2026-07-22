@@ -19,6 +19,18 @@ def _write_json(path: Path, obj: object) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def test_next_resume_attempt_count_inherits_persisted_and_local_attempts() -> None:
+    assert (
+        resume_commands._next_resume_attempt_count(
+            {
+                "resume_attempt_count": 2,
+                "resume_attempts": [{"run_dir": "third"}],
+            }
+        )
+        == 4
+    )
+
+
 def _make_resume_run(tmp_path: Path, *, workspace_exists: bool = True) -> tuple[Path, Path, Path]:
     run_dir = tmp_path / "original_run"
     workspace = tmp_path / "workspace"

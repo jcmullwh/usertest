@@ -1041,6 +1041,18 @@ def _mark_original_resume_state(
     _write_json(state_path, state)
 
 
+def _next_resume_attempt_count(resume_state: dict[str, Any]) -> int:
+    persisted = resume_state.get("resume_attempt_count")
+    base_count = (
+        persisted
+        if isinstance(persisted, int) and not isinstance(persisted, bool) and persisted >= 0
+        else 0
+    )
+    attempts = resume_state.get("resume_attempts")
+    prior_local_attempts = len(attempts) if isinstance(attempts, list) else 0
+    return base_count + prior_local_attempts + 1
+
+
 def _cmd_resume_pr(
     *,
     args: argparse.Namespace,
@@ -1540,6 +1552,7 @@ def _cmd_resume_pr(
         new_state["resumed_from_resume_state_path"] = str(state_path)
         new_state["workspace_strategy"] = workspace_strategy
         new_state["resume_kind"] = "pr"
+        new_state["resume_attempt_count"] = _next_resume_attempt_count(resume_state)
         new_resume_lifecycle = new_state.get("lifecycle_state")
         _write_json(resumed_run_dir / RESUME_STATE_ARTIFACT_NAME, new_state)
         _mark_original_resume_state(
@@ -1944,6 +1957,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         new_state["resumed_from_run_dir"] = str(run_dir)
         new_state["resumed_from_resume_state_path"] = str(state_path)
         new_state["workspace_strategy"] = workspace_strategy
+        new_state["resume_attempt_count"] = _next_resume_attempt_count(resume_state)
         _write_json(resumed_run_dir / RESUME_STATE_ARTIFACT_NAME, new_state)
         _mark_original_resume_state(
             state_path=state_path,

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -1181,15 +1181,15 @@ def _ready_queue_has_work(repo_root: Path) -> bool:
 
 def _resume_ledger_path(
     *,
-    repo_root: Path,
+    owner_root: Path,
     defaults: dict[str, Any],
 ) -> Path:
     raw = defaults.get("ledger")
     if isinstance(raw, Path):
-        return _resolve_batch_ledger_path(repo_root=repo_root, raw=raw)
+        return _resolve_batch_ledger_path(repo_root=owner_root, raw=raw)
     if isinstance(raw, str) and raw.strip():
-        return _resolve_batch_ledger_path(repo_root=repo_root, raw=Path(raw))
-    return _resolve_batch_ledger_path(repo_root=repo_root, raw=_DEFAULT_LEDGER_PATH)
+        return _resolve_batch_ledger_path(repo_root=owner_root, raw=Path(raw))
+    return _resolve_batch_ledger_path(repo_root=owner_root, raw=_DEFAULT_LEDGER_PATH)
 
 
 
@@ -1215,8 +1215,19 @@ def _latest_resume_state_from_ledger_path(
         latest_state = state
         latest_path = resolved_path
         attempts = state.get("resume_attempts")
-        if isinstance(attempts, list):
-            attempt_count += len(attempts)
+        local_attempt_count = len(attempts) if isinstance(attempts, list) else 0
+        persisted_attempt_count = state.get("resume_attempt_count")
+        if (
+            isinstance(persisted_attempt_count, int)
+            and not isinstance(persisted_attempt_count, bool)
+            and persisted_attempt_count >= 0
+        ):
+            attempt_count = max(
+                attempt_count,
+                persisted_attempt_count + local_attempt_count,
+            )
+        else:
+            attempt_count += local_attempt_count
         next_raw = _clean_str(state.get("last_resumed_state_path"))
         if next_raw is None:
             return resolved_path, state, attempt_count
@@ -1487,7 +1498,7 @@ def _move_ticket_complete(*, candidate: BatchCandidate, repo_root: Path) -> Path
         to_bucket="5 - complete",
         dry_run=False,
     ).resolve()
-    _sync_ticket_atom_actions(repo_root=repo_root, owner_root=candidate.owner_root)
+    _sync_ticket_atom_actions(owner_root=candidate.owner_root)
     return path
 
 
@@ -1820,6 +1831,7 @@ def _run_resume_process(
     worker: WorkerTemplate,
     settings_path: Path,
     settings_profile: str,
+    resume_ledger_path: Path,
     ticket_timeout_seconds: float | None,
     exec_backend: str,
     maintenance_image_metadata_path: Path | None = None,
@@ -1846,12 +1858,7 @@ def _run_resume_process(
         "--exec-backend",
         exec_backend.strip().lower() or "docker",
         "--ledger",
-        str(
-            _resume_ledger_path(
-                repo_root=repo_root,
-                defaults={"ledger": run_common.get("ledger")},
-            )
-        ),
+        str(resume_ledger_path),
     ]
     if worker.model is not None:
         command.extend(["--model", worker.model])
@@ -1927,6 +1934,31 @@ def _run_resume_process(
         timed_out=timed_out,
         duration_seconds=duration_seconds,
     )
+
+
+def _resume_noop_payload(
+    *,
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+) -> dict[str, Any] | None:
+    if not candidate.is_resume or run_result.returncode != 0 or run_result.timed_out:
+        return None
+    try:
+        payload = json.loads(run_result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "noop_current_gates_green":
+        return None
+    state_path_raw = _clean_str(payload.get("resume_state_path"))
+    run_dir_raw = _clean_str(payload.get("original_run_dir"))
+    if state_path_raw is None or run_dir_raw is None or candidate.resume_state_path is None:
+        return None
+    if Path(state_path_raw).resolve() != candidate.resume_state_path.resolve():
+        return None
+    original_run_dir = Path(run_dir_raw).resolve()
+    if original_run_dir != candidate.resume_state_path.resolve().parent:
+        return None
+    return payload
 
 
 def _read_handoff_summary(run_dir: Path) -> dict[str, Any] | None:
@@ -2345,7 +2377,7 @@ def _drain_phase(
     infra_retry_limit = int(defaults.get("infra_retry_limit") or 1)
     resume_retry_limit = int(defaults.get("resume_retry_limit") or 1)
     max_phase_cycles = int(defaults.get("max_phase_cycles") or 20)
-    resume_ledger_path = _resume_ledger_path(repo_root=repo_root, defaults=defaults)
+    resume_ledger_path = _resume_ledger_path(owner_root=owner_root, defaults=defaults)
 
     state["phase"] = phase.name
     persist_state(batch_dir_path, state)
@@ -2496,6 +2528,7 @@ def _drain_phase(
                                 worker=worker,
                                 settings_path=settings_path,
                                 settings_profile=settings_profile,
+                                resume_ledger_path=resume_ledger_path,
                                 ticket_timeout_seconds=ticket_timeout_seconds,
                                 exec_backend=exec_backend,
                                 maintenance_image_metadata_path=maintenance_image_metadata_path,
@@ -2539,11 +2572,28 @@ def _drain_phase(
                     )
 
                     run_result = future.result()
-                    handoff_summary = (
-                        _read_handoff_summary(run_result.run_dir)
-                        if run_result.run_dir is not None
-                        else None
+                    resume_noop = _resume_noop_payload(
+                        candidate=candidate,
+                        run_result=run_result,
                     )
+                    if resume_noop is not None:
+                        run_result = replace(
+                            run_result,
+                            run_dir=Path(str(resume_noop["original_run_dir"])).resolve(),
+                        )
+                        handoff_summary = {
+                            "schema_version": 1,
+                            "final_status": "success",
+                            "pr_created": True,
+                            "pr_url": resume_noop.get("pr_url"),
+                            "resume_noop": resume_noop,
+                        }
+                    else:
+                        handoff_summary = (
+                            _read_handoff_summary(run_result.run_dir)
+                            if run_result.run_dir is not None
+                            else None
+                        )
                     missing_terminal_artifacts = run_result.run_dir is None
                     if (
                         candidate.is_resume
@@ -2566,6 +2616,16 @@ def _drain_phase(
                                 )
                             },
                         }
+                    elif resume_noop is not None:
+                        failure = {
+                            "failure_class": "success",
+                            "retryable": False,
+                            "global_blocker": False,
+                            "summary": str(
+                                resume_noop.get("reason") or "Current PR gates are green."
+                            ),
+                            "evidence": {"resume_noop": resume_noop},
+                        }
                     else:
                         failure = classify_run_outcome(
                             run_dir=run_result.run_dir or batch_dir_path,
@@ -2573,7 +2633,7 @@ def _drain_phase(
                             timed_out=run_result.timed_out,
                             missing_terminal_artifacts=missing_terminal_artifacts,
                         )
-                    if run_result.run_dir is not None:
+                    if run_result.run_dir is not None and resume_noop is None:
                         write_batch_failure(run_result.run_dir, failure)
                     _record_outcome(
                         batch_dir_path=batch_dir_path,
@@ -2584,7 +2644,16 @@ def _drain_phase(
                         failure=failure,
                     )
 
-                    resume_state = _load_resume_state_for_run(run_result.run_dir)
+                    resume_state = (
+                        {
+                            "schema_version": 1,
+                            "lifecycle_state": LIFECYCLE_MERGE_READY,
+                            "blocking_reason": resume_noop.get("reason"),
+                            "resume_noop": resume_noop,
+                        }
+                        if resume_noop is not None
+                        else _load_resume_state_for_run(run_result.run_dir)
+                    )
                     lifecycle = _resume_state_lifecycle(resume_state)
                     _record_resumed_ticket(
                         state=state,

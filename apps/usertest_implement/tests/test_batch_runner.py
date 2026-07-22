@@ -31,9 +31,12 @@ from usertest_implement.batch_runner import (
     _collect_wave_candidates,
     _configured_owner_root,
     _drain_phase,
+    _latest_resume_state_from_ledger_path,
     _pick_launchable_candidate_index,
     _refresh_backlog,
     _resolve_wave_base_revision,
+    _resume_ledger_path,
+    _run_resume_process,
     _run_ticket_process,
     _validate_candidate_wave_revision,
     _write_batch_token_monitoring_artifacts,
@@ -259,6 +262,66 @@ def test_ticket_process_receives_exact_wave_revision(tmp_path: Path, monkeypatch
     assert isinstance(command, list)
     assert command[command.index("--ref") + 1] == revision
     assert command[command.index("--runs-dir") + 1] == str(runs_dir)
+    assert command[command.index("--ledger") + 1] == str(ledger_path)
+
+
+def test_resume_ledger_and_subprocess_use_owner_root_path(tmp_path: Path, monkeypatch) -> None:
+    code_root = tmp_path / "code"
+    owner_root = tmp_path / "owner"
+    state_path = owner_root / "runs" / "prior" / "ticket_resume_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text("{}\n", encoding="utf-8")
+    ledger_path = _resume_ledger_path(owner_root=owner_root, defaults={})
+    captured: dict[str, object] = {}
+
+    class _FinishedProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner.subprocess.Popen",
+        _FinishedProcess,
+    )
+    candidate = BatchCandidate(
+        source_name="resume_ready",
+        export_path=ledger_path,
+        fingerprint="abababababababab",
+        severity="high",
+        title="Resume owner-root ledger",
+        owner_root=owner_root,
+        ticket_path=owner_root / "ticket.md",
+        execution_domain="runner_core",
+        execution_conflict_keys=("ticket:abababababababab",),
+        resume_state_path=state_path,
+        resume_lifecycle_state="ci_failed_resume_ready",
+    )
+
+    _run_resume_process(
+        repo_root=code_root,
+        implement_python=tmp_path / "python.exe",
+        batch_dir_path=owner_root / "batch",
+        candidate=candidate,
+        repo_input=str(owner_root),
+        worker=WorkerTemplate(worker_index=0, agent="codex"),
+        settings_path=code_root / "settings.yaml",
+        settings_profile="default",
+        resume_ledger_path=ledger_path,
+        ticket_timeout_seconds=None,
+        exec_backend="local",
+    )
+
+    assert ledger_path == owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+    command = captured["command"]
+    assert isinstance(command, list)
     assert command[command.index("--ledger") + 1] == str(ledger_path)
 
 
@@ -1879,6 +1942,102 @@ def test_collect_resume_ready_candidates_follows_latest_resumed_state(
     )
 
     assert candidates == []
+
+
+def test_latest_resume_state_retains_persisted_attempt_count(tmp_path: Path) -> None:
+    state_path = tmp_path / "runs" / "latest" / "ticket_resume_state.json"
+    _write_json(
+        state_path,
+        {
+            "lifecycle_state": "ci_failed_resume_ready",
+            "resume_attempt_count": 1,
+            "resume_attempts": [{"run_dir": str(tmp_path / "runs" / "next")}],
+        },
+    )
+
+    latest = _latest_resume_state_from_ledger_path(
+        repo_root=tmp_path,
+        state_path=state_path,
+    )
+
+    assert latest is not None
+    assert latest[2] == 2
+
+
+def test_drain_phase_parks_successful_resume_noop_at_merge_ready(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    original_run = tmp_path / "runs" / "original"
+    state_path = original_run / "ticket_resume_state.json"
+    _write_json(state_path, {"lifecycle_state": "ci_failed_resume_ready"})
+    candidate = BatchCandidate(
+        source_name="resume_ready",
+        export_path=tmp_path / "ledger.yaml",
+        fingerprint="1010101010101010",
+        severity="high",
+        title="Recovered gates",
+        owner_root=tmp_path,
+        ticket_path=tmp_path / ".agents" / "plans" / "4 - for_review" / "ticket.md",
+        execution_domain="runner_core",
+        execution_conflict_keys=("ticket:1010101010101010",),
+        resume_state_path=state_path,
+        resume_lifecycle_state="ci_failed_resume_ready",
+    )
+
+    def _collect(**_: Any) -> list[BatchCandidate]:
+        return [] if state.get("parked") else [candidate]
+
+    def _run_resume(**_: Any) -> TicketRunResult:
+        payload = {
+            "schema_version": 1,
+            "status": "noop_current_gates_green",
+            "reason": "Current PR merge gate is already green.",
+            "original_run_dir": str(original_run),
+            "resume_state_path": str(state_path),
+            "pr_url": "https://github.com/example/repo/pull/1",
+            "current_pr_context": {"pr": {"reviewDecision": "APPROVED"}},
+        }
+        return TicketRunResult(None, 0, json.dumps(payload), "", False, 0.01)
+
+    moved: list[str] = []
+    monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
+    monkeypatch.setattr("usertest_implement.batch_runner._run_resume_process", _run_resume)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._move_ticket_for_review",
+        lambda **_: moved.append("review") or candidate.ticket_path,
+    )
+
+    state = _state_for_batch_lifecycle_tests(tmp_path)
+    _drain_phase(
+        phase=_phase_for_batch_lifecycle_tests(tmp_path),
+        repo_root=tmp_path,
+        batch_dir_path=tmp_path / "batch",
+        config={"defaults": {"max_phase_cycles": 2, "resume_retry_limit": 2}},
+        state=state,
+        workers=[WorkerTemplate(worker_index=1, agent="codex")],
+        backlog_python=tmp_path / "python",
+        implement_python=tmp_path / "python",
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        repo_input=str(tmp_path),
+        refresh_state={},
+        exec_backend="local",
+    )
+
+    assert [item["lifecycle_state"] for item in state["parked"]] == ["merge_ready"]
+    assert state["failed"] == []
+    assert moved == ["review"]
+    outcomes = [
+        json.loads(line)
+        for line in (tmp_path / "batch" / "ticket_outcomes.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert outcomes[0]["failure"]["failure_class"] == "success"
+    assert outcomes[0]["run_dir"] == str(original_run.resolve())
+
+
 def test_collect_wave_candidates_ignores_idea_ready_ticket_and_refreshes(
     tmp_path: Path,
     monkeypatch,
