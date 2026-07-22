@@ -122,9 +122,13 @@ def test_runner_telemetry_counts_retry_once_and_writes_usage_receipts(tmp_path: 
     assert (run_dir / "case_metrics.json").is_file()
     assert (run_dir / "cohort_metrics.json").is_file()
     case_metrics = json.loads((run_dir / "case_metrics.json").read_text(encoding="utf-8"))
-    assert case_metrics["reconciliation"]["ok"] is True
+    assert case_metrics["reconciliation"]["ok"] is False
+    assert {
+        issue["code"] for issue in case_metrics["reconciliation"]["issues"]
+    } == {"supervising_agent_tokens_missing"}
     case = case_metrics["cases"][0]
     assert case["accounting"]["direct"]["gross"]["total_tokens"] == 36
+    assert case["accounting"]["all_in"]["gross"]["total_tokens"] is None
     assert case["timing"]["work_interval_union_seconds"] == 60.0
 
 
