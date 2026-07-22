@@ -649,20 +649,13 @@ def _cmd_telemetry_action_record(args: argparse.Namespace) -> int:
         end = start
     if end < start:
         raise ValueError("--ended-at must not precede --started-at")
-    active_seconds = (
-        args.active_seconds
-        if args.active_seconds is not None
-        else max(
-            0.0,
-            (end - start).total_seconds()
-            - machine_wait_seconds
-            - external_wait_seconds,
-        )
-    )
-    if active_seconds < 0:
+    active_seconds = args.active_seconds
+    if active_seconds is not None and active_seconds < 0:
         raise ValueError("--active-seconds must be non-negative")
     wall_seconds = max(0.0, (end - start).total_seconds())
-    classified_seconds = active_seconds + machine_wait_seconds + external_wait_seconds
+    classified_seconds = (
+        (active_seconds or 0.0) + machine_wait_seconds + external_wait_seconds
+    )
     if classified_seconds > wall_seconds + 1e-6:
         raise ValueError("active and wait seconds must not exceed the action interval")
     action_id = f"action:{uuid.uuid4()}"
@@ -705,6 +698,15 @@ def _cmd_telemetry_action_record(args: argparse.Namespace) -> int:
                 parent_work_unit_id=inherited_work_unit_id,
                 dependency_ids=dependencies,
                 result=args.result,
+                active_seconds_source=(
+                    "explicit" if active_seconds is not None else "unknown"
+                ),
+                resource_time_unknown=active_seconds is None,
+                resource_time_unknown_reason=(
+                    None
+                    if active_seconds is not None
+                    else "manual_action_active_time_not_attested"
+                ),
                 related_error_cluster_ids=list(args.error_cluster_id),
                 wait_category=args.wait_category,
                 wait_seconds_by_category=(

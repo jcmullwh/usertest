@@ -315,6 +315,8 @@ def test_telemetry_action_record_retains_manual_burden(tmp_path: Path) -> None:
     assert row["actor_type"] == "supervising_agent"
     assert row["origin"] == "supervising_agent"
     assert row["active_seconds"] == 90
+    assert row["attributes"]["active_seconds_source"] == "explicit"
+    assert row["attributes"]["resource_time_unknown"] is False
     assert row["context"]["work_unit_id"].startswith("work:")
     assert row["external_wait_seconds"] == 30
     assert row["attributes"]["action_family"] == "pull_request"
@@ -322,6 +324,61 @@ def test_telemetry_action_record_retains_manual_burden(tmp_path: Path) -> None:
     assert row["attributes"]["wait_seconds_by_category"] == {"approval": 30.0}
     assert row["attributes"]["dependency_ids"] == ["qualification-shared-1"]
     assert row["attributes"]["all_in_dependency_ids"] == ["controller-repair-1"]
+
+
+def test_telemetry_action_record_keeps_unattested_active_time_unknown(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    assert (
+        _invoke(
+            [
+                "telemetry",
+                "action",
+                "record",
+                "--events",
+                str(events),
+                "--case-lifecycle-id",
+                "life-unknown-active",
+                "--case-id",
+                "case-unknown-active",
+                "--actor",
+                "supervising_agent",
+                "--action-family",
+                "diagnosis",
+                "--started-at",
+                "2026-07-21T12:00:00Z",
+                "--ended-at",
+                "2026-07-21T12:02:00Z",
+                "--external-wait-seconds",
+                "30",
+                "--wait-category",
+                "external",
+                "--result",
+                "diagnosed",
+            ]
+        )
+        == 0
+    )
+
+    row = json.loads(events.read_text(encoding="utf-8"))
+    assert row["started_at"] == "2026-07-21T12:00:00.000000Z"
+    assert row["ended_at"] == "2026-07-21T12:02:00.000000Z"
+    assert row["active_seconds"] is None
+    assert row["external_wait_seconds"] == 30
+    assert row["attributes"]["active_seconds_source"] == "unknown"
+    assert row["attributes"]["resource_time_unknown"] is True
+    assert (
+        row["attributes"]["resource_time_unknown_reason"]
+        == "manual_action_active_time_not_attested"
+    )
+
+    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))[
+        "cases"
+    ][0]
+    assert case["manual_actions"]["active_seconds"] is None
+    assert case["manual_actions"]["known_active_seconds"] == 0
+    assert case["accounting"]["all_in"]["gross"]["active_seconds"] is None
 
 
 def test_telemetry_materialize_discovers_streams_and_writes_comparison(

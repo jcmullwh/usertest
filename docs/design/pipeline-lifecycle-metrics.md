@@ -112,6 +112,10 @@ usertest telemetry action record `
   --result approved
 ```
 
+If the action interval is known but active effort was not measured, omit
+`--active-seconds`. The event retains `active_seconds: null` and the elapsed interval
+remains unclassified; the recorder never assumes that the entire wall interval was active work.
+
 Use `--dependency-work-unit-id` for required retained/shared work and
 `--all-in-dependency-work-unit-id` for directly required supervising-agent or outside-platform
 work. General platform engineering is left without a case beneficiary and is not amortized into
