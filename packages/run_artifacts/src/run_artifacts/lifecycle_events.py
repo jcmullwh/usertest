@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, TypeAlias, cast
 
 LIFECYCLE_TELEMETRY_SCHEMA_VERSION = 1
@@ -355,7 +355,12 @@ def _validate_sha256(value: Any, field_name: str) -> str:
 def _validate_relative_artifact_path(value: str, field_name: str) -> str:
     normalized = value.replace("\\", "/")
     path = PurePosixPath(normalized)
-    if path.is_absolute() or not path.parts or ".." in path.parts:
+    if (
+        path.is_absolute()
+        or bool(PureWindowsPath(normalized).drive)
+        or not path.parts
+        or ".." in path.parts
+    ):
         raise TelemetryValidationError(f"{field_name} must be a non-escaping relative path")
     return normalized
 

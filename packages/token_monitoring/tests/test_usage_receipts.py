@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from token_monitoring.codex import parse_codex_invocation_usage
-from token_monitoring.usage import TokenUsage, usage_receipt_is_valid
+from token_monitoring.usage import (
+    TokenUsage,
+    usage_receipt_content_sha256,
+    usage_receipt_is_valid,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_usage"
 
@@ -124,6 +128,26 @@ def test_duplicate_terminal_is_counted_once_and_receipt_is_content_addressed() -
     assert first.duplicate_terminal_count == 1
     assert first.receipt_payload() == second.receipt_payload()
     assert usage_receipt_is_valid(first.receipt_payload())
+
+
+def test_receipt_rejects_incomplete_attributable_token_maps() -> None:
+    result = parse_codex_invocation_usage(
+        FIXTURES / "fresh_turn.jsonl",
+        invocation_id="invocation-incomplete-receipt",
+    )
+    payload = result.receipt_payload()
+    payload["usage"] = {}
+    payload["content_sha256"] = usage_receipt_content_sha256(payload)
+
+    assert usage_receipt_is_valid(payload) is False
+
+    payload = result.receipt_payload()
+    observed = dict(payload["observed_high_water"])
+    observed.pop("reasoning_output_tokens")
+    payload["observed_high_water"] = observed
+    payload["content_sha256"] = usage_receipt_content_sha256(payload)
+
+    assert usage_receipt_is_valid(payload) is False
 
 
 def test_baseline_above_observed_usage_is_unattributable() -> None:

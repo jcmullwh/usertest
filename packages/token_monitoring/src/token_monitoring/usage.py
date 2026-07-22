@@ -242,6 +242,8 @@ def usage_receipt_is_valid(payload: Mapping[str, object]) -> bool:
             continue
         if not isinstance(value, Mapping):
             return False
+        if set(value) != set(TOKEN_DIMENSIONS):
+            return False
         try:
             TokenUsage.from_mapping(value)
         except ValueError:

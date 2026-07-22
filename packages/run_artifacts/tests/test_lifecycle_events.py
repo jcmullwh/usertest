@@ -593,6 +593,10 @@ def test_manifest_round_trip_atomic_write_and_path_validation(tmp_path: Path) ->
         )
     with pytest.raises(TelemetryValidationError, match="non-escaping relative path"):
         write_lifecycle_manifest(path, replace(manifest, event_log_path="../other/events.jsonl"))
+    with pytest.raises(TelemetryValidationError, match="non-escaping relative path"):
+        write_lifecycle_manifest(path, replace(manifest, event_log_path="C:/outside/events.jsonl"))
+    with pytest.raises(TelemetryValidationError, match="non-escaping relative path"):
+        write_lifecycle_manifest(path, replace(manifest, event_log_path=r"C:\outside\events.jsonl"))
 
 
 def test_public_models_reject_unknown_fields() -> None:

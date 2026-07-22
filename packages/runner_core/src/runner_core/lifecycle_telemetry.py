@@ -388,6 +388,7 @@ def write_run_lifecycle_telemetry(
     attempts = _attempts(run_dir)
     usage_receipt_paths: list[str] = []
     open_errors: dict[str, str] = {}
+    failure_episode_counts: dict[str, int] = {}
     baseline_by_session: dict[str, TokenUsage] = {}
     baseline_evidence_by_session: dict[str, Path] = {}
     baseline_issue_by_session: dict[str, str] = {}
@@ -536,8 +537,12 @@ def write_run_lifecycle_telemetry(
         failed = attempt.get("exit_code") not in {None, 0} or bool(validation_errors)
         if failed:
             failure_kind = str(attempt.get("failure_subtype") or "model_output_invalid")
-            cluster_id = _stable_id("error", run_key, failure_kind)
-            open_errors[failure_kind] = cluster_id
+            cluster_id = open_errors.get(failure_kind)
+            if cluster_id is None:
+                episode = failure_episode_counts.get(failure_kind, 0) + 1
+                failure_episode_counts[failure_kind] = episode
+                cluster_id = _stable_id("error", run_key, failure_kind, episode)
+                open_errors[failure_kind] = cluster_id
             append_lifecycle_event(
                 events_path,
                 make_lifecycle_event(

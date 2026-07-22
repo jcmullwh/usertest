@@ -263,6 +263,8 @@ def _event_actor(args: argparse.Namespace, *, verified_parent: bool) -> tuple[st
         return args.actor, args.actor, (
             "manual" if args.actor == "human" else "supervising_agent"
         )
+    if args.actor == "unknown":
+        return "unknown", "unknown", "unknown_external"
     if verified_parent:
         return "controller", "controller", "automatic"
     return "unknown", "unknown", "unknown_external"

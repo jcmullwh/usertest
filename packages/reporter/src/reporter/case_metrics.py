@@ -1934,7 +1934,12 @@ def _collect_events(
                     )
 
                 linked_errors = _strings(
-                    _field(event, "error_cluster_ids", "resolved_error_cluster_ids")
+                    _field(
+                        event,
+                        "error_cluster_ids",
+                        "resolved_error_cluster_ids",
+                        "related_error_cluster_ids",
+                    )
                 )
                 single_linked_error = _string(_field(event, "error_cluster_id"))
                 if single_linked_error is not None and single_linked_error not in linked_errors:

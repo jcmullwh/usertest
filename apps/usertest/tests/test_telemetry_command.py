@@ -151,6 +151,44 @@ def test_telemetry_exec_verified_controller_child_is_automatic(
     assert completed["attributes"]["dependency_ids"] == [parent.work_unit_id]
 
 
+def test_telemetry_exec_explicit_unknown_does_not_inherit_controller_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    parent = LifecycleContext(
+        cycle_id="controller-cycle",
+        work_unit_id="work:controller-parent",
+        system_fingerprint={"controller_context_verified": "true"},
+    )
+    for name, value in lifecycle_context_env(parent).items():
+        monkeypatch.setenv(name, value)
+
+    assert (
+        _invoke(
+            [
+                "telemetry",
+                "exec",
+                "--events",
+                str(events),
+                "--actor",
+                "unknown",
+                "--",
+                sys.executable,
+                "-c",
+                "print('unknown child')",
+            ]
+        )
+        == 0
+    )
+
+    completed = json.loads(events.read_text(encoding="utf-8").splitlines()[1])
+    assert completed["actor_type"] == "unknown"
+    assert completed["initiator_type"] == "unknown"
+    assert completed["origin"] == "unknown_external"
+    assert completed["active_seconds"] is None
+    assert "controller_context_verified" not in completed["context"]["system_fingerprint"]
+
+
 def test_telemetry_exec_rejects_reused_explicit_work_unit(tmp_path: Path) -> None:
     events = tmp_path / "lifecycle_events.jsonl"
     common = [
@@ -324,6 +362,47 @@ def test_telemetry_action_record_retains_manual_burden(tmp_path: Path) -> None:
     assert row["attributes"]["wait_seconds_by_category"] == {"approval": 30.0}
     assert row["attributes"]["dependency_ids"] == ["qualification-shared-1"]
     assert row["attributes"]["all_in_dependency_ids"] == ["controller-repair-1"]
+
+
+def test_telemetry_action_record_links_every_error_cluster(tmp_path: Path) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    code = _invoke(
+        [
+            "telemetry",
+            "action",
+            "record",
+            "--events",
+            str(events),
+            "--case-lifecycle-id",
+            "life-multiple-errors",
+            "--case-id",
+            "case-multiple-errors",
+            "--actor",
+            "supervising_agent",
+            "--action-family",
+            "adjudication",
+            "--started-at",
+            "2026-07-21T12:00:00Z",
+            "--active-seconds",
+            "30",
+            "--error-cluster-id",
+            "error-one",
+            "--error-cluster-id",
+            "error-two",
+            "--result",
+            "resolved",
+        ]
+    )
+
+    assert code == 0
+    row = json.loads(events.read_text(encoding="utf-8"))
+    assert row["error_cluster_id"] is None
+    assert row["attributes"]["related_error_cluster_ids"] == ["error-one", "error-two"]
+    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))["cases"][0]
+    assert case["errors"]["externally_resolved_cluster_count"] == 2
+    assert {
+        cluster["error_cluster_id"] for cluster in case["errors"]["clusters"]
+    } == {"error-one", "error-two"}
 
 
 def test_telemetry_action_record_keeps_unattested_active_time_unknown(

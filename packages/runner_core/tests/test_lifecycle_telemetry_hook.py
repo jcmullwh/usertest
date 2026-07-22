@@ -135,6 +135,77 @@ def test_runner_telemetry_counts_retry_once_and_writes_usage_receipts(tmp_path: 
     assert case["timing"]["work_interval_union_seconds"] == 60.0
 
 
+def test_runner_telemetry_separates_recurrent_failure_episodes(tmp_path: Path) -> None:
+    run_dir = tmp_path / "recurrent-failure-run"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run_meta.json",
+        {
+            "run_started_utc": "2026-07-21T12:00:00Z",
+            "run_finished_utc": "2026-07-21T12:01:00Z",
+            "run_wall_seconds": 60.0,
+        },
+    )
+    _write_json(run_dir / "report.json", {"kind": "retained-partial-report"})
+    attempts: list[dict[str, object]] = []
+    for attempt, exit_code in ((1, 1), (2, 0), (3, 1)):
+        raw_path = run_dir / f"raw_events.attempt{attempt}.jsonl"
+        raw_path.write_text(
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 10 * attempt,
+                        "output_tokens": 2 * attempt,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        attempts.append(
+            {
+                "attempt": attempt,
+                "attempt_started_utc": f"2026-07-21T12:00:{attempt * 10 - 9:02d}Z",
+                "attempt_finished_utc": f"2026-07-21T12:00:{attempt * 10:02d}Z",
+                "attempt_wall_seconds": 9,
+                "agent_exec_wall_seconds": 8,
+                "exit_code": exit_code,
+                "failure_subtype": "provider_capacity" if exit_code else None,
+                "raw_events_path": raw_path.name,
+            }
+        )
+    _write_json(run_dir / "agent_attempts.json", {"attempts": attempts})
+
+    write_run_lifecycle_telemetry(
+        run_dir=run_dir,
+        agent="codex",
+        model="gpt-5.6-sol",
+        policy="write",
+        parent_case_id="case-recurrent-error",
+        case_lifecycle_id="lifecycle-recurrent-error",
+        origin_stage="implementation",
+        supervisor_instruction=None,
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    occurrences = [row for row in rows if row["event_type"] == "error.occurred"]
+    resolutions = [row for row in rows if row["event_type"] == "error.resolved"]
+    assert len(occurrences) == 2
+    assert occurrences[0]["error_cluster_id"] != occurrences[1]["error_cluster_id"]
+    assert {
+        row["attributes"]["resolution_mode"] for row in resolutions
+    } == {"self_healed_controller", "unresolved_terminal"}
+
+    case = json.loads((run_dir / "case_metrics.json").read_text(encoding="utf-8"))["cases"][0]
+    assert case["errors"]["cluster_count"] == 2
+    assert case["errors"]["self_healed_cluster_count"] == 1
+    assert case["errors"]["unresolved_terminal_cluster_count"] == 1
+
+
 def _write_single_codex_run(
     run_dir: Path,
     *,
