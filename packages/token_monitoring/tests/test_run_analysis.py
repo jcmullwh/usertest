@@ -106,6 +106,67 @@ def test_run_analysis_emits_actionable_signals_without_raw_output(tmp_path: Path
     assert analysis["privacy"]["contains_raw_command_output"] is False
 
 
+def test_source_read_evidence_ranks_observed_bytes_not_total_file_size(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    sessions = tmp_path / "sessions"
+    thread_id = "thread-1"
+    _base_run(run_dir, thread_id=thread_id)
+    _write_jsonl(
+        run_dir / "normalized_events.jsonl",
+        [
+            {
+                "type": "read_file",
+                "data": {
+                    "path": "docs/large.json",
+                    "bytes": 792_933,
+                    "file_size_bytes": 792_933,
+                    "observed_bytes": 1_466,
+                    "whole_file_observed": False,
+                },
+            },
+            {
+                "type": "read_file",
+                "data": {
+                    "path": "src/whole.py",
+                    "bytes": 2_048,
+                    "file_size_bytes": 2_048,
+                    "observed_bytes": 2_048,
+                    "whole_file_observed": True,
+                },
+            },
+        ],
+    )
+    _write_jsonl(
+        sessions / f"rollout-{thread_id}.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": thread_id}},
+            _token_event(120_000, 120_000),
+            _call("Get-Content docs/large.json | Select-Object -First 25"),
+            _token_event(260_000, 140_000),
+        ],
+    )
+
+    analysis = analyze_run(run_dir, codex_sessions_root=sessions)
+
+    signal = next(
+        signal
+        for signal in analysis["signals"]
+        if signal["signal_id"] == "broad_source_config_read"
+    )
+    largest = signal["evidence"]["largest_read_files"]
+    assert [item["path"] for item in largest] == ["src/whole.py", "docs/large.json"]
+    assert largest[1] == {
+        "path": "docs/large.json",
+        "bytes": 1_466,
+        "observed_bytes": 1_466,
+        "file_size_bytes": 792_933,
+        "whole_file_observed": False,
+        "source": str(run_dir / "normalized_events.jsonl"),
+    }
+
+
 def test_write_run_monitoring_writes_artifacts_and_trace(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     sessions = tmp_path / "sessions"
