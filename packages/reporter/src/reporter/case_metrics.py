@@ -1944,10 +1944,29 @@ def _collect_events(
                 single_linked_error = _string(_field(event, "error_cluster_id"))
                 if single_linked_error is not None and single_linked_error not in linked_errors:
                     linked_errors.append(single_linked_error)
+                action_result = _normalize_label(_string(_field(event, "result")) or "")
+                action_resolved = is_intervention or action_result in {
+                    "completed",
+                    "corrected",
+                    "fixed",
+                    "healed",
+                    "resolved",
+                    "succeeded",
+                    "success",
+                }
                 for cluster_id in linked_errors:
-                    category = "resolved_supervisor" if is_intervention else "resolved_human"
-                    _mark_resolution(case, cluster_id, category, timestamp=timestamp)
-                    cluster = case["errors"][cluster_id]
+                    cluster = case["errors"].setdefault(
+                        cluster_id, _new_error_cluster(cluster_id)
+                    )
+                    if action_resolved:
+                        category = (
+                            "resolved_supervisor"
+                            if is_intervention or actor == "supervisor"
+                            else "resolved_human"
+                            if actor == "human"
+                            else "resolved_external"
+                        )
+                        _mark_resolution(case, cluster_id, category, timestamp=timestamp)
                     linked_field = (
                         "intervention_ids" if is_intervention else "manual_action_ids"
                     )

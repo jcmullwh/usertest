@@ -8,6 +8,8 @@ from reporter.materialize import materialize_lifecycle_metrics
 from run_artifacts.lifecycle_events import (
     LifecycleContext,
     ModelUsageReceipt,
+    ProvenanceQuality,
+    UsageSemantics,
     append_lifecycle_event,
     canonical_sha256,
     make_lifecycle_event,
@@ -18,6 +20,7 @@ from run_artifacts.lifecycle_events import (
 from usertest_backlog.pipeline_metrics import (
     _append_case_event,
     _cycle_for,
+    _normalized_model_usage_for_logs,
     bind_ticket_lifecycle_ids,
     case_lifecycle_id,
     record_stage_telemetry,
@@ -173,6 +176,8 @@ def _write_historical_cumulative_research_run(
     usage: dict[str, int],
     session_id: str,
     continued_session: bool,
+    usage_semantics: UsageSemantics = "per_invocation",
+    provenance_quality: ProvenanceQuality = "authoritative",
 ) -> tuple[Path, str, Path]:
     root.mkdir(parents=True)
     context = LifecycleContext(
@@ -186,16 +191,24 @@ def _write_historical_cumulative_research_run(
         context=context,
         provider="codex",
         model="gpt-5.6",
-        usage_semantics="per_invocation",
+        usage_semantics=usage_semantics,
         recorded_at=ended_at,
         invocation_started_at=started_at,
         invocation_ended_at=ended_at,
-        input_tokens=usage["input_tokens"],
-        cached_input_tokens=usage["cached_input_tokens"],
-        uncached_input_tokens=usage["uncached_input_tokens"],
-        output_tokens=usage["output_tokens"],
-        reasoning_tokens=usage["reasoning_output_tokens"],
-        total_tokens=usage["total_tokens"],
+        input_tokens=(usage["input_tokens"] if usage_semantics != "unattributable" else None),
+        cached_input_tokens=(
+            usage["cached_input_tokens"] if usage_semantics != "unattributable" else None
+        ),
+        uncached_input_tokens=(
+            usage["uncached_input_tokens"] if usage_semantics != "unattributable" else None
+        ),
+        output_tokens=(usage["output_tokens"] if usage_semantics != "unattributable" else None),
+        reasoning_tokens=(
+            usage["reasoning_output_tokens"]
+            if usage_semantics != "unattributable"
+            else None
+        ),
+        total_tokens=(usage["total_tokens"] if usage_semantics != "unattributable" else None),
         observed_usage={
             "total_tokens": usage["total_tokens"],
             "input_tokens": usage["input_tokens"],
@@ -204,7 +217,7 @@ def _write_historical_cumulative_research_run(
             "output_tokens": usage["output_tokens"],
             "reasoning_tokens": usage["reasoning_output_tokens"],
         },
-        provenance_quality="authoritative",
+        provenance_quality=provenance_quality,
     )
     receipt_path = write_content_addressed_model_usage_receipt(
         root / "model_usage_receipts",
@@ -231,7 +244,7 @@ def _write_historical_cumulative_research_run(
             "token_usage": usage,
             "token_scope": "qualification",
             "cost_scope": "direct",
-            "usage_semantics": "per_invocation",
+            "usage_semantics": usage_semantics,
             "continued_session": continued_session,
             "usage_receipt_path": str(receipt_path),
         },
@@ -249,6 +262,80 @@ def _write_historical_cumulative_research_run(
     )
     (root / "report.json").write_text("{}\n", encoding="utf-8")
     return root / "lifecycle_events.jsonl", completed.event_id, receipt_path
+
+
+def test_stage_usage_normalization_does_not_count_or_promote_unattributable_receipt(
+    tmp_path: Path,
+) -> None:
+    session_id = "session-with-unattributable-middle-turn"
+    first_log, first_event_id, _ = _write_historical_cumulative_research_run(
+        tmp_path / "first",
+        invocation_id="invocation-first",
+        started_at="2026-07-21T12:00:00Z",
+        ended_at="2026-07-21T12:00:01Z",
+        usage={
+            "total_tokens": 120,
+            "input_tokens": 100,
+            "cached_input_tokens": 40,
+            "uncached_input_tokens": 60,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 5,
+        },
+        session_id=session_id,
+        continued_session=False,
+    )
+    second_log, second_event_id, _ = _write_historical_cumulative_research_run(
+        tmp_path / "second",
+        invocation_id="invocation-unattributable",
+        started_at="2026-07-21T12:00:02Z",
+        ended_at="2026-07-21T12:00:03Z",
+        usage={
+            "total_tokens": 180,
+            "input_tokens": 150,
+            "cached_input_tokens": 60,
+            "uncached_input_tokens": 90,
+            "output_tokens": 30,
+            "reasoning_output_tokens": 8,
+        },
+        session_id=session_id,
+        continued_session=True,
+        usage_semantics="unattributable",
+        provenance_quality="unknown",
+    )
+    third_log, third_event_id, _ = _write_historical_cumulative_research_run(
+        tmp_path / "third",
+        invocation_id="invocation-third",
+        started_at="2026-07-21T12:00:04Z",
+        ended_at="2026-07-21T12:00:05Z",
+        usage={
+            "total_tokens": 220,
+            "input_tokens": 180,
+            "cached_input_tokens": 70,
+            "uncached_input_tokens": 110,
+            "output_tokens": 40,
+            "reasoning_output_tokens": 10,
+        },
+        session_id=session_id,
+        continued_session=True,
+    )
+
+    normalized = _normalized_model_usage_for_logs([first_log, second_log, third_log])
+
+    assert normalized[first_event_id].usage is not None
+    assert normalized[second_event_id].usage is None
+    assert normalized[second_event_id].semantics == "unattributable"
+    assert (
+        normalized[second_event_id].unknown_reason
+        == "model_usage_receipt_unattributable"
+    )
+    assert normalized[third_event_id].usage == {
+        "total_tokens": 100,
+        "input_tokens": 80,
+        "cached_input_tokens": 30,
+        "uncached_input_tokens": 50,
+        "output_tokens": 20,
+        "reasoning_output_tokens": 5,
+    }
 
 
 def test_stage_telemetry_closes_verified_negative_and_is_idempotent(tmp_path: Path) -> None:

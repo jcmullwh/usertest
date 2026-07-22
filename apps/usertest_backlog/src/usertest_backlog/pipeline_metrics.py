@@ -600,7 +600,20 @@ def _normalized_model_usage_for_logs(
         semantics = receipt.usage_semantics
         baseline: dict[str, int] | None = None
         unknown_reason: str | None = None
-        if continued:
+        receipt_attributable = bool(
+            receipt.usage_semantics != "unattributable"
+            and receipt.provenance_quality == "authoritative"
+            and attributed is not None
+        )
+        if not receipt_attributable:
+            usage = None
+            semantics = "unattributable"
+            unknown_reason = (
+                "model_usage_receipt_unattributable"
+                if receipt.usage_semantics == "unattributable"
+                else "model_usage_receipt_provenance_unverified"
+            )
+        elif continued:
             semantics = "session_cumulative"
             if prior is None:
                 usage = None
@@ -618,11 +631,8 @@ def _normalized_model_usage_for_logs(
                     usage = _subtract_usage(observed, prior)
                     if usage is None:
                         unknown_reason = "continued_session_high_water_regressed"
-        elif receipt.usage_semantics == "unattributable":
-            usage = None
-            unknown_reason = "model_usage_receipt_unattributable"
 
-        if session_key is not None and observed is not None:
+        if session_key is not None and observed is not None and usage is not None:
             high_water[session_key] = dict(observed)
         projected[event.event_id] = _NormalizedModelUsage(
             source_event_id=event.event_id,

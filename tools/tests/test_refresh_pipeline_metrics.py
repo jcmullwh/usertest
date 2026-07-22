@@ -237,3 +237,85 @@ def test_renderer_content_change_forces_refresh_without_source_changes(
     )
 
     assert decision.reasons == ("dashboard_definition_changed",)
+
+
+def test_cohort_and_comparison_inputs_invalidate_current_outputs(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    _write_event(root / "lifecycle_events.jsonl")
+    output = tmp_path / "metrics"
+    assert tool.main(
+        [
+            "--root",
+            str(root),
+            "--output-dir",
+            str(output),
+            "--cohort-id",
+            "first",
+        ]
+    ) == 0
+
+    changed_cohort = tool.decide_refresh(
+        roots=[root],
+        output_dir=output,
+        stale_after=timedelta(hours=24),
+        now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        cohort_id="second",
+    )
+    assert "cohort_selection_changed" in changed_cohort.reasons
+    assert "refresh_inputs_changed" in changed_cohort.reasons
+
+    prior = tmp_path / "prior.json"
+    prior.write_text(
+        (output / "cohort_metrics.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    assert tool.main(
+        [
+            "--root",
+            str(root),
+            "--output-dir",
+            str(output),
+            "--cohort-id",
+            "first",
+            "--compare-to",
+            str(prior),
+        ]
+    ) == 0
+    prior_payload = json.loads(prior.read_text(encoding="utf-8"))
+    prior_payload["cohort_id"] = "mutated-prior"
+    prior.write_text(json.dumps(prior_payload) + "\n", encoding="utf-8")
+
+    changed_comparison = tool.decide_refresh(
+        roots=[root],
+        output_dir=output,
+        stale_after=timedelta(hours=24),
+        now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        cohort_id="first",
+        compare_to=prior,
+    )
+    assert "refresh_inputs_changed" in changed_comparison.reasons
+
+
+def test_unreadable_derived_json_forces_refresh(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    _write_event(root / "lifecycle_events.jsonl")
+    output = tmp_path / "metrics"
+    output.mkdir()
+    (output / "case_metrics.json").write_text("{broken", encoding="utf-8")
+    (output / "cohort_metrics.json").write_text("{broken", encoding="utf-8")
+    (output / "metrics_dashboard.json").write_text("{broken", encoding="utf-8")
+    (output / "metrics_dashboard.html").write_text("generated", encoding="utf-8")
+    source_old = datetime(2026, 7, 18, tzinfo=timezone.utc).timestamp()
+    derived_new = datetime(2026, 7, 20, tzinfo=timezone.utc).timestamp()
+    os.utime(root / "lifecycle_events.jsonl", (source_old, source_old))
+    for path in output.iterdir():
+        os.utime(path, (derived_new, derived_new))
+
+    decision = tool.decide_refresh(
+        roots=[root],
+        output_dir=output,
+        stale_after=timedelta(hours=24),
+        now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+    )
+
+    assert "derived_artifact_unreadable" in decision.reasons

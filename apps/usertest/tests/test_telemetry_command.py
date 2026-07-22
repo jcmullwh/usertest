@@ -400,9 +400,46 @@ def test_telemetry_action_record_links_every_error_cluster(tmp_path: Path) -> No
     assert row["attributes"]["related_error_cluster_ids"] == ["error-one", "error-two"]
     case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))["cases"][0]
     assert case["errors"]["externally_resolved_cluster_count"] == 2
+    assert case["errors"]["by_resolution"] == {"resolved_supervisor": 2}
     assert {
         cluster["error_cluster_id"] for cluster in case["errors"]["clusters"]
     } == {"error-one", "error-two"}
+
+
+def test_telemetry_action_failed_result_does_not_resolve_linked_error(tmp_path: Path) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    assert (
+        _invoke(
+            [
+                "telemetry",
+                "action",
+                "record",
+                "--events",
+                str(events),
+                "--case-lifecycle-id",
+                "life-failed-action",
+                "--case-id",
+                "case-failed-action",
+                "--actor",
+                "human",
+                "--action-family",
+                "code_repair",
+                "--started-at",
+                "2026-07-21T12:00:00Z",
+                "--active-seconds",
+                "30",
+                "--error-cluster-id",
+                "error-still-open",
+                "--result",
+                "failed",
+            ]
+        )
+        == 0
+    )
+
+    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))["cases"][0]
+    assert case["errors"]["by_resolution"] == {"open": 1}
+    assert case["errors"]["clusters"][0]["linked_manual_action_count"] == 1
 
 
 def test_telemetry_action_record_keeps_unattested_active_time_unknown(

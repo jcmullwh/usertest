@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,6 +30,7 @@ from reporter.case_metrics import (  # noqa: E402
 )
 from reporter.materialize import (  # noqa: E402
     CASE_METRICS_FILENAME,
+    COHORT_COMPARISON_FILENAME,
     COHORT_METRICS_FILENAME,
     discover_lifecycle_event_logs,
     materialize_lifecycle_metrics,
@@ -36,6 +39,7 @@ from reporter.materialize import (  # noqa: E402
 _OPEN_MANIFEST_STATUSES = {"active", "incomplete", "unreconciled"}
 _DASHBOARD_JSON_FILENAME = "metrics_dashboard.json"
 _DASHBOARD_HTML_FILENAME = "metrics_dashboard.html"
+_REFRESH_INPUTS_FILENAME = "refresh_inputs.json"
 _DASHBOARD_RENDERER = _REPO_ROOT / "tools" / "render_pipeline_metrics_dashboard.py"
 
 
@@ -76,6 +80,43 @@ def _open_manifest_count(roots: Sequence[Path]) -> int:
     return count
 
 
+def _refresh_inputs_payload(
+    *,
+    cohort_id: str | None,
+    compare_to: Path | None,
+) -> dict[str, Any]:
+    comparison: dict[str, str | None] | None = None
+    if compare_to is not None:
+        resolved = compare_to.resolve()
+        try:
+            digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        comparison = {"path": str(resolved), "sha256": digest}
+    return {
+        "schema_version": 1,
+        "cohort_id": cohort_id or "cohort",
+        "comparison": comparison,
+    }
+
+
+def _write_refresh_inputs(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def decide_refresh(
     *,
     roots: Sequence[Path],
@@ -83,6 +124,8 @@ def decide_refresh(
     stale_after: timedelta,
     now: datetime,
     force: bool = False,
+    cohort_id: str | None = None,
+    compare_to: Path | None = None,
 ) -> RefreshDecision:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must include a timezone")
@@ -97,6 +140,7 @@ def decide_refresh(
     cohort_path = output_dir.resolve() / COHORT_METRICS_FILENAME
     dashboard_json_path = output_dir.resolve() / _DASHBOARD_JSON_FILENAME
     dashboard_html_path = output_dir.resolve() / _DASHBOARD_HTML_FILENAME
+    refresh_inputs_path = output_dir.resolve() / _REFRESH_INPUTS_FILENAME
     derived_paths = (
         case_path,
         cohort_path,
@@ -107,12 +151,22 @@ def decide_refresh(
         reasons.append("derived_artifact_missing")
 
     case_payload = _read_json(case_path) if case_path.is_file() else None
+    if case_path.is_file() and case_payload is None:
+        reasons.append("derived_artifact_unreadable")
     if (
         case_payload is not None
         and case_payload.get("metric_version") != CASE_METRICS_VERSION
     ):
         reasons.append("metric_definition_changed")
     cohort_payload = _read_json(cohort_path) if cohort_path.is_file() else None
+    if cohort_path.is_file() and cohort_payload is None:
+        reasons.append("derived_artifact_unreadable")
+    if (
+        cohort_payload is not None
+        and (cohort_id is not None or cohort_payload.get("cohort_id") is not None)
+        and cohort_payload.get("cohort_id") != (cohort_id or "cohort")
+    ):
+        reasons.append("cohort_selection_changed")
     automation = (
         cohort_payload.get("automation_score_v1")
         if cohort_payload is not None
@@ -126,6 +180,8 @@ def decide_refresh(
     dashboard_payload = (
         _read_json(dashboard_json_path) if dashboard_json_path.is_file() else None
     )
+    if dashboard_json_path.is_file() and dashboard_payload is None:
+        reasons.append("derived_artifact_unreadable")
     if dashboard_payload is not None:
         dashboard_source = dashboard_payload.get("source")
         dashboard_source_map = (
@@ -140,6 +196,25 @@ def decide_refresh(
             != deployed_renderer_digest
         ):
             reasons.append("dashboard_definition_changed")
+
+    expected_refresh_inputs = _refresh_inputs_payload(
+        cohort_id=cohort_id,
+        compare_to=compare_to,
+    )
+    retained_refresh_inputs = (
+        _read_json(refresh_inputs_path) if refresh_inputs_path.is_file() else None
+    )
+    if retained_refresh_inputs is not None:
+        if retained_refresh_inputs != expected_refresh_inputs:
+            reasons.append("refresh_inputs_changed")
+    elif compare_to is not None:
+        reasons.append("refresh_inputs_changed")
+    if compare_to is not None:
+        comparison_path = output_dir.resolve() / COHORT_COMPARISON_FILENAME
+        if not comparison_path.is_file():
+            reasons.append("derived_artifact_missing")
+        elif _read_json(comparison_path) is None:
+            reasons.append("derived_artifact_unreadable")
 
     if sources and all(path.is_file() for path in derived_paths):
         derived_mtime = min(path.stat().st_mtime for path in derived_paths)
@@ -212,6 +287,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         stale_after=timedelta(hours=args.stale_after_hours),
         now=datetime.now(timezone.utc),
         force=args.force,
+        cohort_id=args.cohort_id,
+        compare_to=args.compare_to,
     )
     if not decision.event_sources:
         raise SystemExit("no lifecycle_events.jsonl streams were discovered")
@@ -227,6 +304,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output_dir,
             comparison_path=result.comparison_path,
         )
+        refresh_inputs_path = args.output_dir.resolve() / _REFRESH_INPUTS_FILENAME
+        _write_refresh_inputs(
+            refresh_inputs_path,
+            _refresh_inputs_payload(
+                cohort_id=args.cohort_id,
+                compare_to=args.compare_to,
+            ),
+        )
         payload = {
             "status": "refreshed",
             "reasons": list(decision.reasons),
@@ -237,6 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "cohort_metrics": str(result.cohort_metrics_path),
             "metrics_dashboard_json": str(dashboard_json_path),
             "metrics_dashboard_html": str(dashboard_html_path),
+            "refresh_inputs": str(refresh_inputs_path),
         }
     else:
         payload = {
