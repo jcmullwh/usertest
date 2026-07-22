@@ -447,7 +447,14 @@ def write_run_lifecycle_telemetry(
             model=model,
             baseline=baseline,
         )
-        if session_id and observed is not None:
+        attributable_observed = bool(
+            session_id
+            and observed is not None
+            and receipt.usage_semantics != "unattributable"
+            and receipt.provenance_quality == "authoritative"
+        )
+        if session_id and attributable_observed:
+            assert observed is not None
             baseline_by_session[session_id] = observed
         baseline_evidence = baseline_evidence_by_session.get(session_id or "")
         if usage_unknown_reason is None and session_id and attempt.get("continued_session") is True:
@@ -517,9 +524,13 @@ def write_run_lifecycle_telemetry(
                 },
             ),
         )
-        if session_id and observed is not None:
+        if session_id and attributable_observed:
             baseline_evidence_by_session[session_id] = receipt_path
             baseline_issue_by_session.pop(session_id, None)
+        elif session_id:
+            baseline_issue_by_session[session_id] = (
+                usage_unknown_reason or "prior_invocation_usage_unattributable"
+            )
 
         validation_errors = attempt.get("report_validation_errors")
         failed = attempt.get("exit_code") not in {None, 0} or bool(validation_errors)

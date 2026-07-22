@@ -70,6 +70,29 @@ def test_multiple_cumulative_terminals_without_baseline_are_unattributable() -> 
     )
 
 
+def test_multiple_cumulative_terminals_with_baseline_are_unattributable() -> None:
+    result = parse_codex_invocation_usage(
+        FIXTURES / "ambiguous_turns.jsonl",
+        invocation_id="invocation-ambiguous-resume",
+        baseline_high_water={
+            "total_tokens": 0,
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "uncached_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+        },
+    )
+
+    assert result.attributable is False
+    assert result.semantics == "unattributable"
+    assert result.usage is None
+    assert any(
+        item["code"] == "multiple_terminal_usage_values_with_baseline"
+        for item in result.diagnostics
+    )
+
+
 def test_missing_terminal_usage_is_unattributable_not_zero() -> None:
     result = parse_codex_invocation_usage(
         FIXTURES / "missing_usage.jsonl",

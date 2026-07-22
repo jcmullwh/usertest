@@ -298,3 +298,98 @@ def test_runner_telemetry_rejects_unattributable_predecessor_high_water(
         event["attributes"]["usage_unknown_reason"]
         == "continued_session_missing_prior_high_water"
     )
+
+
+def test_runner_telemetry_does_not_promote_unattributable_attempt_to_baseline(
+    tmp_path: Path,
+) -> None:
+    session_id = "019f8934-cdb5-70f3-806a-1c5748f385f7"
+    run_dir = tmp_path / "same-run-retry"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run_meta.json",
+        {
+            "run_started_utc": "2026-07-21T12:00:00Z",
+            "run_finished_utc": "2026-07-21T12:01:00Z",
+        },
+    )
+    _write_json(run_dir / "report.json", {"kind": "ok"})
+    first_raw = run_dir / "raw_events.attempt1.jsonl"
+    first_raw.write_text(
+        "{malformed\n"
+        + json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 60,
+                    "output_tokens": 20,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    second_raw = run_dir / "raw_events.attempt2.jsonl"
+    second_raw.write_text(
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 145,
+                    "cached_input_tokens": 90,
+                    "output_tokens": 32,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        run_dir / "agent_attempts.json",
+        {
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "attempt_started_utc": "2026-07-21T12:00:00Z",
+                    "attempt_finished_utc": "2026-07-21T12:00:20Z",
+                    "exit_code": 1,
+                    "agent_session_id": session_id,
+                    "continued_session": False,
+                    "raw_events_path": first_raw.name,
+                },
+                {
+                    "attempt": 2,
+                    "attempt_started_utc": "2026-07-21T12:00:21Z",
+                    "attempt_finished_utc": "2026-07-21T12:00:40Z",
+                    "exit_code": 0,
+                    "agent_session_id": session_id,
+                    "continued_session": True,
+                    "raw_events_path": second_raw.name,
+                },
+            ]
+        },
+    )
+
+    write_run_lifecycle_telemetry(
+        run_dir=run_dir,
+        agent="codex",
+        model="gpt-5.6-sol",
+        policy="write",
+        parent_case_id="case-cumulative",
+        origin_stage="implementation",
+        supervisor_instruction=None,
+    )
+
+    completed = [
+        json.loads(line)
+        for line in (run_dir / "lifecycle_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if json.loads(line)["event_type"] == "model.invocation.completed"
+    ]
+    assert [event["attributes"]["usage_semantics"] for event in completed] == [
+        "unattributable",
+        "unattributable",
+    ]
+    assert completed[1]["attributes"]["token_usage"] is None

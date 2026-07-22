@@ -11,15 +11,60 @@ from run_artifacts.lifecycle_events import (
     append_lifecycle_event,
     canonical_sha256,
     make_lifecycle_event,
+    read_lifecycle_events,
     write_content_addressed_model_usage_receipt,
 )
 
 from usertest_backlog.pipeline_metrics import (
+    _append_case_event,
     _cycle_for,
     bind_ticket_lifecycle_ids,
     case_lifecycle_id,
     record_stage_telemetry,
 )
+
+
+def test_case_event_mirror_reuses_persisted_event_after_interrupted_append(
+    tmp_path: Path,
+) -> None:
+    global_path = tmp_path / "lifecycle_events.jsonl"
+    registry_path = tmp_path / "case_registry.json"
+    context = LifecycleContext(case_lifecycle_id="lifecycle-1", case_id="case-1")
+    persisted = make_lifecycle_event(
+        "stage.completed",
+        context,
+        idempotency_key="stage:case-1:completed",
+        attributes={"stage": "repro_research"},
+    )
+    append_lifecycle_event(global_path, persisted)
+    replay = make_lifecycle_event(
+        "stage.completed",
+        context,
+        idempotency_key="stage:case-1:completed",
+        attributes={"stage": "repro_research"},
+    )
+
+    _append_case_event(
+        global_path=global_path,
+        case_registry_path=registry_path,
+        event=replay,
+    )
+
+    case_log = (
+        tmp_path
+        / "telemetry"
+        / "cases"
+        / sha256(b"lifecycle-1").hexdigest()
+        / "lifecycle_events.jsonl"
+    )
+    assert read_lifecycle_events(case_log)[0].event_id == persisted.event_id
+    merged_dir = tmp_path / "merged"
+    result = materialize_lifecycle_metrics(
+        event_sources=[global_path, case_log],
+        output_dir=merged_dir,
+    )
+    assert result.source_event_count == 2
+    assert result.retained_event_count == 1
 
 
 def _with_model_contract(

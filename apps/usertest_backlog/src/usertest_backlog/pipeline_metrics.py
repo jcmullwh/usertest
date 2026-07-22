@@ -247,12 +247,27 @@ def _append_case_event(
     case_registry_path: Path,
     event: Any,
 ) -> None:
-    append_lifecycle_event(global_path, event)
+    inserted = append_lifecycle_event(global_path, event)
+    persisted = event
+    if not inserted:
+        persisted = next(
+            (
+                retained
+                for retained in read_lifecycle_events(global_path)
+                if retained.idempotency_key == event.idempotency_key
+            ),
+            None,
+        )
+    if persisted is None:
+        raise RuntimeError(
+            "Lifecycle event append did not retain its idempotency key: "
+            f"{event.idempotency_key}"
+        )
     lifecycle_id = event.context.case_lifecycle_id
     if lifecycle_id is not None:
         append_lifecycle_event(
             _case_root(case_registry_path, lifecycle_id) / "lifecycle_events.jsonl",
-            event,
+            persisted,
         )
 
 

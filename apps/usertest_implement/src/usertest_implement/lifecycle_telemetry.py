@@ -556,19 +556,70 @@ def _resolution_mode(origin: _Origin) -> str:
     return "resolved_external"
 
 
-def _known_error_state(events_path: Path) -> tuple[set[str], set[str]]:
+def _predecessor_event_paths(
+    *,
+    run_dir: Path,
+    resume_state: Mapping[str, Any],
+    case_lifecycle_id: str,
+) -> tuple[Path, ...]:
+    """Return retained same-lifecycle event logs linked by resume provenance."""
+
+    pending: list[Path] = []
+    seen_runs = {run_dir.resolve()}
+
+    def add_link(value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        candidate = Path(value).expanduser().resolve()
+        if candidate not in seen_runs:
+            pending.append(candidate)
+
+    add_link(resume_state.get("resumed_from_run_dir"))
+    for artifact_name in ("resume_ref.json", "handoff_summary.json"):
+        payload = _read_json(run_dir / artifact_name)
+        if payload is not None:
+            add_link(payload.get("resumed_from_run_dir"))
+
+    retained_paths: list[Path] = []
+    while pending:
+        predecessor = pending.pop()
+        if predecessor in seen_runs:
+            continue
+        seen_runs.add(predecessor)
+        events_path = predecessor / LIFECYCLE_EVENTS_ARTIFACT_NAME
+        try:
+            events = read_lifecycle_events(events_path)
+        except Exception:  # noqa: BLE001 - malformed prior telemetry remains non-authoritative
+            events = []
+        if any(
+            event.context.case_lifecycle_id == case_lifecycle_id for event in events
+        ):
+            retained_paths.append(events_path)
+            for artifact_name in (
+                "resume_ref.json",
+                "handoff_summary.json",
+                "ticket_resume_state.json",
+            ):
+                payload = _read_json(predecessor / artifact_name)
+                if payload is not None:
+                    add_link(payload.get("resumed_from_run_dir"))
+    return tuple(retained_paths)
+
+
+def _known_error_state(*events_paths: Path) -> tuple[set[str], set[str]]:
     occurred: set[str] = set()
     resolved: set[str] = set()
-    try:
-        for event in read_lifecycle_events(events_path):
-            if event.error_cluster_id is None:
-                continue
-            if event.event_type == "error.occurred":
-                occurred.add(event.error_cluster_id)
-            elif event.event_type == "error.resolved":
-                resolved.add(event.error_cluster_id)
-    except Exception:  # noqa: BLE001 - append/validation owns durable corruption reporting
-        pass
+    for events_path in events_paths:
+        try:
+            for event in read_lifecycle_events(events_path):
+                if event.error_cluster_id is None:
+                    continue
+                if event.event_type == "error.occurred":
+                    occurred.add(event.error_cluster_id)
+                elif event.event_type == "error.resolved":
+                    resolved.add(event.error_cluster_id)
+        except Exception:  # noqa: BLE001 - append/validation owns durable corruption reporting
+            continue
     return occurred, resolved
 
 
@@ -870,7 +921,17 @@ def write_implementation_lifecycle_telemetry(
 
     lifecycle_state = _clean_str(resume_state.get("lifecycle_state")) or "in_progress"
     terminal_failure = lifecycle_state in _TERMINAL_FAILURE_STATES
-    occurred_errors, resolved_errors = _known_error_state(events_path)
+    case_lifecycle_id = context.case_lifecycle_id
+    assert case_lifecycle_id is not None
+    predecessor_event_paths = _predecessor_event_paths(
+        run_dir=run_dir,
+        resume_state=resume_state,
+        case_lifecycle_id=case_lifecycle_id,
+    )
+    occurred_errors, resolved_errors = _known_error_state(
+        events_path,
+        *predecessor_event_paths,
+    )
     observed = _milestones(run_dir, review_run_dir)
     for milestone in observed:
         appended += _emit_milestone(

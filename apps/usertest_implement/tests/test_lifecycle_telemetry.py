@@ -226,6 +226,47 @@ def test_resume_ready_verification_failure_keeps_lifecycle_open(tmp_path: Path) 
     assert manifest.status == "active"
 
 
+def test_successful_resume_resolves_predecessor_error_cluster(tmp_path: Path) -> None:
+    selected = replace(_selected(tmp_path), case_lifecycle_id="case-lifecycle-resume")
+    failed_run = tmp_path / "runs" / "implement" / "failed-predecessor"
+    _write_json(failed_run / "verification.json", {"passed": False, "commands": []})
+    write_ticket_resume_state(
+        selected=selected,
+        run_dir=failed_run,
+        owner_root=tmp_path,
+        exit_code=2,
+    )
+    predecessor_error = next(
+        event
+        for event in read_lifecycle_events(failed_run / "lifecycle_events.jsonl")
+        if event.event_type == "error.occurred"
+    )
+
+    successful_run = tmp_path / "runs" / "implement" / "successful-resume"
+    _write_json(successful_run / "verification.json", {"passed": True, "commands": []})
+    _write_json(
+        successful_run / "resume_ref.json",
+        {
+            "resumed_from_run_dir": str(failed_run),
+            "correction_origin": "system_self_correction",
+        },
+    )
+    write_ticket_resume_state(
+        selected=selected,
+        run_dir=successful_run,
+        owner_root=tmp_path,
+        exit_code=0,
+    )
+
+    resolution = next(
+        event
+        for event in read_lifecycle_events(successful_run / "lifecycle_events.jsonl")
+        if event.event_type == "error.resolved"
+    )
+    assert resolution.error_cluster_id == predecessor_error.error_cluster_id
+    assert resolution.attributes["resolution_mode"] == "self_healed_controller"
+
+
 def test_case_lifecycle_fallback_is_stable_per_implementation_run(tmp_path: Path) -> None:
     selected = _selected(tmp_path)
     run_dir = tmp_path / "runs" / "implement" / "stable"

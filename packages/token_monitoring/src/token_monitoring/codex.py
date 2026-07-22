@@ -902,6 +902,20 @@ def parse_codex_invocation_usage(
         previous = observation
 
     final_high_water = unique_observations[-1].usage if unique_observations else None
+    terminal_values = {
+        _usage_tuple(item.usage) for item in observations if item.terminal
+    }
+    if len(terminal_values) > 1:
+        diagnostics.append(
+            {
+                "code": (
+                    "multiple_terminal_usage_values_with_baseline"
+                    if baseline is not None
+                    else "multiple_terminal_usage_values_without_baseline"
+                ),
+                "count": len(terminal_values),
+            }
+        )
     fatal_codes = {
         "invalid_baseline_high_water",
         "usage_source_missing",
@@ -912,6 +926,8 @@ def parse_codex_invocation_usage(
         "session_id_mismatch",
         "conflicting_duplicate_cumulative_usage",
         "non_monotonic_cumulative_usage",
+        "multiple_terminal_usage_values_with_baseline",
+        "multiple_terminal_usage_values_without_baseline",
     }
 
     if not observations:
@@ -934,17 +950,7 @@ def parse_codex_invocation_usage(
                 usage = final_high_water.delta_from(baseline)
                 semantics = "session_cumulative"
         elif final_high_water is not None:
-            terminal_values = {
-                _usage_tuple(item.usage) for item in observations if item.terminal
-            }
-            if len(terminal_values) > 1:
-                diagnostics.append(
-                    {
-                        "code": "multiple_terminal_usage_values_without_baseline",
-                        "count": len(terminal_values),
-                    }
-                )
-            elif terminal_values:
+            if terminal_values:
                 usage = final_high_water
                 semantics = "per_invocation"
             else:
