@@ -154,24 +154,58 @@ def _git_head(repo_root: Path) -> str:
     return sha
 
 
-def _pick_ci_run(runs: list[dict[str, Any]], *, head_sha: str) -> dict[str, Any] | None:
+def _exact_ci_runs(runs: list[dict[str, Any]], *, head_sha: str) -> list[dict[str, Any]]:
     matches = [
         item
         for item in runs
         if isinstance(item, dict)
         and str(item.get("headSha") or "").strip() == head_sha
-        and str(item.get("event") or "").strip() == "push"
     ]
-    if not matches:
-        matches = [
-            item
-            for item in runs
-            if isinstance(item, dict) and str(item.get("headSha") or "").strip() == head_sha
-        ]
+    matches.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+    return matches
+
+
+def _ci_run_is_successful(run: dict[str, Any]) -> bool:
+    return (
+        str(run.get("status") or "").strip().lower() == "completed"
+        and str(run.get("conclusion") or "").strip().lower() == "success"
+    )
+
+
+def _completed_ci_results_conflict(runs: list[dict[str, Any]], *, head_sha: str) -> bool:
+    conclusions = {
+        str(item.get("conclusion") or "").strip().lower()
+        for item in _exact_ci_runs(runs, head_sha=head_sha)
+        if str(item.get("status") or "").strip().lower() == "completed"
+        and str(item.get("conclusion") or "").strip().lower()
+        in {"success", "failure", "timed_out", "action_required", "startup_failure"}
+    }
+    return "success" in conclusions and len(conclusions) > 1
+
+
+def _pick_ci_run(runs: list[dict[str, Any]], *, head_sha: str) -> dict[str, Any] | None:
+    matches = _exact_ci_runs(runs, head_sha=head_sha)
     if not matches:
         return None
-    matches.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
-    return matches[0]
+    successful = [item for item in matches if _ci_run_is_successful(item)]
+    if successful:
+        # A complete exact-SHA workflow is immutable qualification evidence. A
+        # redundant push twin that is merely queued or running must not hide a
+        # completed pull-request workflow for the same commit.
+        successful.sort(
+            key=lambda item: (
+                str(item.get("event") or "").strip() == "push",
+                str(item.get("createdAt") or ""),
+            ),
+            reverse=True,
+        )
+        return successful[0]
+    completed = [
+        item
+        for item in matches
+        if str(item.get("status") or "").strip().lower() == "completed"
+    ]
+    return completed[0] if completed else matches[0]
 
 
 def _blocker(
@@ -363,8 +397,21 @@ def run_batch_preflight(
                 runs = json.loads(ci_proc.stdout or "[]")
             except json.JSONDecodeError:
                 runs = []
-            picked = _pick_ci_run(runs if isinstance(runs, list) else [], head_sha=head_sha)
-            if picked is None or str(picked.get("conclusion") or "").strip().lower() != "success":
+            run_records = runs if isinstance(runs, list) else []
+            picked = _pick_ci_run(run_records, head_sha=head_sha)
+            if _completed_ci_results_conflict(run_records, head_sha=head_sha):
+                blockers.append(
+                    _blocker(
+                        blocker_id="baseline_repo_red",
+                        failure_class="baseline_repo_regression",
+                        summary="Completed CI results for the batch commit conflict.",
+                        evidence={
+                            "head_sha": head_sha,
+                            "path": str(preflight_dir / "base_ci.log"),
+                        },
+                    )
+                )
+            elif picked is None or not _ci_run_is_successful(picked):
                 blockers.append(
                     _blocker(
                         blocker_id="baseline_repo_red",
