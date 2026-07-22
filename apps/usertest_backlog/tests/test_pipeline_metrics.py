@@ -4,14 +4,18 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
+from reporter.materialize import materialize_lifecycle_metrics
 from run_artifacts.lifecycle_events import (
     LifecycleContext,
+    ModelUsageReceipt,
     append_lifecycle_event,
     canonical_sha256,
     make_lifecycle_event,
+    write_content_addressed_model_usage_receipt,
 )
 
 from usertest_backlog.pipeline_metrics import (
+    _cycle_for,
     bind_ticket_lifecycle_ids,
     case_lifecycle_id,
     record_stage_telemetry,
@@ -55,13 +59,15 @@ def _write_research_model_run(
     ended_at: str,
     total_tokens: int = 10,
     session_id: str = "session-1",
+    source_case_id: str | None = None,
+    source_lifecycle_id: str | None = None,
 ) -> Path:
     root.mkdir(parents=True)
     manifest_path = root / "research.model_invocation.json"
-    manifest_path.write_text(
-        json.dumps({"invocation_id": invocation_id}), encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps({"invocation_id": invocation_id}), encoding="utf-8")
     context = LifecycleContext(
+        case_lifecycle_id=source_lifecycle_id,
+        case_id=source_case_id,
         cycle_id="source-cycle",
         work_unit_id=f"model-work:{invocation_id}",
         invocation_id=invocation_id,
@@ -111,6 +117,93 @@ def _write_research_model_run(
     )
     (root / "report.json").write_text("{}\n", encoding="utf-8")
     return manifest_path
+
+
+def _write_historical_cumulative_research_run(
+    root: Path,
+    *,
+    invocation_id: str,
+    started_at: str,
+    ended_at: str,
+    usage: dict[str, int],
+    session_id: str,
+    continued_session: bool,
+) -> tuple[Path, str, Path]:
+    root.mkdir(parents=True)
+    context = LifecycleContext(
+        cycle_id="source-cycle",
+        work_unit_id=f"model-work:{invocation_id}",
+        invocation_id=invocation_id,
+        session_id=session_id,
+    )
+    receipt = ModelUsageReceipt(
+        receipt_id=f"usage:{invocation_id}",
+        context=context,
+        provider="codex",
+        model="gpt-5.6",
+        usage_semantics="per_invocation",
+        recorded_at=ended_at,
+        invocation_started_at=started_at,
+        invocation_ended_at=ended_at,
+        input_tokens=usage["input_tokens"],
+        cached_input_tokens=usage["cached_input_tokens"],
+        uncached_input_tokens=usage["uncached_input_tokens"],
+        output_tokens=usage["output_tokens"],
+        reasoning_tokens=usage["reasoning_output_tokens"],
+        total_tokens=usage["total_tokens"],
+        observed_usage={
+            "total_tokens": usage["total_tokens"],
+            "input_tokens": usage["input_tokens"],
+            "cached_input_tokens": usage["cached_input_tokens"],
+            "uncached_input_tokens": usage["uncached_input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "reasoning_tokens": usage["reasoning_output_tokens"],
+        },
+        provenance_quality="authoritative",
+    )
+    receipt_path = write_content_addressed_model_usage_receipt(
+        root / "model_usage_receipts",
+        receipt,
+    )
+    append_lifecycle_event(
+        root / "lifecycle_events.jsonl",
+        make_lifecycle_event(
+            "model.invocation.started",
+            context,
+            occurred_at=started_at,
+            started_at=started_at,
+        ),
+    )
+    completed = make_lifecycle_event(
+        "model.invocation.completed",
+        context,
+        occurred_at=ended_at,
+        started_at=started_at,
+        ended_at=ended_at,
+        active_seconds=1,
+        evidence_paths=(str(receipt_path),),
+        attributes={
+            "token_usage": usage,
+            "token_scope": "qualification",
+            "cost_scope": "direct",
+            "usage_semantics": "per_invocation",
+            "continued_session": continued_session,
+            "usage_receipt_path": str(receipt_path),
+        },
+    )
+    append_lifecycle_event(root / "lifecycle_events.jsonl", completed)
+    (root / "run_meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_started_utc": started_at,
+                "run_finished_utc": ended_at,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "report.json").write_text("{}\n", encoding="utf-8")
+    return root / "lifecycle_events.jsonl", completed.event_id, receipt_path
 
 
 def test_stage_telemetry_closes_verified_negative_and_is_idempotent(tmp_path: Path) -> None:
@@ -199,9 +292,7 @@ def test_stage_links_bound_model_usage_without_duplicating_case_cost(tmp_path: P
     invocation_dir.mkdir()
     invocation_id = "invocation-1"
     manifest_path = invocation_dir / "stage.model_invocation.json"
-    manifest_path.write_text(
-        json.dumps({"invocation_id": invocation_id}), encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps({"invocation_id": invocation_id}), encoding="utf-8")
     append_lifecycle_event(
         invocation_dir / "lifecycle_events.jsonl",
         make_lifecycle_event(
@@ -261,15 +352,11 @@ def test_stage_links_bound_model_usage_without_duplicating_case_cost(tmp_path: P
     assert len(linked[0]["beneficiary_case_lifecycle_ids"]) == 2
     stage_work = next(row for row in rows if row["event_type"] == "work.completed")
     assert linked[0]["context"]["work_unit_id"] != stage_work["context"]["work_unit_id"]
-    assert linked[0]["attributes"]["stage_work_unit_id"] == stage_work["context"][
-        "work_unit_id"
-    ]
+    assert linked[0]["attributes"]["stage_work_unit_id"] == stage_work["context"]["work_unit_id"]
     interventions = [row for row in rows if row["event_type"] == "intervention.completed"]
     assert len(interventions) == 1
     assert len(interventions[0]["beneficiary_case_lifecycle_ids"]) == 2
-    assert interventions[0]["context"]["work_unit_id"] != linked[0]["context"][
-        "work_unit_id"
-    ]
+    assert interventions[0]["context"]["work_unit_id"] != linked[0]["context"]["work_unit_id"]
     metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
     assert metrics["reconciliation"]["ok"] is False
     assert {issue["code"] for issue in metrics["reconciliation"]["issues"]} == {
@@ -277,9 +364,116 @@ def test_stage_links_bound_model_usage_without_duplicating_case_cost(tmp_path: P
         "work_unit_resource_time_unknown",
     }
     assert {
-        case["accounting"]["inclusive"]["gross"]["total_tokens"]
-        for case in metrics["cases"]
+        case["accounting"]["inclusive"]["gross"]["total_tokens"] for case in metrics["cases"]
     } == {12}
+
+
+def test_stage_link_rehomes_complete_runner_boundary_to_canonical_lifecycle(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "research-run"
+    source_lifecycle_id = "case-lifecycle:source-run"
+    manifest_path = _write_research_model_run(
+        run_dir,
+        invocation_id="invocation-1",
+        started_at="2026-07-21T12:00:01Z",
+        ended_at="2026-07-21T12:00:05Z",
+        total_tokens=10,
+        source_case_id="case-1",
+        source_lifecycle_id=source_lifecycle_id,
+    )
+    runner_context = LifecycleContext(
+        case_lifecycle_id=source_lifecycle_id,
+        case_id="case-1",
+        cycle_id="source-cycle",
+        stage="repro_research",
+        work_unit_id="runner-work:1",
+    )
+    append_lifecycle_event(
+        run_dir / "lifecycle_events.jsonl",
+        make_lifecycle_event(
+            "work.created",
+            runner_context,
+            occurred_at="2026-07-21T12:00:00Z",
+            started_at="2026-07-21T12:00:00Z",
+            attributes={"scope": "pipeline"},
+        ),
+    )
+    append_lifecycle_event(
+        run_dir / "lifecycle_events.jsonl",
+        make_lifecycle_event(
+            "work.completed",
+            runner_context,
+            occurred_at="2026-07-21T12:00:06Z",
+            started_at="2026-07-21T12:00:00Z",
+            ended_at="2026-07-21T12:00:06Z",
+            attributes={
+                "scope": "pipeline",
+                "wall_clock_envelope_seconds": 6,
+            },
+        ),
+    )
+    registry_path = tmp_path / "case_registry.json"
+    stage = _with_model_contract(
+        {
+            "stage": "repro_research",
+            "generated_at": "2026-07-21T12:00:10Z",
+            "input_meta": {},
+            "items": [
+                {
+                    "case_id": "case-1",
+                    "research_attempts": [
+                        {
+                            "attempt_number": 1,
+                            "attempt_kind": "full_research",
+                            "outcome": "output_contract_valid",
+                            "run_dir": str(run_dir),
+                            "report_path": str(run_dir / "report.json"),
+                            "validation_errors": [],
+                        }
+                    ],
+                }
+            ],
+        },
+        manifest_paths=[manifest_path],
+        invocation_expected=True,
+    )
+    record_stage_telemetry(
+        case_registry={"cases": {}},
+        case_registry_path=registry_path,
+        stage_doc=stage,
+    )
+    merged_dir = tmp_path / "merged"
+    materialize_lifecycle_metrics(
+        event_sources=[
+            run_dir / "lifecycle_events.jsonl",
+            tmp_path / "lifecycle_events.jsonl",
+        ],
+        output_dir=merged_dir,
+    )
+
+    metrics = json.loads((merged_dir / "case_metrics.json").read_text(encoding="utf-8"))
+    assert [case["case_id"] for case in metrics["cases"]] == ["case-1"]
+    [case] = metrics["cases"]
+    assert case["case_lifecycle_id"] != source_lifecycle_id
+    assert case["accounting"]["direct"]["gross"]["total_tokens"] == 10
+    assert "runner-work:1" in case["accounting"]["direct"]["work_unit_ids"]
+    linked_types = {
+        row["event_type"]
+        for row in (
+            json.loads(line)
+            for line in (tmp_path / "lifecycle_events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        if row.get("attributes", {}).get("linked_source_event_id")
+    }
+    assert {
+        "work.created",
+        "work.completed",
+        "model.invocation.started",
+        "model.invocation.completed",
+    }.issubset(linked_types)
 
 
 def test_reused_stage_without_complete_prior_work_edges_withholds_cost(tmp_path: Path) -> None:
@@ -297,23 +491,18 @@ def test_reused_stage_without_complete_prior_work_edges_withholds_cost(tmp_path:
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "lifecycle_events.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        for line in (tmp_path / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     reused = next(row for row in rows if row["event_type"] == "work.reused")
     assert reused["attributes"]["cost_unknown"] is True
     assert reused["attributes"]["dependency_ids"] == []
 
-    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))[
-        "cases"
-    ][0]
+    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))["cases"][0]
     assert case["accounting"]["inclusive"]["gross"]["total_tokens"] is None
     assert case["accounting"]["inclusive"]["gross"]["active_seconds"] is None
     assert case["reconciliation"]["ok"] is False
     assert any(
-        issue["code"] == "work_unit_cost_unknown"
-        for issue in case["reconciliation"]["issues"]
+        issue["code"] == "work_unit_cost_unknown" for issue in case["reconciliation"]["issues"]
     )
 
 
@@ -338,9 +527,7 @@ def test_reused_stage_accepts_explicit_complete_prior_work_edges(tmp_path: Path)
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "lifecycle_events.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        for line in (tmp_path / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     reused = next(row for row in rows if row["event_type"] == "work.reused")
     assert reused["attributes"]["cost_unknown"] is False
@@ -358,9 +545,7 @@ def test_stage_derives_raw_atom_boundary_from_retained_origin_id(tmp_path: Path)
         "items": [
             {
                 "case_id": "case-1",
-                "evidence_atom_ids": [
-                    "target/20260719T083852Z/codex/1:confusion_point:1"
-                ],
+                "evidence_atom_ids": ["target/20260719T083852Z/codex/1:confusion_point:1"],
             }
         ],
     }
@@ -475,9 +660,7 @@ def test_stage3_projects_run_receipts_and_validation_self_healing(
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "lifecycle_events.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        for line in (tmp_path / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["event_type"] for row in rows].count("model.invocation.completed") == 4
     assert [row["event_type"] for row in rows].count("error.occurred") == 4
@@ -580,11 +763,166 @@ def test_stage3_model_cost_is_bound_to_each_case_not_shared_across_cohort(
     }
     assert direct_tokens == {"case-1": 10, "case-2": 20}
     assert {
-        case["case_id"]: case["accounting"]["inclusive"]["gross"][
-            "total_tokens"
-        ]
+        case["case_id"]: case["accounting"]["inclusive"]["gross"]["total_tokens"]
         for case in metrics["cases"]
     } == direct_tokens
+
+
+def test_stage3_corrects_retained_codex_session_high_water_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    session_id = "session-cumulative"
+    first_usage = {
+        "total_tokens": 120,
+        "input_tokens": 100,
+        "cached_input_tokens": 30,
+        "uncached_input_tokens": 70,
+        "output_tokens": 20,
+        "reasoning_output_tokens": 10,
+    }
+    second_usage = {
+        "total_tokens": 177,
+        "input_tokens": 150,
+        "cached_input_tokens": 50,
+        "uncached_input_tokens": 100,
+        "output_tokens": 27,
+        "reasoning_output_tokens": 12,
+    }
+    first_run = tmp_path / "first-run"
+    second_run = tmp_path / "second-run"
+    first_log, first_source_event_id, first_receipt = _write_historical_cumulative_research_run(
+        first_run,
+        invocation_id="invocation-first",
+        started_at="2026-07-21T12:00:01Z",
+        ended_at="2026-07-21T12:00:02Z",
+        usage=first_usage,
+        session_id=session_id,
+        continued_session=False,
+    )
+    second_log, second_source_event_id, second_receipt = _write_historical_cumulative_research_run(
+        second_run,
+        invocation_id="invocation-second",
+        started_at="2026-07-21T12:00:03Z",
+        ended_at="2026-07-21T12:00:04Z",
+        usage=second_usage,
+        session_id=session_id,
+        continued_session=True,
+    )
+    registry_path = tmp_path / "case_registry.json"
+    lifecycle_id = case_lifecycle_id(
+        case_registry_path=registry_path,
+        case_id="case-1",
+    )
+    cycle = _cycle_for(registry_path)
+    global_path = tmp_path / "lifecycle_events.jsonl"
+    for invocation_id, source_event_id, source_log, receipt_path, usage, occurred_at in (
+        (
+            "invocation-first",
+            first_source_event_id,
+            first_log,
+            first_receipt,
+            first_usage,
+            "2026-07-21T12:00:02Z",
+        ),
+        (
+            "invocation-second",
+            second_source_event_id,
+            second_log,
+            second_receipt,
+            second_usage,
+            "2026-07-21T12:00:04Z",
+        ),
+    ):
+        append_lifecycle_event(
+            global_path,
+            make_lifecycle_event(
+                "model.invocation.completed",
+                LifecycleContext(
+                    case_lifecycle_id=lifecycle_id,
+                    case_id="case-1",
+                    cycle_id=cycle.cycle_id,
+                    stage="repro_research",
+                    milestone_id="stage3",
+                    work_unit_id=f"model-work:{invocation_id}",
+                    invocation_id=invocation_id,
+                    session_id=session_id,
+                ),
+                idempotency_key=(f"linked:{cycle.cycle_id}:{source_event_id}"),
+                occurred_at=occurred_at,
+                active_seconds=1,
+                beneficiary_case_lifecycle_ids=(lifecycle_id,),
+                evidence_paths=(str(receipt_path),),
+                attributes={
+                    "token_usage": usage,
+                    "token_scope": "qualification",
+                    "cost_scope": "direct",
+                    "usage_semantics": "per_invocation",
+                    "linked_source_event_id": source_event_id,
+                    "linked_source_event_log": str(source_log),
+                },
+            ),
+        )
+    stage = {
+        "stage": "repro_research",
+        "generated_at": "2026-07-21T12:00:05Z",
+        "input_meta": {},
+        "items": [
+            {
+                "case_id": "case-1",
+                "research_attempts": [
+                    {
+                        "attempt_number": 1,
+                        "attempt_kind": "full_research",
+                        "outcome": "output_contract_valid",
+                        "run_dir": str(first_run),
+                        "report_path": str(first_run / "report.json"),
+                        "validation_errors": [],
+                        "agent_session_id": session_id,
+                        "observed_agent_session_id": session_id,
+                    },
+                    {
+                        "attempt_number": 2,
+                        "attempt_kind": "targeted_repair",
+                        "outcome": "output_contract_valid",
+                        "run_dir": str(second_run),
+                        "report_path": str(second_run / "report.json"),
+                        "validation_errors": [],
+                        "agent_session_id": session_id,
+                        "observed_agent_session_id": session_id,
+                    },
+                ],
+            }
+        ],
+    }
+    for _ in range(2):
+        record_stage_telemetry(
+            case_registry={"cases": {}},
+            case_registry_path=registry_path,
+            stage_doc=stage,
+        )
+
+    rows = [json.loads(line) for line in global_path.read_text(encoding="utf-8").splitlines()]
+    corrections = [row for row in rows if row["event_type"] == "model.usage.corrected"]
+    assert len(corrections) == 1
+    assert corrections[0]["attributes"]["corrected_token_usage"] == {
+        "total_tokens": 57,
+        "input_tokens": 50,
+        "cached_input_tokens": 20,
+        "uncached_input_tokens": 30,
+        "output_tokens": 7,
+        "reasoning_output_tokens": 2,
+    }
+    retained_second = next(
+        row
+        for row in rows
+        if row["event_type"] == "model.invocation.completed"
+        and row["attributes"].get("linked_source_event_id") == second_source_event_id
+    )
+    assert retained_second["attributes"]["token_usage"]["total_tokens"] == 177
+    metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
+    [case] = metrics["cases"]
+    assert case["accounting"]["direct"]["gross"]["total_tokens"] == 177
+    assert metrics["normalization"]["model_usage_corrections"][0]["token_usage_complete"] is True
 
 
 def test_stage3_checkpoint_projects_committed_case_without_completing_batch(
@@ -630,22 +968,18 @@ def test_stage3_checkpoint_projects_committed_case_without_completing_batch(
     def rows() -> list[dict[str, object]]:
         return [
             json.loads(line)
-            for line in (tmp_path / "lifecycle_events.jsonl").read_text(
-                encoding="utf-8"
-            ).splitlines()
+            for line in (tmp_path / "lifecycle_events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
         ]
 
     retained = rows()
     assert [row["event_type"] for row in retained].count("stage.checkpointed") == 1
     assert [row["event_type"] for row in retained].count("work.completed") == 0
     assert [row["event_type"] for row in retained].count("stage.completed") == 1
-    stage_completed = next(
-        row for row in retained if row["event_type"] == "stage.completed"
-    )
+    stage_completed = next(row for row in retained if row["event_type"] == "stage.completed")
     assert stage_completed["occurred_at"] == "2026-07-21T12:00:10Z"
-    assert stage_completed["attributes"]["completion_scope"] == (
-        "committed_case_prefix"
-    )
+    assert stage_completed["attributes"]["completion_scope"] == ("committed_case_prefix")
     metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
     [case] = metrics["cases"]
     assert case["accounting"]["direct"]["gross"]["total_tokens"] == 10
@@ -664,9 +998,7 @@ def test_stage3_checkpoint_projects_committed_case_without_completing_batch(
     retained = rows()
     assert [row["event_type"] for row in retained].count("work.completed") == 1
     assert [row["event_type"] for row in retained].count("stage.completed") == 1
-    assert [row["event_type"] for row in retained].count(
-        "model.invocation.completed"
-    ) == 1
+    assert [row["event_type"] for row in retained].count("model.invocation.completed") == 1
     metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
     [case] = metrics["cases"]
     assert case["accounting"]["direct"]["gross"]["total_tokens"] == 10
@@ -707,8 +1039,6 @@ def test_stage3_checkpoint_preserves_legacy_stage_completion_idempotency(
     )
     rows = [
         json.loads(line)
-        for line in (tmp_path / "lifecycle_events.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        for line in (tmp_path / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["event_type"] for row in rows].count("stage.completed") == 1

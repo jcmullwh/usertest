@@ -16,11 +16,13 @@ from reporter.materialize import materialize_lifecycle_metrics
 from run_artifacts.lifecycle_events import (
     LifecycleContext,
     LifecycleManifest,
+    ModelUsageReceipt,
     append_lifecycle_event,
     canonical_sha256,
     load_context_from_env,
     make_lifecycle_event,
     read_lifecycle_events,
+    read_model_usage_receipt,
     utc_now,
     write_lifecycle_manifest,
 )
@@ -64,6 +66,17 @@ class _ModelTelemetryProjection:
     invocation_expected: bool | None
     complete: bool
     issues: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _NormalizedModelUsage:
+    source_event_id: str
+    usage: dict[str, int] | None
+    semantics: str
+    baseline_usage: dict[str, int] | None
+    observed_usage: dict[str, int] | None
+    unknown_reason: str | None
+    receipt_path: Path | None
 
 
 _CONTEXT_LOCK = threading.Lock()
@@ -399,6 +412,278 @@ def _manifest_invocation_id(path: Path) -> str | None:
     return invocation_id if isinstance(invocation_id, str) and invocation_id else None
 
 
+def _normalized_token_map(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, Mapping):
+        return None
+    aliases = {
+        "total_tokens": ("total_tokens",),
+        "input_tokens": ("input_tokens",),
+        "cached_input_tokens": ("cached_input_tokens",),
+        "uncached_input_tokens": ("uncached_input_tokens",),
+        "output_tokens": ("output_tokens",),
+        "reasoning_output_tokens": (
+            "reasoning_output_tokens",
+            "reasoning_tokens",
+        ),
+    }
+    result: dict[str, int] = {}
+    for dimension, names in aliases.items():
+        parsed = None
+        for name in names:
+            candidate = value.get(name)
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                parsed = candidate
+                break
+        if parsed is None or parsed < 0:
+            return None
+        result[dimension] = parsed
+    if result["total_tokens"] != result["input_tokens"] + result["output_tokens"]:
+        return None
+    if result["input_tokens"] != (result["cached_input_tokens"] + result["uncached_input_tokens"]):
+        return None
+    return result
+
+
+def _receipt_token_map(receipt: ModelUsageReceipt) -> dict[str, int] | None:
+    return _normalized_token_map(
+        {
+            "total_tokens": receipt.total_tokens,
+            "input_tokens": receipt.input_tokens,
+            "cached_input_tokens": receipt.cached_input_tokens,
+            "uncached_input_tokens": receipt.uncached_input_tokens,
+            "output_tokens": receipt.output_tokens,
+            "reasoning_output_tokens": receipt.reasoning_tokens,
+        }
+    )
+
+
+def _receipt_path_for_event(source_path: Path, event: Any) -> Path | None:
+    candidates: list[Path] = []
+    raw = event.attributes.get("usage_receipt_path")
+    if isinstance(raw, str) and raw.strip():
+        candidate = Path(raw)
+        candidates.append(candidate if candidate.is_absolute() else source_path.parent / candidate)
+    for raw_evidence in event.evidence_paths:
+        candidate = Path(raw_evidence)
+        if candidate.name == "model_usage_receipt.json":
+            candidates.append(
+                candidate if candidate.is_absolute() else source_path.parent / candidate
+            )
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _read_event_usage_receipt(
+    source_path: Path,
+    event: Any,
+) -> tuple[Path | None, ModelUsageReceipt | None]:
+    receipt_path = _receipt_path_for_event(source_path, event)
+    if receipt_path is None:
+        return None, None
+    try:
+        receipt = read_model_usage_receipt(receipt_path)
+    except (OSError, UnicodeError, ValueError):
+        return receipt_path, None
+    invocation_id = event.context.invocation_id
+    if receipt.context.invocation_id != invocation_id:
+        return receipt_path, None
+    if (
+        len(receipt_path.parts) >= 2
+        and len(receipt_path.parent.name) == 64
+        and canonical_sha256(receipt.to_dict()) != receipt_path.parent.name
+    ):
+        return receipt_path, None
+    return receipt_path, receipt
+
+
+def _usage_sort_key(source_path: Path, event: Any) -> tuple[float, str, str]:
+    raw_timestamp = _timestamp_or_none(event.ended_at) or _timestamp_or_none(
+        event.occurred_at
+    )
+    timestamp = (
+        datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00")).timestamp()
+        if raw_timestamp is not None
+        else float("inf")
+    )
+    return timestamp, str(source_path.resolve()), event.event_id
+
+
+def _subtract_usage(
+    observed: Mapping[str, int],
+    baseline: Mapping[str, int],
+) -> dict[str, int] | None:
+    if set(observed) != set(baseline):
+        return None
+    delta = {name: observed[name] - baseline[name] for name in observed}
+    if any(value < 0 for value in delta.values()):
+        return None
+    return _normalized_token_map(delta)
+
+
+def _normalized_model_usage_for_logs(
+    source_paths: Sequence[Path],
+) -> dict[str, _NormalizedModelUsage]:
+    rows: list[tuple[Path, Any, Path | None, ModelUsageReceipt | None]] = []
+    for source_path in dict.fromkeys(path.resolve() for path in source_paths):
+        if not source_path.is_file():
+            continue
+        try:
+            events = read_lifecycle_events(source_path)
+        except Exception:  # noqa: BLE001 - retained cost must fail closed
+            continue
+        for event in events:
+            if event.event_type != "model.invocation.completed":
+                continue
+            receipt_path, receipt = _read_event_usage_receipt(source_path, event)
+            rows.append((source_path, event, receipt_path, receipt))
+    rows.sort(key=lambda row: _usage_sort_key(row[0], row[1]))
+
+    high_water: dict[tuple[str, str], dict[str, int]] = {}
+    projected: dict[str, _NormalizedModelUsage] = {}
+    for _source_path, event, receipt_path, receipt in rows:
+        event_usage = _normalized_token_map(event.attributes.get("token_usage"))
+        event_semantics = event.attributes.get("usage_semantics")
+        event_semantics = (
+            event_semantics
+            if isinstance(event_semantics, str) and event_semantics
+            else "per_invocation"
+        )
+        if receipt is None:
+            continued = event.attributes.get("continued_session") is True
+            projected[event.event_id] = _NormalizedModelUsage(
+                source_event_id=event.event_id,
+                usage=None if continued else event_usage,
+                semantics="unattributable" if continued else event_semantics,
+                baseline_usage=None,
+                observed_usage=None,
+                unknown_reason=("continued_session_usage_receipt_missing" if continued else None),
+                receipt_path=receipt_path,
+            )
+            continue
+
+        observed = _normalized_token_map(receipt.observed_usage)
+        attributed = _receipt_token_map(receipt)
+        session_id = receipt.context.session_id or event.context.session_id
+        session_key = (
+            (receipt.provider.casefold(), session_id)
+            if isinstance(session_id, str) and session_id
+            else None
+        )
+        prior = high_water.get(session_key) if session_key is not None else None
+        inferred_continuation = bool(
+            session_key is not None and prior is not None and receipt.provider.casefold() == "codex"
+        )
+        continued = bool(
+            event.attributes.get("continued_session") is True
+            or receipt.usage_semantics == "session_cumulative"
+            or inferred_continuation
+        )
+        usage = attributed
+        semantics = receipt.usage_semantics
+        baseline: dict[str, int] | None = None
+        unknown_reason: str | None = None
+        if continued:
+            semantics = "session_cumulative"
+            if prior is None:
+                usage = None
+                unknown_reason = "continued_session_missing_prior_high_water"
+            elif observed is None:
+                usage = None
+                unknown_reason = "continued_session_observed_high_water_incomplete"
+            else:
+                baseline = dict(prior)
+                receipt_baseline = _normalized_token_map(receipt.baseline_usage)
+                if receipt.usage_semantics == "session_cumulative" and receipt_baseline != prior:
+                    usage = None
+                    unknown_reason = "continued_session_baseline_lineage_mismatch"
+                else:
+                    usage = _subtract_usage(observed, prior)
+                    if usage is None:
+                        unknown_reason = "continued_session_high_water_regressed"
+        elif receipt.usage_semantics == "unattributable":
+            usage = None
+            unknown_reason = "model_usage_receipt_unattributable"
+
+        if session_key is not None and observed is not None:
+            high_water[session_key] = dict(observed)
+        projected[event.event_id] = _NormalizedModelUsage(
+            source_event_id=event.event_id,
+            usage=usage,
+            semantics=semantics,
+            baseline_usage=baseline,
+            observed_usage=observed,
+            unknown_reason=unknown_reason,
+            receipt_path=receipt_path,
+        )
+    return projected
+
+
+def _normalized_research_model_usage(
+    stage_doc: Mapping[str, Any],
+) -> dict[str, _NormalizedModelUsage]:
+    return _normalized_model_usage_for_logs(_research_model_event_logs(stage_doc))
+
+
+def _attributes_with_normalized_usage(
+    attributes: Mapping[str, Any],
+    usage: _NormalizedModelUsage,
+) -> dict[str, Any]:
+    normalized = dict(attributes)
+    normalized.pop("token_usage", None)
+    normalized["usage_semantics"] = usage.semantics
+    normalized["baseline_usage"] = usage.baseline_usage or {}
+    normalized["observed_usage"] = usage.observed_usage or {}
+    if usage.usage is None:
+        normalized["cost_unknown"] = True
+        normalized["cost_unknown_reason"] = usage.unknown_reason or "model_usage_unattributable"
+        normalized["usage_unknown_reason"] = usage.unknown_reason or "model_usage_unattributable"
+    else:
+        normalized["token_usage"] = usage.usage
+        if normalized.get("cost_unknown_reason") in {
+            "continued_session_missing_prior_high_water",
+            "continued_session_usage_receipt_missing",
+            "model_usage_unattributable",
+            "model_usage_receipt_unattributable",
+        }:
+            normalized.pop("cost_unknown", None)
+            normalized.pop("cost_unknown_reason", None)
+        normalized.pop("usage_unknown_reason", None)
+    return normalized
+
+
+def _event_matches_normalized_usage(event: Any, usage: _NormalizedModelUsage) -> bool:
+    current_usage = _normalized_token_map(event.attributes.get("token_usage"))
+    current_semantics = event.attributes.get("usage_semantics")
+    if not isinstance(current_semantics, str) or not current_semantics:
+        current_semantics = "per_invocation"
+    if current_usage != usage.usage or current_semantics != usage.semantics:
+        return False
+    if usage.usage is None:
+        return (
+            event.attributes.get("cost_unknown") is True
+            and event.attributes.get("usage_unknown_reason") == usage.unknown_reason
+        )
+    return True
+
+
+def _correction_matches_normalized_usage(
+    correction: Any,
+    usage: _NormalizedModelUsage,
+) -> bool:
+    corrected = _normalized_token_map(correction.attributes.get("corrected_token_usage"))
+    return bool(
+        corrected == usage.usage
+        and correction.attributes.get("usage_semantics") == usage.semantics
+        and (
+            usage.usage is not None
+            or correction.attributes.get("usage_unknown_reason") == usage.unknown_reason
+        )
+    )
+
+
 def _model_telemetry_projection(
     stage_doc: Mapping[str, Any],
 ) -> _ModelTelemetryProjection:
@@ -411,6 +696,7 @@ def _model_telemetry_projection(
     expected_ids: set[str] = set()
     completed_ids: set[str] = set()
     invocation_expected: bool | None = None
+    normalized_research_usage = _normalized_research_model_usage(stage_doc)
 
     if isinstance(contract_raw, Mapping):
         contract = dict(contract_raw)
@@ -418,9 +704,7 @@ def _model_telemetry_projection(
             issues.append("stage_model_invocation_contract_schema_invalid")
         invocation_expected_raw = contract.get("invocation_expected")
         invocation_expected = (
-            invocation_expected_raw
-            if isinstance(invocation_expected_raw, bool)
-            else None
+            invocation_expected_raw if isinstance(invocation_expected_raw, bool) else None
         )
         if invocation_expected is None:
             issues.append("stage_model_invocation_contract_expectation_invalid")
@@ -437,20 +721,13 @@ def _model_telemetry_projection(
         for index, ref_raw in enumerate(manifests):
             ref = ref_raw if isinstance(ref_raw, Mapping) else {}
             path_raw = ref.get("path")
-            path = (
-                Path(str(path_raw))
-                if isinstance(path_raw, str) and path_raw.strip()
-                else None
-            )
+            path = Path(str(path_raw)) if isinstance(path_raw, str) and path_raw.strip() else None
             if path is None or not path.is_file():
                 issues.append(f"stage_model_invocation_ref_missing:{index}")
                 continue
             paths.append(path)
             ref_sha = ref.get("sha256")
-            if (
-                not isinstance(ref_sha, str)
-                or ref_sha != sha256(path.read_bytes()).hexdigest()
-            ):
+            if not isinstance(ref_sha, str) or ref_sha != sha256(path.read_bytes()).hexdigest():
                 issues.append(f"stage_model_invocation_ref_changed:{index}")
             invocation_id = _manifest_invocation_id(path)
             if invocation_id is None:
@@ -475,9 +752,7 @@ def _model_telemetry_projection(
             ):
                 completed_ids.add(invocation_id)
             else:
-                issues.append(
-                    f"stage_model_invocation_completion_missing:{invocation_id}"
-                )
+                issues.append(f"stage_model_invocation_completion_missing:{invocation_id}")
     elif not research_logs:
         issues.append("stage_model_invocation_contract_missing")
 
@@ -504,24 +779,20 @@ def _model_telemetry_projection(
             if event.event_type == "model.invocation.completed"
             and event.context.invocation_id is not None
         ]
-        completed = {
-            event.context.invocation_id for event in completed_events
-        }
+        completed = {event.context.invocation_id for event in completed_events}
         if not started:
             issues.append(f"stage_research_invocation_start_missing:{index}")
         if not completed:
             issues.append(f"stage_research_invocation_completion_missing:{index}")
         for invocation_id in sorted(started - completed):
-            issues.append(
-                f"stage_research_invocation_completion_missing:{invocation_id}"
-            )
+            issues.append(f"stage_research_invocation_completion_missing:{invocation_id}")
         for invocation_id in sorted(completed - started):
             issues.append(f"stage_research_invocation_start_missing:{invocation_id}")
         for event in completed_events:
-            if not _complete_token_usage(event):
+            normalized_usage = normalized_research_usage.get(event.event_id)
+            if normalized_usage is None or normalized_usage.usage is None:
                 issues.append(
-                    "stage_research_invocation_usage_incomplete:"
-                    + str(event.context.invocation_id)
+                    "stage_research_invocation_usage_incomplete:" + str(event.context.invocation_id)
                 )
         expected_ids.update(started or completed)
         completed_ids.update(completed)
@@ -557,9 +828,7 @@ def _link_model_invocation_events(
         source_path = manifest_path.parent / "lifecycle_events.jsonl"
         invocation_ids_by_log.setdefault(source_path, set()).add(invocation_id)
         beneficiaries_by_log.setdefault(source_path, set()).update(lifecycle_ids)
-    for source_path, source_case_ids in _research_model_event_log_cases(
-        stage_doc
-    ).items():
+    for source_path, source_case_ids in _research_model_event_log_cases(stage_doc).items():
         if not source_path.is_file():
             continue
         try:
@@ -569,14 +838,11 @@ def _link_model_invocation_events(
         invocation_ids = {
             event.context.invocation_id
             for event in source_events
-            if event.event_type
-            in {"model.invocation.started", "model.invocation.completed"}
+            if event.event_type in {"model.invocation.started", "model.invocation.completed"}
             and event.context.invocation_id is not None
         }
         if invocation_ids:
-            invocation_ids_by_log.setdefault(source_path, set()).update(
-                invocation_ids
-            )
+            invocation_ids_by_log.setdefault(source_path, set()).update(invocation_ids)
             beneficiaries_by_log[source_path] = {
                 case_lifecycle_by_id[case_id]
                 for case_id in source_case_ids
@@ -585,6 +851,10 @@ def _link_model_invocation_events(
 
     linked = 0
     allowed_types = {
+        "work.created",
+        "work.started",
+        "work.completed",
+        "model.invocation.started",
         "model.invocation.completed",
         "error.occurred",
         "error.resolved",
@@ -593,14 +863,13 @@ def _link_model_invocation_events(
         "action.started",
         "action.completed",
     }
+    normalized_usage_by_event = _normalized_model_usage_for_logs(list(invocation_ids_by_log))
     for source_path, invocation_ids in sorted(
         invocation_ids_by_log.items(), key=lambda item: str(item[0])
     ):
         if not source_path.is_file() or source_path.resolve() == global_path.resolve():
             continue
-        beneficiary_lifecycle_ids = tuple(
-            sorted(beneficiaries_by_log.get(source_path, set()))
-        )
+        beneficiary_lifecycle_ids = tuple(sorted(beneficiaries_by_log.get(source_path, set())))
         if not beneficiary_lifecycle_ids:
             continue
         beneficiary_case_ids = tuple(
@@ -609,12 +878,9 @@ def _link_model_invocation_events(
             if lifecycle_id in beneficiary_lifecycle_ids
         )
         for source_event in read_lifecycle_events(source_path):
-            if (
-                source_event.event_type not in allowed_types
-                or (
-                    source_event.context.invocation_id is not None
-                    and source_event.context.invocation_id not in invocation_ids
-                )
+            if source_event.event_type not in allowed_types or (
+                source_event.context.invocation_id is not None
+                and source_event.context.invocation_id not in invocation_ids
             ):
                 continue
             source_action_id = source_event.attributes.get("action_id")
@@ -631,15 +897,9 @@ def _link_model_invocation_events(
             )
             linked_context = LifecycleContext(
                 case_lifecycle_id=(
-                    beneficiary_lifecycle_ids[0]
-                    if len(beneficiary_lifecycle_ids) == 1
-                    else None
+                    beneficiary_lifecycle_ids[0] if len(beneficiary_lifecycle_ids) == 1 else None
                 ),
-                case_id=(
-                    beneficiary_case_ids[0]
-                    if len(beneficiary_case_ids) == 1
-                    else None
-                ),
+                case_id=(beneficiary_case_ids[0] if len(beneficiary_case_ids) == 1 else None),
                 cycle_id=work_context.cycle_id,
                 stage=work_context.stage,
                 milestone_id=work_context.milestone_id,
@@ -648,11 +908,7 @@ def _link_model_invocation_events(
                 session_id=source_event.context.session_id,
                 shared_work_id=(
                     source_event.context.shared_work_id
-                    or (
-                        source_work_unit_id
-                        if len(beneficiary_lifecycle_ids) > 1
-                        else None
-                    )
+                    or (source_work_unit_id if len(beneficiary_lifecycle_ids) > 1 else None)
                 ),
                 parent_action_id=source_event.context.parent_action_id,
                 system_fingerprint={
@@ -660,14 +916,38 @@ def _link_model_invocation_events(
                     **source_event.context.system_fingerprint,
                 },
             )
+            linked_attributes = {
+                **source_event.attributes,
+                "stage_work_unit_id": work_context.work_unit_id,
+                "linked_source_event_id": source_event.event_id,
+                "linked_source_event_log": str(source_path),
+            }
+            normalized_usage = normalized_usage_by_event.get(source_event.event_id)
+            if normalized_usage is not None:
+                linked_attributes = _attributes_with_normalized_usage(
+                    linked_attributes,
+                    normalized_usage,
+                )
+            linked_evidence_paths = tuple(
+                dict.fromkeys(
+                    (
+                        *source_event.evidence_paths,
+                        str(source_path),
+                        *(
+                            (str(normalized_usage.receipt_path),)
+                            if normalized_usage is not None
+                            and normalized_usage.receipt_path is not None
+                            else ()
+                        ),
+                    )
+                )
+            )
             append_lifecycle_event(
                 global_path,
                 make_lifecycle_event(
                     source_event.event_type,
                     linked_context,
-                    idempotency_key=(
-                        f"linked:{cycle.cycle_id}:{source_event.event_id}"
-                    ),
+                    idempotency_key=(f"linked:{cycle.cycle_id}:{source_event.event_id}"),
                     occurred_at=source_event.occurred_at,
                     started_at=source_event.started_at,
                     ended_at=source_event.ended_at,
@@ -681,45 +961,107 @@ def _link_model_invocation_events(
                     error_cluster_id=source_event.error_cluster_id,
                     intervention_id=source_event.intervention_id,
                     beneficiary_case_lifecycle_ids=beneficiary_lifecycle_ids,
-                    evidence_paths=tuple(
-                        dict.fromkeys((*source_event.evidence_paths, str(source_path)))
-                    ),
+                    evidence_paths=linked_evidence_paths,
                     artifact_hashes=source_event.artifact_hashes,
                     provenance_quality=source_event.provenance_quality,
-                    attributes={
-                        **source_event.attributes,
-                        "stage_work_unit_id": work_context.work_unit_id,
-                        "linked_source_event_id": source_event.event_id,
-                        "linked_source_event_log": str(source_path),
-                    },
+                    attributes=linked_attributes,
                 ),
             )
             linked += 1
+
+    if not global_path.is_file() or not normalized_usage_by_event:
+        return linked
+    retained = read_lifecycle_events(global_path)
+    linked_targets = {
+        source_event_id: event
+        for event in retained
+        if event.event_type == "model.invocation.completed"
+        and event.context.cycle_id == cycle.cycle_id
+        and isinstance(source_event_id := event.attributes.get("linked_source_event_id"), str)
+        and source_event_id in normalized_usage_by_event
+    }
+    corrections_by_target: dict[str, list[Any]] = {}
+    for event in retained:
+        if event.event_type != "model.usage.corrected":
+            continue
+        target_event_id = event.attributes.get("target_event_id")
+        if isinstance(target_event_id, str):
+            corrections_by_target.setdefault(target_event_id, []).append(event)
+    for source_event_id, target in sorted(linked_targets.items()):
+        normalized_usage = normalized_usage_by_event[source_event_id]
+        existing_corrections = corrections_by_target.get(target.event_id, [])
+        latest_correction = existing_corrections[-1] if existing_corrections else None
+        if latest_correction is not None and _correction_matches_normalized_usage(
+            latest_correction,
+            normalized_usage,
+        ):
+            continue
+        if latest_correction is None and _event_matches_normalized_usage(target, normalized_usage):
+            continue
+        correction_payload = {
+            "target_event_id": target.event_id,
+            "target_invocation_id": target.context.invocation_id,
+            "corrected_token_usage": normalized_usage.usage,
+            "usage_semantics": normalized_usage.semantics,
+            "baseline_usage": normalized_usage.baseline_usage or {},
+            "observed_usage": normalized_usage.observed_usage or {},
+            "usage_unknown_reason": normalized_usage.unknown_reason,
+            "correction_reason": "retained_codex_session_cumulative_snapshot",
+            "source_receipt_path": (
+                str(normalized_usage.receipt_path)
+                if normalized_usage.receipt_path is not None
+                else None
+            ),
+            "supersedes_correction_event_id": (
+                latest_correction.event_id if latest_correction is not None else None
+            ),
+        }
+        correction = make_lifecycle_event(
+            "model.usage.corrected",
+            LifecycleContext(
+                cycle_id=target.context.cycle_id,
+                stage=target.context.stage,
+                milestone_id=target.context.milestone_id,
+                invocation_id=target.context.invocation_id,
+                session_id=target.context.session_id,
+                system_fingerprint=target.context.system_fingerprint,
+            ),
+            idempotency_key=(
+                "model-usage-correction:v1:"
+                + target.event_id
+                + ":"
+                + canonical_sha256(correction_payload)
+            ),
+            parent_event_id=target.event_id,
+            beneficiary_case_lifecycle_ids=(target.beneficiary_case_lifecycle_ids),
+            evidence_paths=tuple(
+                dict.fromkeys(
+                    path
+                    for path in (
+                        *target.evidence_paths,
+                        (
+                            str(normalized_usage.receipt_path)
+                            if normalized_usage.receipt_path is not None
+                            else None
+                        ),
+                    )
+                    if path is not None
+                )
+            ),
+            provenance_quality=(
+                "authoritative" if normalized_usage.usage is not None else "unknown"
+            ),
+            attributes=correction_payload,
+        )
+        linked += append_lifecycle_event(global_path, correction)
     return linked
-
-
-def _complete_token_usage(event: Any) -> bool:
-    usage = event.attributes.get("token_usage")
-    if not isinstance(usage, Mapping):
-        return False
-    required = (
-        "input_tokens",
-        "cached_input_tokens",
-        "uncached_input_tokens",
-        "output_tokens",
-        "total_tokens",
-    )
-    if any(not isinstance(usage.get(field), int) for field in required):
-        return False
-    return isinstance(
-        usage.get("reasoning_output_tokens", usage.get("reasoning_tokens")), int
-    )
 
 
 def _research_model_work_by_run(
     stage_doc: Mapping[str, Any],
 ) -> dict[Path, tuple[tuple[str, ...], bool]]:
     projected: dict[Path, tuple[tuple[str, ...], bool]] = {}
+    normalized_usage = _normalized_research_model_usage(stage_doc)
     for source_path in _research_model_event_logs(stage_doc):
         if not source_path.is_file():
             continue
@@ -727,11 +1069,7 @@ def _research_model_work_by_run(
             events = read_lifecycle_events(source_path)
         except Exception:  # noqa: BLE001 - missing cost remains explicitly incomplete
             continue
-        completed = [
-            event
-            for event in events
-            if event.event_type == "model.invocation.completed"
-        ]
+        completed = [event for event in events if event.event_type == "model.invocation.completed"]
         work_ids = tuple(
             dict.fromkeys(
                 event.context.work_unit_id
@@ -743,7 +1081,11 @@ def _research_model_work_by_run(
             work_ids,
             bool(completed)
             and len(work_ids) == len(completed)
-            and all(_complete_token_usage(event) for event in completed),
+            and all(
+                event.event_id in normalized_usage
+                and normalized_usage[event.event_id].usage is not None
+                for event in completed
+            ),
         )
     return projected
 

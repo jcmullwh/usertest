@@ -707,6 +707,7 @@ def _review_correction_context(
         "previous_summary": previous_summary,
         "author_continuity": continuity,
         "codex_resume_session_id": session_id,
+        "codex_resume_usage_source_run_dir": previous_run_dir,
         "resume_workspace_dir": resume_workspace_dir,
         "resume_workspace_source": resume_workspace_source,
         "prior_model": prior_model if isinstance(prior_model, str) else None,
@@ -797,6 +798,7 @@ def _build_review_semantic_correction_request(
         agent_append_system_prompt_file=None,
         agent_user_prompt=prompt,
         codex_resume_session_id=session_id.strip(),
+        codex_resume_usage_source_run_dir=failed_run_dir,
     )
 
 
@@ -1520,6 +1522,11 @@ def _run_review_for_selected_ticket(
             agent_user_prompt=(review_prompt if correction_context is not None else None),
             codex_resume_session_id=(
                 correction_context["codex_resume_session_id"]
+                if correction_context is not None
+                else None
+            ),
+            codex_resume_usage_source_run_dir=(
+                correction_context["codex_resume_usage_source_run_dir"]
                 if correction_context is not None
                 else None
             ),

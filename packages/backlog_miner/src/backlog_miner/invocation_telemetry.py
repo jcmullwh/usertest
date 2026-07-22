@@ -52,9 +52,7 @@ def _context(
     )
     return (
         LifecycleContext(
-            case_lifecycle_id=(
-                inherited.case_lifecycle_id if inherited is not None else None
-            ),
+            case_lifecycle_id=(inherited.case_lifecycle_id if inherited is not None else None),
             case_id=inherited.case_id if inherited is not None else None,
             cycle_id=cycle_id,
             stage=stage,
@@ -62,9 +60,7 @@ def _context(
             invocation_id=invocation_id,
             session_id=session_id,
             shared_work_id=inherited.shared_work_id if inherited is not None else None,
-            parent_action_id=(
-                inherited.parent_action_id if inherited is not None else None
-            ),
+            parent_action_id=(inherited.parent_action_id if inherited is not None else None),
             system_fingerprint=(
                 dict(inherited.system_fingerprint)
                 if inherited is not None
@@ -105,22 +101,81 @@ def _lifecycle_token_map(usage: TokenUsage | None) -> dict[str, int]:
     }
 
 
-def _usage_receipt(
-    *,
+def _manifest_raw_events_path(
     manifest: Mapping[str, Any],
-    context: LifecycleContext,
+    *,
     out_dir: Path,
-) -> tuple[Path, ModelUsageReceipt]:
+) -> Path:
     artifacts = manifest.get("artifacts")
     artifacts = artifacts if isinstance(artifacts, Mapping) else {}
     raw_ref = artifacts.get("raw_events")
     raw_ref = raw_ref if isinstance(raw_ref, Mapping) else {}
     raw_path_value = raw_ref.get("path")
-    raw_path = (
-        Path(str(raw_path_value))
-        if isinstance(raw_path_value, str)
-        else out_dir / f"{manifest.get('tag')}.raw_events.jsonl"
-    )
+    if not isinstance(raw_path_value, str):
+        return out_dir / f"{manifest.get('tag')}.raw_events.jsonl"
+    raw_path = Path(raw_path_value)
+    return raw_path if raw_path.is_absolute() else out_dir / raw_path
+
+
+def _raw_events_match_manifest(manifest: Mapping[str, Any], raw_path: Path) -> bool:
+    artifacts = manifest.get("artifacts")
+    artifacts = artifacts if isinstance(artifacts, Mapping) else {}
+    raw_ref = artifacts.get("raw_events")
+    raw_ref = raw_ref if isinstance(raw_ref, Mapping) else {}
+    expected_digest = raw_ref.get("sha256")
+    if not isinstance(expected_digest, str) or len(expected_digest) != 64:
+        return False
+    try:
+        return sha256(raw_path.read_bytes()).hexdigest() == expected_digest
+    except OSError:
+        return False
+
+
+def _prior_session_high_water(
+    *,
+    manifest: Mapping[str, Any],
+    out_dir: Path,
+    session_id: str | None,
+) -> tuple[TokenUsage | None, Path | None]:
+    if session_id is None or manifest.get("resumed_from_session_id") != session_id:
+        return None, None
+    current_id = manifest.get("invocation_id")
+    current_started = _timestamp(manifest.get("invocation_started_at"))
+    candidates: list[tuple[datetime, TokenUsage, Path]] = []
+    for prior_path in out_dir.glob("*.model_invocation.json"):
+        prior = _read_json(prior_path)
+        if (
+            prior.get("invocation_id") == current_id
+            or prior.get("agent") != "codex"
+            or prior.get("agent_session_id") != session_id
+        ):
+            continue
+        prior_ended = _timestamp(prior.get("invocation_ended_at"))
+        if prior_ended is None or (current_started is not None and prior_ended > current_started):
+            continue
+        raw_path = _manifest_raw_events_path(prior, out_dir=out_dir)
+        if not _raw_events_match_manifest(prior, raw_path):
+            continue
+        parsed = parse_codex_invocation_usage(
+            raw_path,
+            invocation_id=str(prior.get("invocation_id") or prior_path.stem),
+            session_id=session_id,
+        )
+        if parsed.observed_high_water is not None:
+            candidates.append((prior_ended, parsed.observed_high_water, raw_path))
+    if not candidates:
+        return None, None
+    _, high_water, evidence_path = max(candidates, key=lambda item: item[0])
+    return high_water, evidence_path
+
+
+def _usage_receipt(
+    *,
+    manifest: Mapping[str, Any],
+    context: LifecycleContext,
+    out_dir: Path,
+) -> tuple[Path, ModelUsageReceipt, Path | None, str | None]:
+    raw_path = _manifest_raw_events_path(manifest, out_dir=out_dir)
     agent = str(manifest.get("agent") or "unknown")
     session_id = (
         str(manifest["agent_session_id"])
@@ -128,9 +183,15 @@ def _usage_receipt(
         else None
     )
     if agent == "codex":
+        baseline, baseline_evidence = _prior_session_high_water(
+            manifest=manifest,
+            out_dir=out_dir,
+            session_id=session_id,
+        )
         result = parse_codex_invocation_usage(
             raw_path,
             invocation_id=str(manifest["invocation_id"]),
+            baseline_high_water=baseline,
             session_id=session_id,
         )
         usage = result.usage
@@ -138,17 +199,22 @@ def _usage_receipt(
         semantics = result.semantics
         baseline = result.baseline_high_water
         observed = result.observed_high_water
+        unknown_reason = None
+        if manifest.get("resumed_from_session_id") == session_id and baseline is None:
+            usage = None
+            semantics = "unattributable"
+            unknown_reason = "continued_session_missing_prior_high_water"
     else:
         usage = None
         provider = agent
         semantics = "unattributable"
         baseline = None
         observed = None
+        baseline_evidence = None
+        unknown_reason = "provider_usage_unsupported"
     source_digest = _source_sha256(raw_path)
     receipt = ModelUsageReceipt(
-        receipt_id=_stable_id(
-            "usage", manifest["invocation_id"], source_digest or "missing"
-        ),
+        receipt_id=_stable_id("usage", manifest["invocation_id"], source_digest or "missing"),
         context=context,
         provider=provider,
         model=str(manifest.get("model") or agent),
@@ -178,14 +244,10 @@ def _usage_receipt(
         observed_usage=_lifecycle_token_map(observed),
         source_artifact_path=str(raw_path) if source_digest is not None else None,
         source_artifact_sha256=source_digest,
-        provenance_quality=(
-            "authoritative" if semantics != "unattributable" else "unknown"
-        ),
+        provenance_quality=("authoritative" if semantics != "unattributable" else "unknown"),
     )
-    path = write_content_addressed_model_usage_receipt(
-        out_dir / "model_usage_receipts", receipt
-    )
-    return path, receipt
+    path = write_content_addressed_model_usage_receipt(out_dir / "model_usage_receipts", receipt)
+    return path, receipt, baseline_evidence, unknown_reason
 
 
 def _event_token_usage(receipt: ModelUsageReceipt) -> dict[str, int] | None:
@@ -281,7 +343,7 @@ def write_stage_invocation_telemetry(
     actor_fields = _actor_fields(automatic=automatic)
     started_at = manifest.get("invocation_started_at")
     ended_at = manifest.get("invocation_ended_at")
-    receipt_path, receipt = _usage_receipt(
+    receipt_path, receipt, baseline_evidence, usage_unknown_reason = _usage_receipt(
         manifest=manifest,
         context=context,
         out_dir=out_dir,
@@ -297,22 +359,16 @@ def write_stage_invocation_telemetry(
             {
                 **context.to_dict(),
                 "invocation_id": None,
-                "work_unit_id": _stable_id(
-                    "provider-wait-work", predecessor_id, invocation_id
-                ),
+                "work_unit_id": _stable_id("provider-wait-work", predecessor_id, invocation_id),
             }
         )
-        predecessor_path = out_dir / (
-            f"{predecessor.get('tag')}.model_invocation.json"
-        )
+        predecessor_path = out_dir / (f"{predecessor.get('tag')}.model_invocation.json")
         append_lifecycle_event(
             events_path,
             make_lifecycle_event(
                 "work.completed",
                 wait_context,
-                idempotency_key=(
-                    f"provider-wait:{predecessor_id}:{invocation_id}:completed"
-                ),
+                idempotency_key=(f"provider-wait:{predecessor_id}:{invocation_id}:completed"),
                 occurred_at=wait_ended_at,
                 started_at=wait_started_at,
                 ended_at=wait_ended_at,
@@ -323,9 +379,7 @@ def write_stage_invocation_telemetry(
                 origin="external_service",
                 provenance_quality="artifact_derived",
                 evidence_paths=tuple(
-                    str(path)
-                    for path in (predecessor_path, manifest_path)
-                    if path.is_file()
+                    str(path) for path in (predecessor_path, manifest_path) if path.is_file()
                 ),
                 attributes={
                     "wait_category": "provider",
@@ -353,7 +407,11 @@ def write_stage_invocation_telemetry(
                 if isinstance(manifest.get("elapsed_seconds"), (int, float))
                 else None
             ),
-            evidence_paths=(str(manifest_path), str(receipt_path)),
+            evidence_paths=tuple(
+                str(path)
+                for path in (manifest_path, receipt_path, baseline_evidence)
+                if path is not None
+            ),
             artifact_hashes={
                 "model_invocation_manifest": sha256(manifest_path.read_bytes()).hexdigest(),
                 "model_usage_receipt": canonical_sha256(receipt.to_dict()),
@@ -363,6 +421,7 @@ def write_stage_invocation_telemetry(
                 "error_kind": manifest.get("error_kind"),
                 "usage_receipt_path": relative_receipt,
                 "usage_semantics": receipt.usage_semantics,
+                "usage_unknown_reason": usage_unknown_reason,
                 "token_usage": _event_token_usage(receipt),
                 "token_scope": "qualification",
                 "cost_scope": "direct" if context.case_id is not None else "shared",
@@ -392,9 +451,7 @@ def write_stage_invocation_telemetry(
     else:
         for failed in failed_manifests:
             prior_kind = str(failed.get("error_kind") or "model_invocation_failed")
-            prior_cluster = _stable_id(
-                "error", str(out_dir.resolve()), stage, prior_kind
-            )
+            prior_cluster = _stable_id("error", str(out_dir.resolve()), stage, prior_kind)
             same_author = bool(
                 session_id is not None
                 and failed.get("agent_session_id") == session_id
@@ -411,9 +468,7 @@ def write_stage_invocation_telemetry(
                     attributes={
                         "error_kind": prior_kind,
                         "resolution_mode": (
-                            "self_healed_same_author"
-                            if same_author
-                            else "self_healed_controller"
+                            "self_healed_same_author" if same_author else "self_healed_controller"
                         ),
                     },
                     **actor_fields,

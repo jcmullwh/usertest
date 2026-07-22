@@ -685,6 +685,196 @@ def _issue(
         issues.append(item)
 
 
+def _raw_event_type(event: Mapping[str, Any]) -> str | None:
+    raw = _string(_field(event, "type", "event_type", "event_kind"))
+    if raw is None:
+        return None
+    normalized = raw.lower().replace("_", ".").replace("-", ".")
+    while ".." in normalized:
+        normalized = normalized.replace("..", ".")
+    return normalized
+
+
+def _complete_correction_token_usage(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, Mapping):
+        return None
+    aliases = {
+        "total_tokens": ("total_tokens",),
+        "input_tokens": ("input_tokens",),
+        "cached_input_tokens": ("cached_input_tokens",),
+        "uncached_input_tokens": ("uncached_input_tokens",),
+        "output_tokens": ("output_tokens",),
+        "reasoning_output_tokens": (
+            "reasoning_output_tokens",
+            "reasoning_tokens",
+        ),
+    }
+    result: dict[str, int] = {}
+    for dimension, names in aliases.items():
+        parsed = None
+        for name in names:
+            parsed = _integer(value.get(name))
+            if parsed is not None:
+                break
+        if parsed is None:
+            return None
+        result[dimension] = parsed
+    if result["total_tokens"] != result["input_tokens"] + result["output_tokens"]:
+        return None
+    if result["input_tokens"] != (result["cached_input_tokens"] + result["uncached_input_tokens"]):
+        return None
+    return result
+
+
+def _apply_model_usage_corrections(
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:
+    """Overlay append-only token corrections without mutating retained events.
+
+    Corrections are removed before ordinary work aggregation, so they cannot
+    accidentally materialize a second work unit. A later correction may
+    explicitly supersede an earlier correction. Multiple unsuperseded heads or
+    malformed corrections fail closed by withholding the target event's tokens.
+    """
+
+    ordinary: list[dict[str, Any]] = []
+    corrections: list[dict[str, Any]] = []
+    for event in events:
+        if _raw_event_type(event) == "model.usage.corrected":
+            corrections.append(event)
+        else:
+            ordinary.append(event)
+    if not corrections:
+        return ordinary, [], [], 0
+
+    targets = {
+        event_id: (index, event)
+        for index, event in enumerate(ordinary)
+        if (event_id := _string(_field(event, "event_id"))) is not None
+    }
+    by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    issues: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for correction in corrections:
+        target_id = _string(_field(correction, "target_event_id"))
+        correction_id = _string(_field(correction, "event_id"))
+        if target_id is None or correction_id is None:
+            _issue(issues, "model_usage_correction_identity_missing")
+            continue
+        by_target[target_id].append(correction)
+
+    for target_id, candidates in sorted(by_target.items()):
+        target_entry = targets.get(target_id)
+        if target_entry is None:
+            _issue(
+                issues,
+                "model_usage_correction_target_missing",
+                detail=target_id,
+            )
+            continue
+        target_index, target = target_entry
+        target_work_unit_id = _string(_field(target, "work_unit_id"))
+        if _event_type(target) != "model.invocation.completed":
+            _issue(
+                issues,
+                "model_usage_correction_target_invalid",
+                work_unit_id=target_work_unit_id,
+                detail=target_id,
+            )
+            continue
+
+        candidate_ids = {
+            correction_id
+            for correction in candidates
+            if (correction_id := _string(_field(correction, "event_id"))) is not None
+        }
+        superseded_ids = {
+            superseded
+            for correction in candidates
+            if (superseded := _string(_field(correction, "supersedes_correction_event_id")))
+            is not None
+            and superseded in candidate_ids
+        }
+        heads = [
+            correction
+            for correction in candidates
+            if _string(_field(correction, "event_id")) not in superseded_ids
+        ]
+        if len(heads) != 1:
+            selected = None
+            _issue(
+                issues,
+                "model_usage_correction_conflict",
+                work_unit_id=target_work_unit_id,
+                detail=target_id,
+            )
+        else:
+            selected = heads[0]
+
+        replacement: dict[str, int] | None = None
+        unknown_reason = "model_usage_correction_conflict"
+        correction_id = None
+        if selected is not None:
+            correction_id = _string(_field(selected, "event_id"))
+            selected_attributes = selected.get("attributes")
+            selected_attributes = (
+                selected_attributes if isinstance(selected_attributes, Mapping) else {}
+            )
+            raw_replacement = selected_attributes.get("corrected_token_usage")
+            unknown_reason = (
+                _string(selected_attributes.get("usage_unknown_reason"))
+                or "model_usage_correction_unattributable"
+            )
+            if raw_replacement is not None:
+                replacement = _complete_correction_token_usage(raw_replacement)
+                if replacement is None:
+                    _issue(
+                        issues,
+                        "model_usage_correction_invalid",
+                        work_unit_id=target_work_unit_id,
+                        detail=target_id,
+                    )
+                    unknown_reason = "model_usage_correction_invalid"
+
+        corrected = dict(target)
+        target_attributes = target.get("attributes")
+        attributes = dict(target_attributes) if isinstance(target_attributes, Mapping) else {}
+        attributes.pop("token_usage", None)
+        attributes["usage_correction_event_id"] = correction_id
+        if selected is not None:
+            semantics = _string(_field(selected, "usage_semantics"))
+            if semantics is not None:
+                attributes["usage_semantics"] = semantics
+        if replacement is None:
+            attributes["cost_unknown"] = True
+            attributes["cost_unknown_reason"] = unknown_reason
+            attributes["usage_unknown_reason"] = unknown_reason
+        else:
+            attributes["token_usage"] = replacement
+            if attributes.get("cost_unknown_reason") in {
+                "continued_session_missing_prior_high_water",
+                "continued_session_usage_receipt_missing",
+                "model_usage_correction_unattributable",
+                "model_usage_unattributable",
+                "model_usage_receipt_unattributable",
+            }:
+                attributes.pop("cost_unknown", None)
+                attributes.pop("cost_unknown_reason", None)
+            attributes.pop("usage_unknown_reason", None)
+        corrected["attributes"] = attributes
+        ordinary[target_index] = corrected
+        records.append(
+            {
+                "target_event_id": target_id,
+                "correction_event_id": correction_id,
+                "token_usage_complete": replacement is not None,
+                "usage_semantics": attributes.get("usage_semantics"),
+            }
+        )
+
+    return ordinary, records, issues, len(corrections)
+
+
 def _duration_seconds(event: Mapping[str, Any]) -> float | None:
     value = _number(
         _field(event, "active_seconds", "duration_seconds", "elapsed_seconds", "time_seconds")
@@ -2884,14 +3074,21 @@ def aggregate_case_metrics(events: LifecycleSource) -> dict[str, Any]:
     """Aggregate exact lifecycle facts into per-case metrics and a reusable work graph."""
 
     loaded = load_lifecycle_events(events)
+    (
+        normalized_events,
+        usage_corrections,
+        correction_issues,
+        correction_event_count,
+    ) = _apply_model_usage_corrections(loaded)
     aliases_by_event, aliases_by_source, legacy_action_splits = (
-        _legacy_action_work_unit_aliases(loaded)
+        _legacy_action_work_unit_aliases(normalized_events)
     )
     cases, work_units, global_issues, ignored_event_count = _collect_events(
-        loaded,
+        normalized_events,
         work_unit_aliases_by_event=aliases_by_event,
         work_unit_aliases_by_source=aliases_by_source,
     )
+    global_issues.extend(correction_issues)
     _finalize_work_units(work_units, global_issues)
     serialized_cases: list[dict[str, Any]] = []
 
@@ -3131,7 +3328,9 @@ def aggregate_case_metrics(events: LifecycleSource) -> dict[str, Any]:
         "schema_version": 1,
         "metric_version": CASE_METRICS_VERSION,
         "source_event_count": len(loaded),
-        "recognized_event_count": len(loaded) - ignored_event_count,
+        "recognized_event_count": (
+            len(normalized_events) - ignored_event_count + correction_event_count
+        ),
         "ignored_event_count": ignored_event_count,
         "case_count": len(serialized_cases),
         "cases": serialized_cases,
@@ -3141,6 +3340,7 @@ def aggregate_case_metrics(events: LifecycleSource) -> dict[str, Any]:
         ],
         "normalization": {
             "legacy_action_work_unit_splits": legacy_action_splits,
+            "model_usage_corrections": usage_corrections,
         },
         "reconciliation": {
             "ok": not all_issues,

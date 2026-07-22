@@ -107,15 +107,12 @@ def test_runner_telemetry_counts_retry_once_and_writes_usage_receipts(tmp_path: 
         if row["event_type"] == "model.invocation.completed"
     }
     assert len(invocation_work_ids) == 2
-    intervention = next(
-        row for row in rows if row["event_type"] == "intervention.completed"
-    )
+    intervention = next(row for row in rows if row["event_type"] == "intervention.completed")
     assert intervention["context"]["work_unit_id"] not in invocation_work_ids
     run_completion = next(
         row
         for row in rows
-        if row["event_type"] == "work.completed"
-        and row["attributes"].get("scope") == "pipeline"
+        if row["event_type"] == "work.completed" and row["attributes"].get("scope") == "pipeline"
     )
     assert run_completion["active_seconds"] is None
     assert run_completion["attributes"]["wall_clock_envelope_seconds"] == 60.0
@@ -129,3 +126,134 @@ def test_runner_telemetry_counts_retry_once_and_writes_usage_receipts(tmp_path: 
     case = case_metrics["cases"][0]
     assert case["accounting"]["direct"]["gross"]["total_tokens"] == 36
     assert case["timing"]["work_interval_union_seconds"] == 60.0
+
+
+def _write_single_codex_run(
+    run_dir: Path,
+    *,
+    session_id: str,
+    usage: dict[str, int],
+    continued: bool,
+    started_at: str,
+    ended_at: str,
+    source_run_dir: Path | None = None,
+) -> dict[str, object]:
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run_meta.json",
+        {
+            "run_started_utc": started_at,
+            "run_finished_utc": ended_at,
+            "run_wall_seconds": 10.0,
+            "runner_implementation": {"head_commit": "abc123"},
+        },
+    )
+    _write_json(run_dir / "report.json", {"kind": "ok"})
+    raw_path = run_dir / "raw_events.attempt1.jsonl"
+    raw_path.write_text(
+        json.dumps({"type": "turn.completed", "usage": usage}) + "\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        run_dir / "agent_attempts.json",
+        {
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "attempt_started_utc": started_at,
+                    "attempt_finished_utc": ended_at,
+                    "attempt_wall_seconds": 10.0,
+                    "agent_exec_wall_seconds": 9.0,
+                    "exit_code": 0,
+                    "agent_session_id": session_id,
+                    "continued_session": continued,
+                    "raw_events_path": raw_path.name,
+                }
+            ]
+        },
+    )
+    return write_run_lifecycle_telemetry(
+        run_dir=run_dir,
+        agent="codex",
+        model="gpt-5.6-sol",
+        policy="write",
+        parent_case_id="case-cumulative",
+        origin_stage="repro_research",
+        supervisor_instruction=None,
+        codex_resume_session_id=session_id if continued else None,
+        codex_resume_usage_source_run_dir=source_run_dir,
+    )
+
+
+def _completed_model_event(run_dir: Path) -> dict[str, object]:
+    return next(
+        json.loads(line)
+        for line in (run_dir / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["event_type"] == "model.invocation.completed"
+    )
+
+
+def test_runner_telemetry_deltas_resumed_session_from_retained_predecessor(
+    tmp_path: Path,
+) -> None:
+    session_id = "019f8934-cdb5-70f3-806a-1c5748f385f7"
+    prior_run = tmp_path / "prior"
+    current_run = tmp_path / "current"
+    _write_single_codex_run(
+        prior_run,
+        session_id=session_id,
+        usage={"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 20},
+        continued=False,
+        started_at="2026-07-21T12:00:00Z",
+        ended_at="2026-07-21T12:00:10Z",
+    )
+
+    _write_single_codex_run(
+        current_run,
+        session_id=session_id,
+        usage={"input_tokens": 145, "cached_input_tokens": 90, "output_tokens": 32},
+        continued=True,
+        started_at="2026-07-21T12:01:00Z",
+        ended_at="2026-07-21T12:01:10Z",
+        source_run_dir=prior_run,
+    )
+
+    event = _completed_model_event(current_run)
+    assert event["attributes"]["usage_semantics"] == "session_cumulative"
+    assert event["attributes"]["token_usage"] == {
+        "total_tokens": 57,
+        "input_tokens": 45,
+        "cached_input_tokens": 30,
+        "uncached_input_tokens": 15,
+        "output_tokens": 12,
+        "reasoning_output_tokens": 0,
+    }
+    assert event["attributes"]["usage_unknown_reason"] is None
+    assert len(event["evidence_paths"]) == 2
+
+
+def test_runner_telemetry_withholds_resumed_session_without_predecessor_high_water(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "continued-without-baseline"
+    result = _write_single_codex_run(
+        run_dir,
+        session_id="019f8934-cdb5-70f3-806a-1c5748f385f7",
+        usage={"input_tokens": 145, "cached_input_tokens": 90, "output_tokens": 32},
+        continued=True,
+        started_at="2026-07-21T12:01:00Z",
+        ended_at="2026-07-21T12:01:10Z",
+    )
+
+    event = _completed_model_event(run_dir)
+    assert event["attributes"]["usage_semantics"] == "unattributable"
+    assert event["attributes"]["token_usage"] is None
+    assert (
+        event["attributes"]["usage_unknown_reason"] == "continued_session_missing_prior_high_water"
+    )
+    receipt_path = run_dir / str(result["usage_receipt_paths"][0])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["observed_usage"]["total_tokens"] == 177
+    case_metrics = json.loads((run_dir / "case_metrics.json").read_text(encoding="utf-8"))
+    assert case_metrics["reconciliation"]["ok"] is False
+    assert case_metrics["cases"][0]["accounting"]["direct"]["gross"]["total_tokens"] is None

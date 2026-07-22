@@ -482,6 +482,7 @@ def test_resume_carries_asset_and_constraints_then_commits_passing_verification(
     assert resume_commands._cmd_resume(args) == 0
     request = seen["request"]
     assert request.codex_resume_session_id == "019f5000-0000-7000-8000-000000000002"
+    assert request.codex_resume_usage_source_run_dir == run_dir
     assert request.agent_user_prompt is not None
     assert "Do not invoke Docker." in request.agent_user_prompt
     assert permission_correction in request.agent_user_prompt
@@ -618,6 +619,7 @@ def test_resume_uses_same_workspace_when_available(
     assert request.keep_workspace is True
     assert request.agent == "codex"
     assert request.codex_resume_session_id == "019f5000-0000-7000-8000-000000000002"
+    assert request.codex_resume_usage_source_run_dir == run_dir
     assert request.agent_user_prompt is not None
     assert (
         "Do not restart the original full ticket prompt from scratch" in request.agent_user_prompt
@@ -1351,6 +1353,7 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     assert request.keep_workspace is True
     assert request.agent == "codex"
     assert request.codex_resume_session_id == "019f5000-0000-7000-8000-000000000003"
+    assert request.codex_resume_usage_source_run_dir == run_dir
     assert request.agent_user_prompt is not None
     assert "Current PR metadata" in request.agent_user_prompt
     assert request.agent_append_system_prompt is None

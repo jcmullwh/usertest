@@ -4,6 +4,7 @@ import json
 import warnings
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from run_artifacts.lifecycle_events import (
     canonical_sha256,
     load_context_from_env,
     make_lifecycle_event,
+    read_model_usage_receipt,
     utc_now,
     write_content_addressed_model_usage_receipt,
     write_lifecycle_manifest,
@@ -84,9 +86,7 @@ def _base_context(
 ) -> tuple[LifecycleContext, bool]:
     inherited = load_context_from_env(required=False)
     runner_provenance = run_meta.get("runner_implementation")
-    runner_provenance = (
-        runner_provenance if isinstance(runner_provenance, Mapping) else {}
-    )
+    runner_provenance = runner_provenance if isinstance(runner_provenance, Mapping) else {}
     fingerprint = dict(inherited.system_fingerprint) if inherited is not None else {}
     if inherited is None:
         for key, value in {
@@ -118,15 +118,11 @@ def _base_context(
             case_lifecycle_id=lifecycle_id,
             case_id=case_id,
             cycle_id=cycle_id,
-            stage=origin_stage
-            or (inherited.stage if inherited is not None else None)
-            or "runner",
+            stage=origin_stage or (inherited.stage if inherited is not None else None) or "runner",
             work_unit_id=_stable_id("runner-work", run_identity),
             session_id=inherited.session_id if inherited is not None else None,
             shared_work_id=inherited.shared_work_id if inherited is not None else None,
-            parent_action_id=(
-                inherited.parent_action_id if inherited is not None else None
-            ),
+            parent_action_id=(inherited.parent_action_id if inherited is not None else None),
             system_fingerprint=fingerprint,
         ),
         verified_controller,
@@ -151,6 +147,60 @@ def _attempts(run_dir: Path) -> list[dict[str, Any]]:
     return [item for item in attempts if isinstance(item, dict)]
 
 
+def _latest_session_usage_receipt(
+    run_dir: Path | None,
+    *,
+    session_id: str | None,
+) -> Path | None:
+    """Return the latest retained high-water receipt for one exact session."""
+
+    if run_dir is None or session_id is None:
+        return None
+    receipts_root = run_dir / "model_usage_receipts"
+    candidates: list[tuple[datetime, Path]] = []
+    for path in receipts_root.glob("*/model_usage_receipt.json"):
+        try:
+            receipt = read_model_usage_receipt(path)
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if receipt.context.session_id != session_id or not receipt.observed_usage:
+            continue
+        if (
+            len(path.parent.name) != 64
+            or canonical_sha256(receipt.to_dict()) != path.parent.name
+        ):
+            continue
+        observed_at = receipt.invocation_ended_at or receipt.recorded_at
+        candidates.append(
+            (datetime.fromisoformat(observed_at.replace("Z", "+00:00")), path)
+        )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _verified_resume_baseline(
+    *,
+    source_run_dir: Path | None,
+    session_id: str | None,
+) -> tuple[TokenUsage | None, Path | None, str | None]:
+    receipt_path = _latest_session_usage_receipt(source_run_dir, session_id=session_id)
+    if receipt_path is None:
+        return None, None, "continued_session_missing_prior_high_water"
+    try:
+        receipt = read_model_usage_receipt(receipt_path)
+        baseline = TokenUsage.from_mapping(receipt.observed_usage)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return (
+            None,
+            None,
+            f"continued_session_prior_high_water_invalid:{type(exc).__name__}",
+        )
+    if receipt.context.session_id != session_id:
+        return None, None, "continued_session_prior_high_water_session_mismatch"
+    return baseline, receipt_path, None
+
+
 def _write_usage_receipt(
     *,
     run_dir: Path,
@@ -159,7 +209,7 @@ def _write_usage_receipt(
     agent: str,
     model: str | None,
     baseline: TokenUsage | None,
-) -> tuple[Path, ModelUsageReceipt, TokenUsage | None]:
+) -> tuple[Path, ModelUsageReceipt, TokenUsage | None, str | None]:
     raw_path_value = attempt.get("raw_events_path")
     raw_path = run_dir / str(raw_path_value or "raw_events.jsonl")
     invocation_id = context.invocation_id
@@ -183,6 +233,12 @@ def _write_usage_receipt(
         provider = result.provider
         baseline_usage = _token_map(result.baseline_high_water)
         observed_usage = _token_map(result.observed_high_water)
+        unknown_reason = None
+        if continued and baseline is None:
+            attributed = None
+            semantics = "unattributable"
+            baseline_usage = {}
+            unknown_reason = "continued_session_missing_prior_high_water"
     else:
         attributed = None
         observed = None
@@ -190,6 +246,7 @@ def _write_usage_receipt(
         provider = agent
         baseline_usage = {}
         observed_usage = {}
+        unknown_reason = "provider_usage_unsupported"
     source_digest = _artifact_sha256(raw_path)
     recorded_at = (
         str(attempt["attempt_finished_utc"])
@@ -218,29 +275,21 @@ def _write_usage_receipt(
             else None
         ),
         input_tokens=attributed.input_tokens if attributed is not None else None,
-        cached_input_tokens=(
-            attributed.cached_input_tokens if attributed is not None else None
-        ),
+        cached_input_tokens=(attributed.cached_input_tokens if attributed is not None else None),
         uncached_input_tokens=(
             attributed.uncached_input_tokens if attributed is not None else None
         ),
         output_tokens=attributed.output_tokens if attributed is not None else None,
-        reasoning_tokens=(
-            attributed.reasoning_output_tokens if attributed is not None else None
-        ),
+        reasoning_tokens=(attributed.reasoning_output_tokens if attributed is not None else None),
         total_tokens=attributed.total_tokens if attributed is not None else None,
         baseline_usage=baseline_usage,
         observed_usage=observed_usage,
         source_artifact_path=(str(raw_path) if source_digest is not None else None),
         source_artifact_sha256=source_digest,
-        provenance_quality=(
-            "authoritative" if semantics != "unattributable" else "unknown"
-        ),
+        provenance_quality=("authoritative" if semantics != "unattributable" else "unknown"),
     )
-    path = write_content_addressed_model_usage_receipt(
-        run_dir / "model_usage_receipts", receipt
-    )
-    return path, receipt, observed
+    path = write_content_addressed_model_usage_receipt(run_dir / "model_usage_receipts", receipt)
+    return path, receipt, observed, unknown_reason
 
 
 def write_run_lifecycle_telemetry(
@@ -252,6 +301,8 @@ def write_run_lifecycle_telemetry(
     parent_case_id: str | None,
     origin_stage: str | None,
     supervisor_instruction: str | None,
+    codex_resume_session_id: str | None = None,
+    codex_resume_usage_source_run_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Derive idempotent lifecycle telemetry from one completed runner directory.
 
@@ -321,6 +372,19 @@ def write_run_lifecycle_telemetry(
     usage_receipt_paths: list[str] = []
     open_errors: dict[str, str] = {}
     baseline_by_session: dict[str, TokenUsage] = {}
+    baseline_evidence_by_session: dict[str, Path] = {}
+    baseline_issue_by_session: dict[str, str] = {}
+    if codex_resume_session_id is not None:
+        resume_baseline, resume_evidence, resume_issue = _verified_resume_baseline(
+            source_run_dir=codex_resume_usage_source_run_dir,
+            session_id=codex_resume_session_id,
+        )
+        if resume_baseline is not None:
+            baseline_by_session[codex_resume_session_id] = resume_baseline
+        if resume_evidence is not None:
+            baseline_evidence_by_session[codex_resume_session_id] = resume_evidence
+        if resume_issue is not None:
+            baseline_issue_by_session[codex_resume_session_id] = resume_issue
     for position, attempt in enumerate(attempts, start=1):
         attempt_number = attempt.get("attempt")
         attempt_number = attempt_number if isinstance(attempt_number, int) else position
@@ -348,9 +412,7 @@ def write_run_lifecycle_telemetry(
                 occurred_at=(
                     str(attempt_started) if isinstance(attempt_started, str) else utc_now()
                 ),
-                started_at=(
-                    str(attempt_started) if isinstance(attempt_started, str) else None
-                ),
+                started_at=(str(attempt_started) if isinstance(attempt_started, str) else None),
                 actor_type="model",
                 initiator_type=actor_fields["initiator_type"],
                 root_initiator_type=actor_fields["root_initiator_type"],
@@ -360,7 +422,7 @@ def write_run_lifecycle_telemetry(
             ),
         )
         baseline = baseline_by_session.get(session_id or "")
-        receipt_path, receipt, observed = _write_usage_receipt(
+        receipt_path, receipt, observed, usage_unknown_reason = _write_usage_receipt(
             run_dir=run_dir,
             attempt=attempt,
             context=invocation_context,
@@ -370,6 +432,12 @@ def write_run_lifecycle_telemetry(
         )
         if session_id and observed is not None:
             baseline_by_session[session_id] = observed
+        baseline_evidence = baseline_evidence_by_session.get(session_id or "")
+        if usage_unknown_reason is None and session_id and attempt.get("continued_session") is True:
+            usage_unknown_reason = baseline_issue_by_session.get(session_id)
+        baseline_evidence_digest = (
+            _artifact_sha256(baseline_evidence) if baseline_evidence is not None else None
+        )
         relative_receipt = str(receipt_path.relative_to(run_dir)).replace("\\", "/")
         usage_receipt_paths.append(relative_receipt)
         receipt_digest = canonical_sha256(receipt.to_dict())
@@ -379,12 +447,8 @@ def write_run_lifecycle_telemetry(
                 "model.invocation.completed",
                 invocation_context,
                 idempotency_key=f"{invocation_id}:completed",
-                occurred_at=(
-                    str(attempt_ended) if isinstance(attempt_ended, str) else utc_now()
-                ),
-                started_at=(
-                    str(attempt_started) if isinstance(attempt_started, str) else None
-                ),
+                occurred_at=(str(attempt_ended) if isinstance(attempt_ended, str) else utc_now()),
+                started_at=(str(attempt_started) if isinstance(attempt_started, str) else None),
                 ended_at=str(attempt_ended) if isinstance(attempt_ended, str) else None,
                 active_seconds=(
                     float(attempt["agent_exec_wall_seconds"])
@@ -406,8 +470,17 @@ def write_run_lifecycle_telemetry(
                 root_initiator_type=actor_fields["root_initiator_type"],
                 origin=actor_fields["origin"],
                 provenance_quality=receipt.provenance_quality,
-                evidence_paths=(str(receipt_path),),
-                artifact_hashes={"model_usage_receipt": receipt_digest},
+                evidence_paths=tuple(
+                    str(path) for path in (receipt_path, baseline_evidence) if path is not None
+                ),
+                artifact_hashes={
+                    "model_usage_receipt": receipt_digest,
+                    **(
+                        {"baseline_model_usage_receipt": baseline_evidence_digest}
+                        if baseline_evidence_digest is not None
+                        else {}
+                    ),
+                },
                 attributes={
                     "attempt": attempt_number,
                     "agent": agent,
@@ -423,9 +496,13 @@ def write_run_lifecycle_telemetry(
                     ),
                     "cost_scope": "direct" if context.case_id is not None else "shared",
                     "continued_session": attempt.get("continued_session") is True,
+                    "usage_unknown_reason": usage_unknown_reason,
                 },
             ),
         )
+        if session_id and observed is not None:
+            baseline_evidence_by_session[session_id] = receipt_path
+            baseline_issue_by_session.pop(session_id, None)
 
         validation_errors = attempt.get("report_validation_errors")
         failed = attempt.get("exit_code") not in {None, 0} or bool(validation_errors)
@@ -469,9 +546,7 @@ def write_run_lifecycle_telemetry(
                         invocation_context,
                         idempotency_key=f"{cluster_id}:resolved",
                         occurred_at=(
-                            str(attempt_ended)
-                            if isinstance(attempt_ended, str)
-                            else utc_now()
+                            str(attempt_ended) if isinstance(attempt_ended, str) else utc_now()
                         ),
                         actor_type="model",
                         initiator_type=actor_fields["initiator_type"],

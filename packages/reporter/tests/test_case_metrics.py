@@ -230,6 +230,122 @@ def _acceptance_events() -> list[dict[str, Any]]:
     return events
 
 
+def _complete_usage(total_tokens: int) -> dict[str, int]:
+    return {
+        "total_tokens": total_tokens,
+        "input_tokens": total_tokens - 2,
+        "cached_input_tokens": 3,
+        "uncached_input_tokens": total_tokens - 5,
+        "output_tokens": 2,
+        "reasoning_output_tokens": 1,
+    }
+
+
+def test_append_only_model_usage_correction_replaces_retained_tokens_once() -> None:
+    target = _event(
+        "model.invocation.completed",
+        "life:corrected",
+        case_id="case:corrected",
+        work_unit_id="work:model",
+        token_usage=_complete_usage(177),
+        cost_unknown=True,
+        cost_unknown_reason="continued_session_usage_receipt_missing",
+        active_seconds=1,
+    )
+    target["event_id"] = "event:model"
+    correction = _event(
+        "model.usage.corrected",
+        target_event_id="event:model",
+        corrected_token_usage=_complete_usage(57),
+        usage_semantics="session_cumulative",
+    )
+    correction["event_id"] = "event:correction"
+
+    report = aggregate_case_metrics([target, correction])
+
+    [case] = report["cases"]
+    assert case["accounting"]["direct"]["gross"]["total_tokens"] == 57
+    assert len(report["work_units"]) == 1
+    assert report["work_units"][0]["cost_unknown"] is False
+    assert report["source_event_count"] == 2
+    assert report["recognized_event_count"] == 2
+    assert report["ignored_event_count"] == 0
+    assert report["normalization"]["model_usage_corrections"] == [
+        {
+            "target_event_id": "event:model",
+            "correction_event_id": "event:correction",
+            "token_usage_complete": True,
+            "usage_semantics": "session_cumulative",
+        }
+    ]
+
+
+def test_conflicting_model_usage_corrections_withhold_tokens() -> None:
+    target = _event(
+        "model.invocation.completed",
+        "life:conflict",
+        case_id="case:conflict",
+        work_unit_id="work:model",
+        token_usage=_complete_usage(177),
+        active_seconds=1,
+    )
+    target["event_id"] = "event:model"
+    corrections = []
+    for index, total in enumerate((57, 67), start=1):
+        correction = _event(
+            "model.usage.corrected",
+            target_event_id="event:model",
+            corrected_token_usage=_complete_usage(total),
+            usage_semantics="session_cumulative",
+        )
+        correction["event_id"] = f"event:correction:{index}"
+        corrections.append(correction)
+
+    report = aggregate_case_metrics([target, *corrections])
+
+    [case] = report["cases"]
+    assert case["accounting"]["direct"]["gross"]["total_tokens"] is None
+    assert report["work_units"][0]["cost_unknown"] is True
+    assert any(
+        issue["code"] == "model_usage_correction_conflict"
+        for issue in case["reconciliation"]["issues"]
+    )
+
+
+def test_superseding_model_usage_correction_selects_one_active_head() -> None:
+    target = _event(
+        "model.invocation.completed",
+        "life:superseded-correction",
+        case_id="case:superseded-correction",
+        work_unit_id="work:model",
+        token_usage=_complete_usage(177),
+        active_seconds=1,
+    )
+    target["event_id"] = "event:model"
+    first = _event(
+        "model.usage.corrected",
+        target_event_id="event:model",
+        corrected_token_usage=_complete_usage(57),
+        usage_semantics="session_cumulative",
+    )
+    first["event_id"] = "event:correction:1"
+    second = _event(
+        "model.usage.corrected",
+        target_event_id="event:model",
+        supersedes_correction_event_id="event:correction:1",
+        corrected_token_usage=_complete_usage(67),
+        usage_semantics="session_cumulative",
+    )
+    second["event_id"] = "event:correction:2"
+
+    report = aggregate_case_metrics([target, first, second])
+
+    [case] = report["cases"]
+    assert case["accounting"]["direct"]["gross"]["total_tokens"] == 67
+    assert not any(
+        issue["code"] == "model_usage_correction_conflict"
+        for issue in report["reconciliation"]["issues"]
+    )
 def test_case_and_cohort_accounting_preserves_shared_work_and_exact_dispositions() -> None:
     report = aggregate_case_metrics(_acceptance_events())
 

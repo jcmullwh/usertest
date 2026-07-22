@@ -286,6 +286,10 @@ class RunRequest:
     parent_case_id: str | None = None
     # Exact Codex thread.started.thread_id to continue. Never infer with `--last`.
     codex_resume_session_id: str | None = None
+    # Retained predecessor run used to prove the cumulative token high-water mark
+    # before a Codex session is resumed. Without this evidence, lifecycle
+    # telemetry must withhold the continued invocation's token delta.
+    codex_resume_usage_source_run_dir: Path | None = None
     keep_workspace: bool = False
     preflight_commands: tuple[str, ...] = ()
     preflight_required_commands: tuple[str, ...] = ()
@@ -3400,6 +3404,8 @@ def _maybe_write_lifecycle_telemetry(
             parent_case_id=request.parent_case_id,
             origin_stage=request.origin_stage,
             supervisor_instruction=request.supervisor_instruction,
+            codex_resume_session_id=request.codex_resume_session_id,
+            codex_resume_usage_source_run_dir=request.codex_resume_usage_source_run_dir,
         )
     except Exception as exc:  # noqa: BLE001
         _write_json(
@@ -3790,6 +3796,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "requested_persona_id": request.persona_id,
             "requested_mission_id": request.mission_id,
             "requested_codex_resume_session_id": request.codex_resume_session_id,
+            "codex_resume_usage_source_run_dir": (
+                str(request.codex_resume_usage_source_run_dir.resolve())
+                if request.codex_resume_usage_source_run_dir is not None
+                else None
+            ),
             **({"model": effective_model} if effective_model is not None else {}),
             **({"model_source": model_source} if model_source is not None else {}),
         }

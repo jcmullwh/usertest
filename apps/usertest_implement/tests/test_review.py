@@ -1874,6 +1874,7 @@ def test_semantic_review_error_returns_to_exact_same_reviewer(
     )
 
     assert corrected.codex_resume_session_id == session_id
+    assert corrected.codex_resume_usage_source_run_dir == failed_run_dir
     assert corrected.agent_append_system_prompt_file is None
     assert corrected.resume_workspace_dir == original.resume_workspace_dir
     assert corrected.ref == original.ref

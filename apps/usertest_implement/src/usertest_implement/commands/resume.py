@@ -1226,6 +1226,9 @@ def _cmd_resume_pr(
         agent_append_system_prompt=(prompt if codex_resume_session_id is None else None),
         agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
         codex_resume_session_id=codex_resume_session_id,
+        codex_resume_usage_source_run_dir=(
+            run_dir if codex_resume_session_id is not None else None
+        ),
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
@@ -1771,6 +1774,9 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
         supervisor_instruction=combined_supervisor_instruction or None,
         codex_resume_session_id=codex_resume_session_id,
+        codex_resume_usage_source_run_dir=(
+            run_dir if codex_resume_session_id is not None else None
+        ),
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
