@@ -323,6 +323,44 @@ def test_case_and_cohort_accounting_preserves_shared_work_and_exact_dispositions
     ]["p90"] == 220.0
 
 
+def test_action_start_and_completion_share_nested_action_identity() -> None:
+    started = _event(
+        "action.started",
+        "life:paired-action",
+        at="2026-07-21T00:00:00Z",
+        action_id="action:paired",
+        actor="supervising_agent",
+        manual=True,
+        required_for_progress=True,
+        action_family="launch",
+        operation="run measured command",
+        started_at="2026-07-21T00:00:00Z",
+    )
+    started["event_id"] = "event:action-started"
+    completed = _event(
+        "action.completed",
+        "life:paired-action",
+        at="2026-07-21T00:00:03Z",
+        action_id="action:paired",
+        actor="supervising_agent",
+        manual=True,
+        required_for_progress=True,
+        action_family="launch",
+        operation="run measured command",
+        active_seconds=3,
+        started_at="2026-07-21T00:00:00Z",
+        ended_at="2026-07-21T00:00:03Z",
+    )
+    completed["event_id"] = "event:action-completed"
+
+    report = aggregate_case_metrics([started, completed])
+    [case] = report["cases"]
+
+    assert case["manual_actions"]["count"] == 1
+    assert case["manual_actions"]["active_seconds"] == 3.0
+    assert case["manual_actions"]["items"][0]["id"] == "action:paired"
+
+
 def test_jsonl_loader_and_missing_reconciliation_withhold_certification(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.jsonl"
     events = [

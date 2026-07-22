@@ -1187,8 +1187,14 @@ def _merge_work_cost(
 
 
 def _action_id(event: Mapping[str, Any], event_type: str, index: int) -> tuple[str, bool]:
-    names = ("intervention_id", "action_id", "delivery_id", "event_id")
-    stable = _string(_field(event, *names))
+    # A lifecycle event always has its own event_id, while paired start/completion
+    # events share the action identity in their attributes. Resolve action-scoped
+    # identities across every container before falling back to the event identity;
+    # otherwise one concrete manual action is counted once per lifecycle event.
+    stable = _string(_field(event, "intervention_id", "action_id", "delivery_id"))
+    if stable is not None:
+        return stable, True
+    stable = _string(_field(event, "event_id"))
     if stable is not None:
         return stable, True
     return f"synthetic:{event_type}:{index:08d}", False
