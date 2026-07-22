@@ -84,12 +84,15 @@ def _batch_remote_handoff_requested(*, repo_root: Path, batch_config: dict[str, 
     if not isinstance(profile, dict):
         return True
 
-    run_common = profile.get("run_common", {})
-    if not isinstance(run_common, dict):
-        return True
+    run_settings: dict[str, Any] = {}
+    for section_name in ("run_common", "run"):
+        section = profile.get(section_name, {})
+        if not isinstance(section, dict):
+            return True
+        run_settings.update(section)
 
-    push = bool(run_common.get("push", True))
-    pr = bool(run_common.get("pr", True))
+    push = bool(run_settings.get("push", True))
+    pr = bool(run_settings.get("pr", True))
     return push or pr
 
 

@@ -37,6 +37,7 @@ from usertest_implement.batch_runner import (
     _preflight_agent_roster,
     _refresh_backlog,
     _resolve_wave_base_revision,
+    _run_settings,
     _run_ticket_process,
     _validate_candidate_wave_revision,
     _write_batch_token_monitoring_artifacts,
@@ -262,6 +263,51 @@ def test_preflight_roster_includes_distinct_refresh_and_review_agents() -> None:
             "model": None,
         },
     ]
+
+
+def test_run_settings_apply_run_section_over_run_common(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(
+        yaml.safe_dump(
+            {
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "run_common": {
+                            "implementation_review_agent": "claude",
+                            "implementation_review_model": "claude-sonnet-5",
+                            "pr": True,
+                        },
+                        "run": {
+                            "implementation_review_agent": "gemini",
+                            "implementation_review_model": None,
+                            "pr": False,
+                        },
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run_settings(
+        run_settings_path=settings_path,
+        run_settings_profile="default",
+    ) == {
+        "implementation_review_agent": "gemini",
+        "implementation_review_model": None,
+        "pr": False,
+    }
+
+
+def test_preflight_roster_skips_unreachable_reviewer() -> None:
+    assert _preflight_agent_roster(
+        workers=[WorkerTemplate(worker_index=1, agent="codex", model=None)],
+        refresh_agent="codex",
+        review_agent="claude",
+        review_enabled=False,
+    ) == [{"worker_index": 1, "agent": "codex", "model": None}]
 
 
 def test_wave_base_revision_is_fetched_resolved_and_receipted(

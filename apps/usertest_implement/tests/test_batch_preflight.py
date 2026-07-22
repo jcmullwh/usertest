@@ -71,6 +71,58 @@ def test_batch_preflight_skips_github_auth_for_local_exercise_profile(
     )
 
 
+def test_batch_preflight_run_section_can_disable_remote_handoff(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "default_profile": "local_exercise",
+                "profiles": {
+                    "local_exercise": {
+                        "run_common": {"push": True, "pr": True},
+                        "run": {"push": False, "pr": False},
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    called: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        called.append(argv)
+        return _completed(argv)
+
+    monkeypatch.setattr(batch_preflight, "_run", fake_run)
+    monkeypatch.setattr(batch_preflight, "_git_branch", lambda _: "dev")
+    monkeypatch.setattr(batch_preflight, "_git_head", lambda _: "abc123")
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+
+    result = batch_preflight.run_batch_preflight(
+        repo_root=tmp_path,
+        batch_dir=tmp_path / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": False,
+                "require_ci_green_for_base": False,
+                "run_settings_path": str(settings_path),
+                "run_settings_profile": "local_exercise",
+            }
+        },
+        worker_roster=[],
+        exec_backend="host",
+    )
+
+    assert result["blockers"] == []
+    assert ["gh", "auth", "status"] not in called
+
+
 def test_batch_preflight_accepts_env_token_when_auth_status_reports_stale_default(
     tmp_path: Path,
     monkeypatch,

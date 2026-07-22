@@ -1169,6 +1169,33 @@ def _run_common_settings(
     return dict(run_common) if isinstance(run_common, dict) else {}
 
 
+def _run_settings(
+    *,
+    run_settings_path: Path,
+    run_settings_profile: str,
+) -> dict[str, Any]:
+    """Return settings with the same precedence as the ``run`` CLI."""
+
+    if not run_settings_path.exists():
+        return {}
+    settings_doc = _load_yaml(run_settings_path)
+    profiles = settings_doc.get("profiles", {})
+    profile_name = (
+        run_settings_profile
+        if run_settings_profile.strip()
+        else str(settings_doc.get("default_profile") or "default")
+    )
+    if not isinstance(profiles, dict) or not isinstance(profiles.get(profile_name), dict):
+        return {}
+    profile = profiles[profile_name]
+    merged: dict[str, Any] = {}
+    for section_name in ("run_common", "run"):
+        section = profile.get(section_name, {})
+        if isinstance(section, dict):
+            merged.update(section)
+    return merged
+
+
 def _bool_setting(value: object, *, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -1594,6 +1621,7 @@ def _preflight_agent_roster(
     workers: list[WorkerTemplate],
     refresh_agent: str,
     review_agent: str | None,
+    review_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     """Return every distinct provider binary required by the batch."""
 
@@ -1602,7 +1630,10 @@ def _preflight_agent_roster(
         for worker in workers
     ]
     seen = {worker.agent for worker in workers}
-    for role, agent in (("refresh", refresh_agent), ("implementation_review", review_agent)):
+    role_agents = [("refresh", refresh_agent)]
+    if review_enabled:
+        role_agents.append(("implementation_review", review_agent))
+    for role, agent in role_agents:
         if agent is None or agent in seen:
             continue
         roster.append({"worker_index": None, "role": role, "agent": agent, "model": None})
@@ -1910,7 +1941,7 @@ def _drain_phase(
     implementation_review_agent, implementation_review_model, _, _ = (
         _effective_implementation_review_role(
             defaults=defaults,
-            run_common=_run_common_settings(
+            run_common=_run_settings(
                 run_settings_path=settings_path,
                 run_settings_profile=settings_profile,
             ),
@@ -2258,6 +2289,10 @@ def run_batch(
         run_settings_path=run_settings_path,
         run_settings_profile=run_settings_profile,
     )
+    run_settings = _run_settings(
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+    )
     effective_refresh_agent, effective_refresh_model, agent_origin, model_origin = (
         _effective_refresh_role(defaults=defaults, workers=workers)
     )
@@ -2266,7 +2301,7 @@ def run_batch(
         effective_review_model,
         review_agent_origin,
         review_model_origin,
-    ) = _effective_implementation_review_role(defaults=defaults, run_common=run_common)
+    ) = _effective_implementation_review_role(defaults=defaults, run_common=run_settings)
     exec_backend = str(run_common.get("exec_backend") or "docker")
     preliminary_docker_resource_plan = _build_docker_resource_plan(
         repo_root=repo_root,
@@ -2289,6 +2324,7 @@ def run_batch(
             workers=workers,
             refresh_agent=effective_refresh_agent,
             review_agent=effective_review_agent,
+            review_enabled=_bool_setting(run_settings.get("pr"), default=True),
         ),
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,
