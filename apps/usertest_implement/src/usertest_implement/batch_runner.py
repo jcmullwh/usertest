@@ -1399,12 +1399,16 @@ def _run_ticket_process(
         command.extend(["--runs-dir", str(implementation_runs_dir)])
     if ledger_path is not None:
         command.extend(["--ledger", str(ledger_path)])
-    if worker.model is not None:
-        command.extend(["--model", worker.model])
+    # The agent is always an explicit batch-role choice.  Make the paired model
+    # explicit as well, including the empty value that means "this agent's
+    # default", so the run-settings profile cannot restore a model selected for
+    # another provider.
+    command.extend(["--model", worker.model or ""])
     if implementation_review_agent is not None:
         command.extend(["--implementation-review-agent", implementation_review_agent])
-    if implementation_review_model is not None:
-        command.extend(["--implementation-review-model", implementation_review_model])
+        command.extend(
+            ["--implementation-review-model", implementation_review_model or ""]
+        )
     if maintenance_image_metadata_path is not None:
         command.extend(
             [
@@ -1539,6 +1543,71 @@ def _effective_refresh_role(
         refresh_model = None
         model_origin = "agent_default"
     return refresh_agent, refresh_model, agent_origin, model_origin
+
+
+def _effective_implementation_review_role(
+    *,
+    defaults: dict[str, Any],
+    run_common: dict[str, Any],
+) -> tuple[str | None, str | None, str, str]:
+    """Resolve the reviewer identity actually supplied to ticket runs."""
+
+    configured_agent = defaults.get("implementation_review_agent")
+    settings_agent = run_common.get("implementation_review_agent")
+    agent_raw = configured_agent if configured_agent is not None else settings_agent
+    agent = (
+        str(agent_raw).strip().lower()
+        if isinstance(agent_raw, str) and agent_raw.strip()
+        else None
+    )
+    if agent is not None and agent not in VALID_AGENTS:
+        raise ValueError(f"Invalid implementation review agent: {agent!r}")
+    agent_origin = (
+        "batch_config"
+        if configured_agent is not None
+        else ("run_settings" if settings_agent is not None else "not_configured")
+    )
+
+    if configured_agent is not None or "implementation_review_model" in defaults:
+        # A batch-level agent selection owns the paired model.  Missing/blank
+        # means the selected provider's default, not a run-settings model.
+        configured_model = defaults.get("implementation_review_model")
+        model = (
+            str(configured_model).strip()
+            if isinstance(configured_model, str) and configured_model.strip()
+            else None
+        )
+        model_origin = "batch_config" if model is not None else "agent_default"
+    else:
+        settings_model = run_common.get("implementation_review_model")
+        model = (
+            str(settings_model).strip()
+            if isinstance(settings_model, str) and settings_model.strip()
+            else None
+        )
+        model_origin = "run_settings" if model is not None else "agent_default"
+    return agent, model, agent_origin, model_origin
+
+
+def _preflight_agent_roster(
+    *,
+    workers: list[WorkerTemplate],
+    refresh_agent: str,
+    review_agent: str | None,
+) -> list[dict[str, Any]]:
+    """Return every distinct provider binary required by the batch."""
+
+    roster = [
+        {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
+        for worker in workers
+    ]
+    seen = {worker.agent for worker in workers}
+    for role, agent in (("refresh", refresh_agent), ("implementation_review", review_agent)):
+        if agent is None or agent in seen:
+            continue
+        roster.append({"worker_index": None, "role": role, "agent": agent, "model": None})
+        seen.add(agent)
+    return roster
 
 
 def _apply_run_overrides(
@@ -1838,26 +1907,14 @@ def _drain_phase(
         defaults=defaults,
         workers=workers,
     )
-    implementation_review_agent_raw = defaults.get("implementation_review_agent")
-    implementation_review_agent = (
-        str(implementation_review_agent_raw).strip().lower()
-        if isinstance(implementation_review_agent_raw, str)
-        and implementation_review_agent_raw.strip()
-        else None
-    )
-    if (
-        implementation_review_agent is not None
-        and implementation_review_agent not in VALID_AGENTS
-    ):
-        raise ValueError(
-            f"Invalid implementation review agent: {implementation_review_agent!r}"
+    implementation_review_agent, implementation_review_model, _, _ = (
+        _effective_implementation_review_role(
+            defaults=defaults,
+            run_common=_run_common_settings(
+                run_settings_path=settings_path,
+                run_settings_profile=settings_profile,
+            ),
         )
-    implementation_review_model_raw = defaults.get("implementation_review_model")
-    implementation_review_model = (
-        str(implementation_review_model_raw).strip()
-        if isinstance(implementation_review_model_raw, str)
-        and implementation_review_model_raw.strip()
-        else None
     )
     ticket_timeout_seconds: float | None = None
     ticket_timeout_raw = defaults.get("ticket_timeout_seconds")
@@ -2201,6 +2258,15 @@ def run_batch(
         run_settings_path=run_settings_path,
         run_settings_profile=run_settings_profile,
     )
+    effective_refresh_agent, effective_refresh_model, agent_origin, model_origin = (
+        _effective_refresh_role(defaults=defaults, workers=workers)
+    )
+    (
+        effective_review_agent,
+        effective_review_model,
+        review_agent_origin,
+        review_model_origin,
+    ) = _effective_implementation_review_role(defaults=defaults, run_common=run_common)
     exec_backend = str(run_common.get("exec_backend") or "docker")
     preliminary_docker_resource_plan = _build_docker_resource_plan(
         repo_root=repo_root,
@@ -2219,10 +2285,11 @@ def run_batch(
         repo_root=repo_root,
         batch_dir=batch_dir_path,
         batch_config=config,
-        worker_roster=[
-            {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
-            for worker in workers
-        ],
+        worker_roster=_preflight_agent_roster(
+            workers=workers,
+            refresh_agent=effective_refresh_agent,
+            review_agent=effective_review_agent,
+        ),
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,
         resolve_maintenance_image=bool(
@@ -2255,9 +2322,6 @@ def run_batch(
     state["code_root"] = str(repo_root.resolve())
     state["owner_root"] = str(owner_root)
     state["repo_input"] = repo_input
-    effective_refresh_agent, effective_refresh_model, agent_origin, model_origin = (
-        _effective_refresh_role(defaults=defaults, workers=workers)
-    )
     state["effective_execution_roles"] = {
         "refresh": {
             "agent": effective_refresh_agent,
@@ -2273,25 +2337,19 @@ def run_batch(
             "cli_override" if worker_agent else "batch_config"
         ),
         "implementation_review": {
+            "agent": effective_review_agent,
+            "model": effective_review_model,
             "agent_override": defaults.get("implementation_review_agent"),
             "model_override": defaults.get("implementation_review_model"),
             "agent_origin": (
                 "cli_override"
                 if implementation_review_agent
-                else (
-                    "batch_config"
-                    if defaults.get("implementation_review_agent")
-                    else "run_settings"
-                )
+                else review_agent_origin
             ),
             "model_origin": (
                 "cli_override"
                 if implementation_review_model
-                else (
-                    "batch_config"
-                    if defaults.get("implementation_review_model")
-                    else "run_settings"
-                )
+                else review_model_origin
             ),
         },
     }

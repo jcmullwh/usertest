@@ -31,8 +31,10 @@ from usertest_implement.batch_runner import (
     _collect_wave_candidates,
     _configured_owner_root,
     _drain_phase,
+    _effective_implementation_review_role,
     _effective_refresh_role,
     _pick_launchable_candidate_index,
+    _preflight_agent_roster,
     _refresh_backlog,
     _resolve_wave_base_revision,
     _run_ticket_process,
@@ -222,6 +224,46 @@ def test_agent_only_overrides_discard_provider_specific_models() -> None:
     ) == ("claude", None, "batch_config", "agent_default")
 
 
+def test_agent_only_review_override_ignores_run_settings_model() -> None:
+    assert _effective_implementation_review_role(
+        defaults={"implementation_review_agent": "gemini"},
+        run_common={
+            "implementation_review_agent": "claude",
+            "implementation_review_model": "claude-sonnet-5",
+        },
+    ) == ("gemini", None, "batch_config", "agent_default")
+
+    assert _effective_implementation_review_role(
+        defaults={"implementation_review_model": "gemini-2.5-pro"},
+        run_common={
+            "implementation_review_agent": "gemini",
+            "implementation_review_model": "configured-old-model",
+        },
+    ) == ("gemini", "gemini-2.5-pro", "run_settings", "batch_config")
+
+
+def test_preflight_roster_includes_distinct_refresh_and_review_agents() -> None:
+    assert _preflight_agent_roster(
+        workers=[WorkerTemplate(worker_index=1, agent="codex", model=None)],
+        refresh_agent="gemini",
+        review_agent="claude",
+    ) == [
+        {"worker_index": 1, "agent": "codex", "model": None},
+        {
+            "worker_index": None,
+            "role": "refresh",
+            "agent": "gemini",
+            "model": None,
+        },
+        {
+            "worker_index": None,
+            "role": "implementation_review",
+            "agent": "claude",
+            "model": None,
+        },
+    ]
+
+
 def test_wave_base_revision_is_fetched_resolved_and_receipted(
     tmp_path: Path,
     monkeypatch,
@@ -332,8 +374,50 @@ def test_ticket_process_receives_exact_wave_revision(tmp_path: Path, monkeypatch
     assert command[command.index("--ref") + 1] == revision
     assert command[command.index("--runs-dir") + 1] == str(runs_dir)
     assert command[command.index("--ledger") + 1] == str(ledger_path)
+    assert command[command.index("--model") + 1] == ""
     assert command[command.index("--implementation-review-agent") + 1] == "codex"
     assert command[command.index("--implementation-review-model") + 1] == "gpt-5.6-sol"
+
+
+def test_ticket_process_explicitly_suppresses_settings_models_for_agent_only_roles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FinishedProcess:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            captured["command"] = command
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner.subprocess.Popen",
+        _FinishedProcess,
+    )
+    _run_ticket_process(
+        repo_root=tmp_path,
+        implement_python=tmp_path / "python.exe",
+        batch_dir_path=tmp_path / "batch",
+        ticket_path=tmp_path / "ticket.md",
+        repo_input=str(tmp_path),
+        worker=WorkerTemplate(worker_index=1, agent="gemini", model=None),
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        ticket_timeout_seconds=None,
+        implementation_review_agent="claude",
+        implementation_review_model=None,
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--model") + 1] == ""
+    assert command[command.index("--implementation-review-model") + 1] == ""
 
 
 def _write_terminal_source_artifacts(
