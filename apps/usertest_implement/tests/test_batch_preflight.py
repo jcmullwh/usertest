@@ -27,6 +27,19 @@ def test_git_branch_accepts_detached_head(tmp_path: Path, monkeypatch) -> None:
     assert batch_preflight._git_branch(tmp_path) is None
 
 
+def test_default_batch_config_reuses_successful_exact_commit_ci() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    config = yaml.safe_load(
+        (repo_root / "configs" / "backlog_implement_batch.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert config["defaults"]["require_local_green"] is True
+    assert config["defaults"]["require_ci_green_for_base"] is True
+    assert config["defaults"]["reuse_successful_ci_for_local_green"] is True
+
+
 def test_batch_preflight_resolves_detached_identity_before_local_qualification(
     tmp_path: Path,
     monkeypatch,
@@ -146,6 +159,127 @@ def test_batch_preflight_qualifies_ci_by_commit_when_detached(
     assert "--branch" not in ci_query
     assert result["base_ci_run_url"] == "https://example.test/actions/7"
     assert result["blockers"] == []
+
+
+def test_batch_preflight_reuses_successful_exact_commit_ci_for_local_green(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    called: list[list[str]] = []
+    ci_runs = json.dumps(
+        [
+            {
+                "databaseId": 7,
+                "headSha": "abc123",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "createdAt": "2026-07-22T00:00:00Z",
+                "url": "https://example.test/actions/7",
+            }
+        ]
+    )
+
+    def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        called.append(argv)
+        if argv[:3] == ["gh", "run", "list"]:
+            return _completed(argv, stdout=ci_runs)
+        return _completed(argv)
+
+    monkeypatch.setattr(batch_preflight, "_run", fake_run)
+    monkeypatch.setattr(batch_preflight, "_git_branch", lambda _: None)
+    monkeypatch.setattr(batch_preflight, "_git_head", lambda _: "abc123")
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+
+    result = batch_preflight.run_batch_preflight(
+        repo_root=tmp_path,
+        batch_dir=tmp_path / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": True,
+                "require_ci_green_for_base": True,
+                "reuse_successful_ci_for_local_green": True,
+            }
+        },
+        worker_roster=[],
+        exec_backend="host",
+    )
+
+    assert not any("tools/scaffold/scaffold.py" in argv for argv in called)
+    assert result["local_green_source"] == "exact_commit_ci"
+    assert result["local_green_satisfied"] is True
+    receipt = json.loads(
+        (tmp_path / "batch" / "preflight" / "local_green.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt == {
+        "ci_run_url": "https://example.test/actions/7",
+        "head_sha": "abc123",
+        "lint_executed": False,
+        "satisfied": True,
+        "schema_version": 1,
+        "source": "exact_commit_ci",
+        "test_executed": False,
+    }
+    assert "exact_commit_ci" in (
+        tmp_path / "batch" / "preflight" / "local_test.log"
+    ).read_text(encoding="utf-8")
+
+
+def test_batch_preflight_skips_local_gate_when_mandatory_ci_blocks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    called: list[list[str]] = []
+    ci_runs = json.dumps(
+        [
+            {
+                "databaseId": 8,
+                "headSha": "abc123",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "failure",
+                "createdAt": "2026-07-22T00:00:00Z",
+                "url": "https://example.test/actions/8",
+            }
+        ]
+    )
+
+    def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        called.append(argv)
+        if argv[:3] == ["gh", "run", "list"]:
+            return _completed(argv, stdout=ci_runs)
+        return _completed(argv)
+
+    monkeypatch.setattr(batch_preflight, "_run", fake_run)
+    monkeypatch.setattr(batch_preflight, "_git_branch", lambda _: "dev")
+    monkeypatch.setattr(batch_preflight, "_git_head", lambda _: "abc123")
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+
+    result = batch_preflight.run_batch_preflight(
+        repo_root=tmp_path,
+        batch_dir=tmp_path / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": True,
+                "require_ci_green_for_base": True,
+                "reuse_successful_ci_for_local_green": True,
+            }
+        },
+        worker_roster=[],
+        exec_backend="host",
+    )
+
+    assert not any("tools/scaffold/scaffold.py" in argv for argv in called)
+    assert result["local_green_source"] == "skipped_base_ci_blocked"
+    assert result["local_green_satisfied"] is False
+    assert any(
+        blocker["summary"] == "Latest CI for the batch commit is not green."
+        for blocker in result["blockers"]
+    )
 
 
 def test_batch_preflight_skips_github_auth_for_local_exercise_profile(

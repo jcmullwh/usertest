@@ -628,6 +628,8 @@ def test_local_backend_has_no_docker_resource_plan(tmp_path: Path, monkeypatch: 
             "head_sha": "abc123",
             "branch": "dev",
             "base_ci_run_url": None,
+            "local_green_source": "exact_commit_ci",
+            "local_green_satisfied": True,
             "blockers": [{"blocker_id": "preflight", "class": "preflight"}],
         }
 
@@ -638,6 +640,8 @@ def test_local_backend_has_no_docker_resource_plan(tmp_path: Path, monkeypatch: 
     batch_dirs = sorted((tmp_path / "runs" / "_batch" / "usertest_implement").iterdir())
     persisted_state = json.loads((batch_dirs[-1] / "batch_state.json").read_text(encoding="utf-8"))
     assert captured["exec_backend"] == "local"
+    assert persisted_state["local_green_source"] == "exact_commit_ci"
+    assert persisted_state["local_green_satisfied"] is True
     assert "docker_resource_plan" not in persisted_state
     assert not docker_resource_plan_path(batch_dirs[-1]).exists()
 

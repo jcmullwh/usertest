@@ -53,6 +53,35 @@ def _write_log(path: Path, proc: subprocess.CompletedProcess[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _write_local_green_receipt(
+    *,
+    preflight_dir: Path,
+    source: str,
+    head_sha: str,
+    ci_run_url: str | None,
+    lint_executed: bool,
+    test_executed: bool,
+    satisfied: bool,
+) -> None:
+    (preflight_dir / "local_green.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": source,
+                "head_sha": head_sha,
+                "ci_run_url": ci_run_url,
+                "lint_executed": lint_executed,
+                "test_executed": test_executed,
+                "satisfied": satisfied,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -270,55 +299,13 @@ def run_batch_preflight(
                 )
             )
 
-    if bool(defaults.get("require_local_green", True)):
-        lint_proc = _run(
-            [
-                "python",
-                "tools/scaffold/scaffold.py",
-                "run",
-                "lint",
-                "--all",
-                "--skip-missing",
-                "--keep-going",
-            ],
-            cwd=repo_root,
-        )
-        _write_log(preflight_dir / "local_lint.log", lint_proc)
-        if lint_proc.returncode != 0:
-            blockers.append(
-                _blocker(
-                    blocker_id="baseline_repo_red",
-                    failure_class="baseline_repo_regression",
-                    summary="Local lint --all failed during batch preflight.",
-                    evidence={"path": str(preflight_dir / "local_lint.log")},
-                )
-            )
-
-        test_proc = _run(
-            [
-                "python",
-                "tools/scaffold/scaffold.py",
-                "run",
-                "test",
-                "--all",
-                "--skip-missing",
-                "--keep-going",
-            ],
-            cwd=repo_root,
-        )
-        _write_log(preflight_dir / "local_test.log", test_proc)
-        if test_proc.returncode != 0:
-            blockers.append(
-                _blocker(
-                    blocker_id="baseline_repo_red",
-                    failure_class="baseline_repo_regression",
-                    summary="Local test --all failed during batch preflight.",
-                    evidence={"path": str(preflight_dir / "local_test.log")},
-                )
-            )
-
     base_ci_run_url: str | None = None
+    base_ci_green = False
     require_base_ci = bool(defaults.get("require_ci_green_for_base", True))
+    require_local_green = bool(defaults.get("require_local_green", True))
+    reuse_successful_ci = bool(
+        defaults.get("reuse_successful_ci_for_local_green", False)
+    )
     require_github = require_base_ci or _batch_remote_handoff_requested(
         repo_root=repo_root,
         batch_config=batch_config,
@@ -388,6 +375,128 @@ def run_batch_preflight(
                 )
             else:
                 base_ci_run_url = str(picked.get("url") or "") or None
+                base_ci_green = True
+
+    local_green_source = "not_required"
+    local_green_satisfied = not require_local_green
+    if require_local_green and reuse_successful_ci and base_ci_green:
+        local_green_source = "exact_commit_ci"
+        local_green_satisfied = True
+        reuse_lines = (
+            "reused: exact_commit_ci\n"
+            f"head_sha={head_sha}\n"
+            f"ci_run_url={base_ci_run_url}\n"
+        )
+        (preflight_dir / "local_lint.log").write_text(
+            "check=lint\n" + reuse_lines,
+            encoding="utf-8",
+        )
+        (preflight_dir / "local_test.log").write_text(
+            "check=test\n" + reuse_lines,
+            encoding="utf-8",
+        )
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=False,
+            test_executed=False,
+            satisfied=True,
+        )
+    elif require_local_green and reuse_successful_ci and require_base_ci:
+        # Base CI is mandatory and already blocks admission. Do not spend the
+        # dominant local interval diagnosing a commit that cannot progress.
+        local_green_source = "skipped_base_ci_blocked"
+        skip_message = (
+            "skipped: mandatory exact-commit CI is not successful; "
+            "batch admission is already blocked.\n"
+            f"head_sha={head_sha}\n"
+        )
+        (preflight_dir / "local_lint.log").write_text(
+            "check=lint\n" + skip_message,
+            encoding="utf-8",
+        )
+        (preflight_dir / "local_test.log").write_text(
+            "check=test\n" + skip_message,
+            encoding="utf-8",
+        )
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=False,
+            test_executed=False,
+            satisfied=False,
+        )
+    elif require_local_green:
+        local_green_source = "local"
+        lint_proc = _run(
+            [
+                "python",
+                "tools/scaffold/scaffold.py",
+                "run",
+                "lint",
+                "--all",
+                "--skip-missing",
+                "--keep-going",
+            ],
+            cwd=repo_root,
+        )
+        _write_log(preflight_dir / "local_lint.log", lint_proc)
+        if lint_proc.returncode != 0:
+            blockers.append(
+                _blocker(
+                    blocker_id="baseline_repo_red",
+                    failure_class="baseline_repo_regression",
+                    summary="Local lint --all failed during batch preflight.",
+                    evidence={"path": str(preflight_dir / "local_lint.log")},
+                )
+            )
+
+        test_proc = _run(
+            [
+                "python",
+                "tools/scaffold/scaffold.py",
+                "run",
+                "test",
+                "--all",
+                "--skip-missing",
+                "--keep-going",
+            ],
+            cwd=repo_root,
+        )
+        _write_log(preflight_dir / "local_test.log", test_proc)
+        if test_proc.returncode != 0:
+            blockers.append(
+                _blocker(
+                    blocker_id="baseline_repo_red",
+                    failure_class="baseline_repo_regression",
+                    summary="Local test --all failed during batch preflight.",
+                    evidence={"path": str(preflight_dir / "local_test.log")},
+                )
+            )
+        local_green_satisfied = lint_proc.returncode == 0 and test_proc.returncode == 0
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=True,
+            test_executed=True,
+            satisfied=local_green_satisfied,
+        )
+    else:
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=False,
+            test_executed=False,
+            satisfied=True,
+        )
 
     agents_config = _load_yaml(repo_root / "configs" / "agents.yaml").get("agents", {})
     if not isinstance(agents_config, dict):
@@ -585,6 +694,8 @@ def run_batch_preflight(
         "checkout_mode": checkout_mode,
         "head_sha": head_sha,
         "base_ci_run_url": base_ci_run_url,
+        "local_green_source": local_green_source,
+        "local_green_satisfied": local_green_satisfied,
         "maintenance_image_metadata": maintenance_image_metadata,
         "blockers": blockers,
     }

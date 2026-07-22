@@ -2106,6 +2106,8 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     state["code_root"] = str(repo_root.resolve())
     state["owner_root"] = str(owner_root)
     state["repo_input"] = repo_input
+    state["local_green_source"] = preflight.get("local_green_source")
+    state["local_green_satisfied"] = preflight.get("local_green_satisfied")
     state["global_blockers"] = list(preflight.get("blockers", []))
     if state["global_blockers"]:
         state["status"] = "blocked"
