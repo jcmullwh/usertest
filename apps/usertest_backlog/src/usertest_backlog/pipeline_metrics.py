@@ -41,6 +41,12 @@ _TERMINAL_NEGATIVE_DISPOSITIONS = {
     "superseded",
 }
 _ATOM_ID_TIMESTAMP = re.compile(r"(?:^|/)(?P<stamp>\d{8}T\d{6}Z)(?:/|$)")
+_NON_MODEL_RESEARCH_ATTEMPT_KINDS = {
+    "evidence_verification_feedback",
+    "evidence_verification_persistence_replay",
+    "evidence_verification_promotion",
+    "evidence_verification_rescore",
+}
 
 
 @dataclass(frozen=True)
@@ -95,7 +101,7 @@ def _cycle_for(case_registry_path: Path) -> _CycleTelemetry:
         return value
 
 
-def _timestamp(value: Any) -> str:
+def _timestamp_or_none(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         candidate = value.strip()
         try:
@@ -105,7 +111,11 @@ def _timestamp(value: Any) -> str:
         else:
             if parsed.tzinfo is not None:
                 return candidate
-    return utc_now()
+    return None
+
+
+def _timestamp(value: Any) -> str:
+    return _timestamp_or_none(value) or utc_now()
 
 
 def _case_ids(stage_doc: Mapping[str, Any]) -> list[str]:
@@ -311,6 +321,65 @@ def _model_manifest_paths(stage_doc: Mapping[str, Any]) -> list[Path]:
     ]
 
 
+def _research_attempts(
+    stage_doc: Mapping[str, Any],
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    if str(stage_doc.get("stage") or "").strip() != "repro_research":
+        return []
+    items = stage_doc.get("items")
+    if not isinstance(items, list):
+        return []
+    attempts: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        raw_attempts = item.get("research_attempts")
+        if not isinstance(raw_attempts, list):
+            continue
+        attempts.extend(
+            (item, attempt)
+            for attempt in raw_attempts
+            if isinstance(attempt, Mapping)
+        )
+    return attempts
+
+
+def _attempt_has_model_work(attempt: Mapping[str, Any]) -> bool:
+    kind = str(attempt.get("attempt_kind") or "").strip()
+    if kind in _NON_MODEL_RESEARCH_ATTEMPT_KINDS:
+        return False
+    run_dir = attempt.get("run_dir")
+    return isinstance(run_dir, str) and bool(run_dir.strip())
+
+
+def _attempt_run_dir(attempt: Mapping[str, Any]) -> Path | None:
+    raw = attempt.get("run_dir")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw).resolve()
+
+
+def _research_model_event_log_cases(
+    stage_doc: Mapping[str, Any],
+) -> dict[Path, set[str]]:
+    logs: dict[Path, set[str]] = {}
+    for item, attempt in _research_attempts(stage_doc):
+        if not _attempt_has_model_work(attempt):
+            continue
+        run_dir = _attempt_run_dir(attempt)
+        if run_dir is None:
+            continue
+        path = run_dir / "lifecycle_events.jsonl"
+        case_id = item.get("case_id")
+        if isinstance(case_id, str) and case_id.strip():
+            logs.setdefault(path, set()).add(case_id.strip())
+    return logs
+
+
+def _research_model_event_logs(stage_doc: Mapping[str, Any]) -> list[Path]:
+    return list(_research_model_event_log_cases(stage_doc))
+
+
 def _manifest_invocation_id(path: Path) -> str | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -326,74 +395,126 @@ def _model_telemetry_projection(
     input_meta = stage_doc.get("input_meta")
     input_meta = input_meta if isinstance(input_meta, Mapping) else {}
     contract_raw = input_meta.get("model_invocation_contract")
-    if not isinstance(contract_raw, Mapping):
-        return _ModelTelemetryProjection(
-            manifest_paths=(),
-            expected_invocation_ids=(),
-            completed_invocation_ids=(),
-            invocation_expected=None,
-            complete=False,
-            issues=("stage_model_invocation_contract_missing",),
-        )
-
-    contract = dict(contract_raw)
+    research_logs = _research_model_event_logs(stage_doc)
     issues: list[str] = []
-    if contract.get("schema_version") != 1:
-        issues.append("stage_model_invocation_contract_schema_invalid")
-    invocation_expected_raw = contract.get("invocation_expected")
-    invocation_expected = (
-        invocation_expected_raw if isinstance(invocation_expected_raw, bool) else None
-    )
-    if invocation_expected is None:
-        issues.append("stage_model_invocation_contract_expectation_invalid")
-    expected_contract_hash = canonical_sha256(
-        {key: value for key, value in contract.items() if key != "contract_sha256"}
-    )
-    if contract.get("contract_sha256") != expected_contract_hash:
-        issues.append("stage_model_invocation_contract_hash_changed")
-
-    manifests_raw = contract.get("manifests")
-    manifests = manifests_raw if isinstance(manifests_raw, list) else []
-    if not isinstance(manifests_raw, list):
-        issues.append("stage_model_invocation_contract_manifests_invalid")
     paths: list[Path] = []
     expected_ids: set[str] = set()
     completed_ids: set[str] = set()
-    for index, ref_raw in enumerate(manifests):
-        ref = ref_raw if isinstance(ref_raw, Mapping) else {}
-        path_raw = ref.get("path")
-        path = Path(str(path_raw)) if isinstance(path_raw, str) and path_raw.strip() else None
-        if path is None or not path.is_file():
-            issues.append(f"stage_model_invocation_ref_missing:{index}")
-            continue
-        paths.append(path)
-        ref_sha = ref.get("sha256")
-        if not isinstance(ref_sha, str) or ref_sha != sha256(path.read_bytes()).hexdigest():
-            issues.append(f"stage_model_invocation_ref_changed:{index}")
-        invocation_id = _manifest_invocation_id(path)
-        if invocation_id is None:
-            issues.append(f"stage_model_invocation_id_missing:{index}")
-            continue
-        if invocation_id in expected_ids:
-            issues.append(f"stage_model_invocation_id_duplicated:{invocation_id}")
-        expected_ids.add(invocation_id)
-        source_path = path.parent / "lifecycle_events.jsonl"
+    invocation_expected: bool | None = None
+
+    if isinstance(contract_raw, Mapping):
+        contract = dict(contract_raw)
+        if contract.get("schema_version") != 1:
+            issues.append("stage_model_invocation_contract_schema_invalid")
+        invocation_expected_raw = contract.get("invocation_expected")
+        invocation_expected = (
+            invocation_expected_raw
+            if isinstance(invocation_expected_raw, bool)
+            else None
+        )
+        if invocation_expected is None:
+            issues.append("stage_model_invocation_contract_expectation_invalid")
+        expected_contract_hash = canonical_sha256(
+            {key: value for key, value in contract.items() if key != "contract_sha256"}
+        )
+        if contract.get("contract_sha256") != expected_contract_hash:
+            issues.append("stage_model_invocation_contract_hash_changed")
+
+        manifests_raw = contract.get("manifests")
+        manifests = manifests_raw if isinstance(manifests_raw, list) else []
+        if not isinstance(manifests_raw, list):
+            issues.append("stage_model_invocation_contract_manifests_invalid")
+        for index, ref_raw in enumerate(manifests):
+            ref = ref_raw if isinstance(ref_raw, Mapping) else {}
+            path_raw = ref.get("path")
+            path = (
+                Path(str(path_raw))
+                if isinstance(path_raw, str) and path_raw.strip()
+                else None
+            )
+            if path is None or not path.is_file():
+                issues.append(f"stage_model_invocation_ref_missing:{index}")
+                continue
+            paths.append(path)
+            ref_sha = ref.get("sha256")
+            if (
+                not isinstance(ref_sha, str)
+                or ref_sha != sha256(path.read_bytes()).hexdigest()
+            ):
+                issues.append(f"stage_model_invocation_ref_changed:{index}")
+            invocation_id = _manifest_invocation_id(path)
+            if invocation_id is None:
+                issues.append(f"stage_model_invocation_id_missing:{index}")
+                continue
+            if invocation_id in expected_ids:
+                issues.append(f"stage_model_invocation_id_duplicated:{invocation_id}")
+            expected_ids.add(invocation_id)
+            source_path = path.parent / "lifecycle_events.jsonl"
+            if not source_path.is_file():
+                issues.append(f"stage_model_invocation_event_log_missing:{index}")
+                continue
+            try:
+                source_events = read_lifecycle_events(source_path)
+            except Exception:  # noqa: BLE001 - retained telemetry remains unknown
+                issues.append(f"stage_model_invocation_event_log_invalid:{index}")
+                continue
+            if any(
+                event.event_type == "model.invocation.completed"
+                and event.context.invocation_id == invocation_id
+                for event in source_events
+            ):
+                completed_ids.add(invocation_id)
+            else:
+                issues.append(
+                    f"stage_model_invocation_completion_missing:{invocation_id}"
+                )
+    elif not research_logs:
+        issues.append("stage_model_invocation_contract_missing")
+
+    if research_logs:
+        invocation_expected = True
+    for index, source_path in enumerate(research_logs):
         if not source_path.is_file():
-            issues.append(f"stage_model_invocation_event_log_missing:{index}")
+            issues.append(f"stage_research_invocation_event_log_missing:{index}")
             continue
         try:
             source_events = read_lifecycle_events(source_path)
-        except Exception:  # noqa: BLE001 - retained telemetry remains unknown, not fatal
-            issues.append(f"stage_model_invocation_event_log_invalid:{index}")
+        except Exception:  # noqa: BLE001 - retained telemetry remains unknown
+            issues.append(f"stage_research_invocation_event_log_invalid:{index}")
             continue
-        if any(
-            event.event_type == "model.invocation.completed"
-            and event.context.invocation_id == invocation_id
+        started = {
+            event.context.invocation_id
             for event in source_events
-        ):
-            completed_ids.add(invocation_id)
-        else:
-            issues.append(f"stage_model_invocation_completion_missing:{invocation_id}")
+            if event.event_type == "model.invocation.started"
+            and event.context.invocation_id is not None
+        }
+        completed_events = [
+            event
+            for event in source_events
+            if event.event_type == "model.invocation.completed"
+            and event.context.invocation_id is not None
+        ]
+        completed = {
+            event.context.invocation_id for event in completed_events
+        }
+        if not started:
+            issues.append(f"stage_research_invocation_start_missing:{index}")
+        if not completed:
+            issues.append(f"stage_research_invocation_completion_missing:{index}")
+        for invocation_id in sorted(started - completed):
+            issues.append(
+                f"stage_research_invocation_completion_missing:{invocation_id}"
+            )
+        for invocation_id in sorted(completed - started):
+            issues.append(f"stage_research_invocation_start_missing:{invocation_id}")
+        for event in completed_events:
+            if not _complete_token_usage(event):
+                issues.append(
+                    "stage_research_invocation_usage_incomplete:"
+                    + str(event.context.invocation_id)
+                )
+        expected_ids.update(started or completed)
+        completed_ids.update(completed)
 
     if invocation_expected is True and not expected_ids:
         issues.append("stage_model_invocation_manifest_missing")
@@ -412,17 +533,45 @@ def _link_model_invocation_events(
     stage_doc: Mapping[str, Any],
     global_path: Path,
     work_context: LifecycleContext,
+    case_ids: Sequence[str],
     lifecycle_ids: Sequence[str],
     cycle: _CycleTelemetry,
 ) -> int:
     invocation_ids_by_log: dict[Path, set[str]] = {}
+    case_lifecycle_by_id = dict(zip(case_ids, lifecycle_ids, strict=True))
+    beneficiaries_by_log: dict[Path, set[str]] = {}
     for manifest_path in _model_manifest_paths(stage_doc):
         invocation_id = _manifest_invocation_id(manifest_path)
         if invocation_id is None:
             continue
-        invocation_ids_by_log.setdefault(
-            manifest_path.parent / "lifecycle_events.jsonl", set()
-        ).add(invocation_id)
+        source_path = manifest_path.parent / "lifecycle_events.jsonl"
+        invocation_ids_by_log.setdefault(source_path, set()).add(invocation_id)
+        beneficiaries_by_log.setdefault(source_path, set()).update(lifecycle_ids)
+    for source_path, source_case_ids in _research_model_event_log_cases(
+        stage_doc
+    ).items():
+        if not source_path.is_file():
+            continue
+        try:
+            source_events = read_lifecycle_events(source_path)
+        except Exception:  # noqa: BLE001 - completeness is reported separately
+            continue
+        invocation_ids = {
+            event.context.invocation_id
+            for event in source_events
+            if event.event_type
+            in {"model.invocation.started", "model.invocation.completed"}
+            and event.context.invocation_id is not None
+        }
+        if invocation_ids:
+            invocation_ids_by_log.setdefault(source_path, set()).update(
+                invocation_ids
+            )
+            beneficiaries_by_log[source_path] = {
+                case_lifecycle_by_id[case_id]
+                for case_id in source_case_ids
+                if case_id in case_lifecycle_by_id
+            }
 
     linked = 0
     allowed_types = {
@@ -439,6 +588,16 @@ def _link_model_invocation_events(
     ):
         if not source_path.is_file() or source_path.resolve() == global_path.resolve():
             continue
+        beneficiary_lifecycle_ids = tuple(
+            sorted(beneficiaries_by_log.get(source_path, set()))
+        )
+        if not beneficiary_lifecycle_ids:
+            continue
+        beneficiary_case_ids = tuple(
+            case_id
+            for case_id, lifecycle_id in case_lifecycle_by_id.items()
+            if lifecycle_id in beneficiary_lifecycle_ids
+        )
         for source_event in read_lifecycle_events(source_path):
             if (
                 source_event.event_type not in allowed_types
@@ -461,6 +620,16 @@ def _link_model_invocation_events(
                 ),
             )
             linked_context = LifecycleContext(
+                case_lifecycle_id=(
+                    beneficiary_lifecycle_ids[0]
+                    if len(beneficiary_lifecycle_ids) == 1
+                    else None
+                ),
+                case_id=(
+                    beneficiary_case_ids[0]
+                    if len(beneficiary_case_ids) == 1
+                    else None
+                ),
                 cycle_id=work_context.cycle_id,
                 stage=work_context.stage,
                 milestone_id=work_context.milestone_id,
@@ -469,7 +638,11 @@ def _link_model_invocation_events(
                 session_id=source_event.context.session_id,
                 shared_work_id=(
                     source_event.context.shared_work_id
-                    or (source_work_unit_id if len(lifecycle_ids) > 1 else None)
+                    or (
+                        source_work_unit_id
+                        if len(beneficiary_lifecycle_ids) > 1
+                        else None
+                    )
                 ),
                 parent_action_id=source_event.context.parent_action_id,
                 system_fingerprint={
@@ -497,7 +670,7 @@ def _link_model_invocation_events(
                     origin=source_event.origin,
                     error_cluster_id=source_event.error_cluster_id,
                     intervention_id=source_event.intervention_id,
-                    beneficiary_case_lifecycle_ids=tuple(lifecycle_ids),
+                    beneficiary_case_lifecycle_ids=beneficiary_lifecycle_ids,
                     evidence_paths=tuple(
                         dict.fromkeys((*source_event.evidence_paths, str(source_path)))
                     ),
@@ -513,6 +686,316 @@ def _link_model_invocation_events(
             )
             linked += 1
     return linked
+
+
+def _complete_token_usage(event: Any) -> bool:
+    usage = event.attributes.get("token_usage")
+    if not isinstance(usage, Mapping):
+        return False
+    required = (
+        "input_tokens",
+        "cached_input_tokens",
+        "uncached_input_tokens",
+        "output_tokens",
+        "total_tokens",
+    )
+    if any(not isinstance(usage.get(field), int) for field in required):
+        return False
+    return isinstance(
+        usage.get("reasoning_output_tokens", usage.get("reasoning_tokens")), int
+    )
+
+
+def _research_model_work_by_run(
+    stage_doc: Mapping[str, Any],
+) -> dict[Path, tuple[tuple[str, ...], bool]]:
+    projected: dict[Path, tuple[tuple[str, ...], bool]] = {}
+    for source_path in _research_model_event_logs(stage_doc):
+        if not source_path.is_file():
+            continue
+        try:
+            events = read_lifecycle_events(source_path)
+        except Exception:  # noqa: BLE001 - missing cost remains explicitly incomplete
+            continue
+        completed = [
+            event
+            for event in events
+            if event.event_type == "model.invocation.completed"
+        ]
+        work_ids = tuple(
+            dict.fromkeys(
+                event.context.work_unit_id
+                for event in completed
+                if event.context.work_unit_id is not None
+            )
+        )
+        projected[source_path.parent.resolve()] = (
+            work_ids,
+            bool(completed)
+            and len(work_ids) == len(completed)
+            and all(_complete_token_usage(event) for event in completed),
+        )
+    return projected
+
+
+def _validation_error_identity(error: str) -> str:
+    normalized = " ".join(error.split())
+    return normalized.partition(":details=")[0]
+
+
+def _attempt_validation_errors(attempt: Mapping[str, Any]) -> list[str]:
+    raw = attempt.get("validation_errors")
+    if not isinstance(raw, list):
+        return []
+    return [
+        normalized
+        for value in raw
+        for normalized in [" ".join(str(value).split())]
+        if normalized
+    ]
+
+
+def _attempt_boundary(
+    attempt: Mapping[str, Any],
+    *,
+    following_attempts: Sequence[Mapping[str, Any]],
+    fallback: str,
+) -> dict[str, Any]:
+    run_dir = _attempt_run_dir(attempt)
+    evidence_paths: list[str] = []
+    report_path = attempt.get("report_path")
+    if isinstance(report_path, str) and report_path.strip():
+        evidence_paths.append(report_path)
+    if _attempt_has_model_work(attempt) and run_dir is not None:
+        meta_path = run_dir / "run_meta.json"
+        if meta_path.is_file():
+            evidence_paths.append(str(meta_path))
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                meta = {}
+            if isinstance(meta, Mapping):
+                started = _timestamp_or_none(meta.get("run_started_utc"))
+                ended = _timestamp_or_none(meta.get("run_finished_utc"))
+                if ended is not None:
+                    return {
+                        "occurred_at": ended,
+                        "started_at": started,
+                        "timing_complete": started is not None,
+                        "timestamp_semantics": "authoritative_run_boundary",
+                        "evidence_paths": evidence_paths,
+                    }
+
+    for following in following_attempts:
+        if not _attempt_has_model_work(following):
+            continue
+        following_dir = _attempt_run_dir(following)
+        if following_dir is None:
+            continue
+        meta_path = following_dir / "run_meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if not isinstance(meta, Mapping):
+            continue
+        upper_bound = _timestamp_or_none(meta.get("run_started_utc"))
+        if upper_bound is not None:
+            evidence_paths.append(str(meta_path))
+            return {
+                "occurred_at": upper_bound,
+                "started_at": None,
+                "timing_complete": False,
+                "timestamp_semantics": "observed_no_later_than_next_run",
+                "evidence_paths": evidence_paths,
+            }
+    return {
+        "occurred_at": fallback,
+        "started_at": None,
+        "timing_complete": False,
+        "timestamp_semantics": "observed_no_later_than_stage_persistence",
+        "evidence_paths": evidence_paths,
+    }
+
+
+def _context_with_session(
+    context: LifecycleContext, session_id: object
+) -> LifecycleContext:
+    raw = context.to_dict()
+    raw["session_id"] = session_id if isinstance(session_id, str) else None
+    return LifecycleContext.from_dict(raw)
+
+
+def _record_research_validation_errors(
+    *,
+    item: Mapping[str, Any],
+    context: LifecycleContext,
+    global_path: Path,
+    case_registry_path: Path,
+    occurred_at: str,
+    cycle: _CycleTelemetry,
+    model_work_by_run: Mapping[Path, tuple[tuple[str, ...], bool]],
+) -> None:
+    attempts_raw = item.get("research_attempts")
+    attempts = (
+        [attempt for attempt in attempts_raw if isinstance(attempt, Mapping)]
+        if isinstance(attempts_raw, list)
+        else []
+    )
+    if not attempts:
+        return
+
+    observations = [
+        {
+            "attempt": attempt,
+            "boundary": _attempt_boundary(
+                attempt,
+                following_attempts=attempts[index + 1 :],
+                fallback=occurred_at,
+            ),
+        }
+        for index, attempt in enumerate(attempts)
+    ]
+    open_clusters: dict[str, dict[str, Any]] = {}
+    episode_by_identity: dict[str, int] = {}
+    fields = {
+        **_event_fields(cycle),
+        "provenance_quality": "artifact_derived",
+    }
+
+    for observation in observations:
+        attempt = observation["attempt"]
+        boundary = observation["boundary"]
+        run_dir = _attempt_run_dir(attempt)
+        work_ids: tuple[str, ...] = ()
+        work_complete = False
+        if _attempt_has_model_work(attempt) and run_dir is not None:
+            work_ids, work_complete = model_work_by_run.get(run_dir, ((), False))
+            for state in open_clusters.values():
+                state["resolution_work_unit_ids"].update(work_ids)
+                if not work_ids or not work_complete:
+                    state["resolution_cost_attribution_complete"] = False
+
+        errors = _attempt_validation_errors(attempt)
+        current_identities = {_validation_error_identity(error) for error in errors}
+        resolved_identities = sorted(set(open_clusters) - current_identities)
+        for identity in resolved_identities:
+            state = open_clusters.pop(identity)
+            source_session = state.get("source_session_id")
+            observed_session = attempt.get("observed_agent_session_id")
+            resumed_session = attempt.get("resumed_from_session_id")
+            same_author = bool(
+                isinstance(source_session, str)
+                and source_session
+                and observed_session == source_session
+                and resumed_session == source_session
+            )
+            cluster_id = str(state["cluster_id"])
+            resolution_work_unit_ids = sorted(
+                state["resolution_work_unit_ids"]
+            )
+            timing_unknown = bool(
+                state["resolution_timing_unknown"]
+                or not boundary["timing_complete"]
+            )
+            _append_case_event(
+                global_path=global_path,
+                case_registry_path=case_registry_path,
+                event=make_lifecycle_event(
+                    "error.resolved",
+                    _context_with_session(context, observed_session),
+                    idempotency_key=f"{cluster_id}:resolved",
+                    occurred_at=boundary["occurred_at"],
+                    error_cluster_id=cluster_id,
+                    evidence_paths=tuple(boundary["evidence_paths"]),
+                    attributes={
+                        "error_kind": state["error_kind"],
+                        "validation_error_identity": identity,
+                        "resolution_mode": (
+                            "self_healed_same_author"
+                            if same_author
+                            else "self_healed_controller"
+                        ),
+                        "resolution_work_unit_ids": resolution_work_unit_ids,
+                        "resolution_cost_attribution_complete": bool(
+                            resolution_work_unit_ids
+                            and state["resolution_cost_attribution_complete"]
+                        ),
+                        "resolution_timing_unknown": timing_unknown,
+                        "resolution_timestamp_semantics": boundary[
+                            "timestamp_semantics"
+                        ],
+                        "attempt_number": attempt.get("attempt_number"),
+                        "attempt_kind": attempt.get("attempt_kind"),
+                        "attempt_outcome": attempt.get("outcome"),
+                        "telemetry_layer": "stage_validation",
+                    },
+                    **fields,
+                ),
+            )
+
+        for error_index, error in enumerate(errors):
+            identity = _validation_error_identity(error)
+            state = open_clusters.get(identity)
+            if state is None:
+                episode = episode_by_identity.get(identity, 0) + 1
+                episode_by_identity[identity] = episode
+                cluster_id = _stable_id(
+                    "error",
+                    context.case_lifecycle_id,
+                    context.stage,
+                    identity,
+                    episode,
+                )
+                source_session = attempt.get("observed_agent_session_id") or attempt.get(
+                    "agent_session_id"
+                )
+                state = {
+                    "cluster_id": cluster_id,
+                    "error_kind": identity.partition(":")[0],
+                    "source_session_id": source_session,
+                    "resolution_work_unit_ids": set(),
+                    "resolution_cost_attribution_complete": True,
+                    "resolution_timing_unknown": not boundary["timing_complete"],
+                }
+                open_clusters[identity] = state
+            cluster_id = str(state["cluster_id"])
+            _append_case_event(
+                global_path=global_path,
+                case_registry_path=case_registry_path,
+                event=make_lifecycle_event(
+                    "error.occurred",
+                    _context_with_session(
+                        context, attempt.get("observed_agent_session_id")
+                    ),
+                    idempotency_key=(
+                        f"{cluster_id}:occurrence:{attempt.get('attempt_number')}:"
+                        f"{error_index}:{sha256(error.encode('utf-8')).hexdigest()}"
+                    ),
+                    occurred_at=boundary["occurred_at"],
+                    error_cluster_id=cluster_id,
+                    evidence_paths=tuple(boundary["evidence_paths"]),
+                    attributes={
+                        "error_kind": state["error_kind"],
+                        "validation_error": error,
+                        "validation_error_identity": identity,
+                        "resolution_timing_unknown": not boundary[
+                            "timing_complete"
+                        ],
+                        "occurrence_timestamp_semantics": boundary[
+                            "timestamp_semantics"
+                        ],
+                        "source_work_unit_ids": list(work_ids),
+                        "attempt_number": attempt.get("attempt_number"),
+                        "attempt_kind": attempt.get("attempt_kind"),
+                        "attempt_outcome": attempt.get("outcome"),
+                        "telemetry_layer": "stage_validation",
+                    },
+                    **fields,
+                ),
+            )
 
 
 def record_stage_telemetry(
@@ -598,9 +1081,11 @@ def record_stage_telemetry(
         stage_doc=stage_doc,
         global_path=global_path,
         work_context=work_context,
+        case_ids=cases,
         lifecycle_ids=lifecycle_ids,
         cycle=cycle,
     )
+    model_work_by_run = _research_model_work_by_run(stage_doc)
 
     items = stage_doc.get("items")
     item_by_case = (
@@ -667,6 +1152,16 @@ def record_stage_telemetry(
                 **fields,
             ),
         )
+        if isinstance(item, Mapping):
+            _record_research_validation_errors(
+                item=item,
+                context=context,
+                global_path=global_path,
+                case_registry_path=case_registry_path,
+                occurred_at=occurred_at,
+                cycle=cycle,
+                model_work_by_run=model_work_by_run,
+            )
 
         not_emitted = isinstance(item, Mapping) and item.get("ticket_stage") == "not_emitted"
         disposition = (

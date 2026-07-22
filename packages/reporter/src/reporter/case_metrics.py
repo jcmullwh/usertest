@@ -1360,6 +1360,7 @@ def _new_error_cluster(cluster_id: str) -> dict[str, Any]:
         "intervention_ids": set(),
         "manual_action_ids": set(),
         "resolution_evidence_unknown": False,
+        "resolution_timing_unknown": False,
     }
 
 
@@ -1559,6 +1560,8 @@ def _collect_events(
                         cluster["occurred_at"] = timestamp
                     if _bool_field(event, "resolution_evidence_unknown") is True:
                         cluster["resolution_evidence_unknown"] = True
+                    if _bool_field(event, "resolution_timing_unknown") is True:
+                        cluster["resolution_timing_unknown"] = True
                 else:
                     cluster["resolution_event_count"] += 1
                     resolution_work_ids = _expand_legacy_work_unit_references(
@@ -1619,6 +1622,8 @@ def _collect_events(
                                 detail=str(raw_resolution),
                             )
                         category = "open"
+                    if _bool_field(event, "resolution_timing_unknown") is True:
+                        cluster["resolution_timing_unknown"] = True
                     _mark_resolution(case, cluster_id, category, timestamp=timestamp)
 
         if event_type.startswith("intervention") or event_type.startswith("action"):
@@ -2634,7 +2639,12 @@ def _serialize_error_metrics(
         occurred_at = raw.get("occurred_at")
         resolved_at = raw.get("resolved_at")
         resolution_elapsed_seconds: float | None = None
-        if isinstance(occurred_at, datetime) and isinstance(resolved_at, datetime):
+        if (
+            category not in {"open", "unresolved_terminal"}
+            and raw.get("resolution_timing_unknown") is not True
+            and isinstance(occurred_at, datetime)
+            and isinstance(resolved_at, datetime)
+        ):
             elapsed = (resolved_at - occurred_at).total_seconds()
             if elapsed >= 0:
                 resolution_elapsed_seconds = elapsed
@@ -2650,6 +2660,12 @@ def _serialize_error_metrics(
                 "occurred_at": _iso(occurred_at),
                 "resolved_at": _iso(resolved_at),
                 "resolution_elapsed_seconds": resolution_elapsed_seconds,
+                "resolution_timing_complete": (
+                    raw.get("resolution_timing_unknown") is not True
+                    and isinstance(occurred_at, datetime)
+                    and isinstance(resolved_at, datetime)
+                    and category not in {"open", "unresolved_terminal"}
+                ),
                 "resolution_category": category,
                 "event_count": raw.get("event_count", 0),
                 "occurrence_count": raw.get("occurrence_count", 0),
