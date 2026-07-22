@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from runner_core import RunnerConfig
 from runner_core.retained_oracle_assets import _sha256_json
 
@@ -1223,6 +1224,19 @@ def test_pr_resume_noops_when_stale_ci_failure_is_currently_green(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "noop_current_gates_green"
     assert payload["branch"] == "backlog/current-pr-branch"
+    assert payload["persisted_lifecycle_state"] == "merge_ready"
+    persisted = json.loads((run_dir / "ticket_resume_state.json").read_text(encoding="utf-8"))
+    assert persisted["lifecycle_state"] == "merge_ready"
+    assert persisted["blocking_reason"] is None
+    assert persisted["resume_attempt_count"] == 1
+    ledger = yaml.safe_load(
+        (tmp_path / ".agents" / "state" / "backlog_implement_actions.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert ledger["actions"]["def456def456def0"]["last_resume_lifecycle_state"] == (
+        "merge_ready"
+    )
 
 
 def test_pr_resume_noops_when_review_changes_requested_is_now_approved(
@@ -1250,6 +1264,7 @@ def test_pr_resume_noops_when_review_changes_requested_is_now_approved(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "noop_current_gates_green"
     assert payload["current_pr_context"]["pr"]["reviewDecision"] == "APPROVED"
+    assert payload["persisted_lifecycle_state"] == "merge_ready"
 
 
 def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(

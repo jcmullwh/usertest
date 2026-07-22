@@ -613,8 +613,10 @@ def _route_operational_correction(
         allowed_lifecycles={
             "awaiting_review",
             "ci_failed",
+            "ci_failed_resume_ready",
             "merge_ready",
             "review_changes_requested",
+            "review_failed_resume_ready",
         },
         supervisor_instructions=[_operational_correction_instruction(evidence)],
     )
@@ -718,7 +720,10 @@ def _resume_review_changes_requested(
         return False
     run_dir_raw = entry.get("last_run_dir")
     lifecycle = str(entry.get("last_resume_lifecycle_state") or "").strip().lower()
-    accepted_lifecycles = allowed_lifecycles or {"review_changes_requested"}
+    accepted_lifecycles = allowed_lifecycles or {
+        "review_changes_requested",
+        "review_failed_resume_ready",
+    }
     if (
         not isinstance(run_dir_raw, str)
         or not run_dir_raw.strip()
@@ -768,7 +773,7 @@ def _review_changes_requested(entry: object, pr_url: str) -> bool:
         == "changes_requested"
         and entry.get("last_review_merge_ready") is not True
         and str(entry.get("last_resume_lifecycle_state") or "").strip().lower()
-        == "review_changes_requested"
+        in {"review_changes_requested", "review_failed_resume_ready"}
     )
 
 

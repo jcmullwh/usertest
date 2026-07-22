@@ -1838,10 +1838,6 @@ def _run_resume_process(
 ) -> TicketRunResult:
     if candidate.resume_state_path is None:
         raise ValueError("resume candidate is missing resume_state_path")
-    run_common = _run_common_settings(
-        run_settings_path=settings_path,
-        run_settings_profile=settings_profile,
-    )
     command = [
         str(implement_python),
         "-m",
@@ -1851,8 +1847,14 @@ def _run_resume_process(
         "resume",
         "--resume-state",
         str(candidate.resume_state_path),
+        "--runs-dir",
+        str(candidate.owner_root / "runs" / "usertest_implement"),
         "--repo",
         repo_input,
+        "--settings",
+        str(settings_path),
+        "--settings-profile",
+        settings_profile,
         "--agent",
         worker.agent,
         "--exec-backend",
@@ -1862,14 +1864,6 @@ def _run_resume_process(
     ]
     if worker.model is not None:
         command.extend(["--model", worker.model])
-    exec_docker_profile = run_common.get("exec_docker_profile")
-    if isinstance(exec_docker_profile, str) and exec_docker_profile.strip():
-        command.extend(["--exec-docker-profile", exec_docker_profile.strip()])
-    exec_cache = run_common.get("exec_cache")
-    if isinstance(exec_cache, str) and exec_cache.strip():
-        command.extend(["--exec-cache", exec_cache.strip()])
-    if run_common.get("maintenance_venv_cache") is False:
-        command.append("--no-maintenance-venv-cache")
     if maintenance_image_metadata_path is not None:
         command.extend(
             [

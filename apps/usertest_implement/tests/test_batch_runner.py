@@ -323,6 +323,11 @@ def test_resume_ledger_and_subprocess_use_owner_root_path(tmp_path: Path, monkey
     command = captured["command"]
     assert isinstance(command, list)
     assert command[command.index("--ledger") + 1] == str(ledger_path)
+    assert command[command.index("--runs-dir") + 1] == str(
+        owner_root / "runs" / "usertest_implement"
+    )
+    assert command[command.index("--settings") + 1] == str(code_root / "settings.yaml")
+    assert command[command.index("--settings-profile") + 1] == "default"
 
 
 def _write_terminal_source_artifacts(

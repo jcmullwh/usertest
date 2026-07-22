@@ -838,6 +838,53 @@ def _current_pr_resume_noop_reason(
     return "Current PR merge gate is already green: " + json.dumps(current_gate, ensure_ascii=False)
 
 
+def _persist_current_pr_resume_noop(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    state_path: Path,
+    run_dir: Path,
+    resume_state: dict[str, Any],
+    selected: SelectedTicket,
+    reason: str,
+    pr_url: str,
+    branch: str,
+) -> dict[str, Any]:
+    """Park a recovered PR durably so controllers cannot select the stale failure again."""
+
+    observed_at = _utc_now_z()
+    noop = {
+        "status": "noop_current_gates_green",
+        "reason": reason,
+        "observed_at_utc": observed_at,
+        "pr_url": pr_url,
+        "branch": branch,
+    }
+    persisted_state = {
+        **resume_state,
+        "lifecycle_state": LIFECYCLE_MERGE_READY,
+        "blocking_reason": None,
+        "resume_attempt_count": _next_resume_attempt_count(resume_state),
+        "resume_noop": noop,
+    }
+    _write_json(state_path, persisted_state)
+
+    ledger_path = _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+    update_ledger_file(
+        ledger_path,
+        fingerprint=selected.fingerprint,
+        updates={
+            "last_run_dir": str(run_dir),
+            "last_branch": branch,
+            "last_pr_url": pr_url,
+            "last_resume_state_path": str(state_path),
+            "last_resume_lifecycle_state": LIFECYCLE_MERGE_READY,
+            "last_resume_noop_at": observed_at,
+        },
+    )
+    return persisted_state
+
+
 def _resolve_pr_resume_target(
     *,
     args: argparse.Namespace,
@@ -1110,6 +1157,17 @@ def _cmd_resume_pr(
         review_summary=review_summary,
     )
     if noop_reason is not None:
+        persisted_state = _persist_current_pr_resume_noop(
+            args=args,
+            repo_root=repo_root,
+            state_path=state_path,
+            run_dir=run_dir,
+            resume_state=resume_state,
+            selected=selected,
+            reason=noop_reason,
+            pr_url=pr_url,
+            branch=branch,
+        )
         payload = {
             "schema_version": 1,
             "status": "noop_current_gates_green",
@@ -1119,6 +1177,7 @@ def _cmd_resume_pr(
             "pr_url": pr_url,
             "branch": branch,
             "current_pr_context": pr_context,
+            "persisted_lifecycle_state": persisted_state["lifecycle_state"],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
