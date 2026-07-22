@@ -7790,6 +7790,21 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 )
             else:
                 stage3_resume_document = completed_stage3_resume_candidate
+
+        def record_stage3_progress(stage_document: dict[str, Any]) -> None:
+            try:
+                record_stage_telemetry(
+                    case_registry=case_registry,
+                    case_registry_path=case_registry_json,
+                    stage_doc=stage_document,
+                )
+            except Exception as exc:  # noqa: BLE001 - metrics cannot gate Stage 3
+                print(
+                    "[stage3] WARNING: failed to record progress telemetry: "
+                    f"{exc}",
+                    file=sys.stderr,
+                )
+
         stage3_doc = _run_repro_research_stage(
             repo_root=repo_root,
             repo_input=resolved_repo_input,
@@ -7811,6 +7826,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             resume_stage_document=stage3_resume_document,
             reused_research_dossiers=reused_research_dossiers,
             resume_upstream_contract=stage3_resume_upstream,
+            progress_observer=record_stage3_progress,
         )
 
         items3_raw = stage3_doc.get("items") if isinstance(stage3_doc, dict) else None

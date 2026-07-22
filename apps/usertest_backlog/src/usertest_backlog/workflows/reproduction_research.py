@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from backlog_core import (
     SOURCE_EVIDENCE_PROJECTION_VERSION,
@@ -1178,6 +1178,7 @@ def _run_repro_research_stage(
     resume_stage_document: Mapping[str, Any] | None = None,
     reused_research_dossiers: Sequence[dict[str, Any]] = (),
     resume_upstream_contract: Mapping[str, Any] | None = None,
+    progress_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run stage 3 reproduce-plus-research and write the stage artifacts."""
     import json as _json
@@ -1296,6 +1297,8 @@ def _run_repro_research_stage(
         retained_artifacts.update({"research_json": str(out_json), "research_md": str(out_md)})
         retained["artifacts"] = retained_artifacts
         _atomic_write_research_json(out_json, retained)
+        if progress_observer is not None:
+            progress_observer(retained)
 
     if selected_payloads or not reused:
         stage_doc = run_repro_research_stage(

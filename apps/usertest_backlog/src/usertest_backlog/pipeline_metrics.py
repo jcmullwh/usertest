@@ -344,6 +344,16 @@ def _research_attempts(
     return attempts
 
 
+def _is_committed_progress_checkpoint(stage_doc: Mapping[str, Any]) -> bool:
+    if str(stage_doc.get("stage") or "").strip() != "repro_research":
+        return False
+    input_meta = stage_doc.get("input_meta")
+    return (
+        isinstance(input_meta, Mapping)
+        and input_meta.get("stage_status") == "checkpointed_progress"
+    )
+
+
 def _attempt_has_model_work(attempt: Mapping[str, Any]) -> bool:
     kind = str(attempt.get("attempt_kind") or "").strip()
     if kind in _NON_MODEL_RESEARCH_ATTEMPT_KINDS:
@@ -998,6 +1008,25 @@ def _record_research_validation_errors(
             )
 
 
+def _research_item_completed_at(item: object, *, fallback: str) -> str:
+    if not isinstance(item, Mapping):
+        return fallback
+    attempts_raw = item.get("research_attempts")
+    attempts = (
+        [attempt for attempt in attempts_raw if isinstance(attempt, Mapping)]
+        if isinstance(attempts_raw, list)
+        else []
+    )
+    if not attempts:
+        return fallback
+    boundary = _attempt_boundary(
+        attempts[-1],
+        following_attempts=(),
+        fallback=fallback,
+    )
+    return str(boundary["occurred_at"])
+
+
 def record_stage_telemetry(
     *,
     case_registry: Mapping[str, Any],
@@ -1024,7 +1053,10 @@ def record_stage_telemetry(
     ]
     stage_digest = canonical_sha256(dict(stage_doc))
     work_unit_id = _stable_id("work", cycle.cycle_id, stage, stage_digest)
-    shared_work_id = work_unit_id if len(cases) > 1 else None
+    progress_checkpoint = _is_committed_progress_checkpoint(stage_doc)
+    shared_work_id = (
+        work_unit_id if len(cases) > 1 and not progress_checkpoint else None
+    )
     fields = _event_fields(cycle)
     reused_input = _input_reused(stage_doc)
     dependency_ids, reused_lineage_complete = _reused_work_dependencies(stage_doc)
@@ -1040,43 +1072,87 @@ def record_stage_telemetry(
         cycle_id=cycle.cycle_id,
         stage=stage,
         milestone_id=milestone,
-        work_unit_id=work_unit_id,
+        work_unit_id=None if progress_checkpoint else work_unit_id,
         shared_work_id=shared_work_id,
         system_fingerprint=cycle.system_fingerprint,
     )
-    append_lifecycle_event(
-        global_path,
-        make_lifecycle_event(
-            "work.reused" if reused_input else "work.completed",
-            work_context,
-            idempotency_key=f"{work_unit_id}:work",
-            occurred_at=occurred_at,
-            beneficiary_case_lifecycle_ids=tuple(lifecycle_ids),
-            attributes={
-                "stage": stage,
-                "milestone_id": milestone,
-                "dependency_ids": dependency_ids,
-                "cost_unknown": bool(cost_unknown_reasons),
-                "cost_unknown_reason": (
-                    ",".join(cost_unknown_reasons) if cost_unknown_reasons else None
+    if progress_checkpoint:
+        checkpoint_context = LifecycleContext(
+            cycle_id=cycle.cycle_id,
+            stage=stage,
+            system_fingerprint=cycle.system_fingerprint,
+        )
+        append_lifecycle_event(
+            global_path,
+            make_lifecycle_event(
+                "stage.checkpointed",
+                checkpoint_context,
+                idempotency_key=(
+                    f"{cycle.cycle_id}:{stage}:checkpoint:{stage_digest}"
                 ),
-                "resource_time_unknown": True,
-                "resource_time_unknown_reason": "stage_boundary_active_time_not_retained",
-                "model_usage_telemetry_complete": model_projection.complete,
-                "model_usage_telemetry_issues": list(model_projection.issues),
-                "model_invocation_expected": model_projection.invocation_expected,
-                "expected_model_invocation_ids": list(model_projection.expected_invocation_ids),
-                "completed_model_invocation_ids": list(model_projection.completed_invocation_ids),
-                "cost_status": (
-                    "linked_reused_prior_work" if reused_input else "stage_boundary_only"
-                ),
-                "reused_work_dependency_set_complete": reused_lineage_complete,
-                "artifact_sha256": stage_digest,
-                "beneficiary_case_ids": cases,
-            },
-            **fields,
-        ),
-    )
+                occurred_at=occurred_at,
+                beneficiary_case_lifecycle_ids=tuple(lifecycle_ids),
+                attributes={
+                    "stage": stage,
+                    "checkpoint_status": "checkpointed_progress",
+                    "checkpoint_scope": "committed_case_prefix",
+                    "model_usage_telemetry_complete": model_projection.complete,
+                    "model_usage_telemetry_issues": list(model_projection.issues),
+                    "model_invocation_expected": model_projection.invocation_expected,
+                    "expected_model_invocation_ids": list(
+                        model_projection.expected_invocation_ids
+                    ),
+                    "completed_model_invocation_ids": list(
+                        model_projection.completed_invocation_ids
+                    ),
+                    "artifact_sha256": stage_digest,
+                    "beneficiary_case_ids": cases,
+                },
+                **fields,
+            ),
+        )
+    else:
+        append_lifecycle_event(
+            global_path,
+            make_lifecycle_event(
+                "work.reused" if reused_input else "work.completed",
+                work_context,
+                idempotency_key=f"{work_unit_id}:work",
+                occurred_at=occurred_at,
+                beneficiary_case_lifecycle_ids=tuple(lifecycle_ids),
+                attributes={
+                    "stage": stage,
+                    "milestone_id": milestone,
+                    "dependency_ids": dependency_ids,
+                    "cost_unknown": bool(cost_unknown_reasons),
+                    "cost_unknown_reason": (
+                        ",".join(cost_unknown_reasons) if cost_unknown_reasons else None
+                    ),
+                    "resource_time_unknown": True,
+                    "resource_time_unknown_reason": (
+                        "stage_boundary_active_time_not_retained"
+                    ),
+                    "model_usage_telemetry_complete": model_projection.complete,
+                    "model_usage_telemetry_issues": list(model_projection.issues),
+                    "model_invocation_expected": model_projection.invocation_expected,
+                    "expected_model_invocation_ids": list(
+                        model_projection.expected_invocation_ids
+                    ),
+                    "completed_model_invocation_ids": list(
+                        model_projection.completed_invocation_ids
+                    ),
+                    "cost_status": (
+                        "linked_reused_prior_work"
+                        if reused_input
+                        else "stage_boundary_only"
+                    ),
+                    "reused_work_dependency_set_complete": reused_lineage_complete,
+                    "artifact_sha256": stage_digest,
+                    "beneficiary_case_ids": cases,
+                },
+                **fields,
+            ),
+        )
     _link_model_invocation_events(
         stage_doc=stage_doc,
         global_path=global_path,
@@ -1099,6 +1175,21 @@ def record_stage_telemetry(
     )
     registry_cases = case_registry.get("cases")
     registry_cases = registry_cases if isinstance(registry_cases, Mapping) else {}
+    existing_stage_completions: set[tuple[str, str]] = set()
+    if stage == "repro_research" and global_path.is_file():
+        for retained_event in read_lifecycle_events(global_path):
+            retained_stage = retained_event.context.stage or str(
+                retained_event.attributes.get("stage") or ""
+            ).strip()
+            retained_lifecycle_id = retained_event.context.case_lifecycle_id
+            if (
+                retained_event.event_type == "stage.completed"
+                and retained_lifecycle_id is not None
+                and retained_stage
+            ):
+                existing_stage_completions.add(
+                    (retained_lifecycle_id, retained_stage)
+                )
     for case_id, lifecycle_id in zip(cases, lifecycle_ids, strict=True):
         context = LifecycleContext(
             case_lifecycle_id=lifecycle_id,
@@ -1110,6 +1201,11 @@ def record_stage_telemetry(
             system_fingerprint=cycle.system_fingerprint,
         )
         item = item_by_case.get(case_id)
+        case_completed_at = (
+            _research_item_completed_at(item, fallback=occurred_at)
+            if progress_checkpoint
+            else occurred_at
+        )
         registry_entry = registry_cases.get(case_id)
         origin_atom_ids = _origin_atom_ids(item, registry_entry)
         atom_created_at = _earliest_atom_timestamp(origin_atom_ids)
@@ -1135,23 +1231,40 @@ def record_stage_telemetry(
                 **fields,
             ),
         )
-        _append_case_event(
-            global_path=global_path,
-            case_registry_path=case_registry_path,
-            event=make_lifecycle_event(
-                "stage.completed",
-                context,
-                idempotency_key=f"{lifecycle_id}:{work_unit_id}:completed",
-                occurred_at=occurred_at,
-                attributes={
-                    "stage": stage,
-                    "milestone_id": milestone,
-                    "stage_work_unit_id": work_unit_id,
-                    "shared": shared_work_id is not None,
-                },
-                **fields,
-            ),
-        )
+        stage_completion_identity = (lifecycle_id, stage)
+        if stage_completion_identity not in existing_stage_completions:
+            _append_case_event(
+                global_path=global_path,
+                case_registry_path=case_registry_path,
+                event=make_lifecycle_event(
+                    "stage.completed",
+                    context,
+                    idempotency_key=(
+                        f"{lifecycle_id}:{stage}:completed"
+                        if stage == "repro_research"
+                        else f"{lifecycle_id}:{work_unit_id}:completed"
+                    ),
+                    occurred_at=case_completed_at,
+                    attributes={
+                        "stage": stage,
+                        "milestone_id": milestone,
+                        "stage_work_unit_id": (
+                            None if progress_checkpoint else work_unit_id
+                        ),
+                        "shared": shared_work_id is not None,
+                        "completion_scope": (
+                            "committed_case_prefix"
+                            if progress_checkpoint
+                            else "persisted_stage"
+                        ),
+                        "checkpoint_artifact_sha256": (
+                            stage_digest if progress_checkpoint else None
+                        ),
+                    },
+                    **fields,
+                ),
+            )
+            existing_stage_completions.add(stage_completion_identity)
         if isinstance(item, Mapping):
             _record_research_validation_errors(
                 item=item,

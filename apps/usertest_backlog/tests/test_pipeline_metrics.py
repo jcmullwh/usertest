@@ -13,6 +13,7 @@ from run_artifacts.lifecycle_events import (
 
 from usertest_backlog.pipeline_metrics import (
     bind_ticket_lifecycle_ids,
+    case_lifecycle_id,
     record_stage_telemetry,
 )
 
@@ -584,3 +585,130 @@ def test_stage3_model_cost_is_bound_to_each_case_not_shared_across_cohort(
         ]
         for case in metrics["cases"]
     } == direct_tokens
+
+
+def test_stage3_checkpoint_projects_committed_case_without_completing_batch(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "research-run"
+    _write_research_model_run(
+        run_dir,
+        invocation_id="invocation-checkpoint",
+        started_at="2026-07-21T12:00:01Z",
+        ended_at="2026-07-21T12:00:10Z",
+        total_tokens=10,
+    )
+    item = {
+        "case_id": "case-1",
+        "research_attempts": [
+            {
+                "attempt_number": 1,
+                "attempt_kind": "full_research",
+                "outcome": "output_contract_valid",
+                "run_dir": str(run_dir),
+                "report_path": str(run_dir / "report.json"),
+                "validation_errors": [],
+                "agent_session_id": "session-1",
+                "observed_agent_session_id": "session-1",
+            }
+        ],
+    }
+    checkpoint = {
+        "stage": "repro_research",
+        "generated_at": "2026-07-21T12:00:30Z",
+        "input_meta": {"stage_status": "checkpointed_progress"},
+        "items": [item],
+    }
+    registry_path = tmp_path / "case_registry.json"
+    for _ in range(2):
+        record_stage_telemetry(
+            case_registry={"cases": {}},
+            case_registry_path=registry_path,
+            stage_doc=checkpoint,
+        )
+
+    def rows() -> list[dict[str, object]]:
+        return [
+            json.loads(line)
+            for line in (tmp_path / "lifecycle_events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+
+    retained = rows()
+    assert [row["event_type"] for row in retained].count("stage.checkpointed") == 1
+    assert [row["event_type"] for row in retained].count("work.completed") == 0
+    assert [row["event_type"] for row in retained].count("stage.completed") == 1
+    stage_completed = next(
+        row for row in retained if row["event_type"] == "stage.completed"
+    )
+    assert stage_completed["occurred_at"] == "2026-07-21T12:00:10Z"
+    assert stage_completed["attributes"]["completion_scope"] == (
+        "committed_case_prefix"
+    )
+    metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
+    [case] = metrics["cases"]
+    assert case["accounting"]["direct"]["gross"]["total_tokens"] == 10
+    assert case["lifecycle_status"] == "active"
+
+    completed = {
+        **checkpoint,
+        "generated_at": "2026-07-21T12:01:00Z",
+        "input_meta": {"stage_status": "completed"},
+    }
+    record_stage_telemetry(
+        case_registry={"cases": {}},
+        case_registry_path=registry_path,
+        stage_doc=completed,
+    )
+    retained = rows()
+    assert [row["event_type"] for row in retained].count("work.completed") == 1
+    assert [row["event_type"] for row in retained].count("stage.completed") == 1
+    assert [row["event_type"] for row in retained].count(
+        "model.invocation.completed"
+    ) == 1
+    metrics = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))
+    [case] = metrics["cases"]
+    assert case["accounting"]["direct"]["gross"]["total_tokens"] == 10
+
+
+def test_stage3_checkpoint_preserves_legacy_stage_completion_idempotency(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "case_registry.json"
+    lifecycle_id = case_lifecycle_id(
+        case_registry_path=registry_path,
+        case_id="case-1",
+    )
+    append_lifecycle_event(
+        tmp_path / "lifecycle_events.jsonl",
+        make_lifecycle_event(
+            "stage.completed",
+            LifecycleContext(
+                case_lifecycle_id=lifecycle_id,
+                case_id="case-1",
+                stage="repro_research",
+                milestone_id="research_completed",
+            ),
+            idempotency_key="legacy-stage-completion-key",
+            occurred_at="2026-07-21T12:00:10Z",
+            attributes={"stage": "repro_research"},
+        ),
+    )
+    record_stage_telemetry(
+        case_registry={"cases": {}},
+        case_registry_path=registry_path,
+        stage_doc={
+            "stage": "repro_research",
+            "generated_at": "2026-07-21T12:00:30Z",
+            "input_meta": {"stage_status": "checkpointed_progress"},
+            "items": [{"case_id": "case-1", "research_attempts": []}],
+        },
+    )
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "lifecycle_events.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert [row["event_type"] for row in rows].count("stage.completed") == 1
