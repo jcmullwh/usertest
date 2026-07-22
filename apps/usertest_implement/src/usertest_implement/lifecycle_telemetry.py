@@ -27,7 +27,6 @@ _TERMINAL_FAILURE_STATES = {
     "agent_failed",
     "verification_failed",
     "push_failed",
-    "ci_failed",
     "pr_creation_failed",
 }
 _TERMINAL_OUTCOME_STATES = {"resolved", "mitigated", "duplicate", "superseded"}

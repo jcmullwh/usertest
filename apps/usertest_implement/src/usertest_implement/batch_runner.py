@@ -1739,7 +1739,7 @@ def _record_candidate_plan_contract_failure(
         "summary": str(error),
         "failed_utc": failed_at,
         "global_blocker": False,
-        "retryable": False,
+        "retryable": replanned_path is None,
         "disposition": "replan_required",
         "original_ticket_path": str(candidate.ticket_path),
         "replanned_ticket_path": str(replanned_path) if replanned_path is not None else None,
@@ -1919,7 +1919,11 @@ def _drain_phase(
     failed_keys = {
         entry["ticket_key"]
         for entry in state.get("failed", [])
-        if isinstance(entry, dict) and isinstance(entry.get("ticket_key"), str)
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("ticket_key"), str)
+            and entry.get("retryable") is not True
+        )
     }
     processed = completed_keys | failed_keys
 
@@ -2002,8 +2006,7 @@ def _drain_phase(
                                 wave_base_revision=wave_base_revision,
                             )
                         except ValueError as exc:
-                            processed.add(candidate.ticket_key)
-                            _record_candidate_plan_contract_failure(
+                            replanned_path = _record_candidate_plan_contract_failure(
                                 batch_dir_path=batch_dir_path,
                                 state=state,
                                 phase_name=phase.name,
@@ -2012,9 +2015,11 @@ def _drain_phase(
                                 error=exc,
                                 defer_atom_action_sync=True,
                             )
-                            pending_replan_action_sync.setdefault(
-                                candidate.owner_root.resolve(), set()
-                            ).add(candidate.fingerprint)
+                            if replanned_path is not None:
+                                processed.add(candidate.ticket_key)
+                                pending_replan_action_sync.setdefault(
+                                    candidate.owner_root.resolve(), set()
+                                ).add(candidate.fingerprint)
                             persist_state(batch_dir_path, state)
                             continue
                     worker = workers[next_worker_index % len(workers)]
