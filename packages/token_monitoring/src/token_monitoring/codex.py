@@ -872,6 +872,7 @@ def parse_codex_invocation_usage(
         if observation.terminal:
             if observation_key in seen_terminal_values:
                 duplicate_terminal_count += 1
+                continue
             else:
                 seen_terminal_values.add(observation_key)
         if previous is not None and observation.usage == previous.usage:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from token_monitoring.codex import parse_codex_invocation_usage
 from token_monitoring.usage import (
@@ -148,6 +151,98 @@ def test_receipt_rejects_incomplete_attributable_token_maps() -> None:
     payload["content_sha256"] = usage_receipt_content_sha256(payload)
 
     assert usage_receipt_is_valid(payload) is False
+
+
+def test_incomplete_provider_usage_is_unattributable(tmp_path: Path) -> None:
+    stream = tmp_path / "incomplete.jsonl"
+    stream.write_text(
+        json.dumps({"type": "turn.completed", "usage": {"total_tokens": 120}}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = parse_codex_invocation_usage(
+        stream,
+        invocation_id="invocation-incomplete-provider-usage",
+    )
+
+    assert result.semantics == "unattributable"
+    assert result.usage is None
+    assert any(item["code"] == "invalid_usage_values" for item in result.diagnostics)
+
+
+def test_token_usage_rejects_inconsistent_total() -> None:
+    with pytest.raises(
+        ValueError,
+        match="total_tokens must equal input_tokens \\+ output_tokens",
+    ):
+        TokenUsage.from_mapping(
+            {
+                "total_tokens": 121,
+                "input_tokens": 100,
+                "cached_input_tokens": 60,
+                "output_tokens": 20,
+            }
+        )
+
+
+def test_nonadjacent_terminal_replay_does_not_regress_high_water(tmp_path: Path) -> None:
+    terminal = {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 60,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 5,
+            "total_tokens": 120,
+        },
+    }
+    cumulative = {
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 120,
+                    "cached_input_tokens": 70,
+                    "output_tokens": 30,
+                    "reasoning_output_tokens": 6,
+                    "total_tokens": 150,
+                },
+                "last_token_usage": {
+                    "input_tokens": 20,
+                    "cached_input_tokens": 10,
+                    "output_tokens": 10,
+                    "reasoning_output_tokens": 1,
+                    "total_tokens": 30,
+                },
+            },
+        },
+    }
+    stream = tmp_path / "terminal-replay.jsonl"
+    stream.write_text(
+        "\n".join(json.dumps(item) for item in (terminal, cumulative, terminal)) + "\n",
+        encoding="utf-8",
+    )
+
+    result = parse_codex_invocation_usage(
+        stream,
+        invocation_id="invocation-terminal-replay",
+    )
+
+    assert result.attributable is True
+    assert result.usage == TokenUsage(
+        total_tokens=150,
+        input_tokens=120,
+        cached_input_tokens=70,
+        uncached_input_tokens=50,
+        output_tokens=30,
+        reasoning_output_tokens=6,
+    )
+    assert result.duplicate_terminal_count == 1
+    assert not any(
+        item["code"] == "non_monotonic_cumulative_usage"
+        for item in result.diagnostics
+    )
 
 
 def test_baseline_above_observed_usage_is_unattributable() -> None:

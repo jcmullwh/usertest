@@ -51,6 +51,8 @@ class TokenUsage:
     def __post_init__(self) -> None:
         for name in TOKEN_DIMENSIONS:
             _integer_token_value(getattr(self, name), field_name=name)
+        if self.total_tokens != self.input_tokens + self.output_tokens:
+            raise ValueError("total_tokens must equal input_tokens + output_tokens")
         if self.cached_input_tokens > self.input_tokens:
             raise ValueError("cached_input_tokens cannot exceed input_tokens")
         if self.uncached_input_tokens != self.input_tokens - self.cached_input_tokens:
@@ -71,7 +73,11 @@ class TokenUsage:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> TokenUsage:
-        input_tokens = _integer_token_value(raw.get("input_tokens", 0), field_name="input_tokens")
+        if "input_tokens" not in raw:
+            raise ValueError("input_tokens is required")
+        if "output_tokens" not in raw:
+            raise ValueError("output_tokens is required")
+        input_tokens = _integer_token_value(raw["input_tokens"], field_name="input_tokens")
         cached = _integer_token_value(
             raw.get("cached_input_tokens", 0), field_name="cached_input_tokens"
         )
@@ -81,7 +87,7 @@ class TokenUsage:
             if explicit_uncached is None
             else _integer_token_value(explicit_uncached, field_name="uncached_input_tokens")
         )
-        output = _integer_token_value(raw.get("output_tokens", 0), field_name="output_tokens")
+        output = _integer_token_value(raw["output_tokens"], field_name="output_tokens")
         reasoning_raw = raw.get("reasoning_output_tokens", raw.get("reasoning_tokens", 0))
         reasoning = _integer_token_value(
             reasoning_raw, field_name="reasoning_output_tokens"
