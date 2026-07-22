@@ -1679,7 +1679,7 @@ def _apply_run_overrides(
     if effective_refresh_agent is not None:
         defaults["refresh_agent"] = effective_refresh_agent
         if effective_refresh_model is None:
-            defaults.pop("refresh_model", None)
+            defaults["refresh_model"] = None
     if effective_refresh_model is not None:
         defaults["refresh_model"] = effective_refresh_model
 

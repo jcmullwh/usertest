@@ -28,6 +28,7 @@ from usertest_implement.batch_runner import (
     _build_docker_resource_plan,
     _build_phases,
     _build_terminal_proof,
+    _build_workers,
     _collect_wave_candidates,
     _configured_owner_root,
     _drain_phase,
@@ -216,13 +217,39 @@ def test_agent_only_overrides_discard_provider_specific_models() -> None:
     )
 
     assert config["defaults"]["refresh_agent"] == "claude"
-    assert "refresh_model" not in config["defaults"]
+    assert config["defaults"]["refresh_model"] is None
     assert config["defaults"]["implementation_review_agent"] == "gemini"
     assert "implementation_review_model" not in config["defaults"]
     assert _effective_refresh_role(
         defaults=config["defaults"],
         workers=[WorkerTemplate(worker_index=1, agent="codex", model="gpt-5.6-sol")],
     ) == ("claude", None, "batch_config", "agent_default")
+
+
+def test_agent_only_refresh_override_does_not_inherit_worker_model() -> None:
+    config: dict[str, Any] = {
+        "version": 1,
+        "defaults": {
+            "refresh_agent": "codex",
+            "worker_roster": [{"agent": "codex"}],
+        },
+    }
+
+    _apply_run_overrides(
+        config,
+        refresh_agent="codex",
+        worker_agent="codex",
+        worker_model="implementation-model",
+    )
+    workers = _build_workers(config)
+
+    assert config["defaults"]["refresh_model"] is None
+    assert _effective_refresh_role(defaults=config["defaults"], workers=workers) == (
+        "codex",
+        None,
+        "batch_config",
+        "agent_default",
+    )
 
 
 def test_agent_only_review_override_ignores_run_settings_model() -> None:
