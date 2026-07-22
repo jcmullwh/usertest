@@ -149,52 +149,184 @@ def _system_commit(repo_root: Path) -> str:
     return commit if result.returncode == 0 and commit else "unknown"
 
 
+def _yaml_mapping(path: Path) -> dict[str, Any] | None:
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _clean_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _configured_model(
+    *,
+    agent: str,
+    requested: object,
+    agents: dict[str, Any],
+) -> str | None:
+    explicit = _clean_string(requested)
+    if explicit is not None:
+        return explicit
+    agent_config = agents.get(agent)
+    if not isinstance(agent_config, dict):
+        return None
+    return _clean_string(agent_config.get("default_model"))
+
+
+def _effective_execution_fingerprint(
+    ctx: LoopContext,
+) -> tuple[dict[str, Any], dict[str, Any], Path] | None:
+    """Resolve every agent/model path the controller can dispatch.
+
+    Returning ``None`` deliberately leaves the fingerprint incomplete, preventing
+    certified metrics when the batch roster or its model defaults cannot be proven.
+    """
+
+    agents_path = ctx.repo_root / "configs" / "agents.yaml"
+    agents_doc = _yaml_mapping(agents_path)
+    batch_doc = _yaml_mapping(ctx.batch_config_path)
+    if agents_doc is None or batch_doc is None:
+        return None
+    agents_raw = agents_doc.get("agents")
+    defaults_raw = batch_doc.get("defaults")
+    agents = agents_raw if isinstance(agents_raw, dict) else None
+    defaults = defaults_raw if isinstance(defaults_raw, dict) else None
+    if agents is None or defaults is None:
+        return None
+
+    settings_raw = defaults.get("run_settings_path") or "configs/usertest_implement_settings.yaml"
+    settings_path = Path(str(settings_raw))
+    if not settings_path.is_absolute():
+        settings_path = (ctx.repo_root / settings_path).resolve()
+    settings_doc = _yaml_mapping(settings_path)
+    if settings_doc is None:
+        return None
+    profiles = settings_doc.get("profiles")
+    if not isinstance(profiles, dict):
+        return None
+    profile_name = str(
+        defaults.get("run_settings_profile")
+        or settings_doc.get("default_profile")
+        or "default"
+    ).strip()
+    profile = profiles.get(profile_name)
+    if not isinstance(profile, dict):
+        return None
+    run_common_raw = profile.get("run_common")
+    run_common = run_common_raw if isinstance(run_common_raw, dict) else None
+    roster = defaults.get("worker_roster")
+    if run_common is None or not isinstance(roster, list) or not roster:
+        return None
+
+    worker_models: list[dict[str, Any]] = []
+    worker_providers: list[dict[str, Any]] = []
+    settings_model = run_common.get("model")
+    for index, item in enumerate(roster, start=1):
+        if not isinstance(item, dict):
+            return None
+        agent = (_clean_string(item.get("agent")) or "").lower()
+        if agent not in agents:
+            return None
+        model = _configured_model(
+            agent=agent,
+            requested=item.get("model") or settings_model,
+            agents=agents,
+        )
+        if model is None:
+            return None
+        worker_models.append({"worker_index": index, "model": model})
+        worker_providers.append({"worker_index": index, "agent": agent})
+
+    role_values = {
+        "backlog": (ctx.backlog_agent, ctx.backlog_model),
+        "controller_implementation": (ctx.implementation_agent, ctx.implementation_model),
+        "controller_review": (ctx.review_agent, ctx.review_model),
+    }
+    resolved_roles: dict[str, tuple[str, str]] = {}
+    for role, (raw_agent, requested_model) in role_values.items():
+        agent = raw_agent.strip().lower()
+        model = _configured_model(agent=agent, requested=requested_model, agents=agents)
+        if agent not in agents or model is None:
+            return None
+        resolved_roles[role] = (agent, model)
+
+    batch_review_agent = _clean_string(run_common.get("implementation_review_agent"))
+    batch_review_model: str | None = None
+    if batch_review_agent is not None:
+        batch_review_agent = batch_review_agent.lower()
+        if batch_review_agent not in agents:
+            return None
+        batch_review_model = _configured_model(
+            agent=batch_review_agent,
+            requested=run_common.get("implementation_review_model"),
+            agents=agents,
+        )
+        if batch_review_model is None:
+            return None
+
+    models: dict[str, Any] = {
+        role: model for role, (_agent, model) in resolved_roles.items()
+    }
+    models["batch_workers"] = worker_models
+    models["batch_post_implementation_review"] = batch_review_model
+    providers: dict[str, Any] = {
+        role: agent for role, (agent, _model) in resolved_roles.items()
+    }
+    providers["batch_workers"] = worker_providers
+    providers["batch_post_implementation_review"] = batch_review_agent
+    return models, providers, settings_path
+
+
 def _build_controller_context(ctx: LoopContext) -> LifecycleContext:
     prompt_paths = [
         *ctx.repo_root.glob("configs/backlog_prompts/*.md"),
         *ctx.repo_root.glob("configs/backlog_stage_guidance/*.md"),
     ]
+    execution_fingerprint = _effective_execution_fingerprint(ctx)
     config_paths = [
         path
         for path in (
             ctx.settings_path,
             ctx.batch_config_path,
+            ctx.repo_root / "configs" / "agents.yaml",
+            execution_fingerprint[2] if execution_fingerprint is not None else None,
             ctx.repo_root / "configs" / "backlog_research.yaml",
         )
-        if path.is_file()
+        if path is not None and path.is_file()
     ]
+    fingerprint = {
+        "controller_context_verified": "true",
+        "code_commit": _system_commit(ctx.repo_root),
+        "prompt_hash": _tree_fingerprint(ctx.repo_root, prompt_paths),
+        "config_hash": _tree_fingerprint(ctx.repo_root, config_paths),
+        "policy_hash": _tree_fingerprint(
+            ctx.repo_root,
+            [ctx.batch_config_path] if ctx.batch_config_path.is_file() else [],
+        ),
+        "score_version": "automation_score_v1",
+    }
+    if execution_fingerprint is not None:
+        models, providers, _settings_path = execution_fingerprint
+        fingerprint["models"] = json.dumps(
+            models,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint["providers"] = json.dumps(
+            providers,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     return LifecycleContext(
         cycle_id=f"continuous-controller:{uuid.uuid4()}",
         session_id=f"continuous-controller:{os.getpid()}",
-        system_fingerprint={
-            "controller_context_verified": "true",
-            "code_commit": _system_commit(ctx.repo_root),
-            "prompt_hash": _tree_fingerprint(ctx.repo_root, prompt_paths),
-            "config_hash": _tree_fingerprint(ctx.repo_root, config_paths),
-            "policy_hash": _tree_fingerprint(
-                ctx.repo_root,
-                [ctx.batch_config_path] if ctx.batch_config_path.is_file() else [],
-            ),
-            "models": json.dumps(
-                {
-                    "backlog": ctx.backlog_model,
-                    "implementation": ctx.implementation_model,
-                    "review": ctx.review_model,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            "providers": json.dumps(
-                {
-                    "backlog": ctx.backlog_agent,
-                    "implementation": ctx.implementation_agent,
-                    "review": ctx.review_agent,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            "score_version": "automation_score_v1",
-        },
+        system_fingerprint=fingerprint,
     )
 
 

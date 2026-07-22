@@ -29,8 +29,37 @@ def test_continuous_controller_propagates_verified_versioned_context(tmp_path: P
     (prompts / "stage.md").write_text("prompt\n", encoding="utf-8")
     settings = tmp_path / "settings.yaml"
     settings.write_text("profile: test\n", encoding="utf-8")
+    agents = tmp_path / "configs" / "agents.yaml"
+    agents.write_text(
+        "agents:\n"
+        "  codex:\n"
+        "    default_model: gpt-default\n"
+        "  claude:\n"
+        "    default_model: claude-default\n",
+        encoding="utf-8",
+    )
+    batch_settings = tmp_path / "configs" / "batch-settings.yaml"
+    batch_settings.write_text(
+        "default_profile: batch\n"
+        "profiles:\n"
+        "  batch:\n"
+        "    run_common:\n"
+        "      model: null\n"
+        "      implementation_review_agent: claude\n"
+        "      implementation_review_model: null\n",
+        encoding="utf-8",
+    )
     batch = tmp_path / "batch.yaml"
-    batch.write_text("targets: []\n", encoding="utf-8")
+    batch.write_text(
+        "defaults:\n"
+        "  run_settings_path: configs/batch-settings.yaml\n"
+        "  run_settings_profile: batch\n"
+        "  worker_roster:\n"
+        "    - agent: codex\n"
+        "      model: gpt-batch-explicit\n"
+        "    - agent: claude\n",
+        encoding="utf-8",
+    )
     ctx = SimpleNamespace(
         repo_root=tmp_path,
         settings_path=settings,
@@ -52,8 +81,49 @@ def test_continuous_controller_propagates_verified_versioned_context(tmp_path: P
     assert decoded.system_fingerprint["controller_context_verified"] == "true"
     assert decoded.system_fingerprint["score_version"] == "automation_score_v1"
     assert len(decoded.system_fingerprint["prompt_hash"]) == 64
-    assert json.loads(decoded.system_fingerprint["models"])["backlog"] == "gpt-5.6-sol"
-    assert json.loads(decoded.system_fingerprint["providers"])["backlog"] == "codex"
+    models = json.loads(decoded.system_fingerprint["models"])
+    providers = json.loads(decoded.system_fingerprint["providers"])
+    assert models["backlog"] == "gpt-5.6-sol"
+    assert models["batch_workers"] == [
+        {"model": "gpt-batch-explicit", "worker_index": 1},
+        {"model": "claude-default", "worker_index": 2},
+    ]
+    assert models["batch_post_implementation_review"] == "claude-default"
+    assert providers["backlog"] == "codex"
+    assert providers["batch_workers"] == [
+        {"agent": "codex", "worker_index": 1},
+        {"agent": "claude", "worker_index": 2},
+    ]
+
+
+def test_controller_fingerprint_stays_incomplete_when_batch_roster_is_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "agents.yaml").write_text(
+        "agents:\n  codex:\n    default_model: gpt-default\n",
+        encoding="utf-8",
+    )
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("profiles: {}\n", encoding="utf-8")
+    batch = tmp_path / "batch.yaml"
+    batch.write_text("defaults:\n  worker_roster: []\n", encoding="utf-8")
+    ctx = SimpleNamespace(
+        repo_root=tmp_path,
+        settings_path=settings,
+        batch_config_path=batch,
+        backlog_model="gpt-default",
+        backlog_agent="codex",
+        implementation_model=None,
+        implementation_agent="codex",
+        review_model=None,
+        review_agent="codex",
+    )
+
+    context = tool._build_controller_context(ctx)
+
+    assert "models" not in context.system_fingerprint
+    assert "providers" not in context.system_fingerprint
 
 
 def test_continuous_pass_invokes_only_observational_refresh(

@@ -3393,6 +3393,7 @@ def _maybe_write_lifecycle_telemetry(
     *,
     run_dir: Path,
     request: RunRequest,
+    model: str | None,
 ) -> None:
     try:
         from runner_core.lifecycle_telemetry import write_run_lifecycle_telemetry
@@ -3400,7 +3401,7 @@ def _maybe_write_lifecycle_telemetry(
         write_run_lifecycle_telemetry(
             run_dir=run_dir,
             agent=request.agent,
-            model=request.model,
+            model=model,
             policy=request.policy,
             parent_case_id=request.parent_case_id,
             case_lifecycle_id=request.case_lifecycle_id,
@@ -3693,6 +3694,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     controlled_codex_config_overrides: list[str] | None = None
     codex_session_id: str | None = request.codex_resume_session_id
     codex_last_invocation_resumed = False
+    effective_model = (
+        request.model.strip()
+        if isinstance(request.model, str) and request.model.strip()
+        else None
+    )
 
     if request.codex_resume_session_id is not None and request.agent != "codex":
         raise ValueError("codex_resume_session_id is only valid for the codex agent")
@@ -8308,4 +8314,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             pass
 
         _maybe_write_token_monitoring_artifacts(run_dir)
-        _maybe_write_lifecycle_telemetry(run_dir=run_dir, request=request)
+        _maybe_write_lifecycle_telemetry(
+            run_dir=run_dir,
+            request=request,
+            model=effective_model,
+        )
