@@ -22,7 +22,7 @@ def test_builtin_personas_are_clean_utf8_text() -> None:
 
     for path in persona_paths:
         text = path.read_text(encoding="utf-8", errors="strict")
-        for line_number, line in enumerate(text.splitlines(), start=1):
+        for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
             sentinels = [value for value in MOJIBAKE_SENTINELS if value in line]
             c1_controls = [
                 f"U+{ord(character):04X}"
