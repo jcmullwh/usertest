@@ -658,6 +658,10 @@ def _cmd_telemetry_action_record(args: argparse.Namespace) -> int:
     )
     if classified_seconds > wall_seconds + 1e-6:
         raise ValueError("active and wait seconds must not exceed the action interval")
+    resource_time_complete = (
+        active_seconds is not None
+        and classified_seconds >= max(0.0, wall_seconds - 1e-6)
+    )
     action_id = f"action:{uuid.uuid4()}"
     concrete_work_unit_id, inherited_work_unit_id, dependencies = (
         _concrete_action_work_identity(args, context)
@@ -701,11 +705,15 @@ def _cmd_telemetry_action_record(args: argparse.Namespace) -> int:
                 active_seconds_source=(
                     "explicit" if active_seconds is not None else "unknown"
                 ),
-                resource_time_unknown=active_seconds is None,
+                resource_time_unknown=not resource_time_complete,
                 resource_time_unknown_reason=(
                     None
-                    if active_seconds is not None
-                    else "manual_action_active_time_not_attested"
+                    if resource_time_complete
+                    else (
+                        "manual_action_active_time_not_attested"
+                        if active_seconds is None
+                        else "manual_action_interval_partially_classified"
+                    )
                 ),
                 related_error_cluster_ids=list(args.error_cluster_id),
                 wait_category=args.wait_category,

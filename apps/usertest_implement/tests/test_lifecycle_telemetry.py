@@ -200,7 +200,7 @@ def test_resume_state_reuses_manifest_identity_and_emits_delivery_lifecycle(
     assert case["timing"]["pr_create_to_outcome_seconds"] == 150.0
 
 
-def test_failed_delivery_is_unknown_origin_and_unresolved_terminal(tmp_path: Path) -> None:
+def test_resume_ready_verification_failure_keeps_lifecycle_open(tmp_path: Path) -> None:
     selected = _selected(tmp_path)
     run_dir = tmp_path / "runs" / "implement" / "failed"
     _write_json(
@@ -219,12 +219,11 @@ def test_failed_delivery_is_unknown_origin_and_unresolved_terminal(tmp_path: Pat
     assert state["lifecycle_state"] == "verification_failed_resume_ready"
     assert all(event.origin == "unknown_external" for event in events)
     failure = next(event for event in events if event.event_type == "error.occurred")
-    resolution = next(event for event in events if event.event_type == "error.resolved")
-    assert failure.error_cluster_id == resolution.error_cluster_id
-    assert resolution.attributes["resolution_mode"] == "unresolved_terminal"
-    closure = next(event for event in events if event.event_type == "lifecycle.closed")
-    assert closure.attributes["disposition"] == "failed_incomplete"
-    assert closure.attributes["closure_valid"] is False
+    assert failure.error_cluster_id is not None
+    assert all(event.event_type != "error.resolved" for event in events)
+    assert all(event.event_type != "lifecycle.closed" for event in events)
+    manifest = read_lifecycle_manifest(run_dir / "lifecycle_manifest.json")
+    assert manifest.status == "active"
 
 
 def test_case_lifecycle_fallback_is_stable_per_implementation_run(tmp_path: Path) -> None:

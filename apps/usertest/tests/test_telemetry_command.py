@@ -381,6 +381,55 @@ def test_telemetry_action_record_keeps_unattested_active_time_unknown(
     assert case["accounting"]["all_in"]["gross"]["active_seconds"] is None
 
 
+def test_telemetry_action_record_keeps_unclassified_interval_unknown(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    assert (
+        _invoke(
+            [
+                "telemetry",
+                "action",
+                "record",
+                "--events",
+                str(events),
+                "--case-lifecycle-id",
+                "life-partial-interval",
+                "--case-id",
+                "case-partial-interval",
+                "--actor",
+                "supervising_agent",
+                "--action-family",
+                "diagnosis",
+                "--started-at",
+                "2026-07-21T12:00:00Z",
+                "--ended-at",
+                "2026-07-21T12:10:00Z",
+                "--active-seconds",
+                "60",
+                "--result",
+                "diagnosed",
+            ]
+        )
+        == 0
+    )
+
+    row = json.loads(events.read_text(encoding="utf-8"))
+    assert row["active_seconds"] == 60
+    assert row["attributes"]["resource_time_unknown"] is True
+    assert (
+        row["attributes"]["resource_time_unknown_reason"]
+        == "manual_action_interval_partially_classified"
+    )
+
+    case = json.loads((tmp_path / "case_metrics.json").read_text(encoding="utf-8"))[
+        "cases"
+    ][0]
+    assert case["manual_actions"]["active_seconds"] == 60
+    assert case["manual_actions"]["known_active_seconds"] == 60
+    assert case["accounting"]["all_in"]["gross"]["active_seconds"] is None
+
+
 def test_telemetry_materialize_discovers_streams_and_writes_comparison(
     tmp_path: Path,
 ) -> None:

@@ -93,7 +93,8 @@ def _ignore_names_for_copytree(*, src_root: Path) -> Callable[[str, list[str]], 
 def _run_git(args: list[str], *, cwd: Path) -> str:
     safe_dir = str(cwd.resolve()).replace("\\", "/")
     proc = subprocess.run(
-        ["git", "-c", f"safe.directory={safe_dir}", "-C", str(cwd), *args],
+        ["git", "-c", f"safe.directory={safe_dir}", *args],
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
@@ -101,7 +102,7 @@ def _run_git(args: list[str], *, cwd: Path) -> str:
     if proc.returncode != 0:
         msg = proc.stderr.strip() or proc.stdout.strip()
         if not msg:
-            msg = f"git failed: {' '.join(args)}"
+            msg = f"git failed with exit code {proc.returncode}: {' '.join(args)}"
         raise RuntimeError(msg)
     return proc.stdout.strip()
 

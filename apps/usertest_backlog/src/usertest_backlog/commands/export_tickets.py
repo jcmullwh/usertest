@@ -263,6 +263,9 @@ def _render_export_issue_body(
         lines.append(f"- Case ID: `{case_id}`")
     if plan_revision_id:
         lines.append(f"- Plan revision ID: `{plan_revision_id}`")
+    case_lifecycle_id = _coerce_string(ticket.get("case_lifecycle_id"))
+    if case_lifecycle_id:
+        lines.append(f"- Case lifecycle ID: `{case_lifecycle_id}`")
     lines.append(f"- Export kind: `{export_kind}`")
     stage = _coerce_string(ticket.get("stage"))
     if stage:
