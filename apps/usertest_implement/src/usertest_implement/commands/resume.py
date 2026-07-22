@@ -1225,6 +1225,10 @@ def _cmd_resume_pr(
         agent_config_overrides=tuple(args.agent_config_override or []),
         agent_append_system_prompt=(prompt if codex_resume_session_id is None else None),
         agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
+        evidence_role="implementation" if selected.case_id is not None else None,
+        origin_stage="implementation_resume" if selected.case_id is not None else None,
+        parent_case_id=selected.case_id,
+        case_lifecycle_id=selected.case_lifecycle_id,
         codex_resume_session_id=codex_resume_session_id,
         codex_resume_usage_source_run_dir=(
             run_dir if codex_resume_session_id is not None else None
@@ -1773,6 +1777,10 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         agent_append_system_prompt=(prompt if codex_resume_session_id is None else None),
         agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
         supervisor_instruction=combined_supervisor_instruction or None,
+        evidence_role="verification" if selected.case_id is not None else None,
+        origin_stage="verification_resume" if selected.case_id is not None else None,
+        parent_case_id=selected.case_id,
+        case_lifecycle_id=selected.case_lifecycle_id,
         codex_resume_session_id=codex_resume_session_id,
         codex_resume_usage_source_run_dir=(
             run_dir if codex_resume_session_id is not None else None

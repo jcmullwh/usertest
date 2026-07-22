@@ -79,6 +79,7 @@ def _base_context(
     *,
     run_dir: Path,
     parent_case_id: str | None,
+    case_lifecycle_id: str | None,
     origin_stage: str | None,
     model: str | None,
     policy: str,
@@ -99,7 +100,12 @@ def _base_context(
 
     case_id = parent_case_id or (inherited.case_id if inherited is not None else None)
     run_identity = str(run_dir.resolve())
-    lifecycle_id = (
+    requested_lifecycle_id = (
+        case_lifecycle_id.strip()
+        if isinstance(case_lifecycle_id, str) and case_lifecycle_id.strip()
+        else None
+    )
+    lifecycle_id = requested_lifecycle_id or (
         inherited.case_lifecycle_id
         if inherited is not None and inherited.case_lifecycle_id is not None
         else (_stable_id("case-lifecycle", case_id, run_identity) if case_id else None)
@@ -163,7 +169,16 @@ def _latest_session_usage_receipt(
             receipt = read_model_usage_receipt(path)
         except (OSError, UnicodeError, ValueError):
             continue
-        if receipt.context.session_id != session_id or not receipt.observed_usage:
+        if (
+            receipt.context.session_id != session_id
+            or receipt.usage_semantics == "unattributable"
+            or receipt.provenance_quality != "authoritative"
+            or not receipt.observed_usage
+        ):
+            continue
+        try:
+            TokenUsage.from_mapping(receipt.observed_usage)
+        except ValueError:
             continue
         if (
             len(path.parent.name) != 64
@@ -301,6 +316,7 @@ def write_run_lifecycle_telemetry(
     parent_case_id: str | None,
     origin_stage: str | None,
     supervisor_instruction: str | None,
+    case_lifecycle_id: str | None = None,
     codex_resume_session_id: str | None = None,
     codex_resume_usage_source_run_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -315,6 +331,7 @@ def write_run_lifecycle_telemetry(
     context, verified_controller = _base_context(
         run_dir=run_dir,
         parent_case_id=parent_case_id,
+        case_lifecycle_id=case_lifecycle_id,
         origin_stage=origin_stage,
         model=model,
         policy=policy,

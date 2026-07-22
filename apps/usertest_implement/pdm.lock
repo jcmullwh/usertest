@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:0958ef79e28a5f379dbcc9d1ec0864962447a7a3af9cfdc44e513c6668a5e33b"
+content_hash = "sha256:a394c8406b4a165b5feeaf80edcbf1e7a9f1654935d9f7496fdd50b8f6ff0a0b"
 
 [[metadata.targets]]
 requires_python = ">=3.11"
@@ -38,6 +38,7 @@ summary = "A Python library (PDM)"
 groups = ["default"]
 dependencies = [
     "pyyaml>=6.0.2",
+    "run-artifacts",
 ]
 
 [[package]]
@@ -598,7 +599,9 @@ dependencies = [
     "normalized-events",
     "pyyaml>=6.0.3",
     "reporter",
+    "run-artifacts",
     "sandbox-runner",
+    "token-monitoring",
 ]
 
 [[package]]
@@ -607,6 +610,14 @@ version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/sandbox_runner"
 summary = "A Python library (PDM)"
+groups = ["default"]
+
+[[package]]
+name = "token-monitoring"
+version = "0.2.0"
+requires_python = ">=3.11"
+path = "../../packages/token_monitoring"
+summary = "Metadata-only token inefficiency monitoring for usertest runs"
 groups = ["default"]
 
 [[package]]

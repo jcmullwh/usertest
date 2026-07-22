@@ -161,7 +161,11 @@ def _prior_session_high_water(
             invocation_id=str(prior.get("invocation_id") or prior_path.stem),
             session_id=session_id,
         )
-        if parsed.observed_high_water is not None:
+        if (
+            parsed.attributable is True
+            and parsed.semantics != "unattributable"
+            and parsed.observed_high_water is not None
+        ):
             candidates.append((prior_ended, parsed.observed_high_water, raw_path))
     if not candidates:
         return None, None

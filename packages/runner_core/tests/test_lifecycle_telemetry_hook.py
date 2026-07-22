@@ -79,6 +79,7 @@ def test_runner_telemetry_counts_retry_once_and_writes_usage_receipts(tmp_path: 
         model="gpt-5.6-sol",
         policy="write",
         parent_case_id="case-1",
+        case_lifecycle_id="case-lifecycle-1",
         origin_stage="implementation",
         supervisor_instruction="retry with the retained evidence",
     )
@@ -88,6 +89,7 @@ def test_runner_telemetry_counts_retry_once_and_writes_usage_receipts(tmp_path: 
         model="gpt-5.6-sol",
         policy="write",
         parent_case_id="case-1",
+        case_lifecycle_id="case-lifecycle-1",
         origin_stage="implementation",
         supervisor_instruction="retry with the retained evidence",
     )
@@ -98,6 +100,7 @@ def test_runner_telemetry_counts_retry_once_and_writes_usage_receipts(tmp_path: 
         for line in (run_dir / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     types = [row["event_type"] for row in rows]
+    assert {row["context"]["case_lifecycle_id"] for row in rows} == {"case-lifecycle-1"}
     assert types.count("model.invocation.completed") == 2
     assert types.count("error.occurred") == 1
     assert types.count("intervention.completed") == 1
@@ -261,3 +264,37 @@ def test_runner_telemetry_withholds_resumed_session_without_predecessor_high_wat
     case_metrics = json.loads((run_dir / "case_metrics.json").read_text(encoding="utf-8"))
     assert case_metrics["reconciliation"]["ok"] is False
     assert case_metrics["cases"][0]["accounting"]["direct"]["gross"]["total_tokens"] is None
+
+
+def test_runner_telemetry_rejects_unattributable_predecessor_high_water(
+    tmp_path: Path,
+) -> None:
+    session_id = "019f8934-cdb5-70f3-806a-1c5748f385f7"
+    invalid_prior = tmp_path / "invalid-prior"
+    current_run = tmp_path / "current"
+    _write_single_codex_run(
+        invalid_prior,
+        session_id=session_id,
+        usage={"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 20},
+        continued=True,
+        started_at="2026-07-21T12:00:00Z",
+        ended_at="2026-07-21T12:00:10Z",
+    )
+
+    _write_single_codex_run(
+        current_run,
+        session_id=session_id,
+        usage={"input_tokens": 145, "cached_input_tokens": 90, "output_tokens": 32},
+        continued=True,
+        started_at="2026-07-21T12:01:00Z",
+        ended_at="2026-07-21T12:01:10Z",
+        source_run_dir=invalid_prior,
+    )
+
+    event = _completed_model_event(current_run)
+    assert event["attributes"]["usage_semantics"] == "unattributable"
+    assert event["attributes"]["token_usage"] is None
+    assert (
+        event["attributes"]["usage_unknown_reason"]
+        == "continued_session_missing_prior_high_water"
+    )

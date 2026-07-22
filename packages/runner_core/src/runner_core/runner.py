@@ -284,6 +284,7 @@ class RunRequest:
     evidence_role: str | None = None
     origin_stage: str | None = None
     parent_case_id: str | None = None
+    case_lifecycle_id: str | None = None
     # Exact Codex thread.started.thread_id to continue. Never infer with `--last`.
     codex_resume_session_id: str | None = None
     # Retained predecessor run used to prove the cumulative token high-water mark
@@ -3402,6 +3403,7 @@ def _maybe_write_lifecycle_telemetry(
             model=request.model,
             policy=request.policy,
             parent_case_id=request.parent_case_id,
+            case_lifecycle_id=request.case_lifecycle_id,
             origin_stage=request.origin_stage,
             supervisor_instruction=request.supervisor_instruction,
             codex_resume_session_id=request.codex_resume_session_id,
@@ -3796,6 +3798,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "requested_persona_id": request.persona_id,
             "requested_mission_id": request.mission_id,
             "requested_codex_resume_session_id": request.codex_resume_session_id,
+            **(
+                {"case_lifecycle_id": request.case_lifecycle_id.strip()}
+                if isinstance(request.case_lifecycle_id, str)
+                and request.case_lifecycle_id.strip()
+                else {}
+            ),
             "codex_resume_usage_source_run_dir": (
                 str(request.codex_resume_usage_source_run_dir.resolve())
                 if request.codex_resume_usage_source_run_dir is not None

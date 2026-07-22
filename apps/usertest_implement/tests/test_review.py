@@ -2494,7 +2494,10 @@ def test_run_defers_review_until_for_review_and_green_ci(
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
+    run_requests: list[RunRequest] = []
+
     def _fake_run_once(_cfg, _request):
+        run_requests.append(_request)
         _write_json(
             impl_run_dir / "workspace_ref.json",
             {"workspace_dir": str(workspace_dir)},
@@ -2615,6 +2618,7 @@ def test_run_defers_review_until_for_review_and_green_ci(
         ticket_markdown=ticket_path.read_text(encoding="utf-8"),
         tickets_export_path=None,
         export_index=None,
+        case_lifecycle_id="case-lifecycle:facefacefaceface:1",
     )
 
     exit_code = _run_selected_ticket(
@@ -2624,6 +2628,8 @@ def test_run_defers_review_until_for_review_and_green_ci(
         selected=selected,
     )
     assert exit_code == 0
+    assert run_requests[0].parent_case_id is None
+    assert run_requests[0].case_lifecycle_id == "case-lifecycle:facefacefaceface:1"
     handoff_summary = _read_json(impl_run_dir / "handoff_summary.json")
     assert isinstance(handoff_summary, dict)
     assert handoff_summary["pr_created"] is True

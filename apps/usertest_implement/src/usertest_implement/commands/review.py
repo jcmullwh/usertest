@@ -1520,6 +1520,10 @@ def _run_review_for_selected_ticket(
                 None if correction_context is not None else staged_review_prompt_path
             ),
             agent_user_prompt=(review_prompt if correction_context is not None else None),
+            evidence_role="verification" if selected.case_id is not None else None,
+            origin_stage="review" if selected.case_id is not None else None,
+            parent_case_id=selected.case_id,
+            case_lifecycle_id=selected.case_lifecycle_id,
             codex_resume_session_id=(
                 correction_context["codex_resume_session_id"]
                 if correction_context is not None
