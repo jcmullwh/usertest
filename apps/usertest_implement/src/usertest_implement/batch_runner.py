@@ -28,7 +28,7 @@ from usertest_implement.backlog_refresh import (
     run_shadow_backlog_refresh,
 )
 from usertest_implement.batch_failure import classify_run_outcome, write_batch_failure
-from usertest_implement.batch_preflight import run_batch_preflight
+from usertest_implement.batch_preflight import _effective_handoff_flags, run_batch_preflight
 from usertest_implement.batch_state import (
     append_jsonl,
     batch_dir,
@@ -2324,7 +2324,7 @@ def run_batch(
             workers=workers,
             refresh_agent=effective_refresh_agent,
             review_agent=effective_review_agent,
-            review_enabled=_bool_setting(run_settings.get("pr"), default=True),
+            review_enabled=_effective_handoff_flags(run_settings)[2],
         ),
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,

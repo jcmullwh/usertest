@@ -10,6 +10,18 @@ from runner_core.execution_backend import MaintenanceDockerConfig
 from usertest_implement import batch_preflight
 
 
+def test_effective_handoff_flags_follow_dependency_chain() -> None:
+    assert batch_preflight._effective_handoff_flags(
+        {"commit": False, "push": True, "pr": True}
+    ) == (False, False, False)
+    assert batch_preflight._effective_handoff_flags(
+        {"commit": True, "push": False, "pr": True}
+    ) == (True, False, False)
+    assert batch_preflight._effective_handoff_flags(
+        {"commit": True, "push": True, "pr": True}
+    ) == (True, True, True)
+
+
 def _completed(argv: list[str], *, returncode: int = 0) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(argv, returncode, stdout="", stderr="")
 
@@ -71,7 +83,7 @@ def test_batch_preflight_skips_github_auth_for_local_exercise_profile(
     )
 
 
-def test_batch_preflight_run_section_can_disable_remote_handoff(
+def test_batch_preflight_normalizes_run_handoff_dependencies(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -83,8 +95,8 @@ def test_batch_preflight_run_section_can_disable_remote_handoff(
                 "default_profile": "local_exercise",
                 "profiles": {
                     "local_exercise": {
-                        "run_common": {"push": True, "pr": True},
-                        "run": {"push": False, "pr": False},
+                        "run_common": {"commit": True, "push": True, "pr": True},
+                        "run": {"commit": False},
                     }
                 },
             },

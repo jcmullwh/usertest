@@ -60,6 +60,15 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _effective_handoff_flags(run_settings: dict[str, Any]) -> tuple[bool, bool, bool]:
+    """Apply the run command's commit -> push -> PR dependency chain."""
+
+    commit = bool(run_settings.get("commit", False))
+    push = commit and bool(run_settings.get("push", False))
+    pr = push and bool(run_settings.get("pr", False))
+    return commit, push, pr
+
+
 def _batch_remote_handoff_requested(*, repo_root: Path, batch_config: dict[str, Any]) -> bool:
     defaults = batch_config.get("defaults", {})
     if not isinstance(defaults, dict):
@@ -91,8 +100,7 @@ def _batch_remote_handoff_requested(*, repo_root: Path, batch_config: dict[str, 
             return True
         run_settings.update(section)
 
-    push = bool(run_settings.get("push", True))
-    pr = bool(run_settings.get("pr", True))
+    _, push, pr = _effective_handoff_flags(run_settings)
     return push or pr
 
 
