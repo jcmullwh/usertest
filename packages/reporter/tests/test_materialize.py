@@ -64,9 +64,9 @@ def test_discovery_and_materialization_are_deterministic(tmp_path: Path) -> None
     )
 
     assert second.case_metrics_path.read_bytes() == first_bytes
-    assert json.loads(second.cohort_metrics_path.read_text(encoding="utf-8"))["cohort_id"] == (
-        "cohort-a"
-    )
+    cohort = json.loads(second.cohort_metrics_path.read_text(encoding="utf-8"))
+    assert cohort["cohort_id"] == "cohort-a"
+    assert cohort["data_through_at"] == "2026-07-01T00:01:00Z"
     assert first.source_event_count == first.retained_event_count == 2
 
 

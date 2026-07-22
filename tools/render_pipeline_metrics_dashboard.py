@@ -460,11 +460,25 @@ def _project_disposition(
         },
         "manual_actions": {
             "actions": manual_actions,
+            "known_action_count": _count_from(
+                row,
+                "manual_actions.known_count",
+                label=f"{prefix}.manual_actions.known_count",
+            ),
             "required_for_progress": _count_from(
                 row,
                 "manual_actions.required_for_progress_count",
                 "manual_actions.required_count",
                 label=f"{prefix}.manual_actions.required_for_progress_count",
+            ),
+            "known_required_for_progress": _count_from(
+                row,
+                "manual_actions.known_required_for_progress_count",
+                label=f"{prefix}.manual_actions.known_required_for_progress_count",
+            ),
+            "telemetry_complete": _boolean_or_none(
+                _first(row, ("manual_actions.telemetry_complete",)),
+                label=f"{prefix}.manual_actions.telemetry_complete",
             ),
             "policy_mandated": _count_from(
                 row,
@@ -912,7 +926,7 @@ def build_dashboard_projection(
                 source.get("cohort_id"), label="cohort_metrics.cohort_id"
             ),
             "generated_at": _text_or_none(
-                _first(source, ("generated_at", "as_of")),
+                _first(source, ("data_through_at", "generated_at", "as_of")),
                 label="cohort_metrics.generated_at",
             ),
             "sha256": hashlib.sha256(canonical_source).hexdigest(),
@@ -983,6 +997,8 @@ def _validate_metrics_projection(row: Mapping[str, Any], *, label: str) -> None:
         manual.get("active_seconds"), label=f"{label}.manual_actions.active_seconds"
     )
     for field in (
+        "known_action_count",
+        "known_required_for_progress",
         "required_for_progress",
         "policy_mandated",
         "passive_observations",
@@ -992,6 +1008,10 @@ def _validate_metrics_projection(row: Mapping[str, Any], *, label: str) -> None:
         "unclassified",
     ):
         _integer_or_none(manual.get(field), label=f"{label}.manual_actions.{field}")
+    _boolean_or_none(
+        manual.get("telemetry_complete"),
+        label=f"{label}.manual_actions.telemetry_complete",
+    )
     automation = _mapping(
         row.get("automation_score_v1"), label=f"{label}.automation_score_v1"
     )
@@ -1187,6 +1207,22 @@ def _format_token_stats(stats: Mapping[str, Any]) -> str:
     return f"median {_format_number(median, decimals=0)} / total {_format_number(total, decimals=0)}"
 
 
+def _format_observed_count(
+    exact: object,
+    known: object,
+    *,
+    telemetry_complete: object,
+) -> str:
+    if telemetry_complete is False and known is not None:
+        return f"known minimum {_format_number(known, decimals=0)}"
+    if exact is not None:
+        return _format_number(exact, decimals=0)
+    if known is None:
+        return "unknown"
+    qualifier = "known" if telemetry_complete is True else "known minimum"
+    return f"{qualifier} {_format_number(known, decimals=0)}"
+
+
 def _format_score(stats: Mapping[str, Any]) -> str:
     median = stats.get("median")
     p90 = stats.get("p90")
@@ -1269,8 +1305,10 @@ def render_dashboard_html(projection_value: object) -> str:
             f"unresolved {_format_number(errors.get('unresolved_terminal_clusters'), decimals=0)}"
         )
         manual_summary = (
-            f"total {_format_number(manual_stats.get('total'), decimals=0)}; "
-            f"required {_format_number(manual.get('required_for_progress'), decimals=0)}; "
+            "total "
+            f"{_format_observed_count(manual_stats.get('total'), manual.get('known_action_count'), telemetry_complete=manual.get('telemetry_complete'))}; "
+            "required "
+            f"{_format_observed_count(manual.get('required_for_progress'), manual.get('known_required_for_progress'), telemetry_complete=manual.get('telemetry_complete'))}; "
             f"active {_format_duration(_mapping(manual['active_seconds'], label='manual.active_seconds'))}"
         )
         completeness_summary = (
@@ -1375,7 +1413,7 @@ def render_dashboard_html(projection_value: object) -> str:
   <div class="meta">
     <span>Cohort: <code>{cohort_id}</code></span>
     <span>Metric version: <code>{metric_version}</code></span>
-    <span>Generated: <code>{generated_at}</code></span>
+    <span>Telemetry through: <code>{generated_at}</code></span>
     <span>Source: <code>{escape(str(source["sha256"]))}</code></span>
   </div>
   <p class="notice">Observed measurements only. Missing evidence is shown as <strong>unknown</strong>; no value is estimated as zero.</p>
@@ -1391,8 +1429,8 @@ def render_dashboard_html(projection_value: object) -> str:
     <div class="card"><span class="label">Error clusters</span><span class="value">{_format_number(cohort_clusters.get("total"), decimals=0)}</span></div>
     <div class="card"><span class="label">Error occurrences</span><span class="value">{_format_number(cohort_errors.get("occurrences"), decimals=0)}</span></div>
     <div class="card"><span class="label">Supervisor interventions</span><span class="value">{_format_number(cohort_supervisor.get("total"), decimals=0)}</span></div>
-    <div class="card"><span class="label">Manual actions</span><span class="value">{_format_number(cohort_manual_actions.get("total"), decimals=0)}</span></div>
-    <div class="card"><span class="label">Required manual actions</span><span class="value">{_format_number(cohort_manual.get("required_for_progress"), decimals=0)}</span></div>
+    <div class="card"><span class="label">Manual actions</span><span class="value">{_format_observed_count(cohort_manual_actions.get("total"), cohort_manual.get("known_action_count"), telemetry_complete=cohort_manual.get("telemetry_complete"))}</span></div>
+    <div class="card"><span class="label">Required manual actions</span><span class="value">{_format_observed_count(cohort_manual.get("required_for_progress"), cohort_manual.get("known_required_for_progress"), telemetry_complete=cohort_manual.get("telemetry_complete"))}</span></div>
     <div class="card"><span class="label">Automation cases withheld</span><span class="value">{_format_number(cohort_automation.get("withheld_case_count"), decimals=0)}</span></div>
     <div class="card"><span class="label">Accounting reconciliation</span><span class="value">{escape(reconciliation_text)}</span></div>
   </div>

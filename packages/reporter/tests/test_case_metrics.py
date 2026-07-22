@@ -589,6 +589,16 @@ def test_incomplete_manual_action_telemetry_withholds_zero_counts_and_rates() ->
                 fingerprint=None,
             ),
             _event(
+                "action.completed",
+                "life:historical-manual-unknown",
+                at="2026-07-21T01:00:30Z",
+                action_id="action:known-minimum",
+                actor_type="supervising_agent",
+                manual=True,
+                required_for_progress=True,
+                fingerprint=None,
+            ),
+            _event(
                 "lifecycle.closed",
                 "life:historical-manual-unknown",
                 at="2026-07-21T01:01:00Z",
@@ -603,14 +613,16 @@ def test_incomplete_manual_action_telemetry_withholds_zero_counts_and_rates() ->
 
     case = report["cases"][0]
     assert case["manual_actions"]["count"] is None
-    assert case["manual_actions"]["known_count"] == 0
+    assert case["manual_actions"]["known_count"] == 1
+    assert case["manual_actions"]["known_required_for_progress_count"] == 1
     assert case["manual_actions"]["telemetry_complete"] is False
     assert case["timing"]["manual_active_seconds"] is None
     assert case["accounting"]["all_in"]["gross"]["total_tokens"] is None
 
     cohort = aggregate_cohort_metrics(report, cohort_id="manual-unknown")
     assert cohort["manual_actions"]["count"] is None
-    assert cohort["manual_actions"]["known_count"] == 0
+    assert cohort["manual_actions"]["known_count"] == 1
+    assert cohort["manual_actions"]["known_required_for_progress_count"] == 1
     automation = cohort["automation_score_v1"]
     assert automation["rate_eligible_terminal_case_count"] == 0
     assert automation["touchless_terminal_yield"] is None

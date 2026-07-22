@@ -194,6 +194,53 @@ def test_empty_distributions_render_as_unknown_instead_of_measured_zero() -> Non
     assert row["manual_actions"]["active_seconds"]["total"] is None
 
 
+def test_incomplete_manual_actions_render_operator_attested_lower_bound() -> None:
+    mod = _load_module()
+    source = _source()
+    source.pop("generated_at")
+    source["data_through_at"] = "2026-07-21T14:01:00Z"
+    source["case_count"] = 3
+    source["case_distributions"] = {
+        "manual_actions": _distribution(count=1, total=0, median=0, p75=0, p90=0)
+    }
+    source["manual_actions"] = {
+        "count": None,
+        "known_count": 54,
+        "required_for_progress_count": None,
+        "known_required_for_progress_count": 54,
+        "telemetry_complete": False,
+    }
+    already = source["by_disposition"]["already_addressed"]
+    already["case_distributions"]["manual_actions"] = {
+        "count": 0,
+        "total": 0.0,
+        "median": None,
+        "p75": None,
+        "p90": None,
+    }
+    already["manual_actions"] = {
+        "count": None,
+        "known_count": 29,
+        "required_for_progress_count": None,
+        "known_required_for_progress_count": 27,
+        "telemetry_complete": False,
+    }
+
+    projection = mod.build_dashboard_projection(source)
+    row = projection["dispositions"][0]
+
+    assert projection["source"]["generated_at"] == "2026-07-21T14:01:00Z"
+    assert row["manual_actions"]["actions"]["total"] is None
+    assert row["manual_actions"]["known_action_count"] == 29
+    assert row["manual_actions"]["known_required_for_progress"] == 27
+    assert row["manual_actions"]["telemetry_complete"] is False
+    html = mod.render_dashboard_html(projection)
+    assert "known minimum 54" in html
+    assert "known minimum 29" in html
+    assert "known minimum 27" in html
+    assert "Telemetry through" in html
+
+
 def test_active_cohort_burden_is_visible_before_final_disposition() -> None:
     mod = _load_module()
     source = _source()

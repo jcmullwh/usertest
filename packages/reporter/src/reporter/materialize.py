@@ -5,6 +5,7 @@ import os
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,26 @@ def _linked_source_event_id(event: Mapping[str, Any]) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _data_through_at(events: Sequence[Mapping[str, Any]]) -> str | None:
+    """Return the latest retained evidence timestamp without consulting the clock."""
+
+    observed: list[datetime] = []
+    for event in events:
+        for field in ("recorded_at", "occurred_at", "ended_at", "started_at"):
+            value = event.get(field)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:
+                observed.append(parsed.astimezone(timezone.utc))
+    if not observed:
+        return None
+    return max(observed).isoformat().replace("+00:00", "Z")
 
 
 def reconcile_event_streams(sources: Sequence[Path]) -> tuple[list[dict[str, Any]], int]:
@@ -176,6 +197,7 @@ def materialize_lifecycle_metrics(
         cohort_id=cohort_id,
         case_ids=case_lifecycle_ids,
     )
+    cohort_report["data_through_at"] = _data_through_at(events)
 
     output = output_dir.resolve()
     case_path = output / CASE_METRICS_FILENAME

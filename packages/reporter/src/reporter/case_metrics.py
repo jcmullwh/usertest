@@ -3362,6 +3362,8 @@ def _aggregate_action_metrics(
     cases: Sequence[Mapping[str, Any]], field: str
 ) -> dict[str, Any]:
     totals: Counter[str] = Counter()
+    known_totals: Counter[str] = Counter()
+    known_by_actor: Counter[str] = Counter()
     active_seconds = 0.0
     incomplete_fields: set[str] = set()
     active_seconds_incomplete = False
@@ -3387,19 +3389,31 @@ def _aggregate_action_metrics(
             value = raw.get(key)
             if isinstance(value, int):
                 totals[key] += value
+                known_totals[key] += value
             else:
                 incomplete_fields.add(key)
+                known_value = raw.get(f"known_{key}")
+                if isinstance(known_value, int):
+                    known_totals[key] += known_value
         raw_by_actor = raw.get("by_actor")
         if isinstance(raw_by_actor, Mapping):
             for actor, count in raw_by_actor.items():
                 totals[f"actor:{actor}"] += int(count or 0)
+                known_by_actor[str(actor)] += int(count or 0)
         else:
             incomplete_fields.add("by_actor")
+            raw_known_by_actor = raw.get("known_by_actor")
+            if isinstance(raw_known_by_actor, Mapping):
+                for actor, count in raw_known_by_actor.items():
+                    known_by_actor[str(actor)] += int(count or 0)
         value = raw.get("active_seconds")
         if isinstance(value, (int, float)):
             active_seconds += float(value)
         else:
             active_seconds_incomplete = True
+            known_active_seconds = raw.get("known_active_seconds")
+            if isinstance(known_active_seconds, (int, float)):
+                active_seconds += float(known_active_seconds)
     result: dict[str, Any] = dict(totals)
     result["by_actor"] = {
         key.removeprefix("actor:"): value
@@ -3410,10 +3424,10 @@ def _aggregate_action_metrics(
         del result[key]
     for key in incomplete_fields:
         if key == "by_actor":
-            result["known_by_actor"] = result["by_actor"]
+            result["known_by_actor"] = dict(sorted(known_by_actor.items()))
             result["by_actor"] = None
         else:
-            result[f"known_{key}"] = result.get(key, 0)
+            result[f"known_{key}"] = known_totals[key]
             result[key] = None
     result["known_active_seconds"] = active_seconds
     result["active_seconds"] = None if active_seconds_incomplete else active_seconds

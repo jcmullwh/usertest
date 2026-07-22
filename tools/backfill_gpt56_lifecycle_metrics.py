@@ -318,6 +318,49 @@ def backfill_dashboard(
                     },
                 ),
             )
+            action_id = _stable_id("legacy-action", run_id, intervention_id)
+            action_context = LifecycleContext.from_dict(
+                {
+                    **intervention_context.to_dict(),
+                    "parent_action_id": action_id,
+                }
+            )
+            retained_events.append(
+                make_lifecycle_event(
+                    "action.completed",
+                    action_context,
+                    idempotency_key=(
+                        f"legacy:{run_id}:intervention-action:{intervention_id}"
+                    ),
+                    occurred_at=_iso(fallback),
+                    started_at=_iso(fallback),
+                    ended_at=_iso(fallback),
+                    actor_type="supervising_agent",
+                    initiator_type="supervising_agent",
+                    root_initiator_type="supervising_agent",
+                    origin="supervising_agent",
+                    intervention_id=intervention_id,
+                    provenance_quality="operator_attested",
+                    attributes={
+                        **cohort_attributes,
+                        "action_id": action_id,
+                        "action_family": "adjudication",
+                        "operation": "legacy_supervisor_intervention",
+                        "interface": "schema_v3_dashboard_backfill",
+                        "required_for_progress": True,
+                        "active_seconds": None,
+                        "active_seconds_source": "unknown",
+                        "resource_time_unknown": True,
+                        "resource_time_unknown_reason": (
+                            "legacy_manual_action_active_time_not_retained"
+                        ),
+                        "legacy_action_cardinality": (
+                            "minimum_one_action_per_intervention"
+                        ),
+                        "manual_action_telemetry_complete": False,
+                    },
+                ),
+            )
 
         rework = raw.get("rework")
         rework = rework if isinstance(rework, Mapping) else {}
@@ -424,7 +467,11 @@ def backfill_dashboard(
                         "operator_attested" if intervention_ids else "unknown"
                     ),
                     "tokens": "unknown",
-                    "manual_actions": "unknown",
+                    "manual_actions": (
+                        "operator_attested_minimum"
+                        if intervention_ids
+                        else "unknown"
+                    ),
                     "origin": "unknown",
                     "disposition": (
                         "artifact_derived" if disposition is not None else "unknown"

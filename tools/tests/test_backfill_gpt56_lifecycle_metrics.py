@@ -72,12 +72,22 @@ def test_backfill_preserves_unknowns_and_structured_clusters(tmp_path: Path) -> 
         row for row in rows if row["event_type"] == "intervention.completed"
     )
     assert intervention["context"]["work_unit_id"] not in invocation_work_ids
+    action = next(row for row in rows if row["event_type"] == "action.completed")
+    assert action["intervention_id"] == intervention["intervention_id"]
+    assert action["context"]["work_unit_id"] == intervention["context"]["work_unit_id"]
+    assert action["attributes"]["legacy_action_cardinality"] == (
+        "minimum_one_action_per_intervention"
+    )
+    assert action["attributes"]["resource_time_unknown"] is True
     assert next(row for row in rows if row["event_type"] == "error.occurred")[
         "attributes"
     ]["legacy_self_healed"] is True
     resolution = next(row for row in rows if row["event_type"] == "error.resolved")
     assert resolution["attributes"]["resolution_mode"] == "self_healed_same_author"
     assert manifest["selected_runs"][0]["provenance"]["tokens"] == "unknown"
+    assert manifest["selected_runs"][0]["provenance"]["manual_actions"] == (
+        "operator_attested_minimum"
+    )
     assert manifest["selected_runs"][0]["provenance"]["disposition"] == "unknown"
     assert manifest["certification"]["eligible"] is False
     closed = next(row for row in rows if row["event_type"] == "lifecycle.closed")
@@ -202,5 +212,15 @@ def test_backfill_derives_case_dispositions_and_preserves_count_only_measures(
         if row["event_type"] == "intervention.completed"
         and row["context"]["case_lifecycle_id"] == "legacy:life-pr"
     ]
+    pr_actions = [
+        row
+        for row in rows
+        if row["event_type"] == "action.completed"
+        and row["context"]["case_lifecycle_id"] == "legacy:life-pr"
+    ]
     assert len(pr_errors) == 2
     assert len(pr_interventions) == 3
+    assert len(pr_actions) == 3
+    assert {row["intervention_id"] for row in pr_actions} == {
+        row["intervention_id"] for row in pr_interventions
+    }
