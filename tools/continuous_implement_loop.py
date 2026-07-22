@@ -939,7 +939,12 @@ def _merge_review(ctx: LoopContext, fingerprint: str) -> bool:
 def _reconcile_review_queue(ctx: LoopContext) -> bool:
     """Reconcile PRs while keeping incomplete outcome proof case-local."""
 
-    def merged_outcome_pending(fingerprint: str, pr_url: str) -> bool:
+    def merged_outcome_pending(
+        fingerprint: str,
+        pr_url: str,
+        *,
+        ticket_path: Path,
+    ) -> bool:
         refreshed = _load_ledger(ctx)
         actions_raw = refreshed.get("actions")
         entry = actions_raw.get(fingerprint) if isinstance(actions_raw, dict) else None
@@ -957,12 +962,21 @@ def _reconcile_review_queue(ctx: LoopContext) -> bool:
             .strip()
             .lower()
         )
-        return bool(
+        recorded_merge = bool(
             entry.get("last_merge_pr_url") == pr_url
             and isinstance(entry.get("last_merged_at"), str)
             and str(entry.get("last_merged_at")).strip()
-            and state not in {"resolved", "mitigated"}
         )
+        # Historical generated tickets can predate the merge-ledger fields.  GitHub's
+        # mergedAt proof plus the completed ticket location is enough to establish that
+        # any remaining failure belongs to outcome/provenance progression for this case.
+        # It is not enough to mark the outcome resolved, but it must not turn one stale
+        # historical case into a global gate on unrelated backlog work.
+        historical_completed_merge = ticket_path.parent.name == "5 - complete"
+        return (recorded_merge or historical_completed_merge) and state not in {
+            "resolved",
+            "mitigated",
+        }
 
     ledger = _load_ledger(ctx)
     actions = ledger.get("actions", {})
@@ -1012,7 +1026,11 @@ def _reconcile_review_queue(ctx: LoopContext) -> bool:
             # finalizer. It writes merge provenance and drives original/live outcome
             # roles; moving the file alone would falsely treat workflow motion as proof.
             if not _merge_review(ctx, fingerprint):
-                if merged_outcome_pending(fingerprint, pr_url):
+                if merged_outcome_pending(
+                    fingerprint,
+                    pr_url,
+                    ticket_path=ticket_path,
+                ):
                     _append_log(
                         ctx,
                         "Merged PR outcome progression remains case-locally pending; "
