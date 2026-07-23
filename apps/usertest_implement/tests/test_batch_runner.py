@@ -1090,8 +1090,15 @@ def test_drain_phase_replans_invalid_stage6_candidate_and_launches_unrelated_wor
     monkeypatch: Any,
 ) -> None:
     owner_root = tmp_path / "repo"
+    invalid_owner_root = tmp_path / "invalid-repo"
     ready_dir = owner_root / ".agents" / "plans" / "2 - ready"
-    invalid_path = ready_dir / "20260722_badbadbadbadbadb_historical-generated-ticket.md"
+    invalid_path = (
+        invalid_owner_root
+        / ".agents"
+        / "plans"
+        / "2 - ready"
+        / "20260722_badbadbadbadbadb_historical-generated-ticket.md"
+    )
     invalid_path.parent.mkdir(parents=True, exist_ok=True)
     invalid_path.write_text(
         "\n".join(
@@ -1116,7 +1123,7 @@ def test_drain_phase_replans_invalid_stage6_candidate_and_launches_unrelated_wor
         fingerprint="badbadbadbadbadb",
         severity="high",
         title="Historical generated ticket",
-        owner_root=owner_root,
+        owner_root=invalid_owner_root,
         ticket_path=invalid_path,
         execution_domain="runner_core",
         execution_conflict_keys=("ticket:badbadbadbadbadb",),
@@ -1135,6 +1142,7 @@ def test_drain_phase_replans_invalid_stage6_candidate_and_launches_unrelated_wor
     collection_count = 0
     launched: list[str] = []
     action_sync_roots: list[Path] = []
+    invalid_sync_attempts = 0
 
     def _collect(**_: Any) -> list[BatchCandidate]:
         nonlocal collection_count
@@ -1160,10 +1168,18 @@ def test_drain_phase_replans_invalid_stage6_candidate_and_launches_unrelated_wor
             duration_seconds=0.01,
         )
 
+    def _sync_with_transient_invalid_failure(*, owner_root: Path) -> None:
+        nonlocal invalid_sync_attempts
+        action_sync_roots.append(owner_root)
+        if owner_root == invalid_owner_root:
+            invalid_sync_attempts += 1
+            if invalid_sync_attempts == 1:
+                raise OSError("transient invalid-owner sync failure")
+
     monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
     monkeypatch.setattr(
         "usertest_implement.batch_runner._sync_ticket_atom_actions",
-        lambda *, owner_root: action_sync_roots.append(owner_root),
+        _sync_with_transient_invalid_failure,
     )
     monkeypatch.setattr(
         "usertest_implement.batch_runner._move_ticket_for_review",
@@ -1209,12 +1225,15 @@ def test_drain_phase_replans_invalid_stage6_candidate_and_launches_unrelated_wor
     )
 
     replanned_path = (
-        owner_root / ".agents" / "plans" / "1.5 - to_plan" / invalid_path.name
+        invalid_owner_root / ".agents" / "plans" / "1.5 - to_plan" / invalid_path.name
     ).resolve()
     assert replanned_path.exists()
     assert not invalid_path.exists()
     assert launched == [valid_path.name]
-    assert action_sync_roots == [owner_root]
+    assert action_sync_roots == [owner_root, invalid_owner_root, invalid_owner_root]
+    assert [
+        receipt["status"] for receipt in state["candidate_admission_action_syncs"]
+    ] == ["error", "success"]
     assert len(state["completed"]) == 1
     assert len(state["failed"]) == 1
     failure = state["failed"][0]
@@ -1242,10 +1261,9 @@ def test_drain_phase_replans_invalid_stage6_candidate_and_launches_unrelated_wor
     assert admission_failures[0]["disposition"] == "replan_required"
     assert admission_failures[0]["global_blocker"] is False
     action_syncs = state["candidate_admission_action_syncs"]
-    assert len(action_syncs) == 1
-    assert action_syncs[0]["completion_source"] == "claim_sync"
-    assert action_syncs[0]["fingerprints"] == ["badbadbadbadbadb"]
-    assert action_syncs[0]["status"] == "success"
+    assert len(action_syncs) == 2
+    assert all(item["completion_source"] == "deferred_flush" for item in action_syncs)
+    assert all(item["fingerprints"] == ["badbadbadbadbadb"] for item in action_syncs)
 
 
 def test_drain_phase_retries_invalid_candidate_when_replan_move_fails(
@@ -1584,6 +1602,7 @@ def test_deferred_replan_action_sync_receipt_failure_is_retained(
     assert failure["status"] == "error"
     assert failure["retryable"] is True
     assert failure["receipt_error"].startswith("OSError: cannot write")
+    assert pending == {owner_root: {"aaaaaaaaaaaaaaaa"}}
 
 
 def test_classify_run_outcome_detects_registry_json_failure(tmp_path: Path) -> None:

@@ -28,6 +28,13 @@ _TERMINAL_FAILURE_STATES = {
     "push_failed",
     "pr_creation_failed",
 }
+_LEGACY_VERIFICATION_RESUME_ARTIFACTS = (
+    "verification.json",
+    "verification_reuse.json",
+    "agent_attempts.json",
+    "workspace_ref.json",
+    "ticket_ref.json",
+)
 _TERMINAL_OUTCOME_STATES = {"resolved", "mitigated", "duplicate", "superseded"}
 _ORIGIN_FIELDS = (
     "correction_origin",
@@ -812,6 +819,22 @@ def _run_started_at(run_dir: Path, fallback: str) -> str:
     return _valid_timestamp(run_meta.get("run_started_utc")) or fallback
 
 
+def _legacy_verification_failure_is_resumable(run_dir: Path) -> bool:
+    """Mirror the retained-evidence gate used by the verification resume command."""
+
+    if not all((run_dir / name).is_file() for name in _LEGACY_VERIFICATION_RESUME_ARTIFACTS):
+        return False
+    verification = _read_json(run_dir / "verification.json")
+    workspace_ref = _read_json(run_dir / "workspace_ref.json")
+    ticket_ref = _read_json(run_dir / "ticket_ref.json")
+    return (
+        isinstance(verification, dict)
+        and verification.get("passed") is False
+        and isinstance(workspace_ref, dict)
+        and isinstance(ticket_ref, dict)
+    )
+
+
 def _write_manifest(
     *,
     run_dir: Path,
@@ -918,7 +941,10 @@ def write_implementation_lifecycle_telemetry(
     )
 
     lifecycle_state = _clean_str(resume_state.get("lifecycle_state")) or "in_progress"
-    terminal_failure = lifecycle_state in _TERMINAL_FAILURE_STATES
+    terminal_failure = lifecycle_state in _TERMINAL_FAILURE_STATES or (
+        lifecycle_state == "verification_failed"
+        and not _legacy_verification_failure_is_resumable(run_dir)
+    )
     case_lifecycle_id = context.case_lifecycle_id
     assert case_lifecycle_id is not None
     predecessor_event_paths = _predecessor_event_paths(

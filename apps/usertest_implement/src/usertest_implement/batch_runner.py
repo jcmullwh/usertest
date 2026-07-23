@@ -1854,7 +1854,7 @@ def _flush_deferred_replan_action_sync(
         state.setdefault("candidate_admission_action_syncs", []).append(receipt)
         if sync_error is not None or receipt_error is not None:
             state.setdefault("candidate_admission_sync_failures", []).append(receipt)
-        if sync_error is None:
+        if sync_error is None and receipt_error is None:
             completed_owner_roots.append(owner_root)
         _print(
             f"REPLAN_SYNC phase={phase_name} owner_root={owner_root} "
@@ -2002,7 +2002,7 @@ def _drain_phase(
         ] = {}
 
         with ThreadPoolExecutor(max_workers=len(workers)) as executor:
-            while queue or in_flight:
+            while queue or in_flight or pending_replan_action_sync:
                 while not launch_blocked and len(in_flight) < len(workers):
                     launch_index = _pick_launchable_candidate_index(queue, active_conflict_keys)
                     if launch_index is None:
@@ -2037,20 +2037,22 @@ def _drain_phase(
                     claim_started = time.monotonic()
                     claimed_path = _claim_ticket(candidate=candidate, repo_root=repo_root)
                     claim_duration_seconds = time.monotonic() - claim_started
-                    owner_pending = pending_replan_action_sync.pop(
-                        candidate.owner_root.resolve(), None
-                    )
+                    owner_key = candidate.owner_root.resolve()
+                    owner_pending = pending_replan_action_sync.get(owner_key)
                     if owner_pending:
+                        completed_pending = {owner_key: owner_pending}
                         _flush_deferred_replan_action_sync(
                             batch_dir_path=batch_dir_path,
                             state=state,
                             phase_name=phase.name,
                             cycle=cycle,
-                            pending={candidate.owner_root.resolve(): owner_pending},
+                            pending=completed_pending,
                             completed_duration_seconds=claim_duration_seconds,
                             completed_started_utc=claim_started_utc,
                             completion_source="claim_sync",
                         )
+                        if not completed_pending:
+                            pending_replan_action_sync.pop(owner_key, None)
                     active_conflict_keys.update(candidate.execution_conflict_keys)
                     state.setdefault("in_flight", []).append(
                         {
