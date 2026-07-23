@@ -102,6 +102,13 @@ def test_continuous_controller_propagates_verified_versioned_context(
         {"agent": "claude", "worker_index": 2},
     ]
 
+    first_cycle_id = context.cycle_id
+    first_session_id = context.session_id
+    next_context = tool._begin_controller_cycle(ctx)
+    assert next_context.cycle_id != first_cycle_id
+    assert next_context.session_id == first_session_id
+    assert ctx.controller_context is next_context
+
 
 def test_controller_fingerprint_stays_incomplete_when_batch_roster_is_unresolved(
     tmp_path: Path,

@@ -332,6 +332,14 @@ def _build_controller_context(ctx: LoopContext) -> LifecycleContext:
     )
 
 
+def _begin_controller_cycle(ctx: LoopContext) -> LifecycleContext:
+    """Bind one fresh processing-attempt identity to the next controller pass."""
+
+    context = _build_controller_context(ctx)
+    ctx.controller_context = context
+    return context
+
+
 def _run_logged(
     ctx: LoopContext,
     argv: list[str],
@@ -1535,14 +1543,13 @@ def main(argv: list[str] | None = None) -> int:
             repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe"
         ).resolve(),
     )
-    ctx.controller_context = _build_controller_context(ctx)
-
     ctx.pid_path.parent.mkdir(parents=True, exist_ok=True)
     ctx.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
     _append_log(ctx, "continuous implementation loop starting")
 
     while True:
         try:
+            _begin_controller_cycle(ctx)
             _write_state(ctx, status="running", current_action="startup")
             _refresh_observational_metrics(ctx)
             if _maintenance_cleanup_due(ctx):
