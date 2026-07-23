@@ -5357,6 +5357,10 @@ def _run_targeted_dossier_repairs(
     attempts: list[dict[str, Any]] = []
     repair_runs: list[str] = []
     session_id = _coerce_str(source_attempt.get("agent_session_id"))
+    source_run_dir = _coerce_str(source_attempt.get("run_dir"))
+    latest_author_run_dir = (
+        Path(source_run_dir).resolve() if source_run_dir is not None else None
+    )
     if agent != "codex" or session_id is None:
         return {
             "dossier": baseline,
@@ -5526,6 +5530,7 @@ def _run_targeted_dossier_repairs(
             keep_workspace=True,
             resume_workspace_dir=workspace,
             codex_resume_session_id=session_id,
+            codex_resume_usage_source_run_dir=latest_author_run_dir,
             # A repair turn has the same controlled subscription route as research but needs no
             # shell/tool authorization: all permissible input is in the content-bound prompt.
             codex_execpolicy_allow_prefixes=(
@@ -5627,6 +5632,7 @@ def _run_targeted_dossier_repairs(
             continue
 
         consecutive_invocation_failures = 0
+        latest_author_run_dir = result.run_dir.resolve()
         repair_runs.append(str(result.run_dir.resolve()))
         repair_seconds = _run_wall_seconds(result.run_dir) or 0.0
         correction_seconds_total += repair_seconds

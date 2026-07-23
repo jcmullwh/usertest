@@ -1180,6 +1180,16 @@ def test_run_once_uses_agent_default_model_when_request_model_is_omitted(
     target_ref = json.loads((result.run_dir / "target_ref.json").read_text(encoding="utf-8"))
     assert target_ref["model"] == "gpt-5.5"
     assert target_ref["model_source"] == "agent_default"
+    receipt_paths = list(
+        (result.run_dir / "model_usage_receipts").glob("*/model_usage_receipt.json")
+    )
+    assert len(receipt_paths) == 1
+    usage_receipt = json.loads(receipt_paths[0].read_text(encoding="utf-8"))
+    assert usage_receipt["model"] == "gpt-5.5"
+    lifecycle_event = json.loads(
+        (result.run_dir / "lifecycle_events.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert lifecycle_event["context"]["system_fingerprint"]["model"] == "gpt-5.5"
 
 
 def test_verification_broker_handoff_uses_shared_launcher_resolution() -> None:

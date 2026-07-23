@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from token_monitoring.usage import TokenUsage, UsageResult, UsageSemantics
 
 TOKEN_DIMENSIONS: tuple[str, ...] = (
     "total_tokens",
@@ -543,23 +547,24 @@ def parse_codex_session(path: Path) -> CodexSessionResult:
                     output = payload.get("output")
                     output_text = output if isinstance(output, str) else ""
                     command = str(call.get("command") or "")
-                    args = call.get("args") if isinstance(call.get("args"), dict) else {}
+                    call_args = call.get("args")
+                    args = dict(call_args) if isinstance(call_args, dict) else {}
                     name = str(call.get("name") or "")
                     if name == "exec_command" and _is_verify_client_command(command):
-                        session_id = _session_id_from_output(output_text)
+                        verify_session_id = _session_id_from_output(output_text)
                         if (
-                            session_id is not None
+                            verify_session_id is not None
                             and "Process running with session ID" in output_text
                         ):
-                            active_verify_sessions.add(session_id)
+                            active_verify_sessions.add(verify_session_id)
                     elif name == "write_stdin":
-                        session_id = args.get("session_id")
+                        verify_session_id = args.get("session_id")
                         if (
-                            isinstance(session_id, int)
-                            and session_id in active_verify_sessions
+                            isinstance(verify_session_id, int)
+                            and verify_session_id in active_verify_sessions
                             and "Process exited" in output_text
                         ):
-                            active_verify_sessions.discard(session_id)
+                            active_verify_sessions.discard(verify_session_id)
 
             usage_pair = _event_token_usage(event)
             if usage_pair is not None:
@@ -658,6 +663,345 @@ def parse_codex_session(path: Path) -> CodexSessionResult:
         trace=trace,
         exceptions=exceptions,
     )
+
+
+@dataclass(frozen=True)
+class _InvocationUsageObservation:
+    usage: TokenUsage
+    source_kind: str
+    source_line: int
+    last_usage: TokenUsage | None = None
+    terminal: bool = False
+
+
+def _source_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _usage_observation_from_event(
+    event: dict[str, Any],
+    *,
+    line_number: int,
+) -> _InvocationUsageObservation | None:
+    event_type = event.get("type")
+    payload = event.get("payload")
+    msg = event.get("msg")
+
+    if event_type == "turn.completed":
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            if not any(
+                key in usage for key in ("input_tokens", "output_tokens", "total_tokens")
+            ):
+                raise ValueError("terminal usage has no recognized token dimensions")
+            return _InvocationUsageObservation(
+                usage=TokenUsage.from_mapping(usage),
+                source_kind="turn.completed",
+                source_line=line_number,
+                terminal=True,
+            )
+        return None
+
+    if isinstance(msg, dict) and msg.get("type") == "turn.completed":
+        usage = msg.get("usage")
+        if isinstance(usage, dict):
+            if not any(
+                key in usage for key in ("input_tokens", "output_tokens", "total_tokens")
+            ):
+                raise ValueError("terminal usage has no recognized token dimensions")
+            return _InvocationUsageObservation(
+                usage=TokenUsage.from_mapping(usage),
+                source_kind="msg.turn.completed",
+                source_line=line_number,
+                terminal=True,
+            )
+        return None
+
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    total_raw = info.get("total_token_usage")
+    if not isinstance(total_raw, dict):
+        return None
+    if not any(
+        key in total_raw for key in ("input_tokens", "output_tokens", "total_tokens")
+    ):
+        raise ValueError("cumulative usage has no recognized token dimensions")
+    last_raw = info.get("last_token_usage")
+    return _InvocationUsageObservation(
+        usage=TokenUsage.from_mapping(total_raw),
+        last_usage=(TokenUsage.from_mapping(last_raw) if isinstance(last_raw, dict) else None),
+        source_kind="event_msg.token_count",
+        source_line=line_number,
+    )
+
+
+def _usage_tuple(usage: TokenUsage) -> tuple[int, ...]:
+    return tuple(usage.to_dict()[name] for name in TOKEN_DIMENSIONS)
+
+
+def _add_token_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
+    return TokenUsage(
+        **{
+            name: int(getattr(left, name)) + int(getattr(right, name))
+            for name in TOKEN_DIMENSIONS
+        }
+    )
+
+
+def parse_codex_invocation_usage(
+    path: Path,
+    *,
+    invocation_id: str,
+    baseline_high_water: TokenUsage | Mapping[str, object] | None = None,
+    session_id: str | None = None,
+) -> UsageResult:
+    """Attribute one Codex invocation from raw JSONL usage evidence.
+
+    A supplied ``baseline_high_water`` declares a continuation of a cumulative
+    provider session; the attributable usage is the final high-water mark minus
+    that baseline.  With no baseline, the input is treated as a fresh invocation
+    and must contain either one unique ``turn.completed`` usage value or a fully
+    reconciling Codex ``token_count`` sequence.
+
+    Repeated identical terminal events are evidence replay and count once.
+    Missing, decreasing, conflicting, or otherwise ambiguous cumulative counters
+    return ``unattributable`` with ``usage=None``.
+    """
+
+    diagnostics: list[dict[str, object]] = []
+    baseline: TokenUsage | None = None
+    if baseline_high_water is not None:
+        try:
+            baseline = (
+                baseline_high_water
+                if isinstance(baseline_high_water, TokenUsage)
+                else TokenUsage.from_mapping(baseline_high_water)
+            )
+        except ValueError as exc:
+            diagnostics.append({"code": "invalid_baseline_high_water", "detail": str(exc)})
+
+    source_hash: str | None = None
+    observations: list[_InvocationUsageObservation] = []
+    malformed_lines = 0
+    invalid_usage_lines: list[int] = []
+    terminal_without_usage_lines: list[int] = []
+    discovered_session_id: str | None = None
+
+    if not path.exists():
+        diagnostics.append({"code": "usage_source_missing"})
+    elif path.stat().st_size == 0:
+        source_hash = _source_sha256(path)
+        diagnostics.append({"code": "usage_source_zero_byte"})
+    else:
+        source_hash = _source_sha256(path)
+        with path.open("r", encoding="utf-8") as source:
+            for line_number, raw_line in enumerate(source, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    malformed_lines += 1
+                    continue
+                if not isinstance(event, dict):
+                    malformed_lines += 1
+                    continue
+
+                payload = event.get("payload")
+                if event.get("type") == "session_meta" and isinstance(payload, dict):
+                    candidate = payload.get("session_id") or payload.get("id")
+                    if isinstance(candidate, str) and candidate.strip():
+                        discovered_session_id = candidate.strip()
+                elif event.get("type") == "thread.started":
+                    candidate = event.get("thread_id")
+                    if isinstance(candidate, str) and candidate.strip():
+                        discovered_session_id = candidate.strip()
+
+                is_terminal = event.get("type") == "turn.completed" or (
+                    isinstance(event.get("msg"), dict)
+                    and event["msg"].get("type") == "turn.completed"
+                )
+                try:
+                    observation = _usage_observation_from_event(
+                        event, line_number=line_number
+                    )
+                except ValueError:
+                    invalid_usage_lines.append(line_number)
+                    continue
+                if observation is not None:
+                    observations.append(observation)
+                elif is_terminal:
+                    terminal_without_usage_lines.append(line_number)
+
+    if malformed_lines:
+        diagnostics.append({"code": "malformed_jsonl_lines", "count": malformed_lines})
+    if invalid_usage_lines:
+        diagnostics.append(
+            {"code": "invalid_usage_values", "source_lines": invalid_usage_lines}
+        )
+    if terminal_without_usage_lines:
+        diagnostics.append(
+            {
+                "code": "terminal_events_missing_usage",
+                "source_lines": terminal_without_usage_lines,
+            }
+        )
+    if session_id is not None and discovered_session_id not in {None, session_id}:
+        diagnostics.append(
+            {
+                "code": "session_id_mismatch",
+                "expected": session_id,
+                "observed": discovered_session_id,
+            }
+        )
+
+    duplicate_terminal_count = 0
+    unique_observations: list[_InvocationUsageObservation] = []
+    previous: _InvocationUsageObservation | None = None
+    seen_terminal_values: set[tuple[int, ...]] = set()
+    for observation in observations:
+        observation_key = _usage_tuple(observation.usage)
+        if observation.terminal:
+            if observation_key in seen_terminal_values:
+                duplicate_terminal_count += 1
+                continue
+            else:
+                seen_terminal_values.add(observation_key)
+        if previous is not None and observation.usage == previous.usage:
+            if (
+                observation.last_usage is not None
+                and previous.last_usage is not None
+                and observation.last_usage != previous.last_usage
+            ):
+                diagnostics.append(
+                    {
+                        "code": "conflicting_duplicate_cumulative_usage",
+                        "source_line": observation.source_line,
+                    }
+                )
+            previous = observation
+            continue
+        if previous is not None:
+            decreased = observation.usage.decreased_dimensions(previous.usage)
+            if decreased:
+                diagnostics.append(
+                    {
+                        "code": "non_monotonic_cumulative_usage",
+                        "source_line": observation.source_line,
+                        "dimensions": list(decreased),
+                    }
+                )
+        unique_observations.append(observation)
+        previous = observation
+
+    final_high_water = unique_observations[-1].usage if unique_observations else None
+    terminal_values = {
+        _usage_tuple(item.usage) for item in observations if item.terminal
+    }
+    if len(terminal_values) > 1:
+        diagnostics.append(
+            {
+                "code": (
+                    "multiple_terminal_usage_values_with_baseline"
+                    if baseline is not None
+                    else "multiple_terminal_usage_values_without_baseline"
+                ),
+                "count": len(terminal_values),
+            }
+        )
+    fatal_codes = {
+        "invalid_baseline_high_water",
+        "usage_source_missing",
+        "usage_source_zero_byte",
+        "malformed_jsonl_lines",
+        "invalid_usage_values",
+        "terminal_events_missing_usage",
+        "session_id_mismatch",
+        "conflicting_duplicate_cumulative_usage",
+        "non_monotonic_cumulative_usage",
+        "multiple_terminal_usage_values_with_baseline",
+        "multiple_terminal_usage_values_without_baseline",
+    }
+
+    if not observations:
+        diagnostics.append({"code": "no_usage_observations"})
+        fatal_codes.add("no_usage_observations")
+
+    usage: TokenUsage | None = None
+    semantics: UsageSemantics = "unattributable"
+    if not any(item.get("code") in fatal_codes for item in diagnostics):
+        if baseline is not None and final_high_water is not None:
+            decreased = final_high_water.decreased_dimensions(baseline)
+            if decreased:
+                diagnostics.append(
+                    {
+                        "code": "final_usage_below_baseline",
+                        "dimensions": list(decreased),
+                    }
+                )
+            else:
+                usage = final_high_water.delta_from(baseline)
+                semantics = "session_cumulative"
+        elif final_high_water is not None:
+            if terminal_values:
+                usage = final_high_water
+                semantics = "per_invocation"
+            else:
+                token_observations = [
+                    item
+                    for item in unique_observations
+                    if item.source_kind == "event_msg.token_count"
+                ]
+                if not token_observations or any(
+                    item.last_usage is None for item in token_observations
+                ):
+                    diagnostics.append({"code": "missing_per_call_usage_for_fresh_session"})
+                else:
+                    summed_last = TokenUsage.zero()
+                    for item in token_observations:
+                        assert item.last_usage is not None
+                        summed_last = _add_token_usage(summed_last, item.last_usage)
+                    if summed_last != final_high_water:
+                        diagnostics.append(
+                            {
+                                "code": "per_call_usage_does_not_reconcile",
+                                "summed_last_usage": summed_last.to_dict(),
+                                "observed_high_water": final_high_water.to_dict(),
+                            }
+                        )
+                    else:
+                        usage = final_high_water
+                        semantics = "per_invocation"
+
+    if usage is None:
+        semantics = "unattributable"
+
+    return UsageResult(
+        provider="openai_codex",
+        invocation_id=invocation_id,
+        semantics=semantics,
+        usage=usage,
+        observed_high_water=final_high_water,
+        baseline_high_water=baseline,
+        session_id=session_id or discovered_session_id,
+        source_kind="codex_raw_jsonl",
+        source_sha256=source_hash,
+        observation_count=len(observations),
+        unique_observation_count=len(unique_observations),
+        duplicate_terminal_count=duplicate_terminal_count,
+        diagnostics=tuple(diagnostics),
+    )
+
+
+parse_codex_usage_jsonl = parse_codex_invocation_usage
 
 
 def find_codex_session_for_thread(

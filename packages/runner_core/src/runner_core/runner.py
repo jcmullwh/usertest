@@ -284,8 +284,13 @@ class RunRequest:
     evidence_role: str | None = None
     origin_stage: str | None = None
     parent_case_id: str | None = None
+    case_lifecycle_id: str | None = None
     # Exact Codex thread.started.thread_id to continue. Never infer with `--last`.
     codex_resume_session_id: str | None = None
+    # Retained predecessor run used to prove the cumulative token high-water mark
+    # before a Codex session is resumed. Without this evidence, lifecycle
+    # telemetry must withhold the continued invocation's token delta.
+    codex_resume_usage_source_run_dir: Path | None = None
     keep_workspace: bool = False
     preflight_commands: tuple[str, ...] = ()
     preflight_required_commands: tuple[str, ...] = ()
@@ -3384,6 +3389,40 @@ def _maybe_write_token_monitoring_artifacts(run_dir: Path) -> None:
         )
 
 
+def _maybe_write_lifecycle_telemetry(
+    *,
+    run_dir: Path,
+    request: RunRequest,
+    model: str | None,
+) -> None:
+    try:
+        from runner_core.lifecycle_telemetry import write_run_lifecycle_telemetry
+
+        write_run_lifecycle_telemetry(
+            run_dir=run_dir,
+            agent=request.agent,
+            model=model,
+            policy=request.policy,
+            parent_case_id=request.parent_case_id,
+            case_lifecycle_id=request.case_lifecycle_id,
+            origin_stage=request.origin_stage,
+            supervisor_instruction=request.supervisor_instruction,
+            codex_resume_session_id=request.codex_resume_session_id,
+            codex_resume_usage_source_run_dir=request.codex_resume_usage_source_run_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _write_json(
+            run_dir / "lifecycle_telemetry_error.json",
+            {
+                "schema_version": 1,
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "generated_at_utc": _utc_now_z(),
+                "non_fatal": True,
+            },
+        )
+
+
 def _schema_is_task_run_v1(schema_dict: dict[str, Any]) -> bool:
     properties = schema_dict.get("properties")
     properties_dict = properties if isinstance(properties, dict) else {}
@@ -3655,6 +3694,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     controlled_codex_config_overrides: list[str] | None = None
     codex_session_id: str | None = request.codex_resume_session_id
     codex_last_invocation_resumed = False
+    effective_model = (
+        request.model.strip()
+        if isinstance(request.model, str) and request.model.strip()
+        else None
+    )
 
     if request.codex_resume_session_id is not None and request.agent != "codex":
         raise ValueError("codex_resume_session_id is only valid for the codex agent")
@@ -3760,6 +3804,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "requested_persona_id": request.persona_id,
             "requested_mission_id": request.mission_id,
             "requested_codex_resume_session_id": request.codex_resume_session_id,
+            **(
+                {"case_lifecycle_id": request.case_lifecycle_id.strip()}
+                if isinstance(request.case_lifecycle_id, str)
+                and request.case_lifecycle_id.strip()
+                else {}
+            ),
+            "codex_resume_usage_source_run_dir": (
+                str(request.codex_resume_usage_source_run_dir.resolve())
+                if request.codex_resume_usage_source_run_dir is not None
+                else None
+            ),
             **({"model": effective_model} if effective_model is not None else {}),
             **({"model_source": model_source} if model_source is not None else {}),
         }
@@ -8259,3 +8314,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             pass
 
         _maybe_write_token_monitoring_artifacts(run_dir)
+        _maybe_write_lifecycle_telemetry(
+            run_dir=run_dir,
+            request=request,
+            model=effective_model,
+        )

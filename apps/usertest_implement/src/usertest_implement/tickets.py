@@ -411,6 +411,7 @@ def parse_ticket_markdown_metadata(markdown: str) -> dict[str, str]:
         ("fingerprint", "Fingerprint"),
         ("case_id", "Case ID"),
         ("plan_revision_id", "Plan revision ID"),
+        ("case_lifecycle_id", "Case lifecycle ID"),
         ("change_plan_id", "Change plan ID"),
         ("export_kind", "Export kind"),
         ("stage", "Stage"),

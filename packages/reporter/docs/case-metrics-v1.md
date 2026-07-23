@@ -1,0 +1,120 @@
+# Lifecycle case metrics v1
+
+The `lifecycle_case_metrics_v2` report is deterministic over lifecycle event dictionaries. Input
+may be an iterable of mappings or one or more JSONL files. Custom producer values may be at the
+top level, in `context`, or in `attributes`; legacy `data` and `payload` containers are also read.
+
+## Identity and canonical events
+
+The aggregation identity is `case_lifecycle_id`. The stable problem identity is `case_id` and is
+retained separately. Shared work uses `shared_work_id`; `beneficiary_case_lifecycle_ids` attach it
+to each case without duplicating cohort cost. `dependency_ids` enter inclusive closure, while
+`all_in_dependency_ids` add outside/support dependencies only to all-in accounting.
+
+For retained legacy telemetry, the aggregator can recover a reused action work ID when every
+claimant is an action or intervention with its own explicit identity. It deterministically splits
+the work into those concrete identities, expands dependencies on the legacy ID to the recovered
+units, and publishes the exact mapping under
+`normalization.legacy_action_work_unit_splits`. If any non-action work also claims the ID, the
+evidence remains unreconciled rather than being guessed.
+
+Canonical event types are:
+
+- `lifecycle.opened` / `lifecycle.closed`
+- `stage.started` / `stage.completed`
+- `work.started` / `work.created` / `work.completed` / `work.reused`
+- `model.invocation.started` / `model.invocation.completed`
+- `error.occurred` / `error.resolved`
+- `intervention.started` / `intervention.completed`
+- `action.started` / `action.completed`
+- `disposition.reached` / `disposition.verified`
+- `delivery.started` / `delivery.completed`
+- `outcome.verified`
+
+Underscore and producer-specific event aliases are normalized, but final disposition values are
+restricted to six exact categories: `already_addressed`, `non_actionable`, `duplicate`,
+`superseded`, `pr`, and `failed_incomplete`. `pull_request` is a producer alias for `pr`. An open
+lifecycle is not coerced to `failed_incomplete`; a terminal lifecycle with no valid disposition is.
+
+## Cost and time
+
+Token dimensions are `total_tokens`, `input_tokens`, `cached_input_tokens`,
+`uncached_input_tokens`, `output_tokens`, and `reasoning_output_tokens`. Cached input remains part
+of input and total tokens. Conflicting totals or cache dimensions fail reconciliation. A
+supervising-agent work boundary without attributable model usage is unknown, never zero; its known
+subtotal remains available separately.
+
+Canonical time fields are `started_at`, `ended_at`, `active_seconds`, `machine_wait_seconds`, and
+`external_wait_seconds`. Resource time is summed; wall time is the union of work intervals. Gaps
+inside the observed interval span and gaps between lineage opening and final disposition are named
+`unclassified`, never inferred to be idle. The case timing block reports:
+
+- atom to disposition;
+- admission to disposition;
+- lineage to disposition;
+- PR creation to outcome verification;
+- summed active, manual-active, machine-wait, and external-wait time;
+- interval-union wall time and unclassified time.
+
+`resource_time_unknown` withholds active and wait totals for the affected cost view while preserving
+known resource subtotals and interval-union wall time. Manual-action active time is never inferred
+from its start/end interval. Pre-v2 `telemetry exec` events from manual, supervisor, or unknown
+external boundaries are treated as resource-time-unknown because those producers recorded child
+subprocess wall time in `active_seconds`.
+
+`disposition.verified` fixes the PR disposition boundary at verified PR creation.
+`outcome.verified` is later post-disposition accounting and does not extend atom/admission/lineage
+to disposition.
+
+## Errors and manual work
+
+Error clusters use exactly eight resolution modes:
+
+- `self_healed_same_author`
+- `self_healed_controller`
+- `resolved_supervisor`
+- `resolved_human`
+- `resolved_external`
+- `tolerated_nonblocking`
+- `unresolved_terminal`
+- `open`
+
+The first two form the self-healed group. The next three are externally resolved and therefore
+could not self-heal. `open` remains distinct from a terminal unresolved cluster. Interventions and
+manual actions are deduplicated by their IDs and retain actor, milestone, avoidability,
+required-for-progress, timestamps, and active seconds. `supervising_agent` normalizes to the
+supervisor actor.
+
+The measured CLI boundary emits an occurrence for every nonzero process exit or launch exception.
+Repeated failures with the same retry-group and failure signature remain occurrences in one open
+cluster. A successful correlated retry is the required resolution evidence and links its concrete
+work unit through `resolution_work_unit_ids`; controller, supervisor, human, and unknown-external
+origins map to their corresponding resolution modes. An uncorrelated later success does not close
+an error cluster.
+
+## Automation score
+
+`automation_score_v1` uses fixed milestone paths by exact disposition. Scores are percentages from
+0 through 100. Gross automation penalizes every manual milestone. Avoidable automation removes an
+explicitly unavoidable manual milestone from its denominator. A failed/invalid lifecycle scores
+zero; an active lifecycle is pending and has no score.
+
+Certification is withheld when origin telemetry is unknown, an origin or required milestone is
+missing, disposition is unverified, manual avoidability is unclassified, milestone order is
+invalid, or accounting fails reconciliation. The numeric score is retained alongside explicit
+withholding reasons and must not be presented as certified.
+
+## Cohorts and comparisons
+
+`aggregate_cohort_metrics` unions work-unit IDs for nonduplicative direct, inclusive, and all-in
+totals. Every exact disposition includes median, nearest-rank p75, nearest-rank p90, and totals for
+tokens, timing boundaries, resource/interval time, errors, interventions, and manual actions.
+The default cohort contains only lifecycle identities with an explicit `lifecycle.opened` event or
+an authoritative `case_cohort_eligible` attestation (used when historical opening time is unknown).
+Action-only or otherwise orphaned identities remain in `case_metrics.json` for audit and are listed
+under the cohort's excluded-case fields instead of being misreported as active pipeline cases.
+
+`compare_cohorts` emits before/after fingerprints, absolute and percentage deltas, configured
+objective direction, observed direction, completeness, and reconciliation. These are factual
+deltas only; the report expressly makes no causal claim. Percentage delta is absent when the
+baseline is zero rather than manufacturing an infinite percentage.

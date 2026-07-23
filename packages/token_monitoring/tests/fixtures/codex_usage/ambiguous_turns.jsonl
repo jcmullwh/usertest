@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"thread-ambiguous"}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}
+{"type":"turn.completed","usage":{"input_tokens":160,"cached_input_tokens":100,"output_tokens":30,"reasoning_output_tokens":7,"total_tokens":190}}

@@ -14,7 +14,7 @@ from backlog_repo import (
 )
 
 from usertest_implement.cli import main
-from usertest_implement.selection import _select_review_ticket
+from usertest_implement.selection import _case_plan_fingerprint, _select_review_ticket
 from usertest_implement.tickets import (
     build_ticket_index,
     move_ticket_file,
@@ -271,6 +271,35 @@ def test_review_selector_rejects_filename_metadata_fingerprint_mismatch(
             ticket_path=None,
             fingerprint="aaaaaaaaaaaaaaaa",
         )
+
+
+def test_review_selector_preserves_case_lifecycle_id_from_markdown(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "repo"
+    bucket = owner_root / ".agents" / "plans" / "4 - for_review"
+    bucket.mkdir(parents=True)
+    fingerprint = _case_plan_fingerprint(
+        case_id="case:lifecycle",
+        plan_revision_id="plan:lifecycle:v1",
+    )
+    path = bucket / f"20260710_{fingerprint}_lifecycle.md"
+    path.write_text(
+        "# Lifecycle\n"
+        f"- Fingerprint: `{fingerprint}`\n"
+        "- Case ID: `case:lifecycle`\n"
+        "- Plan revision ID: `plan:lifecycle:v1`\n"
+        "- Case lifecycle ID: `case-lifecycle:lifecycle:1`\n",
+        encoding="utf-8",
+    )
+
+    selected = _select_review_ticket(
+        owner_root=owner_root,
+        ticket_path=path,
+        fingerprint=None,
+    )
+
+    assert selected.case_lifecycle_id == "case-lifecycle:lifecycle:1"
 
 
 def test_move_to_complete_requires_durable_outcome_record(tmp_path: Path) -> None:

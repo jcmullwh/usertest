@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -111,6 +113,10 @@ def _write_model_invocation_manifest(
     agent_session_id: str | None = None,
     resumed_from_session_id: str | None = None,
     workspace_dir: Path | None = None,
+    model: str | None = None,
+    invocation_started_at: str | None = None,
+    invocation_ended_at: str | None = None,
+    elapsed_seconds: float | None = None,
 ) -> Path:
     """Persist one prompt invocation, including a verified Codex auth proof."""
 
@@ -154,11 +160,15 @@ def _write_model_invocation_manifest(
         and (not auth_required or not auth_errors)
     )
     manifest: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "invocation_id": uuid4().hex,
         "stage": stage,
         "tag": tag,
         "agent": agent.strip().lower(),
+        "model": model,
+        "invocation_started_at": invocation_started_at,
+        "invocation_ended_at": invocation_ended_at,
+        "elapsed_seconds": elapsed_seconds,
         "agent_session_id": agent_session_id,
         "resumed_from_session_id": resumed_from_session_id,
         "workspace_dir": str(workspace_dir.resolve()) if workspace_dir is not None else None,
@@ -179,6 +189,22 @@ def _write_model_invocation_manifest(
     manifest["manifest_sha256"] = _canonical_sha256(manifest)
     path = model_invocation_manifest_path(out_dir=out_dir, tag=tag)
     _write_json_atomic(path, manifest)
+    try:
+        from backlog_miner.invocation_telemetry import (
+            write_stage_invocation_telemetry,
+        )
+
+        write_stage_invocation_telemetry(manifest_path=path)
+    except Exception as exc:  # noqa: BLE001 - metrics must not gate stage output
+        _write_json_atomic(
+            out_dir / f"{tag}.telemetry_error.json",
+            {
+                "schema_version": 1,
+                "non_fatal": True,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        )
     return path
 
 
@@ -204,7 +230,7 @@ def verify_model_invocation_manifest(
     if raw.get("manifest_sha256") != expected_hash:
         errors.append("model_invocation_manifest_hash_changed")
     schema_version = raw.get("schema_version")
-    if schema_version not in {1, 2}:
+    if schema_version not in {1, 2, 3}:
         errors.append("model_invocation_manifest_schema_invalid")
     if require_verified and raw.get("status") != "verified":
         errors.append("model_invocation_manifest_not_verified")
@@ -254,7 +280,7 @@ def verify_model_invocation_manifest(
         session_raw = raw.get("agent_session_id")
         resumed_raw = raw.get("resumed_from_session_id")
         session_id: str | None = None
-        if schema_version == 2:
+        if schema_version in {2, 3}:
             # A verified author turn must bind a UUID. A failed fresh invocation may
             # terminate before Codex creates an author session; retaining that failed
             # receipt is necessary for session acquisition telemetry and replay.
@@ -309,7 +335,7 @@ def verify_model_invocation_manifest(
                 if isinstance(receipt_payload, dict)
                 else None
             )
-            if schema_version == 2 and (
+            if schema_version in {2, 3} and (
                 not isinstance(activation, dict)
                 or activation.get("agent_session_id") != session_raw
                 or activation.get("resumed_from_session_id") != resumed_raw
@@ -920,6 +946,8 @@ def run_stage_prompt_json_result(
 
     response: str | None = None
     prompt_result: Any | None = None
+    invocation_started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    invocation_started_monotonic = time.monotonic()
     try:
         prompt_result = run_backlog_prompt_result(
             prompt=prompt,
@@ -951,6 +979,12 @@ def run_stage_prompt_json_result(
             agent_session_id=prompt_result.agent_session_id,
             resumed_from_session_id=resume_session_id,
             workspace_dir=prompt_result.workspace_dir,
+            model=model,
+            invocation_started_at=invocation_started_at,
+            invocation_ended_at=datetime.now(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            elapsed_seconds=prompt_result.elapsed_seconds,
         )
         invocation_errors = verify_model_invocation_manifest(invocation_path)
         if invocation_errors:
@@ -976,6 +1010,12 @@ def run_stage_prompt_json_result(
                 if exc.external_wait.get("workspace_dir")
                 else workspace_dir
             ),
+            model=model,
+            invocation_started_at=invocation_started_at,
+            invocation_ended_at=datetime.now(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            elapsed_seconds=max(0.0, time.monotonic() - invocation_started_monotonic),
         )
         raise
     except Exception as exc:
@@ -994,6 +1034,12 @@ def run_stage_prompt_json_result(
             workspace_dir=(
                 prompt_result.workspace_dir if prompt_result is not None else workspace_dir
             ),
+            model=model,
+            invocation_started_at=invocation_started_at,
+            invocation_ended_at=datetime.now(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            elapsed_seconds=max(0.0, time.monotonic() - invocation_started_monotonic),
         )
         raise
 

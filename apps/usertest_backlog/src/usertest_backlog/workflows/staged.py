@@ -29,6 +29,10 @@ from usertest_backlog.commands.export_tickets import (
     _export_artifact_paths,
     _ux_review_path_for_backlog,
 )
+from usertest_backlog.pipeline_metrics import (
+    bind_ticket_lifecycle_ids,
+    record_stage_telemetry,
+)
 from usertest_backlog.shared import *
 from usertest_backlog.workflows.derived_evidence import (
     annotate_operational_failure_candidates,
@@ -1096,6 +1100,17 @@ def _persist_case_registry_stage_lineage(
         strict=True,
     )
     write_case_registry(case_registry_path, updated)
+    try:
+        record_stage_telemetry(
+            case_registry=updated,
+            case_registry_path=case_registry_path,
+            stage_doc=stage_doc,
+        )
+    except Exception as exc:  # noqa: BLE001 - metrics must not gate case disposition
+        print(
+            f"[backlog] WARNING: failed to record lifecycle telemetry: {exc}",
+            file=sys.stderr,
+        )
     return updated
 
 
@@ -7775,6 +7790,21 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 )
             else:
                 stage3_resume_document = completed_stage3_resume_candidate
+
+        def record_stage3_progress(stage_document: dict[str, Any]) -> None:
+            try:
+                record_stage_telemetry(
+                    case_registry=case_registry,
+                    case_registry_path=case_registry_json,
+                    stage_doc=stage_document,
+                )
+            except Exception as exc:  # noqa: BLE001 - metrics cannot gate Stage 3
+                print(
+                    "[stage3] WARNING: failed to record progress telemetry: "
+                    f"{exc}",
+                    file=sys.stderr,
+                )
+
         stage3_doc = _run_repro_research_stage(
             repo_root=repo_root,
             repo_input=resolved_repo_input,
@@ -7796,6 +7826,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             resume_stage_document=stage3_resume_document,
             reused_research_dossiers=reused_research_dossiers,
             resume_upstream_contract=stage3_resume_upstream,
+            progress_observer=record_stage3_progress,
         )
 
         items3_raw = stage3_doc.get("items") if isinstance(stage3_doc, dict) else None
@@ -8576,6 +8607,17 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         if isinstance(tickets_for_atoms_raw, list)
         else []
     )
+    try:
+        tickets_for_atoms = bind_ticket_lifecycle_ids(
+            tickets_for_atoms,
+            case_registry_path=case_registry_json,
+        )
+        summary["tickets"] = tickets_for_atoms
+    except Exception as exc:  # noqa: BLE001 - metrics must not gate case disposition
+        print(
+            f"[backlog] WARNING: failed to bind lifecycle identity to tickets: {exc}",
+            file=sys.stderr,
+        )
     try:
         ticket_lineage_doc = _ticket_lineage_stage_document(
             tickets=tickets_for_atoms,

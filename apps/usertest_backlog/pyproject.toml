@@ -16,6 +16,7 @@ dependencies = [
   "run_artifacts @ file:///${PROJECT_ROOT}/../../packages/run_artifacts",
   "runner_core @ file:///${PROJECT_ROOT}/../../packages/runner_core",
   "sandbox_runner @ file:///${PROJECT_ROOT}/../../packages/sandbox_runner",
+  "token_monitoring @ file:///${PROJECT_ROOT}/../../packages/token_monitoring",
   "triage_engine @ file:///${PROJECT_ROOT}/../../packages/triage_engine",
 ]
 
@@ -54,7 +55,7 @@ known_first_party = ["usertest_backlog"]
 [tool.deptry.per_rule_ignores]
 # These packages are loaded through the composed runner/research runtime and source
 # bootstrap rather than imported statically by this application module.
-DEP002 = ["normalized_events", "sandbox_runner"]
+DEP002 = ["normalized_events", "sandbox_runner", "token-monitoring"]
 
 [tool.ruff]
 target-version = "py311"

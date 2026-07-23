@@ -26,6 +26,7 @@ def _write_export_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
     owner_root = tmp_path / "repo"
     case_id = "case:selection"
     plan_revision_id = "plan:selection:v1"
+    case_lifecycle_id = "case-lifecycle:selection:v1"
     fingerprint = _case_plan_fingerprint(
         case_id=case_id,
         plan_revision_id=plan_revision_id,
@@ -64,6 +65,7 @@ def _write_export_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
         f"- Fingerprint: `{fingerprint}`\n"
         f"- Case ID: `{case_id}`\n"
         f"- Plan revision ID: `{plan_revision_id}`\n"
+        f"- Case lifecycle ID: `{case_lifecycle_id}`\n"
         "- Export kind: `implementation`\n"
         "- Stage: `ready_for_ticket`\n\n"
         "## Implementation plan\n\n"
@@ -95,6 +97,7 @@ def _write_export_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
         "fingerprint": fingerprint,
         "case_id": case_id,
         "plan_revision_id": plan_revision_id,
+        "case_lifecycle_id": case_lifecycle_id,
         "export_kind": "implementation",
         "title": "Ticket",
         "body_markdown": body,
@@ -106,6 +109,7 @@ def _write_export_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
             "fingerprint": fingerprint,
             "case_id": case_id,
             "plan_revision_id": plan_revision_id,
+            "case_lifecycle_id": case_lifecycle_id,
             "stage": "ready_for_ticket",
         },
         "owner_repo": {
@@ -132,6 +136,7 @@ def test_selection_binds_outer_export_to_exact_local_plan(tmp_path: Path) -> Non
     assert selected.idea_path == plan_path.resolve()
     assert selected.case_id == export["case_id"]
     assert selected.plan_revision_id == export["plan_revision_id"]
+    assert selected.case_lifecycle_id == export["case_lifecycle_id"]
     assert selected.ticket_body_sha256 == export["body_sha256"]
     assert selected.local_plan_sha256 == export["local_plan_sha256"]
     assert selected.target_contract_sha256 == export["target_contract_sha256"]
@@ -195,6 +200,19 @@ def test_selection_rejects_stale_or_cross_plan_export(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="does not match the referenced local plan"):
+        _select_ticket_from_export(
+            tickets_export_path=export_path,
+            fingerprint=str(export["fingerprint"]),
+        )
+
+
+def test_selection_rejects_mismatched_lifecycle_provenance(tmp_path: Path) -> None:
+    export_path, _plan_path, export = _write_export_fixture(tmp_path)
+    document = json.loads(export_path.read_text(encoding="utf-8"))
+    document["exports"][0]["case_lifecycle_id"] = "case-lifecycle:wrong"
+    export_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Export lifecycle provenance mismatch"):
         _select_ticket_from_export(
             tickets_export_path=export_path,
             fingerprint=str(export["fingerprint"]),
