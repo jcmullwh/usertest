@@ -61,6 +61,7 @@ def test_backfill_preserves_unknowns_and_structured_clusters(tmp_path: Path) -> 
             encoding="utf-8"
         ).splitlines()
     ]
+    first_event_stream = (output_dir / "lifecycle_events.jsonl").read_bytes()
     assert len([row for row in rows if row["event_type"] == "model.invocation.completed"]) == 2
     invocation_work_ids = {
         row["context"]["work_unit_id"]
@@ -105,6 +106,7 @@ def test_backfill_preserves_unknowns_and_structured_clusters(tmp_path: Path) -> 
         encoding="utf-8"
     ).splitlines()
     assert len(rerun_rows) == len(rows)
+    assert (output_dir / "lifecycle_events.jsonl").read_bytes() == first_event_stream
     assert second["content_sha256"] == manifest["content_sha256"]
 
 

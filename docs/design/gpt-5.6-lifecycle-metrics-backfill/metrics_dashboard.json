@@ -1,4 +1,217 @@
 {
+  "cohort_summary": {
+    "active_case_count": 0,
+    "automation_score_v1": {
+      "avoidable": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "certified_case_count": 0,
+      "gross": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "human_touch_free_rate": null,
+      "pipeline_autonomous_rate": null,
+      "touchless_terminal_yield": null,
+      "withheld_case_count": 5
+    },
+    "case_count": 5,
+    "completeness": {
+      "certified_case_count": 0,
+      "coverage": 0.0,
+      "status": "partial",
+      "withheld_case_count": 5
+    },
+    "disposition_pending_case_count": 0,
+    "dispositioned_case_count": 5,
+    "errors": {
+      "clusters": {
+        "count": 5,
+        "median": 7.0,
+        "p75": 14.0,
+        "p90": 37.0,
+        "total": 64.0
+      },
+      "externally_resolved_clusters": 29,
+      "occurrences": 64,
+      "self_healed_clusters": 12,
+      "unresolved_terminal_clusters": 0
+    },
+    "interventions": {
+      "supervising_agent": {
+        "count": 5,
+        "median": 11.0,
+        "p75": 12.0,
+        "p90": 29.0,
+        "total": 54.0
+      }
+    },
+    "manual_actions": {
+      "actions": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "active_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "avoidable": null,
+      "known_action_count": 54,
+      "known_required_for_progress": 54,
+      "measurement_administration": null,
+      "passive_observations": null,
+      "policy_mandated": null,
+      "required_for_progress": null,
+      "telemetry_complete": false,
+      "unavoidable": null,
+      "unclassified": null
+    },
+    "reconciliation_ok": false,
+    "terminal_case_count": 5,
+    "timing": {
+      "approval_wait_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "ci_wait_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "external_wait_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "lifecycle_to_disposition_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "lineage_to_disposition_seconds": {
+        "count": 4,
+        "median": 21471.6768545,
+        "p75": 39136.156234,
+        "p90": 73704.0,
+        "total": 119790.58731
+      },
+      "manual_active_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "pipeline_active_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "pr_creation_seconds": {
+        "count": null,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "provider_wait_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "queue_wait_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "raw_to_disposition_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "unclassified_wall_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "verified_outcome_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "worker_resource_seconds": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      }
+    },
+    "tokens": {
+      "all_in": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "direct": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "inclusive": {
+        "count": 0,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      },
+      "nonduplicative": {
+        "count": null,
+        "median": null,
+        "p75": null,
+        "p90": null,
+        "total": null
+      }
+    }
+  },
   "comparisons": [],
   "dispositions": [
     {
@@ -68,8 +281,16 @@
           "p90": null,
           "total": null
         },
+        "avoidable": null,
+        "known_action_count": 29,
+        "known_required_for_progress": 29,
+        "measurement_administration": null,
+        "passive_observations": null,
         "policy_mandated": null,
-        "required_for_progress": null
+        "required_for_progress": null,
+        "telemetry_complete": false,
+        "unavoidable": null,
+        "unclassified": null
       },
       "timing": {
         "approval_wait_seconds": {
@@ -94,11 +315,11 @@
           "total": null
         },
         "lifecycle_to_disposition_seconds": {
-          "count": 2,
-          "median": 21471.6768545,
-          "p75": 39136.156234,
-          "p90": 39136.156234,
-          "total": 42943.353709
+          "count": 0,
+          "median": null,
+          "p75": null,
+          "p90": null,
+          "total": null
         },
         "lineage_to_disposition_seconds": {
           "count": 2,
@@ -143,28 +364,28 @@
           "total": null
         },
         "raw_to_disposition_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "unclassified_wall_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "verified_outcome_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "worker_resource_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
@@ -269,8 +490,16 @@
           "p90": null,
           "total": null
         },
+        "avoidable": null,
+        "known_action_count": 2,
+        "known_required_for_progress": 2,
+        "measurement_administration": null,
+        "passive_observations": null,
         "policy_mandated": null,
-        "required_for_progress": null
+        "required_for_progress": null,
+        "telemetry_complete": false,
+        "unavoidable": null,
+        "unclassified": null
       },
       "timing": {
         "approval_wait_seconds": {
@@ -295,11 +524,11 @@
           "total": null
         },
         "lifecycle_to_disposition_seconds": {
-          "count": 1,
-          "median": 3143.233601,
-          "p75": 3143.233601,
-          "p90": 3143.233601,
-          "total": 3143.233601
+          "count": 0,
+          "median": null,
+          "p75": null,
+          "p90": null,
+          "total": null
         },
         "lineage_to_disposition_seconds": {
           "count": 1,
@@ -344,28 +573,28 @@
           "total": null
         },
         "raw_to_disposition_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "unclassified_wall_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "verified_outcome_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "worker_resource_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
@@ -470,8 +699,16 @@
           "p90": null,
           "total": null
         },
+        "avoidable": null,
+        "known_action_count": null,
+        "known_required_for_progress": null,
+        "measurement_administration": null,
+        "passive_observations": null,
         "policy_mandated": null,
-        "required_for_progress": null
+        "required_for_progress": null,
+        "telemetry_complete": null,
+        "unavoidable": null,
+        "unclassified": null
       },
       "timing": {
         "approval_wait_seconds": {
@@ -671,8 +908,16 @@
           "p90": null,
           "total": null
         },
+        "avoidable": null,
+        "known_action_count": null,
+        "known_required_for_progress": null,
+        "measurement_administration": null,
+        "passive_observations": null,
         "policy_mandated": null,
-        "required_for_progress": null
+        "required_for_progress": null,
+        "telemetry_complete": null,
+        "unavoidable": null,
+        "unclassified": null
       },
       "timing": {
         "approval_wait_seconds": {
@@ -872,8 +1117,16 @@
           "p90": null,
           "total": null
         },
+        "avoidable": null,
+        "known_action_count": 23,
+        "known_required_for_progress": 23,
+        "measurement_administration": null,
+        "passive_observations": null,
         "policy_mandated": null,
-        "required_for_progress": null
+        "required_for_progress": null,
+        "telemetry_complete": false,
+        "unavoidable": null,
+        "unclassified": null
       },
       "timing": {
         "approval_wait_seconds": {
@@ -898,11 +1151,11 @@
           "total": null
         },
         "lifecycle_to_disposition_seconds": {
-          "count": 1,
-          "median": 73704.0,
-          "p75": 73704.0,
-          "p90": 73704.0,
-          "total": 73704.0
+          "count": 0,
+          "median": null,
+          "p75": null,
+          "p90": null,
+          "total": null
         },
         "lineage_to_disposition_seconds": {
           "count": 1,
@@ -947,28 +1200,28 @@
           "total": null
         },
         "raw_to_disposition_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "unclassified_wall_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "verified_outcome_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "worker_resource_seconds": {
-          "count": null,
+          "count": 0,
           "median": null,
           "p75": null,
           "p90": null,
@@ -1073,8 +1326,16 @@
           "p90": null,
           "total": null
         },
+        "avoidable": null,
+        "known_action_count": null,
+        "known_required_for_progress": null,
+        "measurement_administration": null,
+        "passive_observations": null,
         "policy_mandated": null,
-        "required_for_progress": null
+        "required_for_progress": null,
+        "telemetry_complete": null,
+        "unavoidable": null,
+        "unclassified": null
       },
       "timing": {
         "approval_wait_seconds": {
@@ -1217,11 +1478,12 @@
   "source": {
     "cohort_id": "gpt-5.6-approximate-window",
     "comparison_sha256s": [],
-    "generated_at": null,
-    "metric_version": "lifecycle_case_metrics_v1",
+    "generated_at": "2026-07-21T19:05:32.103849Z",
+    "metric_version": "lifecycle_case_metrics_v2",
     "mixed_version_lifecycle": false,
+    "renderer_sha256": "201cd6fc48c8e016c3fee8fa453e15b348cf3cb8d8850d9abec32ce38a1230ca",
     "schema_version": 1,
-    "sha256": "d5e6c271c1987ccda71648cb82d2927b459b41cb660e5cab770ed79f9e1bfe9a",
+    "sha256": "1a9aff8c78d9292fd740a9942ddc0cf6e7427dd3a96e3c8980012d58a2f6d375",
     "version_warning_codes": [
       "missing_system_fingerprints"
     ]

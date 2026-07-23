@@ -12,7 +12,7 @@
     "sha256": "459048c6cd401401794afb7fa166d9274731fe0303e4f2f41991d68ac22469b4",
     "schema_version": 3
   },
-  "event_log_path": "I:\\code\\usertest_backlog_depth\\docs\\design\\gpt-5.6-lifecycle-metrics-backfill\\lifecycle_events.jsonl",
+  "event_log_path": "lifecycle_events.jsonl",
   "selected_runs": [
     {
       "run_id": "controlled-stage3-cdd666f",
@@ -39,7 +39,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -55,7 +55,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -71,7 +71,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -87,7 +87,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "artifact_derived"
       },
@@ -105,7 +105,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -121,7 +121,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -137,7 +137,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -153,7 +153,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "artifact_derived"
       },
@@ -171,7 +171,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -187,7 +187,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "artifact_derived"
       },
@@ -205,7 +205,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -221,7 +221,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -237,7 +237,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -253,7 +253,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -269,7 +269,7 @@
         "self_healed_errors": "unknown",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "unknown"
       },
@@ -285,7 +285,7 @@
         "self_healed_errors": "operator_attested",
         "interventions": "operator_attested",
         "tokens": "unknown",
-        "manual_actions": "unknown",
+        "manual_actions": "operator_attested_minimum",
         "origin": "unknown",
         "disposition": "artifact_derived"
       },
@@ -327,5 +327,5 @@
     "eligible": false,
     "reason": "legacy manual origin, token, action, and disposition evidence is incomplete"
   },
-  "content_sha256": "5977efa1e6479124a67adf85daec4d66b03ebd8d012b3691a8dfbfc366166510"
+  "content_sha256": "036b97de92c10187a5510799a3db71bb751e90fbfcdf4161474ec37bc54ec484"
 }

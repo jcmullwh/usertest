@@ -11,6 +11,10 @@
     h1, h2 { letter-spacing: -.02em; }
     .meta { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; color: #aebbc8; }
     .notice { border-left: .3rem solid #65a7ff; padding: .75rem 1rem; background: #17212b; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .75rem; margin: 1rem 0 2rem; }
+    .card { border: 1px solid #31404d; border-radius: .6rem; padding: .9rem 1rem; background: #151d24; }
+    .card .value { display: block; margin-top: .35rem; font-size: 1.55rem; color: #b8d7ff; }
+    .card .label { color: #aebbc8; font-size: .82rem; }
     .table-wrap { overflow-x: auto; border: 1px solid #31404d; border-radius: .6rem; }
     table { border-collapse: collapse; width: 100%; min-width: 1500px; font-size: .86rem; }
     th, td { border-bottom: 1px solid #2b3945; padding: .65rem .7rem; text-align: left; vertical-align: top; }
@@ -27,12 +31,28 @@
   <h1>Pipeline lifecycle metrics</h1>
   <div class="meta">
     <span>Cohort: <code>gpt-5.6-approximate-window</code></span>
-    <span>Metric version: <code>lifecycle_case_metrics_v1</code></span>
-    <span>Generated: <code>unknown</code></span>
-    <span>Source: <code>d5e6c271c1987ccda71648cb82d2927b459b41cb660e5cab770ed79f9e1bfe9a</code></span>
+    <span>Metric version: <code>lifecycle_case_metrics_v2</code></span>
+    <span>Telemetry through: <code>2026-07-21T19:05:32.103849Z</code></span>
+    <span>Source: <code>1a9aff8c78d9292fd740a9942ddc0cf6e7427dd3a96e3c8980012d58a2f6d375</code></span>
   </div>
   <p class="notice">Observed measurements only. Missing evidence is shown as <strong>unknown</strong>; no value is estimated as zero.</p>
   <p class="notice">Version boundary warning: missing_system_fingerprints. Compare like-for-like fingerprint cohorts.</p>
+
+  <h2>All observed cases</h2>
+  <p>Current burden includes active and disposition-pending lifecycles; it is not hidden until closure.</p>
+  <div class="cards">
+    <div class="card"><span class="label">Cases</span><span class="value">5</span></div>
+    <div class="card"><span class="label">Active lifecycles</span><span class="value">0</span></div>
+    <div class="card"><span class="label">Disposition pending</span><span class="value">0</span></div>
+    <div class="card"><span class="label">Terminal lifecycles</span><span class="value">5</span></div>
+    <div class="card"><span class="label">Error clusters</span><span class="value">64</span></div>
+    <div class="card"><span class="label">Error occurrences</span><span class="value">64</span></div>
+    <div class="card"><span class="label">Supervisor interventions</span><span class="value">54</span></div>
+    <div class="card"><span class="label">Manual actions</span><span class="value">known minimum 54</span></div>
+    <div class="card"><span class="label">Required manual actions</span><span class="value">known minimum 54</span></div>
+    <div class="card"><span class="label">Automation cases withheld</span><span class="value">5</span></div>
+    <div class="card"><span class="label">Accounting reconciliation</span><span class="value">incomplete</span></div>
+  </div>
 
   <h2>Metrics by final disposition</h2>
   <div class="table-wrap">
@@ -45,7 +65,7 @@
         <th>Errors</th><th>Supervisor interventions</th><th>Manual actions</th>
         <th>Automation gross</th><th>Automation avoidable</th><th>Telemetry completeness</th>
       </tr></thead>
-      <tbody><tr><th scope="row">Already Addressed</th><td>2</td><td>unknown</td><td>median 21,471.7 s / p90 39,136.2 s</td><td>median 21,471.7 s / p90 39,136.2 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 39; occurrences 39; self-healed 6; external 27; unresolved 0</td><td>29</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Non Actionable</th><td>1</td><td>unknown</td><td>median 3,143.2 s / p90 3,143.2 s</td><td>median 3,143.2 s / p90 3,143.2 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 4; occurrences 4; self-healed 2; external 2; unresolved 0</td><td>2</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Duplicate</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr><tr><th scope="row">Superseded</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr><tr><th scope="row">PR</th><td>2</td><td>unknown</td><td>median 73,704.0 s / p90 73,704.0 s</td><td>median 73,704.0 s / p90 73,704.0 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 21; occurrences 21; self-healed 4; external 0; unresolved 0</td><td>23</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Failed Incomplete</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr></tbody>
+      <tbody><tr><th scope="row">Already Addressed</th><td>2</td><td>unknown</td><td>unknown</td><td>median 21,471.7 s / p90 39,136.2 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 39; occurrences 39; self-healed 6; external 27; unresolved 0</td><td>29</td><td>total known minimum 29; required known minimum 29; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Non Actionable</th><td>1</td><td>unknown</td><td>unknown</td><td>median 3,143.2 s / p90 3,143.2 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 4; occurrences 4; self-healed 2; external 2; unresolved 0</td><td>2</td><td>total known minimum 2; required known minimum 2; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Duplicate</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr><tr><th scope="row">Superseded</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr><tr><th scope="row">PR</th><td>2</td><td>unknown</td><td>unknown</td><td>median 73,704.0 s / p90 73,704.0 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 21; occurrences 21; self-healed 4; external 0; unresolved 0</td><td>23</td><td>total known minimum 23; required known minimum 23; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Failed Incomplete</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr></tbody>
     </table>
   </div>
 

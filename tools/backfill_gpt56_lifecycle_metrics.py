@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -482,6 +483,14 @@ def backfill_dashboard(
             }
         )
 
+    retained_events = [
+        replace(
+            event,
+            event_id=_stable_id("legacy-event", event.idempotency_key),
+            recorded_at=event.occurred_at,
+        )
+        for event in retained_events
+    ]
     append_lifecycle_events(events_path, retained_events)
     events_path.replace(final_events_path)
     source_digest = sha256(dashboard_path.read_bytes()).hexdigest()
@@ -499,7 +508,7 @@ def backfill_dashboard(
             "sha256": source_digest,
             "schema_version": 3,
         },
-        "event_log_path": str(final_events_path.resolve()),
+        "event_log_path": final_events_path.name,
         "selected_runs": selected,
         "skipped_runs": skipped,
         "certification": {
