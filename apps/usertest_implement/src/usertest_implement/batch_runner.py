@@ -1870,8 +1870,16 @@ def _run_resume_process(
     effective_agent = "codex" if exact_codex_resume else worker.agent
     effective_model = worker.model
     if exact_codex_resume:
+        author_source_run_dir = _clean_str(
+            implementation_author.get("author_source_run_dir")
+        )
+        target_ref_run_dir = (
+            Path(author_source_run_dir).expanduser()
+            if author_source_run_dir is not None
+            else candidate.resume_state_path.parent
+        )
         original_target_ref = _read_json_if_exists(
-            candidate.resume_state_path.parent / "target_ref.json"
+            target_ref_run_dir / "target_ref.json"
         )
         effective_model = (
             _clean_str(original_target_ref.get("model"))

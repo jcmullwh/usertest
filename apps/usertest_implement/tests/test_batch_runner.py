@@ -446,6 +446,80 @@ def test_exact_codex_resume_ignores_incompatible_worker_agent_and_model(
     assert command[command.index("--model") + 1] == "gpt-5.6-sol"
 
 
+def test_exact_codex_resume_uses_adopted_author_source_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_path = tmp_path / "runs" / "adopted" / "ticket_resume_state.json"
+    author_source_run = tmp_path / "runs" / "original"
+    _write_json(
+        state_path,
+        {
+            "implementation_author": {
+                "agent": "codex",
+                "session_id": "019f8ca0-a467-7870-8959-7636b10c0bbb",
+                "exact_session_available": True,
+                "author_source_run_dir": str(author_source_run),
+            }
+        },
+    )
+    _write_json(
+        state_path.parent / "target_ref.json",
+        {"model_invoked": False, "acquire_mode": "existing_handoff_adoption"},
+    )
+    _write_json(author_source_run / "target_ref.json", {"model": "gpt-5.6-sol"})
+    captured: dict[str, object] = {}
+
+    class _FinishedProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner.subprocess.Popen",
+        _FinishedProcess,
+    )
+    candidate = BatchCandidate(
+        source_name="resume_ready",
+        export_path=tmp_path / "ledger.yaml",
+        fingerprint="adadadadadadadad",
+        severity="high",
+        title="Resume adopted exact Codex session",
+        owner_root=tmp_path,
+        ticket_path=tmp_path / "ticket.md",
+        execution_domain="runner_core",
+        execution_conflict_keys=("ticket:adadadadadadadad",),
+        resume_state_path=state_path,
+        resume_lifecycle_state="ci_failed_resume_ready",
+    )
+
+    _run_resume_process(
+        repo_root=tmp_path,
+        implement_python=tmp_path / "python.exe",
+        batch_dir_path=tmp_path / "batch",
+        candidate=candidate,
+        repo_input=str(tmp_path),
+        worker=WorkerTemplate(worker_index=2, agent="claude", model="claude-opus"),
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        resume_ledger_path=tmp_path / "ledger.yaml",
+        ticket_timeout_seconds=None,
+        exec_backend="local",
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--agent") + 1] == "codex"
+    assert command[command.index("--model") + 1] == "gpt-5.6-sol"
+
+
 def _write_terminal_source_artifacts(
     *,
     code_root: Path,
