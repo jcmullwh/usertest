@@ -1887,12 +1887,12 @@ def _run_ticket_process(
 
 
 
-def _exact_codex_resume_model(candidate: BatchCandidate) -> str | None:
-    """Return the model forced by an exact Codex resume, if applicable."""
+def _exact_codex_resume_model_from_state_path(state_path: Path | None) -> str | None:
+    """Return the model forced by an exact Codex resume state, if applicable."""
 
-    if candidate.resume_state_path is None:
+    if state_path is None:
         return None
-    resume_state = _read_json_if_exists(candidate.resume_state_path)
+    resume_state = _read_json_if_exists(state_path)
     if not _is_exact_codex_session_resume(resume_state):
         return None
     implementation_author = (
@@ -1905,7 +1905,7 @@ def _exact_codex_resume_model(candidate: BatchCandidate) -> str | None:
     target_ref_run_dir = (
         Path(author_source_run_dir).expanduser()
         if author_source_run_dir is not None
-        else candidate.resume_state_path.parent
+        else state_path.parent
     )
     original_target_ref = _read_json_if_exists(target_ref_run_dir / "target_ref.json")
     return (
@@ -1913,6 +1913,12 @@ def _exact_codex_resume_model(candidate: BatchCandidate) -> str | None:
         if isinstance(original_target_ref, dict)
         else None
     ) or LATEST_CODEX_MODEL
+
+
+def _exact_codex_resume_model(candidate: BatchCandidate) -> str | None:
+    """Return the model forced by an exact Codex resume candidate, if applicable."""
+
+    return _exact_codex_resume_model_from_state_path(candidate.resume_state_path)
 
 
 def _run_resume_process(
@@ -2207,7 +2213,7 @@ def _required_exact_resume_roles(
 ) -> list[dict[str, str]]:
     """Return the exact provider/model roles forced by schedulable resumes."""
 
-    required: list[dict[str, str]] = []
+    required: set[tuple[str, str]] = set()
     candidates = _collect_resume_ready_candidates(
         repo_root=repo_root,
         ledger_path=ledger_path,
@@ -2217,14 +2223,53 @@ def _required_exact_resume_roles(
     for candidate in candidates:
         model = _exact_codex_resume_model(candidate)
         if model is not None:
-            required.append(
-                {
-                    "ticket_key": candidate.ticket_key,
-                    "agent": "codex",
-                    "model": model,
-                }
-            )
-    return required
+            required.add(("codex", model))
+    return [
+        {"agent": agent, "model": model}
+        for agent, model in sorted(required)
+    ]
+
+
+def _exact_resume_roles_for_lifecycles(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    lifecycle_states: set[str],
+) -> list[dict[str, str]]:
+    """Return distinct exact-resume roles reachable for selected lifecycle states."""
+
+    required: set[tuple[str, str]] = set()
+    actions = load_ledger(ledger_path).get("actions")
+    if not isinstance(actions, dict):
+        return []
+    for entry in actions.values():
+        if not isinstance(entry, dict):
+            continue
+        state_path_raw = _clean_str(entry.get("last_resume_state_path"))
+        if state_path_raw is None:
+            continue
+        state_path = Path(state_path_raw)
+        if not state_path.is_absolute():
+            state_path = (repo_root / state_path).resolve()
+        latest = _latest_resume_state_from_ledger_path(
+            repo_root=repo_root,
+            state_path=state_path,
+        )
+        if latest is None:
+            continue
+        latest_path, resume_state, _attempt_count = latest
+        lifecycle = _clean_str(resume_state.get("lifecycle_state")) or _clean_str(
+            entry.get("last_resume_lifecycle_state")
+        )
+        if lifecycle not in lifecycle_states:
+            continue
+        model = _exact_codex_resume_model_from_state_path(latest_path)
+        if model is not None:
+            required.add(("codex", model))
+    return [
+        {"agent": agent, "model": model}
+        for agent, model in sorted(required)
+    ]
 
 
 def _required_resume_agents(

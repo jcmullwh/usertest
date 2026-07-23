@@ -74,14 +74,14 @@ def test_continuous_controller_propagates_verified_versioned_context(
     )
     ticket = tmp_path / "plans" / "resume.md"
     ticket.parent.mkdir(parents=True)
-    ticket.write_text("# Exact resume\n\n- Severity: `high`\n", encoding="utf-8")
+    ticket.write_text("# Exact resume\n\n- Severity: `low`\n", encoding="utf-8")
     resume_run = tmp_path / "runs" / "prior"
     resume_run.mkdir(parents=True)
     resume_state = resume_run / "ticket_resume_state.json"
     resume_state.write_text(
         json.dumps(
             {
-                "lifecycle_state": "ci_failed_resume_ready",
+                "lifecycle_state": "review_changes_requested",
                 "ticket": {"path": str(ticket), "title": "Exact resume"},
                 "implementation_author": {
                     "agent": "codex",
@@ -101,11 +101,14 @@ def test_continuous_controller_propagates_verified_versioned_context(
         "schema_version: 1\n"
         "actions:\n"
         "  abcdef0123456789:\n"
+        f"    last_resume_state_path: {resume_state.as_posix()}\n"
+        "  0123456789abcdef:\n"
         f"    last_resume_state_path: {resume_state.as_posix()}\n",
         encoding="utf-8",
     )
     ctx = SimpleNamespace(
         repo_root=tmp_path,
+        owner_root=tmp_path,
         settings_path=settings,
         batch_config_path=batch,
         backlog_model="gpt-5.6-sol",
@@ -134,23 +137,13 @@ def test_continuous_controller_propagates_verified_versioned_context(
         {"model": "gpt-5.6-sol", "worker_index": 1},
     ]
     assert models["batch_post_implementation_review"] == "gpt-5.6-sol"
-    assert models["batch_exact_session_resumes"] == [
-        {
-            "model": "gpt-exact-resume",
-            "ticket_key": f"{tmp_path.resolve().as_posix().lower()}::abcdef0123456789",
-        }
-    ]
+    assert models["exact_session_resumes"] == ["gpt-exact-resume"]
     assert providers["backlog"] == "codex"
     assert providers["batch_workers"] == [
         {"agent": "codex", "worker_index": 1},
     ]
     assert providers["batch_post_implementation_review"] == "codex"
-    assert providers["batch_exact_session_resumes"] == [
-        {
-            "agent": "codex",
-            "ticket_key": f"{tmp_path.resolve().as_posix().lower()}::abcdef0123456789",
-        }
-    ]
+    assert providers["exact_session_resumes"] == ["codex"]
 
     first_cycle_id = context.cycle_id
     first_session_id = context.session_id
@@ -188,6 +181,64 @@ def test_controller_fingerprint_stays_incomplete_when_batch_roster_is_unresolved
 
     assert "models" not in context.system_fingerprint
     assert "providers" not in context.system_fingerprint
+
+
+def test_reconciliation_preserves_exact_codex_author_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "runs" / "prior"
+    run_dir.mkdir(parents=True)
+    state_path = run_dir / "ticket_resume_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "implementation_author": {
+                    "agent": "codex",
+                    "session_id": "019f8ca0-a467-7870-8959-7636b10c0ddd",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"model": "gpt-exact-resume"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        tool,
+        "_load_ledger",
+        lambda _ctx: {
+            "actions": {
+                "abcdef0123456789": {
+                    "last_run_dir": str(run_dir),
+                    "last_resume_state_path": str(state_path),
+                    "last_resume_lifecycle_state": "review_changes_requested",
+                }
+            }
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def run_logged(_ctx: object, argv: list[str], **_kwargs: object) -> object:
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(tool, "_run_logged", run_logged)
+    ctx = SimpleNamespace(
+        owner_root=tmp_path,
+        repo_root=tmp_path,
+        implement_python=Path("python"),
+        repo_input=str(tmp_path),
+        implementation_agent="claude",
+        implementation_model="claude-sonnet",
+    )
+
+    assert tool._resume_review_changes_requested(ctx, "abcdef0123456789") is True
+    command = captured["argv"]
+    assert isinstance(command, list)
+    assert command[command.index("--agent") + 1] == "codex"
+    assert command[command.index("--model") + 1] == "gpt-exact-resume"
 
 
 def test_continuous_pass_invokes_only_observational_refresh(

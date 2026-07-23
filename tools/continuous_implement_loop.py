@@ -34,6 +34,8 @@ from usertest_implement.batch_state import latest_batch_dir, load_json  # noqa: 
 from usertest_implement.batch_runner import (  # noqa: E402
     _build_phases,
     _configured_owner_root,
+    _exact_codex_resume_model_from_state_path,
+    _exact_resume_roles_for_lifecycles,
     _required_exact_resume_roles,
     _resume_ledger_path,
 )
@@ -248,12 +250,30 @@ def _effective_execution_fingerprint(
     try:
         owner_root = _configured_owner_root(code_root=ctx.repo_root, config=batch_doc)
         phases = _build_phases(batch_doc, data_root=owner_root)
-        exact_resume_roles = _required_exact_resume_roles(
+        batch_exact_resume_roles = _required_exact_resume_roles(
             repo_root=ctx.repo_root,
             ledger_path=_resume_ledger_path(owner_root=owner_root, defaults=defaults),
             severities={severity for phase in phases for severity in phase.severities},
         )
-    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        reconciliation_exact_resume_roles = _exact_resume_roles_for_lifecycles(
+            repo_root=ctx.owner_root,
+            ledger_path=(
+                ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+            ),
+            lifecycle_states={
+                "awaiting_review",
+                "ci_failed",
+                "ci_failed_resume_ready",
+                "merge_ready",
+                "review_changes_requested",
+                "review_failed_resume_ready",
+            },
+        )
+        exact_resume_roles = {
+            (role["agent"], role["model"])
+            for role in (*batch_exact_resume_roles, *reconciliation_exact_resume_roles)
+        }
+    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
         return None
 
     models: dict[str, Any] = {
@@ -261,19 +281,15 @@ def _effective_execution_fingerprint(
     }
     models["batch_workers"] = worker_models
     models["batch_post_implementation_review"] = review_model
-    models["batch_exact_session_resumes"] = [
-        {"ticket_key": role["ticket_key"], "model": role["model"]}
-        for role in exact_resume_roles
-    ]
+    models["exact_session_resumes"] = sorted({model for _agent, model in exact_resume_roles})
     providers: dict[str, Any] = {
         role: agent for role, (agent, _model) in resolved_roles.items()
     }
     providers["batch_workers"] = worker_providers
     providers["batch_post_implementation_review"] = review_agent
-    providers["batch_exact_session_resumes"] = [
-        {"ticket_key": role["ticket_key"], "agent": role["agent"]}
-        for role in exact_resume_roles
-    ]
+    providers["exact_session_resumes"] = sorted(
+        {agent for agent, _model in exact_resume_roles}
+    )
     return models, providers, settings_path
 
 
@@ -996,6 +1012,18 @@ def _resume_review_changes_requested(
         or lifecycle not in accepted_lifecycles
     ):
         return False
+    state_path_raw = entry.get("last_resume_state_path")
+    if isinstance(state_path_raw, str) and state_path_raw.strip():
+        state_path = Path(state_path_raw)
+        if not state_path.is_absolute():
+            state_path = (ctx.owner_root / state_path).resolve()
+    else:
+        state_path = Path(run_dir_raw) / "ticket_resume_state.json"
+    exact_codex_model = _exact_codex_resume_model_from_state_path(state_path)
+    effective_agent = "codex" if exact_codex_model is not None else ctx.implementation_agent
+    effective_model = (
+        exact_codex_model if exact_codex_model is not None else ctx.implementation_model
+    )
     argv = [
         str(ctx.implement_python),
         "-m",
@@ -1008,14 +1036,14 @@ def _resume_review_changes_requested(
         "--repo",
         ctx.repo_input,
         "--agent",
-        ctx.implementation_agent,
+        effective_agent,
+        "--model",
+        effective_model or "",
         "--correction-origin",
         "system_self_correction",
         "--ledger",
         str(ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"),
     ]
-    if ctx.implementation_model:
-        argv.extend(["--model", ctx.implementation_model])
     for instruction in supervisor_instructions or []:
         if instruction.strip():
             argv.extend(["--supervisor-instruction", instruction.strip()])
