@@ -2242,13 +2242,32 @@ def _exact_resume_roles_for_lifecycles(
     actions = load_ledger(ledger_path).get("actions")
     if not isinstance(actions, dict):
         return []
-    for entry in actions.values():
-        if not isinstance(entry, dict):
+    plans_root = repo_root / ".agents" / "plans"
+    for fingerprint, entry in actions.items():
+        if not isinstance(fingerprint, str) or not isinstance(entry, dict):
+            continue
+        pr_url = _clean_str(entry.get("last_pr_url")) or _clean_str(
+            entry.get("last_review_pr_url")
+        )
+        if pr_url is None:
+            continue
+        ticket_matches = sorted(plans_root.glob(f"*/*{fingerprint}*.md"))
+        if not ticket_matches:
+            continue
+        try:
+            ticket_markdown = ticket_matches[0].read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if not is_generated_backlog_ticket(ticket_markdown):
             continue
         state_path_raw = _clean_str(entry.get("last_resume_state_path"))
         if state_path_raw is None:
-            continue
-        state_path = Path(state_path_raw)
+            run_dir_raw = _clean_str(entry.get("last_run_dir"))
+            if run_dir_raw is None:
+                continue
+            state_path = Path(run_dir_raw) / RESUME_STATE_ARTIFACT_NAME
+        else:
+            state_path = Path(state_path_raw)
         if not state_path.is_absolute():
             state_path = (repo_root / state_path).resolve()
         latest = _latest_resume_state_from_ledger_path(
