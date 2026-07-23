@@ -790,6 +790,29 @@ def test_docker_resource_plan_is_rendered_to_batch_state_and_artifacts(tmp_path:
     assert persisted_plan == plan
 
 
+def test_batch_summary_distinguishes_local_completion_from_terminal_completion(
+    tmp_path: Path,
+) -> None:
+    batch_dir = tmp_path / "batch"
+    state = build_initial_state(
+        batch_id="20260709T000000Z",
+        batch_commit="abc123",
+        batch_branch="dev",
+        base_ci_run_url=None,
+        workers=[],
+    )
+    state["completed"] = [
+        {"ticket_key": "local", "lifecycle_state": "implemented_local"},
+        {"ticket_key": "merged", "lifecycle_state": "complete"},
+    ]
+
+    persist_state(batch_dir, state)
+
+    summary = json.loads(summary_path(batch_dir).read_text(encoding="utf-8"))
+    assert summary["completed_count"] == 2
+    assert summary["complete_count"] == 1
+
+
 def test_initial_batch_state_retains_detached_checkout_mode() -> None:
     state = build_initial_state(
         batch_id="20260709T000000Z",
