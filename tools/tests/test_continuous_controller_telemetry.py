@@ -7,7 +7,10 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from run_artifacts.lifecycle_events import deserialize_lifecycle_context
+from run_artifacts.lifecycle_events import (
+    LIFECYCLE_CONTEXT_FILE_ENV,
+    deserialize_lifecycle_context,
+)
 
 
 def _load_tool() -> ModuleType:
@@ -23,7 +26,9 @@ def _load_tool() -> ModuleType:
 tool = _load_tool()
 
 
-def test_continuous_controller_propagates_verified_versioned_context(tmp_path: Path) -> None:
+def test_continuous_controller_propagates_verified_versioned_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     prompts = tmp_path / "configs" / "backlog_prompts"
     prompts.mkdir(parents=True)
     (prompts / "stage.md").write_text("prompt\n", encoding="utf-8")
@@ -75,10 +80,12 @@ def test_continuous_controller_propagates_verified_versioned_context(tmp_path: P
 
     context = tool._build_controller_context(ctx)
     ctx.controller_context = context
+    monkeypatch.setenv(LIFECYCLE_CONTEXT_FILE_ENV, str(tmp_path / "stale-context.json"))
     environment = tool._controller_environment(ctx)
     decoded = deserialize_lifecycle_context(environment["USERTEST_LIFECYCLE_CONTEXT"])
 
     assert decoded.system_fingerprint["controller_context_verified"] == "true"
+    assert LIFECYCLE_CONTEXT_FILE_ENV not in environment
     assert decoded.system_fingerprint["score_version"] == "automation_score_v1"
     assert len(decoded.system_fingerprint["prompt_hash"]) == 64
     models = json.loads(decoded.system_fingerprint["models"])

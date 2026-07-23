@@ -11,6 +11,7 @@ from run_artifacts.lifecycle_events import (
     LifecycleContext,
     TelemetryArtifactError,
     lifecycle_context_env,
+    write_lifecycle_context,
 )
 
 from usertest.cli import main
@@ -149,6 +150,42 @@ def test_telemetry_exec_verified_controller_child_is_automatic(
     assert completed["context"]["work_unit_id"] != parent.work_unit_id
     assert completed["attributes"]["parent_work_unit_id"] == parent.work_unit_id
     assert completed["attributes"]["dependency_ids"] == [parent.work_unit_id]
+
+
+def test_telemetry_exec_replaces_file_backed_context_for_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "lifecycle_events.jsonl"
+    context_path = tmp_path / "parent-context.json"
+    parent = LifecycleContext(
+        cycle_id="controller-cycle",
+        work_unit_id="work:controller-parent",
+        system_fingerprint={"controller_context_verified": "true"},
+    )
+    write_lifecycle_context(context_path, parent)
+    monkeypatch.setenv(LIFECYCLE_CONTEXT_FILE_ENV, str(context_path))
+
+    assert (
+        _invoke(
+            [
+                "telemetry",
+                "exec",
+                "--events",
+                str(events),
+                "--",
+                sys.executable,
+                "-c",
+                (
+                    "import os; "
+                    "from run_artifacts.lifecycle_events import ("
+                    "LIFECYCLE_CONTEXT_FILE_ENV, load_context_from_env); "
+                    "assert LIFECYCLE_CONTEXT_FILE_ENV not in os.environ; "
+                    "assert load_context_from_env().work_unit_id != 'work:controller-parent'"
+                ),
+            ]
+        )
+        == 0
+    )
 
 
 def test_telemetry_exec_explicit_unknown_does_not_inherit_controller_origin(

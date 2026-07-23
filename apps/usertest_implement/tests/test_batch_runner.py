@@ -1488,7 +1488,7 @@ def test_deferred_replan_action_sync_failure_is_retained_and_nonblocking(
         pending=pending,
     )
 
-    assert pending == {}
+    assert pending == {owner_root: {"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"}}
     failures = state["candidate_admission_sync_failures"]
     assert len(failures) == 1
     failure = failures[0]
@@ -1504,6 +1504,46 @@ def test_deferred_replan_action_sync_failure_is_retained_and_nonblocking(
         .splitlines()
     ]
     assert receipts == failures
+
+
+def test_deferred_replan_action_sync_removes_pending_after_retry(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    owner_root = tmp_path / "repo"
+    pending = {owner_root: {"aaaaaaaaaaaaaaaa"}}
+    state: dict[str, Any] = {}
+    attempts = 0
+
+    def _transient_sync(*, owner_root: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(f"temporarily cannot update {owner_root}")
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._sync_ticket_atom_actions",
+        _transient_sync,
+    )
+
+    for completion_source in ("deferred_flush", "deferred_retry"):
+        _flush_deferred_replan_action_sync(
+            batch_dir_path=tmp_path / "batch",
+            state=state,
+            phase_name="phase",
+            cycle=1,
+            pending=pending,
+            completion_source=completion_source,
+        )
+        if not pending:
+            break
+
+    assert attempts == 2
+    assert pending == {}
+    assert [entry["status"] for entry in state["candidate_admission_action_syncs"]] == [
+        "error",
+        "success",
+    ]
 
 
 def test_deferred_replan_action_sync_receipt_failure_is_retained(

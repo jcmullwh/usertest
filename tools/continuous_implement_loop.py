@@ -25,6 +25,7 @@ if str(_IMPLEMENT_SRC) not in sys.path:
 
 from backlog_repo import is_generated_backlog_ticket  # noqa: E402
 from run_artifacts.lifecycle_events import (  # noqa: E402
+    LIFECYCLE_CONTEXT_FILE_ENV,
     LifecycleContext,
     lifecycle_context_env,
 )
@@ -110,6 +111,7 @@ def _write_state(ctx: LoopContext, **payload: Any) -> None:
 def _controller_environment(ctx: LoopContext) -> dict[str, str]:
     env = dict(os.environ)
     if ctx.controller_context is not None:
+        env.pop(LIFECYCLE_CONTEXT_FILE_ENV, None)
         env.update(lifecycle_context_env(ctx.controller_context))
     return env
 

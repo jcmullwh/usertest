@@ -1792,8 +1792,14 @@ def _flush_deferred_replan_action_sync(
     completed_started_utc: str | None = None,
     completion_source: str = "deferred_flush",
 ) -> None:
-    """Reconcile derived action state once after a contiguous set of ticket moves."""
+    """Reconcile derived action state after a contiguous set of ticket moves.
 
+    Successful owner roots are removed from ``pending``. Failed roots remain so
+    the phase can retry them and cannot silently complete with stale derived
+    atom-action state.
+    """
+
+    completed_owner_roots: list[Path] = []
     for owner_root, fingerprints in sorted(
         pending.items(), key=lambda item: str(item[0]).lower()
     ):
@@ -1848,6 +1854,8 @@ def _flush_deferred_replan_action_sync(
         state.setdefault("candidate_admission_action_syncs", []).append(receipt)
         if sync_error is not None or receipt_error is not None:
             state.setdefault("candidate_admission_sync_failures", []).append(receipt)
+        if sync_error is None:
+            completed_owner_roots.append(owner_root)
         _print(
             f"REPLAN_SYNC phase={phase_name} owner_root={owner_root} "
             f"candidates={len(fingerprints)} status={receipt['status']} "
@@ -1855,7 +1863,8 @@ def _flush_deferred_replan_action_sync(
             f"error={sync_error or '<none>'} "
             f"receipt_error={receipt_error or '<none>'}"
         )
-    pending.clear()
+    for owner_root in completed_owner_roots:
+        pending.pop(owner_root, None)
 
 
 def _phase_blocker_id(failure_class: str, handoff_summary: dict[str, Any] | None) -> str:
@@ -2101,7 +2110,29 @@ def _drain_phase(
                         cycle=cycle,
                         pending=pending_replan_action_sync,
                     )
+                    if pending_replan_action_sync and not in_flight:
+                        _flush_deferred_replan_action_sync(
+                            batch_dir_path=batch_dir_path,
+                            state=state,
+                            phase_name=phase.name,
+                            cycle=cycle,
+                            pending=pending_replan_action_sync,
+                            completion_source="deferred_retry",
+                        )
                     persist_state(batch_dir_path, state)
+
+                if pending_replan_action_sync and not in_flight:
+                    pending_roots = ", ".join(
+                        str(path)
+                        for path in sorted(
+                            pending_replan_action_sync,
+                            key=lambda item: str(item).lower(),
+                        )
+                    )
+                    raise RuntimeError(
+                        "Deferred atom-action synchronization failed after retry for: "
+                        f"{pending_roots}"
+                    )
 
                 if not in_flight:
                     break

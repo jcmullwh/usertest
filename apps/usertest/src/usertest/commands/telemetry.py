@@ -19,6 +19,7 @@ from reporter.materialize import (
 )
 from run_artifacts.lifecycle_events import (
     ACTION_FAMILIES,
+    LIFECYCLE_CONTEXT_FILE_ENV,
     LifecycleContext,
     append_lifecycle_event,
     command_family,
@@ -456,6 +457,7 @@ def _cmd_telemetry_exec(args: argparse.Namespace) -> int:
     execution_error: BaseException | None = None
     try:
         child_env = dict(os.environ)
+        child_env.pop(LIFECYCLE_CONTEXT_FILE_ENV, None)
         child_env.update(lifecycle_context_env(child_context))
         completed = subprocess.run(
             command,
