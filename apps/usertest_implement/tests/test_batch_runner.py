@@ -378,6 +378,73 @@ def test_resume_ledger_and_subprocess_use_owner_root_path(tmp_path: Path, monkey
     assert command[command.index("--settings-profile") + 1] == "default"
 
 
+def test_exact_codex_resume_ignores_incompatible_worker_agent_and_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_path = tmp_path / "runs" / "prior" / "ticket_resume_state.json"
+    _write_json(
+        state_path,
+        {
+            "implementation_author": {
+                "agent": "codex",
+                "session_id": "019f8ca0-a467-7870-8959-7636b10c0aaa",
+                "exact_session_available": True,
+            }
+        },
+    )
+    captured: dict[str, object] = {}
+
+    class _FinishedProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner.subprocess.Popen",
+        _FinishedProcess,
+    )
+    candidate = BatchCandidate(
+        source_name="resume_ready",
+        export_path=tmp_path / "ledger.yaml",
+        fingerprint="acacacacacacacac",
+        severity="high",
+        title="Resume exact Codex session",
+        owner_root=tmp_path,
+        ticket_path=tmp_path / "ticket.md",
+        execution_domain="runner_core",
+        execution_conflict_keys=("ticket:acacacacacacacac",),
+        resume_state_path=state_path,
+        resume_lifecycle_state="ci_failed_resume_ready",
+    )
+
+    _run_resume_process(
+        repo_root=tmp_path,
+        implement_python=tmp_path / "python.exe",
+        batch_dir_path=tmp_path / "batch",
+        candidate=candidate,
+        repo_input=str(tmp_path),
+        worker=WorkerTemplate(worker_index=2, agent="claude", model="claude-opus"),
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        resume_ledger_path=tmp_path / "ledger.yaml",
+        ticket_timeout_seconds=None,
+        exec_backend="local",
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--agent") + 1] == "codex"
+    assert "--model" not in command
+
+
 def _write_terminal_source_artifacts(
     *,
     code_root: Path,
@@ -2446,7 +2513,10 @@ def test_drain_phase_parks_merge_ready_without_completing_ticket(
     def _collect(**_: Any) -> list[BatchCandidate]:
         return [] if state.get("parked") else [candidate]
 
-    def _run_ticket(**_: Any) -> TicketRunResult:
+    launched_ledgers: list[Path] = []
+
+    def _run_ticket(**kwargs: Any) -> TicketRunResult:
+        launched_ledgers.append(kwargs["ledger_path"])
         run_dir = tmp_path / "runs" / "merge_ready"
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
@@ -2482,7 +2552,12 @@ def test_drain_phase_parks_merge_ready_without_completing_ticket(
         phase=_phase_for_batch_lifecycle_tests(tmp_path),
         repo_root=tmp_path,
         batch_dir_path=tmp_path / "batch",
-        config={"defaults": {"max_phase_cycles": 2}},
+        config={
+            "defaults": {
+                "max_phase_cycles": 2,
+                "ledger": "custom/state/actions.yaml",
+            }
+        },
         state=state,
         workers=[WorkerTemplate(worker_index=1, agent="codex")],
         backlog_python=tmp_path / "python",
@@ -2498,6 +2573,9 @@ def test_drain_phase_parks_merge_ready_without_completing_ticket(
     assert state["completed"] == []
     assert state["failed"] == []
     assert complete_moves == []
+    assert launched_ledgers == [
+        (tmp_path / "custom" / "state" / "actions.yaml").resolve()
+    ]
 
 
 def test_collect_resume_ready_candidates_follows_latest_resumed_state(

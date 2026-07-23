@@ -1856,6 +1856,18 @@ def _run_resume_process(
 ) -> TicketRunResult:
     if candidate.resume_state_path is None:
         raise ValueError("resume candidate is missing resume_state_path")
+    resume_state = _read_json_if_exists(candidate.resume_state_path)
+    implementation_author = (
+        resume_state.get("implementation_author")
+        if isinstance(resume_state, dict)
+        and isinstance(resume_state.get("implementation_author"), dict)
+        else {}
+    )
+    exact_codex_resume = (
+        _clean_str(implementation_author.get("agent")) == "codex"
+        and _clean_str(implementation_author.get("session_id")) is not None
+    )
+    effective_agent = "codex" if exact_codex_resume else worker.agent
     command = [
         str(implement_python),
         "-m",
@@ -1874,13 +1886,13 @@ def _run_resume_process(
         "--settings-profile",
         settings_profile,
         "--agent",
-        worker.agent,
+        effective_agent,
         "--exec-backend",
         exec_backend.strip().lower() or "docker",
         "--ledger",
         str(resume_ledger_path),
     ]
-    if worker.model is not None:
+    if worker.model is not None and not exact_codex_resume:
         command.extend(["--model", worker.model])
     if maintenance_image_metadata_path is not None:
         command.extend(
@@ -2760,12 +2772,7 @@ def _drain_phase(
                             implementation_runs_dir=(
                                 candidate.owner_root / "runs" / "usertest_implement"
                             ),
-                            ledger_path=(
-                                candidate.owner_root
-                                / ".agents"
-                                / "state"
-                                / "backlog_implement_actions.yaml"
-                            ),
+                            ledger_path=resume_ledger_path,
                             maintenance_image_metadata_path=maintenance_image_metadata_path,
                         )
                     in_flight[future] = (candidate, worker, candidate.execution_conflict_keys)
