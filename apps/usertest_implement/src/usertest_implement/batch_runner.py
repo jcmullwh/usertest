@@ -454,6 +454,17 @@ def _clean_str(value: Any) -> str | None:
     return cleaned or None
 
 
+def _is_exact_codex_session_resume(resume_state: dict[str, Any] | None) -> bool:
+    if not isinstance(resume_state, dict):
+        return False
+    implementation_author = resume_state.get("implementation_author")
+    return (
+        isinstance(implementation_author, dict)
+        and _clean_str(implementation_author.get("agent")) == "codex"
+        and _clean_str(implementation_author.get("session_id")) is not None
+    )
+
+
 def _parse_ticket_metadata(path: Path) -> dict[str, str]:
     try:
         markdown = path.read_text(encoding="utf-8", errors="replace")
@@ -1900,10 +1911,7 @@ def _run_resume_process(
         and isinstance(resume_state.get("implementation_author"), dict)
         else {}
     )
-    exact_codex_resume = (
-        _clean_str(implementation_author.get("agent")) == "codex"
-        and _clean_str(implementation_author.get("session_id")) is not None
-    )
+    exact_codex_resume = _is_exact_codex_session_resume(resume_state)
     effective_agent = "codex" if exact_codex_resume else worker.agent
     effective_model = worker.model
     if exact_codex_resume:
@@ -1947,8 +1955,11 @@ def _run_resume_process(
         "--ledger",
         str(resume_ledger_path),
     ]
-    if effective_model is not None:
-        command.extend(["--model", effective_model])
+    # The batch worker owns the provider choice for ordinary resumes.  Preserve
+    # an exact Codex author's model when one exists, but otherwise pass an
+    # explicit empty model so run settings cannot restore a model belonging to
+    # a different provider.
+    command.extend(["--model", effective_model or ""])
     if maintenance_image_metadata_path is not None:
         command.extend(
             [
@@ -2160,6 +2171,7 @@ def _preflight_agent_roster(
     refresh_agent: str,
     review_agent: str | None,
     review_enabled: bool = True,
+    resume_agents: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return every distinct provider binary required by the batch."""
 
@@ -2171,12 +2183,34 @@ def _preflight_agent_roster(
     role_agents = [("refresh", refresh_agent)]
     if review_enabled:
         role_agents.append(("implementation_review", review_agent))
+    role_agents.extend(
+        ("exact_session_resume", agent) for agent in sorted(resume_agents or set())
+    )
     for role, agent in role_agents:
         if agent is None or agent in seen:
             continue
         roster.append({"worker_index": None, "role": role, "agent": agent, "model": None})
         seen.add(agent)
     return roster
+
+
+def _required_resume_agents(*, repo_root: Path, ledger_path: Path) -> set[str]:
+    """Return provider binaries required by currently schedulable exact resumes."""
+
+    required: set[str] = set()
+    candidates = _collect_resume_ready_candidates(
+        repo_root=repo_root,
+        ledger_path=ledger_path,
+        severities=set(SEVERITY_RANK),
+        processed=set(),
+    )
+    for candidate in candidates:
+        if candidate.resume_state_path is None:
+            continue
+        resume_state = _read_json_if_exists(candidate.resume_state_path)
+        if _is_exact_codex_session_resume(resume_state):
+            required.add("codex")
+    return required
 
 
 def _apply_run_overrides(
@@ -3360,6 +3394,11 @@ def run_batch(
         if preliminary_docker_resource_plan is not None
         else "standard"
     )
+    resume_ledger_path = _resume_ledger_path(owner_root=owner_root, defaults=defaults)
+    required_resume_agents = _required_resume_agents(
+        repo_root=repo_root,
+        ledger_path=resume_ledger_path,
+    )
 
     preflight = run_batch_preflight(
         repo_root=repo_root,
@@ -3370,6 +3409,7 @@ def run_batch(
             refresh_agent=effective_refresh_agent,
             review_agent=effective_review_agent,
             review_enabled=_effective_handoff_flags(run_settings)[2],
+            resume_agents=required_resume_agents,
         ),
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,

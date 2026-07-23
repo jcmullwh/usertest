@@ -219,28 +219,8 @@ def _effective_execution_fingerprint(
         return None
     run_common_raw = profile.get("run_common")
     run_common = run_common_raw if isinstance(run_common_raw, dict) else None
-    roster = defaults.get("worker_roster")
-    if run_common is None or not isinstance(roster, list) or not roster:
+    if run_common is None:
         return None
-
-    worker_models: list[dict[str, Any]] = []
-    worker_providers: list[dict[str, Any]] = []
-    settings_model = run_common.get("model")
-    for index, item in enumerate(roster, start=1):
-        if not isinstance(item, dict):
-            return None
-        agent = (_clean_string(item.get("agent")) or "").lower()
-        if agent not in agents:
-            return None
-        model = _configured_model(
-            agent=agent,
-            requested=item.get("model") or settings_model,
-            agents=agents,
-        )
-        if model is None:
-            return None
-        worker_models.append({"worker_index": index, "model": model})
-        worker_providers.append({"worker_index": index, "agent": agent})
 
     role_values = {
         "backlog": (ctx.backlog_agent, ctx.backlog_model),
@@ -255,30 +235,21 @@ def _effective_execution_fingerprint(
             return None
         resolved_roles[role] = (agent, model)
 
-    batch_review_agent = _clean_string(run_common.get("implementation_review_agent"))
-    batch_review_model: str | None = None
-    if batch_review_agent is not None:
-        batch_review_agent = batch_review_agent.lower()
-        if batch_review_agent not in agents:
-            return None
-        batch_review_model = _configured_model(
-            agent=batch_review_agent,
-            requested=run_common.get("implementation_review_model"),
-            agents=agents,
-        )
-        if batch_review_model is None:
-            return None
+    worker_agent, worker_model = resolved_roles["controller_implementation"]
+    review_agent, review_model = resolved_roles["controller_review"]
+    worker_models = [{"worker_index": 1, "model": worker_model}]
+    worker_providers = [{"worker_index": 1, "agent": worker_agent}]
 
     models: dict[str, Any] = {
         role: model for role, (_agent, model) in resolved_roles.items()
     }
     models["batch_workers"] = worker_models
-    models["batch_post_implementation_review"] = batch_review_model
+    models["batch_post_implementation_review"] = review_model
     providers: dict[str, Any] = {
         role: agent for role, (agent, _model) in resolved_roles.items()
     }
     providers["batch_workers"] = worker_providers
-    providers["batch_post_implementation_review"] = batch_review_agent
+    providers["batch_post_implementation_review"] = review_agent
     return models, providers, settings_path
 
 

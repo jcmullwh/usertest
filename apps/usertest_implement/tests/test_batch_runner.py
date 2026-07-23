@@ -40,6 +40,7 @@ from usertest_implement.batch_runner import (
     _pick_launchable_candidate_index,
     _preflight_agent_roster,
     _refresh_backlog,
+    _required_resume_agents,
     _resolve_wave_base_revision,
     _resume_ledger_path,
     _return_ticket_for_replanning,
@@ -293,6 +294,66 @@ def test_preflight_roster_includes_distinct_refresh_and_review_agents() -> None:
             "worker_index": None,
             "role": "implementation_review",
             "agent": "claude",
+            "model": None,
+        },
+    ]
+
+
+def test_preflight_roster_includes_provider_required_by_exact_resume(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "runs" / "prior" / "ticket_resume_state.json"
+    ticket_path = tmp_path / "plans" / "ticket.md"
+    _write_json(
+        state_path,
+        {
+            "lifecycle_state": "ci_failed_resume_ready",
+            "ticket": {"path": str(ticket_path), "title": "Resume exact session"},
+            "implementation_author": {
+                "agent": "codex",
+                "session_id": "019f8ca0-a467-7870-8959-7636b10c0aaa",
+            },
+        },
+    )
+    ledger_path = tmp_path / "state" / "actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "actions": {
+                    "0123456789abcdef": {
+                        "last_resume_state_path": str(state_path),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resume_agents = _required_resume_agents(
+        repo_root=tmp_path,
+        ledger_path=ledger_path,
+    )
+
+    assert resume_agents == {"codex"}
+    assert _preflight_agent_roster(
+        workers=[WorkerTemplate(worker_index=1, agent="gemini", model=None)],
+        refresh_agent="gemini",
+        review_agent="claude",
+        resume_agents=resume_agents,
+    ) == [
+        {"worker_index": 1, "agent": "gemini", "model": None},
+        {
+            "worker_index": None,
+            "role": "implementation_review",
+            "agent": "claude",
+            "model": None,
+        },
+        {
+            "worker_index": None,
+            "role": "exact_session_resume",
+            "agent": "codex",
             "model": None,
         },
     ]
@@ -608,6 +669,7 @@ def test_resume_ledger_and_subprocess_use_owner_root_path(tmp_path: Path, monkey
     )
     assert command[command.index("--settings") + 1] == str(code_root / "settings.yaml")
     assert command[command.index("--settings-profile") + 1] == "default"
+    assert command[command.index("--model") + 1] == ""
 
 
 def test_exact_codex_resume_ignores_incompatible_worker_agent_and_model(

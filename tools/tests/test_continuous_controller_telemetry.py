@@ -92,15 +92,14 @@ def test_continuous_controller_propagates_verified_versioned_context(
     providers = json.loads(decoded.system_fingerprint["providers"])
     assert models["backlog"] == "gpt-5.6-sol"
     assert models["batch_workers"] == [
-        {"model": "gpt-batch-explicit", "worker_index": 1},
-        {"model": "claude-default", "worker_index": 2},
+        {"model": "gpt-5.6-sol", "worker_index": 1},
     ]
-    assert models["batch_post_implementation_review"] == "claude-default"
+    assert models["batch_post_implementation_review"] == "gpt-5.6-sol"
     assert providers["backlog"] == "codex"
     assert providers["batch_workers"] == [
         {"agent": "codex", "worker_index": 1},
-        {"agent": "claude", "worker_index": 2},
     ]
+    assert providers["batch_post_implementation_review"] == "codex"
 
     first_cycle_id = context.cycle_id
     first_session_id = context.session_id
