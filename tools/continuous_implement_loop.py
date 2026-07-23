@@ -31,14 +31,19 @@ from run_artifacts.lifecycle_events import (  # noqa: E402
 )
 
 from usertest_implement.batch_state import latest_batch_dir, load_json  # noqa: E402
+from usertest_implement.batch_runner import (  # noqa: E402
+    _build_phases,
+    _configured_owner_root,
+    _exact_codex_resume_model_from_state_path,
+    _exact_resume_roles_for_lifecycles,
+    _required_exact_resume_roles,
+    _resume_ledger_path,
+)
 from usertest_implement.ledger import update_ledger_file  # noqa: E402
 
 _SEVERITY_PATTERN = re.compile(r"^- Severity:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _EXPORT_KIND_PATTERN = re.compile(r"^- Export kind:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _FINGERPRINT_PATTERN = re.compile(r"^- Fingerprint:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
-LATEST_CODEX_MODEL = "gpt-5.5"
-
-
 @dataclass
 class LoopContext:
     """Shared runtime configuration for the continuous implementation loop."""
@@ -222,28 +227,8 @@ def _effective_execution_fingerprint(
         return None
     run_common_raw = profile.get("run_common")
     run_common = run_common_raw if isinstance(run_common_raw, dict) else None
-    roster = defaults.get("worker_roster")
-    if run_common is None or not isinstance(roster, list) or not roster:
+    if run_common is None:
         return None
-
-    worker_models: list[dict[str, Any]] = []
-    worker_providers: list[dict[str, Any]] = []
-    settings_model = run_common.get("model")
-    for index, item in enumerate(roster, start=1):
-        if not isinstance(item, dict):
-            return None
-        agent = (_clean_string(item.get("agent")) or "").lower()
-        if agent not in agents:
-            return None
-        model = _configured_model(
-            agent=agent,
-            requested=item.get("model") or settings_model,
-            agents=agents,
-        )
-        if model is None:
-            return None
-        worker_models.append({"worker_index": index, "model": model})
-        worker_providers.append({"worker_index": index, "agent": agent})
 
     role_values = {
         "backlog": (ctx.backlog_agent, ctx.backlog_model),
@@ -258,30 +243,53 @@ def _effective_execution_fingerprint(
             return None
         resolved_roles[role] = (agent, model)
 
-    batch_review_agent = _clean_string(run_common.get("implementation_review_agent"))
-    batch_review_model: str | None = None
-    if batch_review_agent is not None:
-        batch_review_agent = batch_review_agent.lower()
-        if batch_review_agent not in agents:
-            return None
-        batch_review_model = _configured_model(
-            agent=batch_review_agent,
-            requested=run_common.get("implementation_review_model"),
-            agents=agents,
+    worker_agent, worker_model = resolved_roles["controller_implementation"]
+    review_agent, review_model = resolved_roles["controller_review"]
+    worker_models = [{"worker_index": 1, "model": worker_model}]
+    worker_providers = [{"worker_index": 1, "agent": worker_agent}]
+    try:
+        owner_root = _configured_owner_root(code_root=ctx.repo_root, config=batch_doc)
+        phases = _build_phases(batch_doc, data_root=owner_root)
+        batch_exact_resume_roles = _required_exact_resume_roles(
+            repo_root=ctx.repo_root,
+            ledger_path=_resume_ledger_path(owner_root=owner_root, defaults=defaults),
+            severities={severity for phase in phases for severity in phase.severities},
         )
-        if batch_review_model is None:
-            return None
+        reconciliation_exact_resume_roles = _exact_resume_roles_for_lifecycles(
+            repo_root=ctx.owner_root,
+            ledger_path=(
+                ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+            ),
+            lifecycle_states={
+                "awaiting_review",
+                "ci_failed",
+                "ci_failed_resume_ready",
+                "merge_ready",
+                "review_changes_requested",
+                "review_failed_resume_ready",
+            },
+        )
+        exact_resume_roles = {
+            (role["agent"], role["model"])
+            for role in (*batch_exact_resume_roles, *reconciliation_exact_resume_roles)
+        }
+    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
+        return None
 
     models: dict[str, Any] = {
         role: model for role, (_agent, model) in resolved_roles.items()
     }
     models["batch_workers"] = worker_models
-    models["batch_post_implementation_review"] = batch_review_model
+    models["batch_post_implementation_review"] = review_model
+    models["exact_session_resumes"] = sorted({model for _agent, model in exact_resume_roles})
     providers: dict[str, Any] = {
         role: agent for role, (agent, _model) in resolved_roles.items()
     }
     providers["batch_workers"] = worker_providers
-    providers["batch_post_implementation_review"] = batch_review_agent
+    providers["batch_post_implementation_review"] = review_agent
+    providers["exact_session_resumes"] = sorted(
+        {agent for agent, _model in exact_resume_roles}
+    )
     return models, providers, settings_path
 
 
@@ -1004,6 +1012,18 @@ def _resume_review_changes_requested(
         or lifecycle not in accepted_lifecycles
     ):
         return False
+    state_path_raw = entry.get("last_resume_state_path")
+    if isinstance(state_path_raw, str) and state_path_raw.strip():
+        state_path = Path(state_path_raw)
+        if not state_path.is_absolute():
+            state_path = (ctx.owner_root / state_path).resolve()
+    else:
+        state_path = Path(run_dir_raw) / "ticket_resume_state.json"
+    exact_codex_model = _exact_codex_resume_model_from_state_path(state_path)
+    effective_agent = "codex" if exact_codex_model is not None else ctx.implementation_agent
+    effective_model = (
+        exact_codex_model if exact_codex_model is not None else ctx.implementation_model
+    )
     argv = [
         str(ctx.implement_python),
         "-m",
@@ -1016,14 +1036,14 @@ def _resume_review_changes_requested(
         "--repo",
         ctx.repo_input,
         "--agent",
-        ctx.implementation_agent,
+        effective_agent,
+        "--model",
+        effective_model or "",
         "--correction-origin",
         "system_self_correction",
         "--ledger",
         str(ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"),
     ]
-    if ctx.implementation_model:
-        argv.extend(["--model", ctx.implementation_model])
     for instruction in supervisor_instructions or []:
         if instruction.strip():
             argv.extend(["--supervisor-instruction", instruction.strip()])
@@ -1349,9 +1369,7 @@ def _run_batch_pass(ctx: LoopContext) -> bool:
     """Run one full maintenance batch pass through the batch engine."""
 
     _write_state(ctx, status="running", current_action="batch")
-    proc = _run_logged(
-        ctx,
-        [
+    argv = [
             str(ctx.implement_python),
             "-m",
             "usertest_implement.cli",
@@ -1361,7 +1379,22 @@ def _run_batch_pass(ctx: LoopContext) -> bool:
             "run",
             "--config",
             str(ctx.batch_config_path),
-        ],
+            "--refresh-agent",
+            ctx.backlog_agent,
+            "--worker-agent",
+            ctx.implementation_agent,
+            "--implementation-review-agent",
+            ctx.review_agent,
+        ]
+    if ctx.backlog_model:
+        argv.extend(["--refresh-model", ctx.backlog_model])
+    if ctx.implementation_model:
+        argv.extend(["--worker-model", ctx.implementation_model])
+    if ctx.review_model:
+        argv.extend(["--implementation-review-model", ctx.review_model])
+    proc = _run_logged(
+        ctx,
+        argv,
         cwd=ctx.repo_root,
         label="batch run",
     )
@@ -1434,7 +1467,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--settings-profile", default="default")
     parser.add_argument("--backlog-agent", choices=["claude", "codex", "gemini"], default="codex")
-    parser.add_argument("--backlog-model", default=LATEST_CODEX_MODEL)
+    parser.add_argument(
+        "--backlog-model",
+        default=None,
+        help=(
+            "Optional backlog model override. When omitted, the selected agent's configured "
+            "default is used."
+        ),
+    )
     parser.add_argument("--backlog-research-ref", default="origin/dev")
     parser.add_argument(
         "--backlog-breadth-profile",

@@ -23,22 +23,30 @@ from usertest_implement.batch_runner import (
     TicketRunResult,
     WorkerTemplate,
     _add_batch_resource_conflicts,
+    _apply_run_overrides,
     _batch_subprocess_env,
     _build_docker_resource_plan,
     _build_phases,
     _build_terminal_proof,
+    _build_workers,
     _collect_resume_ready_candidates,
     _collect_wave_candidates,
     _configured_owner_root,
     _drain_phase,
+    _effective_implementation_review_role,
+    _effective_refresh_role,
+    _exact_resume_roles_for_lifecycles,
     _flush_deferred_replan_action_sync,
     _latest_resume_state_from_ledger_path,
     _pick_launchable_candidate_index,
+    _preflight_agent_roster,
     _refresh_backlog,
+    _required_resume_agents,
     _resolve_wave_base_revision,
     _resume_ledger_path,
     _return_ticket_for_replanning,
     _run_resume_process,
+    _run_settings,
     _run_ticket_process,
     _validate_candidate_wave_revision,
     _write_batch_token_monitoring_artifacts,
@@ -155,6 +163,358 @@ def test_checked_in_batch_config_covers_low_without_default_ticket_timeout() -> 
         "usertest_backlog",
         "usertest_implement",
     }
+
+
+def test_explicit_run_role_overrides_replace_batch_defaults() -> None:
+    config: dict[str, Any] = {
+        "version": 1,
+        "defaults": {
+            "refresh_agent": "claude",
+            "refresh_model": "configured-refresh",
+            "worker_roster": [
+                {"agent": "codex", "model": "configured-codex"},
+                {"agent": "gemini"},
+            ],
+            "implementation_review_agent": "claude",
+        },
+    }
+
+    _apply_run_overrides(
+        config,
+        refresh_agent="codex",
+        refresh_model="gpt-5.6-sol",
+        worker_agent="codex",
+        worker_model="gpt-5.6-sol",
+        implementation_review_agent="codex",
+        implementation_review_model="gpt-5.6-sol",
+    )
+
+    assert config["defaults"] == {
+        "refresh_agent": "codex",
+        "refresh_model": "gpt-5.6-sol",
+        "worker_roster": [{"agent": "codex", "model": "gpt-5.6-sol"}],
+        "implementation_review_agent": "codex",
+        "implementation_review_model": "gpt-5.6-sol",
+    }
+
+
+def test_worker_model_override_requires_explicit_worker_agent() -> None:
+    with pytest.raises(ValueError, match="--worker-model requires --worker-agent"):
+        _apply_run_overrides(
+            {"version": 1, "defaults": {"worker_roster": [{"agent": "codex"}]}},
+            worker_model="gpt-5.6-sol",
+        )
+
+
+def test_agent_only_overrides_discard_provider_specific_models() -> None:
+    config: dict[str, Any] = {
+        "version": 1,
+        "defaults": {
+            "refresh_agent": "codex",
+            "refresh_model": "gpt-5.6-sol",
+            "worker_roster": [{"agent": "codex", "model": "gpt-5.6-sol"}],
+            "implementation_review_agent": "codex",
+            "implementation_review_model": "gpt-5.6-sol",
+        },
+    }
+
+    _apply_run_overrides(
+        config,
+        refresh_agent="claude",
+        implementation_review_agent="gemini",
+    )
+
+    assert config["defaults"]["refresh_agent"] == "claude"
+    assert config["defaults"]["refresh_model"] is None
+    assert config["defaults"]["implementation_review_agent"] == "gemini"
+    assert "implementation_review_model" not in config["defaults"]
+    assert _effective_refresh_role(
+        defaults=config["defaults"],
+        workers=[WorkerTemplate(worker_index=1, agent="codex", model="gpt-5.6-sol")],
+    ) == ("claude", None, "batch_config", "agent_default")
+
+
+def test_agent_only_refresh_override_does_not_inherit_worker_model() -> None:
+    config: dict[str, Any] = {
+        "version": 1,
+        "defaults": {
+            "refresh_agent": "codex",
+            "worker_roster": [{"agent": "codex"}],
+        },
+    }
+
+    _apply_run_overrides(
+        config,
+        refresh_agent="codex",
+        worker_agent="codex",
+        worker_model="implementation-model",
+    )
+    workers = _build_workers(config)
+
+    assert config["defaults"]["refresh_model"] is None
+    assert _effective_refresh_role(defaults=config["defaults"], workers=workers) == (
+        "codex",
+        None,
+        "batch_config",
+        "agent_default",
+    )
+
+
+def test_agent_only_review_override_ignores_run_settings_model() -> None:
+    assert _effective_implementation_review_role(
+        defaults={"implementation_review_agent": "gemini"},
+        run_common={
+            "implementation_review_agent": "claude",
+            "implementation_review_model": "claude-sonnet-5",
+        },
+    ) == ("gemini", None, "batch_config", "agent_default")
+
+    assert _effective_implementation_review_role(
+        defaults={"implementation_review_model": "gemini-2.5-pro"},
+        run_common={
+            "implementation_review_agent": "gemini",
+            "implementation_review_model": "configured-old-model",
+        },
+    ) == ("gemini", "gemini-2.5-pro", "run_settings", "batch_config")
+
+
+def test_preflight_roster_includes_distinct_refresh_and_review_agents() -> None:
+    assert _preflight_agent_roster(
+        workers=[WorkerTemplate(worker_index=1, agent="codex", model=None)],
+        refresh_agent="gemini",
+        review_agent="claude",
+    ) == [
+        {"worker_index": 1, "agent": "codex", "model": None},
+        {
+            "worker_index": None,
+            "role": "refresh",
+            "agent": "gemini",
+            "model": None,
+        },
+        {
+            "worker_index": None,
+            "role": "implementation_review",
+            "agent": "claude",
+            "model": None,
+        },
+    ]
+
+
+def test_preflight_roster_includes_provider_required_by_exact_resume(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "runs" / "prior" / "ticket_resume_state.json"
+    ticket_path = tmp_path / "plans" / "ticket.md"
+    _write_json(
+        state_path,
+        {
+            "lifecycle_state": "ci_failed_resume_ready",
+            "ticket": {"path": str(ticket_path), "title": "Resume exact session"},
+            "implementation_author": {
+                "agent": "codex",
+                "session_id": "019f8ca0-a467-7870-8959-7636b10c0aaa",
+            },
+        },
+    )
+    ledger_path = tmp_path / "state" / "actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "actions": {
+                    "0123456789abcdef": {
+                        "last_resume_state_path": str(state_path),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resume_agents = _required_resume_agents(
+        repo_root=tmp_path,
+        ledger_path=ledger_path,
+        severities={"high"},
+    )
+
+    assert resume_agents == {"codex"}
+    assert _preflight_agent_roster(
+        workers=[WorkerTemplate(worker_index=1, agent="gemini", model=None)],
+        refresh_agent="gemini",
+        review_agent="claude",
+        resume_agents=resume_agents,
+    ) == [
+        {"worker_index": 1, "agent": "gemini", "model": None},
+        {
+            "worker_index": None,
+            "role": "implementation_review",
+            "agent": "claude",
+            "model": None,
+        },
+        {
+            "worker_index": None,
+            "role": "exact_session_resume",
+            "agent": "codex",
+            "model": None,
+        },
+    ]
+
+
+def test_resume_preflight_ignores_exact_resume_outside_configured_severities(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "runs" / "prior" / "ticket_resume_state.json"
+    ticket_path = tmp_path / "plans" / "ticket.md"
+    ticket_path.parent.mkdir(parents=True)
+    ticket_path.write_text(
+        "# Deferred exact resume\n\n- Severity: `low`\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        state_path,
+        {
+            "lifecycle_state": "ci_failed_resume_ready",
+            "ticket": {"path": str(ticket_path), "title": "Deferred exact resume"},
+            "implementation_author": {
+                "agent": "codex",
+                "session_id": "019f8ca0-a467-7870-8959-7636b10c0bbb",
+            },
+        },
+    )
+    ledger_path = tmp_path / "state" / "actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "actions": {
+                    "fedcba9876543210": {
+                        "last_resume_state_path": str(state_path),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _required_resume_agents(
+        repo_root=tmp_path,
+        ledger_path=ledger_path,
+        severities={"blocker", "high"},
+    ) == set()
+
+
+def test_reconciliation_exact_roles_mirror_dispatch_eligibility_and_run_dir_fallback(
+    tmp_path: Path,
+) -> None:
+    plans_dir = tmp_path / ".agents" / "plans" / "4 - for_review"
+    plans_dir.mkdir(parents=True)
+    generated_fingerprint = "1111111111111111"
+    external_fingerprint = "2222222222222222"
+    no_ticket_fingerprint = "3333333333333333"
+    no_pr_fingerprint = "4444444444444444"
+    generated_marker = (
+        "Generated by `python -m usertest_backlog.cli reports export-tickets`.\n"
+    )
+    (plans_dir / f"20260722_{generated_fingerprint}_generated.md").write_text(
+        f"# Generated exact resume\n\n{generated_marker}",
+        encoding="utf-8",
+    )
+    (plans_dir / f"20260722_{external_fingerprint}_external.md").write_text(
+        "# External exact resume\n",
+        encoding="utf-8",
+    )
+    (plans_dir / f"20260722_{no_pr_fingerprint}_generated.md").write_text(
+        f"# Generated exact resume without PR\n\n{generated_marker}",
+        encoding="utf-8",
+    )
+
+    actions: dict[str, dict[str, str]] = {}
+    for fingerprint, model in (
+        (generated_fingerprint, "gpt-generated"),
+        (external_fingerprint, "gpt-external"),
+        (no_ticket_fingerprint, "gpt-no-ticket"),
+        (no_pr_fingerprint, "gpt-no-pr"),
+    ):
+        run_dir = tmp_path / "runs" / fingerprint
+        _write_json(
+            run_dir / "ticket_resume_state.json",
+            {
+                "lifecycle_state": "review_changes_requested",
+                "implementation_author": {
+                    "agent": "codex",
+                    "session_id": f"session-{fingerprint}",
+                },
+            },
+        )
+        _write_json(run_dir / "target_ref.json", {"model": model})
+        actions[fingerprint] = {
+            "last_run_dir": str(run_dir),
+            "last_resume_lifecycle_state": "review_changes_requested",
+        }
+        if fingerprint != no_pr_fingerprint:
+            actions[fingerprint]["last_pr_url"] = (
+                f"https://github.com/example/repo/pull/{int(fingerprint[0])}"
+            )
+
+    ledger_path = tmp_path / ".agents" / "state" / "backlog_implement_actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        yaml.safe_dump({"schema_version": 1, "actions": actions}),
+        encoding="utf-8",
+    )
+
+    assert _exact_resume_roles_for_lifecycles(
+        repo_root=tmp_path,
+        ledger_path=ledger_path,
+        lifecycle_states={"review_changes_requested"},
+    ) == [{"agent": "codex", "model": "gpt-generated"}]
+
+
+def test_run_settings_apply_run_section_over_run_common(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(
+        yaml.safe_dump(
+            {
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "run_common": {
+                            "implementation_review_agent": "claude",
+                            "implementation_review_model": "claude-sonnet-5",
+                            "pr": True,
+                        },
+                        "run": {
+                            "implementation_review_agent": "gemini",
+                            "implementation_review_model": None,
+                            "pr": False,
+                        },
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run_settings(
+        run_settings_path=settings_path,
+        run_settings_profile="default",
+    ) == {
+        "implementation_review_agent": "gemini",
+        "implementation_review_model": None,
+        "pr": False,
+    }
+
+
+def test_preflight_roster_skips_unreachable_reviewer() -> None:
+    assert _preflight_agent_roster(
+        workers=[WorkerTemplate(worker_index=1, agent="codex", model=None)],
+        refresh_agent="codex",
+        review_agent="claude",
+        review_enabled=False,
+    ) == [{"worker_index": 1, "agent": "codex", "model": None}]
 
 
 def test_wave_base_revision_is_fetched_resolved_and_receipted(
@@ -303,6 +663,8 @@ def test_ticket_process_receives_exact_wave_revision(tmp_path: Path, monkeypatch
         implementation_ref=revision,
         implementation_runs_dir=runs_dir,
         ledger_path=ledger_path,
+        implementation_review_agent="codex",
+        implementation_review_model="gpt-5.6-sol",
     )
 
     assert result.returncode == 0
@@ -311,6 +673,50 @@ def test_ticket_process_receives_exact_wave_revision(tmp_path: Path, monkeypatch
     assert command[command.index("--ref") + 1] == revision
     assert command[command.index("--runs-dir") + 1] == str(runs_dir)
     assert command[command.index("--ledger") + 1] == str(ledger_path)
+    assert command[command.index("--model") + 1] == ""
+    assert command[command.index("--implementation-review-agent") + 1] == "codex"
+    assert command[command.index("--implementation-review-model") + 1] == "gpt-5.6-sol"
+
+
+def test_ticket_process_explicitly_suppresses_settings_models_for_agent_only_roles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FinishedProcess:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            captured["command"] = command
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner.subprocess.Popen",
+        _FinishedProcess,
+    )
+    _run_ticket_process(
+        repo_root=tmp_path,
+        implement_python=tmp_path / "python.exe",
+        batch_dir_path=tmp_path / "batch",
+        ticket_path=tmp_path / "ticket.md",
+        repo_input=str(tmp_path),
+        worker=WorkerTemplate(worker_index=1, agent="gemini", model=None),
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        ticket_timeout_seconds=None,
+        implementation_review_agent="claude",
+        implementation_review_model=None,
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--model") + 1] == ""
+    assert command[command.index("--implementation-review-model") + 1] == ""
 
 
 def test_resume_ledger_and_subprocess_use_owner_root_path(tmp_path: Path, monkeypatch) -> None:
@@ -376,6 +782,7 @@ def test_resume_ledger_and_subprocess_use_owner_root_path(tmp_path: Path, monkey
     )
     assert command[command.index("--settings") + 1] == str(code_root / "settings.yaml")
     assert command[command.index("--settings-profile") + 1] == "default"
+    assert command[command.index("--model") + 1] == ""
 
 
 def test_exact_codex_resume_ignores_incompatible_worker_agent_and_model(

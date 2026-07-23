@@ -34,11 +34,11 @@ def test_run_batch_pass_invokes_usertest_implement_batch_run(tmp_path: Path) -> 
         settings_path=repo_root / "configs" / "usertest_implement_settings.yaml",
         settings_profile="default",
         backlog_agent="codex",
-        backlog_model="gpt-5.5",
+        backlog_model="gpt-5.6-sol",
         implementation_agent="codex",
-        implementation_model=None,
-        review_agent="claude",
-        review_model=None,
+        implementation_model="gpt-5.6-sol",
+        review_agent="codex",
+        review_model="gpt-5.6-sol",
         allowed_severities={"blocker", "high"},
         cleanup_interval_seconds=21600.0,
         log_path=repo_root / "runs" / "_continuous_loop" / "continuous_loop.log",
@@ -77,7 +77,28 @@ def test_run_batch_pass_invokes_usertest_implement_batch_run(tmp_path: Path) -> 
         "run",
         "--config",
         str(ctx.batch_config_path),
+        "--refresh-agent",
+        "codex",
+        "--worker-agent",
+        "codex",
+        "--implementation-review-agent",
+        "codex",
+        "--refresh-model",
+        "gpt-5.6-sol",
+        "--worker-model",
+        "gpt-5.6-sol",
+        "--implementation-review-model",
+        "gpt-5.6-sol",
     ]
+
+
+def test_backlog_model_is_opt_in_for_alternate_agents() -> None:
+    mod = _load_module()
+
+    args = mod._build_parser().parse_args(["--backlog-agent", "claude"])
+
+    assert args.backlog_agent == "claude"
+    assert args.backlog_model is None
 
 
 def test_latest_terminal_proof_is_hash_verified_before_loop_stops(tmp_path: Path) -> None:

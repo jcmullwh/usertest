@@ -28,7 +28,7 @@ from usertest_implement.backlog_refresh import (
     run_shadow_backlog_refresh,
 )
 from usertest_implement.batch_failure import classify_run_outcome, write_batch_failure
-from usertest_implement.batch_preflight import run_batch_preflight
+from usertest_implement.batch_preflight import _effective_handoff_flags, run_batch_preflight
 from usertest_implement.batch_state import (
     append_jsonl,
     batch_dir,
@@ -452,6 +452,17 @@ def _clean_str(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _is_exact_codex_session_resume(resume_state: dict[str, Any] | None) -> bool:
+    if not isinstance(resume_state, dict):
+        return False
+    implementation_author = resume_state.get("implementation_author")
+    return (
+        isinstance(implementation_author, dict)
+        and _clean_str(implementation_author.get("agent")) == "codex"
+        and _clean_str(implementation_author.get("session_id")) is not None
+    )
 
 
 def _parse_ticket_metadata(path: Path) -> dict[str, str]:
@@ -919,7 +930,7 @@ def _refresh_backlog(
     repo_input: str,
     backlog_python: Path,
     agent: str,
-    model: str,
+    model: str | None,
     batch_dir_path: Path,
 ) -> Path:
     owner_root = (owner_root or repo_root).resolve()
@@ -1365,7 +1376,7 @@ def _collect_wave_candidates(
     repo_input: str,
     backlog_python: Path,
     refresh_agent: str,
-    refresh_model: str,
+    refresh_model: str | None,
     batch_dir_path: Path,
     sources: list[BacklogSource],
     severities: set[str],
@@ -1550,6 +1561,33 @@ def _run_common_settings(
     profile = profiles[profile_name]
     run_common = profile.get("run_common", {})
     return dict(run_common) if isinstance(run_common, dict) else {}
+
+
+def _run_settings(
+    *,
+    run_settings_path: Path,
+    run_settings_profile: str,
+) -> dict[str, Any]:
+    """Return settings with the same precedence as the ``run`` CLI."""
+
+    if not run_settings_path.exists():
+        return {}
+    settings_doc = _load_yaml(run_settings_path)
+    profiles = settings_doc.get("profiles", {})
+    profile_name = (
+        run_settings_profile
+        if run_settings_profile.strip()
+        else str(settings_doc.get("default_profile") or "default")
+    )
+    if not isinstance(profiles, dict) or not isinstance(profiles.get(profile_name), dict):
+        return {}
+    profile = profiles[profile_name]
+    merged: dict[str, Any] = {}
+    for section_name in ("run_common", "run"):
+        section = profile.get(section_name, {})
+        if isinstance(section, dict):
+            merged.update(section)
+    return merged
 
 
 def _bool_setting(value: object, *, default: bool) -> bool:
@@ -1743,6 +1781,8 @@ def _run_ticket_process(
     implementation_runs_dir: Path | None = None,
     ledger_path: Path | None = None,
     maintenance_image_metadata_path: Path | None = None,
+    implementation_review_agent: str | None = None,
+    implementation_review_model: str | None = None,
 ) -> TicketRunResult:
     command = [
         str(implement_python),
@@ -1769,8 +1809,16 @@ def _run_ticket_process(
         command.extend(["--runs-dir", str(implementation_runs_dir)])
     if ledger_path is not None:
         command.extend(["--ledger", str(ledger_path)])
-    if worker.model is not None:
-        command.extend(["--model", worker.model])
+    # The agent is always an explicit batch-role choice.  Make the paired model
+    # explicit as well, including the empty value that means "this agent's
+    # default", so the run-settings profile cannot restore a model selected for
+    # another provider.
+    command.extend(["--model", worker.model or ""])
+    if implementation_review_agent is not None:
+        command.extend(["--implementation-review-agent", implementation_review_agent])
+        command.extend(
+            ["--implementation-review-model", implementation_review_model or ""]
+        )
     if maintenance_image_metadata_path is not None:
         command.extend(
             [
@@ -1839,6 +1887,40 @@ def _run_ticket_process(
 
 
 
+def _exact_codex_resume_model_from_state_path(state_path: Path | None) -> str | None:
+    """Return the model forced by an exact Codex resume state, if applicable."""
+
+    if state_path is None:
+        return None
+    resume_state = _read_json_if_exists(state_path)
+    if not _is_exact_codex_session_resume(resume_state):
+        return None
+    implementation_author = (
+        resume_state.get("implementation_author")
+        if isinstance(resume_state, dict)
+        and isinstance(resume_state.get("implementation_author"), dict)
+        else {}
+    )
+    author_source_run_dir = _clean_str(implementation_author.get("author_source_run_dir"))
+    target_ref_run_dir = (
+        Path(author_source_run_dir).expanduser()
+        if author_source_run_dir is not None
+        else state_path.parent
+    )
+    original_target_ref = _read_json_if_exists(target_ref_run_dir / "target_ref.json")
+    return (
+        _clean_str(original_target_ref.get("model"))
+        if isinstance(original_target_ref, dict)
+        else None
+    ) or LATEST_CODEX_MODEL
+
+
+def _exact_codex_resume_model(candidate: BatchCandidate) -> str | None:
+    """Return the model forced by an exact Codex resume candidate, if applicable."""
+
+    return _exact_codex_resume_model_from_state_path(candidate.resume_state_path)
+
+
 def _run_resume_process(
     *,
     repo_root: Path,
@@ -1856,36 +1938,10 @@ def _run_resume_process(
 ) -> TicketRunResult:
     if candidate.resume_state_path is None:
         raise ValueError("resume candidate is missing resume_state_path")
-    resume_state = _read_json_if_exists(candidate.resume_state_path)
-    implementation_author = (
-        resume_state.get("implementation_author")
-        if isinstance(resume_state, dict)
-        and isinstance(resume_state.get("implementation_author"), dict)
-        else {}
-    )
-    exact_codex_resume = (
-        _clean_str(implementation_author.get("agent")) == "codex"
-        and _clean_str(implementation_author.get("session_id")) is not None
-    )
+    exact_codex_model = _exact_codex_resume_model(candidate)
+    exact_codex_resume = exact_codex_model is not None
     effective_agent = "codex" if exact_codex_resume else worker.agent
-    effective_model = worker.model
-    if exact_codex_resume:
-        author_source_run_dir = _clean_str(
-            implementation_author.get("author_source_run_dir")
-        )
-        target_ref_run_dir = (
-            Path(author_source_run_dir).expanduser()
-            if author_source_run_dir is not None
-            else candidate.resume_state_path.parent
-        )
-        original_target_ref = _read_json_if_exists(
-            target_ref_run_dir / "target_ref.json"
-        )
-        effective_model = (
-            _clean_str(original_target_ref.get("model"))
-            if isinstance(original_target_ref, dict)
-            else None
-        ) or LATEST_CODEX_MODEL
+    effective_model = exact_codex_model if exact_codex_resume else worker.model
     command = [
         str(implement_python),
         "-m",
@@ -1910,8 +1966,11 @@ def _run_resume_process(
         "--ledger",
         str(resume_ledger_path),
     ]
-    if effective_model is not None:
-        command.extend(["--model", effective_model])
+    # The batch worker owns the provider choice for ordinary resumes.  Preserve
+    # an exact Codex author's model when one exists, but otherwise pass an
+    # explicit empty model so run settings cannot restore a model belonging to
+    # a different provider.
+    command.extend(["--model", effective_model or ""])
     if maintenance_image_metadata_path is not None:
         command.extend(
             [
@@ -2037,6 +2096,283 @@ def _build_workers(config: dict[str, Any]) -> list[WorkerTemplate]:
     if not workers:
         raise ValueError("Batch config must define defaults.worker_roster")
     return workers
+
+
+def _effective_refresh_role(
+    *,
+    defaults: dict[str, Any],
+    workers: list[WorkerTemplate],
+) -> tuple[str, str | None, str, str]:
+    """Resolve refresh identity without carrying a model across providers."""
+
+    configured_agent = defaults.get("refresh_agent")
+    refresh_agent = (
+        str(configured_agent).strip().lower()
+        if isinstance(configured_agent, str) and configured_agent.strip()
+        else workers[0].agent
+    )
+    if refresh_agent not in VALID_AGENTS:
+        raise ValueError(f"Invalid refresh agent: {refresh_agent!r}")
+    agent_origin = "batch_config" if configured_agent else "worker_roster"
+
+    if "refresh_model" in defaults:
+        configured_model = defaults.get("refresh_model")
+        refresh_model = (
+            str(configured_model).strip()
+            if isinstance(configured_model, str) and configured_model.strip()
+            else None
+        )
+        model_origin = "batch_config" if refresh_model is not None else "agent_default"
+    elif refresh_agent == workers[0].agent:
+        refresh_model = workers[0].model
+        model_origin = "worker_roster" if refresh_model is not None else "agent_default"
+    else:
+        refresh_model = None
+        model_origin = "agent_default"
+    return refresh_agent, refresh_model, agent_origin, model_origin
+
+
+def _effective_implementation_review_role(
+    *,
+    defaults: dict[str, Any],
+    run_common: dict[str, Any],
+) -> tuple[str | None, str | None, str, str]:
+    """Resolve the reviewer identity actually supplied to ticket runs."""
+
+    configured_agent = defaults.get("implementation_review_agent")
+    settings_agent = run_common.get("implementation_review_agent")
+    agent_raw = configured_agent if configured_agent is not None else settings_agent
+    agent = (
+        str(agent_raw).strip().lower()
+        if isinstance(agent_raw, str) and agent_raw.strip()
+        else None
+    )
+    if agent is not None and agent not in VALID_AGENTS:
+        raise ValueError(f"Invalid implementation review agent: {agent!r}")
+    agent_origin = (
+        "batch_config"
+        if configured_agent is not None
+        else ("run_settings" if settings_agent is not None else "not_configured")
+    )
+
+    if configured_agent is not None or "implementation_review_model" in defaults:
+        # A batch-level agent selection owns the paired model.  Missing/blank
+        # means the selected provider's default, not a run-settings model.
+        configured_model = defaults.get("implementation_review_model")
+        model = (
+            str(configured_model).strip()
+            if isinstance(configured_model, str) and configured_model.strip()
+            else None
+        )
+        model_origin = "batch_config" if model is not None else "agent_default"
+    else:
+        settings_model = run_common.get("implementation_review_model")
+        model = (
+            str(settings_model).strip()
+            if isinstance(settings_model, str) and settings_model.strip()
+            else None
+        )
+        model_origin = "run_settings" if model is not None else "agent_default"
+    return agent, model, agent_origin, model_origin
+
+
+def _preflight_agent_roster(
+    *,
+    workers: list[WorkerTemplate],
+    refresh_agent: str,
+    review_agent: str | None,
+    review_enabled: bool = True,
+    resume_agents: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return every distinct provider binary required by the batch."""
+
+    roster = [
+        {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
+        for worker in workers
+    ]
+    seen = {worker.agent for worker in workers}
+    role_agents = [("refresh", refresh_agent)]
+    if review_enabled:
+        role_agents.append(("implementation_review", review_agent))
+    role_agents.extend(
+        ("exact_session_resume", agent) for agent in sorted(resume_agents or set())
+    )
+    for role, agent in role_agents:
+        if agent is None or agent in seen:
+            continue
+        roster.append({"worker_index": None, "role": role, "agent": agent, "model": None})
+        seen.add(agent)
+    return roster
+
+
+def _required_exact_resume_roles(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    severities: set[str],
+) -> list[dict[str, str]]:
+    """Return the exact provider/model roles forced by schedulable resumes."""
+
+    required: set[tuple[str, str]] = set()
+    candidates = _collect_resume_ready_candidates(
+        repo_root=repo_root,
+        ledger_path=ledger_path,
+        severities=severities,
+        processed=set(),
+    )
+    for candidate in candidates:
+        model = _exact_codex_resume_model(candidate)
+        if model is not None:
+            required.add(("codex", model))
+    return [
+        {"agent": agent, "model": model}
+        for agent, model in sorted(required)
+    ]
+
+
+def _exact_resume_roles_for_lifecycles(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    lifecycle_states: set[str],
+) -> list[dict[str, str]]:
+    """Return distinct exact-resume roles reachable for selected lifecycle states."""
+
+    required: set[tuple[str, str]] = set()
+    actions = load_ledger(ledger_path).get("actions")
+    if not isinstance(actions, dict):
+        return []
+    plans_root = repo_root / ".agents" / "plans"
+    for fingerprint, entry in actions.items():
+        if not isinstance(fingerprint, str) or not isinstance(entry, dict):
+            continue
+        pr_url = _clean_str(entry.get("last_pr_url")) or _clean_str(
+            entry.get("last_review_pr_url")
+        )
+        if pr_url is None:
+            continue
+        ticket_matches = sorted(plans_root.glob(f"*/*{fingerprint}*.md"))
+        if not ticket_matches:
+            continue
+        try:
+            ticket_markdown = ticket_matches[0].read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if not is_generated_backlog_ticket(ticket_markdown):
+            continue
+        state_path_raw = _clean_str(entry.get("last_resume_state_path"))
+        if state_path_raw is None:
+            run_dir_raw = _clean_str(entry.get("last_run_dir"))
+            if run_dir_raw is None:
+                continue
+            state_path = Path(run_dir_raw) / RESUME_STATE_ARTIFACT_NAME
+        else:
+            state_path = Path(state_path_raw)
+        if not state_path.is_absolute():
+            state_path = (repo_root / state_path).resolve()
+        latest = _latest_resume_state_from_ledger_path(
+            repo_root=repo_root,
+            state_path=state_path,
+        )
+        if latest is None:
+            continue
+        latest_path, resume_state, _attempt_count = latest
+        lifecycle = _clean_str(resume_state.get("lifecycle_state")) or _clean_str(
+            entry.get("last_resume_lifecycle_state")
+        )
+        if lifecycle not in lifecycle_states:
+            continue
+        model = _exact_codex_resume_model_from_state_path(latest_path)
+        if model is not None:
+            required.add(("codex", model))
+    return [
+        {"agent": agent, "model": model}
+        for agent, model in sorted(required)
+    ]
+
+
+def _required_resume_agents(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    severities: set[str],
+) -> set[str]:
+    """Return provider binaries required by currently schedulable exact resumes."""
+
+    return {
+        role["agent"]
+        for role in _required_exact_resume_roles(
+            repo_root=repo_root,
+            ledger_path=ledger_path,
+            severities=severities,
+        )
+    }
+
+
+def _apply_run_overrides(
+    config: dict[str, Any],
+    *,
+    refresh_agent: str | None = None,
+    refresh_model: str | None = None,
+    worker_agent: str | None = None,
+    worker_model: str | None = None,
+    implementation_review_agent: str | None = None,
+    implementation_review_model: str | None = None,
+) -> dict[str, Any]:
+    """Apply explicit batch CLI role overrides over the checked-in config."""
+
+    defaults_raw = config.get("defaults")
+    if defaults_raw is None:
+        defaults: dict[str, Any] = {}
+        config["defaults"] = defaults
+    elif isinstance(defaults_raw, dict):
+        defaults = defaults_raw
+    else:
+        raise ValueError("Batch config defaults must be a mapping")
+
+    def normalized_agent(value: str | None, *, role: str) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized not in VALID_AGENTS:
+            raise ValueError(f"Invalid {role} agent: {normalized!r}")
+        return normalized
+
+    def normalized_model(value: str | None) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    effective_refresh_agent = normalized_agent(refresh_agent, role="refresh")
+    effective_refresh_model = normalized_model(refresh_model)
+    if effective_refresh_agent is not None:
+        defaults["refresh_agent"] = effective_refresh_agent
+        if effective_refresh_model is None:
+            defaults["refresh_model"] = None
+    if effective_refresh_model is not None:
+        defaults["refresh_model"] = effective_refresh_model
+
+    effective_worker_agent = normalized_agent(worker_agent, role="worker")
+    effective_worker_model = normalized_model(worker_model)
+    if effective_worker_model is not None and effective_worker_agent is None:
+        raise ValueError("--worker-model requires --worker-agent")
+    if effective_worker_agent is not None:
+        worker: dict[str, Any] = {"agent": effective_worker_agent}
+        if effective_worker_model is not None:
+            worker["model"] = effective_worker_model
+        defaults["worker_roster"] = [worker]
+
+    effective_review_agent = normalized_agent(
+        implementation_review_agent,
+        role="implementation review",
+    )
+    effective_review_model = normalized_model(implementation_review_model)
+    if effective_review_agent is not None:
+        defaults["implementation_review_agent"] = effective_review_agent
+        if effective_review_model is None:
+            defaults.pop("implementation_review_model", None)
+    if effective_review_model is not None:
+        defaults["implementation_review_model"] = effective_review_model
+    return config
 
 
 def _build_phases(config: dict[str, Any], *, data_root: Path) -> list[PhaseConfig]:
@@ -2565,8 +2901,19 @@ def _drain_phase(
 ) -> None:
     owner_root = (owner_root or repo_root).resolve()
     defaults = config.get("defaults", {})
-    refresh_agent = str(defaults.get("refresh_agent") or workers[0].agent)
-    refresh_model = str(defaults.get("refresh_model") or workers[0].model or LATEST_CODEX_MODEL)
+    refresh_agent, refresh_model, _, _ = _effective_refresh_role(
+        defaults=defaults,
+        workers=workers,
+    )
+    implementation_review_agent, implementation_review_model, _, _ = (
+        _effective_implementation_review_role(
+            defaults=defaults,
+            run_common=_run_settings(
+                run_settings_path=settings_path,
+                run_settings_profile=settings_profile,
+            ),
+        )
+    )
     ticket_timeout_seconds: float | None = None
     ticket_timeout_raw = defaults.get("ticket_timeout_seconds")
     if ticket_timeout_raw not in (None, ""):
@@ -2792,6 +3139,8 @@ def _drain_phase(
                             ),
                             ledger_path=resume_ledger_path,
                             maintenance_image_metadata_path=maintenance_image_metadata_path,
+                            implementation_review_agent=implementation_review_agent,
+                            implementation_review_model=implementation_review_model,
                         )
                     in_flight[future] = (candidate, worker, candidate.execution_conflict_keys)
 
@@ -3075,8 +3424,27 @@ def _drain_phase(
     raise RuntimeError(f"Phase {phase.name} exceeded max_phase_cycles={max_phase_cycles}")
 
 
-def run_batch(*, repo_root: Path, config_path: Path) -> int:
+def run_batch(
+    *,
+    repo_root: Path,
+    config_path: Path,
+    refresh_agent: str | None = None,
+    refresh_model: str | None = None,
+    worker_agent: str | None = None,
+    worker_model: str | None = None,
+    implementation_review_agent: str | None = None,
+    implementation_review_model: str | None = None,
+) -> int:
     config = _load_batch_config(config_path)
+    _apply_run_overrides(
+        config,
+        refresh_agent=refresh_agent,
+        refresh_model=refresh_model,
+        worker_agent=worker_agent,
+        worker_model=worker_model,
+        implementation_review_agent=implementation_review_agent,
+        implementation_review_model=implementation_review_model,
+    )
     workers = _build_workers(config)
     defaults_raw = config.get("defaults")
     defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
@@ -3096,6 +3464,19 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
         run_settings_path=run_settings_path,
         run_settings_profile=run_settings_profile,
     )
+    run_settings = _run_settings(
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+    )
+    effective_refresh_agent, effective_refresh_model, agent_origin, model_origin = (
+        _effective_refresh_role(defaults=defaults, workers=workers)
+    )
+    (
+        effective_review_agent,
+        effective_review_model,
+        review_agent_origin,
+        review_model_origin,
+    ) = _effective_implementation_review_role(defaults=defaults, run_common=run_settings)
     exec_backend = str(run_common.get("exec_backend") or "docker")
     preliminary_docker_resource_plan = _build_docker_resource_plan(
         repo_root=repo_root,
@@ -3109,15 +3490,24 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
         if preliminary_docker_resource_plan is not None
         else "standard"
     )
+    resume_ledger_path = _resume_ledger_path(owner_root=owner_root, defaults=defaults)
+    required_resume_agents = _required_resume_agents(
+        repo_root=repo_root,
+        ledger_path=resume_ledger_path,
+        severities={severity for phase in phases for severity in phase.severities},
+    )
 
     preflight = run_batch_preflight(
         repo_root=repo_root,
         batch_dir=batch_dir_path,
         batch_config=config,
-        worker_roster=[
-            {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
-            for worker in workers
-        ],
+        worker_roster=_preflight_agent_roster(
+            workers=workers,
+            refresh_agent=effective_refresh_agent,
+            review_agent=effective_review_agent,
+            review_enabled=_effective_handoff_flags(run_settings)[2],
+            resume_agents=required_resume_agents,
+        ),
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,
         resolve_maintenance_image=bool(
@@ -3150,6 +3540,37 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     state["code_root"] = str(repo_root.resolve())
     state["owner_root"] = str(owner_root)
     state["repo_input"] = repo_input
+    state["effective_execution_roles"] = {
+        "refresh": {
+            "agent": effective_refresh_agent,
+            "model": effective_refresh_model,
+            "agent_origin": "cli_override" if refresh_agent else agent_origin,
+            "model_origin": "cli_override" if refresh_model else model_origin,
+        },
+        "implementation_workers": [
+            {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
+            for worker in workers
+        ],
+        "implementation_workers_origin": (
+            "cli_override" if worker_agent else "batch_config"
+        ),
+        "implementation_review": {
+            "agent": effective_review_agent,
+            "model": effective_review_model,
+            "agent_override": defaults.get("implementation_review_agent"),
+            "model_override": defaults.get("implementation_review_model"),
+            "agent_origin": (
+                "cli_override"
+                if implementation_review_agent
+                else review_agent_origin
+            ),
+            "model_origin": (
+                "cli_override"
+                if implementation_review_model
+                else review_model_origin
+            ),
+        },
+    }
     state["local_green_source"] = preflight.get("local_green_source")
     state["local_green_satisfied"] = preflight.get("local_green_satisfied")
     state["global_blockers"] = list(preflight.get("blockers", []))
@@ -3390,6 +3811,12 @@ def add_batch_subcommands(subparsers: argparse._SubParsersAction[argparse.Argume
         default=Path("configs/backlog_implement_batch.yaml"),
         help="Batch config YAML path (default: configs/backlog_implement_batch.yaml).",
     )
+    run_p.add_argument("--refresh-agent", choices=sorted(VALID_AGENTS))
+    run_p.add_argument("--refresh-model")
+    run_p.add_argument("--worker-agent", choices=sorted(VALID_AGENTS))
+    run_p.add_argument("--worker-model")
+    run_p.add_argument("--implementation-review-agent", choices=sorted(VALID_AGENTS))
+    run_p.add_argument("--implementation-review-model")
 
     status_p = batch_sub.add_parser("status", help="Show batch state JSON.")
     status_p.add_argument("--batch-id", help="Optional batch id. Defaults to the latest batch.")
@@ -3405,7 +3832,16 @@ def add_batch_subcommands(subparsers: argparse._SubParsersAction[argparse.Argume
         repo_root = (
             Path(args.repo_root).resolve() if args.repo_root is not None else Path.cwd().resolve()
         )
-        return run_batch(repo_root=repo_root, config_path=args.config.resolve())
+        return run_batch(
+            repo_root=repo_root,
+            config_path=args.config.resolve(),
+            refresh_agent=args.refresh_agent,
+            refresh_model=args.refresh_model,
+            worker_agent=args.worker_agent,
+            worker_model=args.worker_model,
+            implementation_review_agent=args.implementation_review_agent,
+            implementation_review_model=args.implementation_review_model,
+        )
 
     def _cmd_batch_status(args: argparse.Namespace) -> int:
         repo_root = (
