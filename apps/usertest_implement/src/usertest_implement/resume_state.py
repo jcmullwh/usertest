@@ -15,10 +15,19 @@ LIFECYCLE_AGENT_FAILED = "agent_failed"
 LIFECYCLE_VERIFICATION_FAILED = "verification_failed"
 LIFECYCLE_VERIFICATION_FAILED_RESUME_READY = "verification_failed_resume_ready"
 LIFECYCLE_PUSH_FAILED = "push_failed"
-LIFECYCLE_CI_FAILED = "ci_failed"
+LIFECYCLE_AWAITING_VERIFICATION = "awaiting_verification"
+LIFECYCLE_AWAITING_CI = "awaiting_ci"
+LIFECYCLE_AWAITING_PR_REVIEW = "awaiting_pr_review"
+LIFECYCLE_CI_FAILED_RESUME_READY = "ci_failed_resume_ready"
+LIFECYCLE_REVIEW_FAILED_RESUME_READY = "review_failed_resume_ready"
+# Canonical public constants now use the durable resume-ready names.  Legacy string
+# literals remain accepted by resume commands for old artifacts.
+LIFECYCLE_CI_FAILED = LIFECYCLE_CI_FAILED_RESUME_READY
+LIFECYCLE_REVIEW_CHANGES_REQUESTED = LIFECYCLE_REVIEW_FAILED_RESUME_READY
+LIFECYCLE_LEGACY_CI_FAILED = "ci_failed"
+LIFECYCLE_LEGACY_REVIEW_CHANGES_REQUESTED = "review_changes_requested"
 LIFECYCLE_PR_CREATION_FAILED = "pr_creation_failed"
 LIFECYCLE_AWAITING_REVIEW = "awaiting_review"
-LIFECYCLE_REVIEW_CHANGES_REQUESTED = "review_changes_requested"
 LIFECYCLE_REVIEW_BLOCKED = "review_blocked"
 LIFECYCLE_MERGE_READY = "merge_ready"
 LIFECYCLE_COMPLETE = "complete"
@@ -30,6 +39,7 @@ _RUN_EVIDENCE_FILES: tuple[tuple[str, str], ...] = (
     ("target_ref", "target_ref.json"),
     ("raw_events", "raw_events.jsonl"),
     ("ticket_ref", "ticket_ref.json"),
+    ("verification_config", "verification_config.json"),
     ("verification", "verification.json"),
     ("verification_capture_ref", "verification_capture_ref.json"),
     ("verification_receipt", "verification_receipt.json"),
@@ -308,7 +318,12 @@ def _first_failing_verification_command(verification: dict[str, Any] | None) -> 
 
 def _ci_failed(*, ci_gate: dict[str, Any] | None, handoff_summary: dict[str, Any] | None) -> bool:
     if isinstance(ci_gate, dict):
-        if ci_gate.get("passed") is False:
+        status = (_clean_str(ci_gate.get("status")) or "").lower()
+        finished_at = _clean_str(ci_gate.get("finished_at_utc"))
+        error = _clean_str(ci_gate.get("error"))
+        if ci_gate.get("passed") is False and (
+            status == "completed" or finished_at is not None or error is not None
+        ):
             return True
         conclusion = _clean_str(ci_gate.get("conclusion"))
         if conclusion is not None and conclusion.lower() in _FAILURE_CONCLUSIONS:
@@ -320,11 +335,37 @@ def _ci_failed(*, ci_gate: dict[str, Any] | None, handoff_summary: dict[str, Any
     return False
 
 
+def _verification_pending(
+    *,
+    verification_config: dict[str, Any] | None,
+    verification: dict[str, Any] | None,
+) -> bool:
+    if isinstance(verification, dict):
+        if isinstance(verification.get("passed"), bool):
+            return False
+        status = (_clean_str(verification.get("status")) or "").lower()
+        return status not in {"completed", "failed", "error", "cancelled", "canceled"}
+    return isinstance(verification_config, dict)
+
+
+def _ci_pending(ci_gate: dict[str, Any] | None) -> bool:
+    if not isinstance(ci_gate, dict) or ci_gate.get("skipped") is True:
+        return False
+    if ci_gate.get("passed") is True or _clean_str(ci_gate.get("error")) is not None:
+        return False
+    status = (_clean_str(ci_gate.get("status")) or "").lower()
+    conclusion = (_clean_str(ci_gate.get("conclusion")) or "").lower()
+    if status == "completed" or conclusion in _FAILURE_CONCLUSIONS | {"success"}:
+        return False
+    return _clean_str(ci_gate.get("finished_at_utc")) is None
+
+
 def _classify_resume_state(
     *,
     run_dir: Path,
     review_run_dir: Path | None,
     exit_code: int | None,
+    verification_config: dict[str, Any] | None,
     verification: dict[str, Any] | None,
     git_ref: dict[str, Any] | None,
     push_ref: dict[str, Any] | None,
@@ -341,20 +382,20 @@ def _classify_resume_state(
         decision = (_clean_str(review_summary.get("review_decision")) or "").lower()
         if decision == "changes_requested":
             rationale = _clean_str(review_summary.get("rationale"))
-            return LIFECYCLE_REVIEW_CHANGES_REQUESTED, rationale or "Review requested changes."
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, rationale or "Review requested changes."
         if decision == "blocked":
             rationale = _clean_str(review_summary.get("rationale"))
-            return LIFECYCLE_REVIEW_BLOCKED, rationale or "Review is blocked."
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, rationale or "Review is blocked."
         if review_summary.get("merge_ready") is True:
             return LIFECYCLE_MERGE_READY, None
 
     if isinstance(handoff_summary, dict):
         decision = (_clean_str(handoff_summary.get("review_decision")) or "").lower()
         if decision == "changes_requested":
-            return LIFECYCLE_REVIEW_CHANGES_REQUESTED, "Review requested changes."
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, "Review requested changes."
         if decision == "blocked":
             reason = _clean_str(handoff_summary.get("review_error")) or "Review is blocked."
-            return LIFECYCLE_REVIEW_BLOCKED, reason
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, reason
         if handoff_summary.get("review_merge_ready") is True:
             return LIFECYCLE_MERGE_READY, None
 
@@ -364,14 +405,29 @@ def _classify_resume_state(
             return LIFECYCLE_VERIFICATION_FAILED_RESUME_READY, f"Verification failed: {command}"
         return LIFECYCLE_VERIFICATION_FAILED_RESUME_READY, "Verification failed."
 
+    if exit_code in {None, 0} and _verification_pending(
+        verification_config=verification_config,
+        verification=verification,
+    ):
+        return LIFECYCLE_AWAITING_VERIFICATION, "Verification is still pending."
+
     if isinstance(push_ref, dict) and push_ref.get("error"):
         return LIFECYCLE_PUSH_FAILED, f"Push failed: {push_ref.get('error')}"
+
+    if exit_code in {None, 0} and _ci_pending(ci_gate):
+        run_url = _clean_str(ci_gate.get("run_url")) if isinstance(ci_gate, dict) else None
+        detail = (
+            f"CI is still pending: {run_url}"
+            if run_url is not None
+            else "CI is still pending."
+        )
+        return LIFECYCLE_AWAITING_CI, detail
 
     if _ci_failed(ci_gate=ci_gate, handoff_summary=handoff_summary):
         error = _clean_str(ci_gate.get("error")) if isinstance(ci_gate, dict) else None
         run_url = _clean_str(ci_gate.get("run_url")) if isinstance(ci_gate, dict) else None
         detail = error or run_url or "CI gate failed."
-        return LIFECYCLE_CI_FAILED, detail
+        return LIFECYCLE_CI_FAILED_RESUME_READY, detail
 
     if isinstance(pr_ref, dict) and pr_ref.get("pr_adopted") is True:
         return (
@@ -411,7 +467,10 @@ def _classify_resume_state(
     if isinstance(handoff_summary, dict):
         if handoff_summary.get("final_status") == "success":
             if handoff_summary.get("pr_requested") is True:
-                return LIFECYCLE_AWAITING_REVIEW, "PR is open and awaiting implementation review."
+                return (
+                    LIFECYCLE_AWAITING_REVIEW,
+                    "PR is open and awaiting implementation review.",
+                )
             return LIFECYCLE_IMPLEMENTED_LOCAL, None
 
     return LIFECYCLE_IN_PROGRESS, "Run has not produced a terminal resume state yet."
@@ -433,6 +492,7 @@ def build_ticket_resume_state(
     )
     workspace_ref = _read_json(run_dir / "workspace_ref.json")
     ticket_ref = _read_json(run_dir / "ticket_ref.json")
+    verification_config = _read_json(run_dir / "verification_config.json")
     verification = _read_json(run_dir / "verification.json")
     git_ref = _read_json(run_dir / "git_ref.json")
     push_ref = _read_json(run_dir / "push_ref.json")
@@ -451,6 +511,9 @@ def build_ticket_resume_state(
     )
 
     workspace_ref_dict = workspace_ref if isinstance(workspace_ref, dict) else None
+    verification_config_dict = (
+        verification_config if isinstance(verification_config, dict) else None
+    )
     verification_dict = verification if isinstance(verification, dict) else None
     git_ref_dict = git_ref if isinstance(git_ref, dict) else None
     push_ref_dict = push_ref if isinstance(push_ref, dict) else None
@@ -465,6 +528,7 @@ def build_ticket_resume_state(
         run_dir=run_dir,
         review_run_dir=review_run_dir,
         exit_code=exit_code,
+        verification_config=verification_config_dict,
         verification=verification_dict,
         git_ref=git_ref_dict,
         push_ref=push_ref_dict,

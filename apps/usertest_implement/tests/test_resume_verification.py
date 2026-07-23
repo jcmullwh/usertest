@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from runner_core import RunnerConfig
 from runner_core.retained_oracle_assets import _sha256_json
 
@@ -17,6 +18,18 @@ from usertest_implement.cli import build_parser
 def _write_json(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def test_next_resume_attempt_count_inherits_persisted_and_local_attempts() -> None:
+    assert (
+        resume_commands._next_resume_attempt_count(
+            {
+                "resume_attempt_count": 2,
+                "resume_attempts": [{"run_dir": "third"}],
+            }
+        )
+        == 4
+    )
 
 
 def _make_resume_run(tmp_path: Path, *, workspace_exists: bool = True) -> tuple[Path, Path, Path]:
@@ -1224,6 +1237,19 @@ def test_pr_resume_noops_when_stale_ci_failure_is_currently_green(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "noop_current_gates_green"
     assert payload["branch"] == "backlog/current-pr-branch"
+    assert payload["persisted_lifecycle_state"] == "merge_ready"
+    persisted = json.loads((run_dir / "ticket_resume_state.json").read_text(encoding="utf-8"))
+    assert persisted["lifecycle_state"] == "merge_ready"
+    assert persisted["blocking_reason"] is None
+    assert persisted["resume_attempt_count"] == 1
+    ledger = yaml.safe_load(
+        (tmp_path / ".agents" / "state" / "backlog_implement_actions.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert ledger["actions"]["def456def456def0"]["last_resume_lifecycle_state"] == (
+        "merge_ready"
+    )
 
 
 def test_pr_resume_noops_when_review_changes_requested_is_now_approved(
@@ -1251,6 +1277,7 @@ def test_pr_resume_noops_when_review_changes_requested_is_now_approved(
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "noop_current_gates_green"
     assert payload["current_pr_context"]["pr"]["reviewDecision"] == "APPROVED"
+    assert payload["persisted_lifecycle_state"] == "merge_ready"
 
 
 def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(

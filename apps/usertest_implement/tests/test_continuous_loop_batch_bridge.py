@@ -238,7 +238,7 @@ def test_review_changes_requested_resumes_same_author_once(tmp_path: Path) -> No
                 "last_review_pr_url": pr_url,
                 "last_review_decision": "changes_requested",
                 "last_review_merge_ready": False,
-                "last_resume_lifecycle_state": "review_changes_requested",
+                "last_resume_lifecycle_state": "review_failed_resume_ready",
             }
         )
         return True
