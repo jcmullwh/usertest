@@ -25,7 +25,6 @@ LIFECYCLE_MANIFEST_ARTIFACT_NAME = "lifecycle_manifest.json"
 
 _TERMINAL_FAILURE_STATES = {
     "agent_failed",
-    "verification_failed",
     "push_failed",
     "pr_creation_failed",
 }

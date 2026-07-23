@@ -226,6 +226,33 @@ def test_resume_ready_verification_failure_keeps_lifecycle_open(tmp_path: Path) 
     assert manifest.status == "active"
 
 
+def test_legacy_resumable_verification_failure_keeps_lifecycle_open(tmp_path: Path) -> None:
+    selected = _selected(tmp_path)
+    run_dir = tmp_path / "runs" / "implement" / "legacy-verification-failed"
+    _write_json(
+        run_dir / "verification.json",
+        {"passed": False, "commands": [{"command": "pytest", "exit_code": 1}]},
+    )
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=2,
+    )
+    state["lifecycle_state"] = "verification_failed"
+
+    lifecycle_telemetry.write_implementation_lifecycle_telemetry(
+        run_dir=run_dir,
+        review_run_dir=None,
+        resume_state=state,
+    )
+
+    events = read_lifecycle_events(run_dir / "lifecycle_events.jsonl")
+    assert all(event.event_type != "lifecycle.closed" for event in events)
+    manifest = read_lifecycle_manifest(run_dir / "lifecycle_manifest.json")
+    assert manifest.status == "active"
+
+
 def test_resumable_ci_failure_keeps_lifecycle_open(tmp_path: Path) -> None:
     selected = _selected(tmp_path)
     run_dir = tmp_path / "runs" / "implement" / "ci-failed"
