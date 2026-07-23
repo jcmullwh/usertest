@@ -62,7 +62,46 @@ def test_continuous_controller_propagates_verified_versioned_context(
         "  worker_roster:\n"
         "    - agent: codex\n"
         "      model: gpt-batch-explicit\n"
-        "    - agent: claude\n",
+        "    - agent: claude\n"
+        "phases:\n"
+        "  - name: high\n"
+        "    sources:\n"
+        "      - name: fixture\n"
+        "        runs_dir: runs/fixture\n"
+        "        target: fixture\n"
+        "    severities: [high]\n",
+        encoding="utf-8",
+    )
+    ticket = tmp_path / "plans" / "resume.md"
+    ticket.parent.mkdir(parents=True)
+    ticket.write_text("# Exact resume\n\n- Severity: `high`\n", encoding="utf-8")
+    resume_run = tmp_path / "runs" / "prior"
+    resume_run.mkdir(parents=True)
+    resume_state = resume_run / "ticket_resume_state.json"
+    resume_state.write_text(
+        json.dumps(
+            {
+                "lifecycle_state": "ci_failed_resume_ready",
+                "ticket": {"path": str(ticket), "title": "Exact resume"},
+                "implementation_author": {
+                    "agent": "codex",
+                    "session_id": "019f8ca0-a467-7870-8959-7636b10c0ccc",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (resume_run / "target_ref.json").write_text(
+        json.dumps({"model": "gpt-exact-resume"}),
+        encoding="utf-8",
+    )
+    ledger = tmp_path / ".agents" / "state" / "backlog_implement_actions.yaml"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        "schema_version: 1\n"
+        "actions:\n"
+        "  abcdef0123456789:\n"
+        f"    last_resume_state_path: {resume_state.as_posix()}\n",
         encoding="utf-8",
     )
     ctx = SimpleNamespace(
@@ -95,11 +134,23 @@ def test_continuous_controller_propagates_verified_versioned_context(
         {"model": "gpt-5.6-sol", "worker_index": 1},
     ]
     assert models["batch_post_implementation_review"] == "gpt-5.6-sol"
+    assert models["batch_exact_session_resumes"] == [
+        {
+            "model": "gpt-exact-resume",
+            "ticket_key": f"{tmp_path.resolve().as_posix().lower()}::abcdef0123456789",
+        }
+    ]
     assert providers["backlog"] == "codex"
     assert providers["batch_workers"] == [
         {"agent": "codex", "worker_index": 1},
     ]
     assert providers["batch_post_implementation_review"] == "codex"
+    assert providers["batch_exact_session_resumes"] == [
+        {
+            "agent": "codex",
+            "ticket_key": f"{tmp_path.resolve().as_posix().lower()}::abcdef0123456789",
+        }
+    ]
 
     first_cycle_id = context.cycle_id
     first_session_id = context.session_id

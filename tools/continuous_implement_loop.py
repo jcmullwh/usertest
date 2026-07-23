@@ -31,6 +31,12 @@ from run_artifacts.lifecycle_events import (  # noqa: E402
 )
 
 from usertest_implement.batch_state import latest_batch_dir, load_json  # noqa: E402
+from usertest_implement.batch_runner import (  # noqa: E402
+    _build_phases,
+    _configured_owner_root,
+    _required_exact_resume_roles,
+    _resume_ledger_path,
+)
 from usertest_implement.ledger import update_ledger_file  # noqa: E402
 
 _SEVERITY_PATTERN = re.compile(r"^- Severity:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
@@ -239,17 +245,35 @@ def _effective_execution_fingerprint(
     review_agent, review_model = resolved_roles["controller_review"]
     worker_models = [{"worker_index": 1, "model": worker_model}]
     worker_providers = [{"worker_index": 1, "agent": worker_agent}]
+    try:
+        owner_root = _configured_owner_root(code_root=ctx.repo_root, config=batch_doc)
+        phases = _build_phases(batch_doc, data_root=owner_root)
+        exact_resume_roles = _required_exact_resume_roles(
+            repo_root=ctx.repo_root,
+            ledger_path=_resume_ledger_path(owner_root=owner_root, defaults=defaults),
+            severities={severity for phase in phases for severity in phase.severities},
+        )
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        return None
 
     models: dict[str, Any] = {
         role: model for role, (_agent, model) in resolved_roles.items()
     }
     models["batch_workers"] = worker_models
     models["batch_post_implementation_review"] = review_model
+    models["batch_exact_session_resumes"] = [
+        {"ticket_key": role["ticket_key"], "model": role["model"]}
+        for role in exact_resume_roles
+    ]
     providers: dict[str, Any] = {
         role: agent for role, (agent, _model) in resolved_roles.items()
     }
     providers["batch_workers"] = worker_providers
     providers["batch_post_implementation_review"] = review_agent
+    providers["batch_exact_session_resumes"] = [
+        {"ticket_key": role["ticket_key"], "agent": role["agent"]}
+        for role in exact_resume_roles
+    ]
     return models, providers, settings_path
 
 

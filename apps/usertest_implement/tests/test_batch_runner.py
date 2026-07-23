@@ -334,6 +334,7 @@ def test_preflight_roster_includes_provider_required_by_exact_resume(
     resume_agents = _required_resume_agents(
         repo_root=tmp_path,
         ledger_path=ledger_path,
+        severities={"high"},
     )
 
     assert resume_agents == {"codex"}
@@ -357,6 +358,50 @@ def test_preflight_roster_includes_provider_required_by_exact_resume(
             "model": None,
         },
     ]
+
+
+def test_resume_preflight_ignores_exact_resume_outside_configured_severities(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "runs" / "prior" / "ticket_resume_state.json"
+    ticket_path = tmp_path / "plans" / "ticket.md"
+    ticket_path.parent.mkdir(parents=True)
+    ticket_path.write_text(
+        "# Deferred exact resume\n\n- Severity: `low`\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        state_path,
+        {
+            "lifecycle_state": "ci_failed_resume_ready",
+            "ticket": {"path": str(ticket_path), "title": "Deferred exact resume"},
+            "implementation_author": {
+                "agent": "codex",
+                "session_id": "019f8ca0-a467-7870-8959-7636b10c0bbb",
+            },
+        },
+    )
+    ledger_path = tmp_path / "state" / "actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "actions": {
+                    "fedcba9876543210": {
+                        "last_resume_state_path": str(state_path),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _required_resume_agents(
+        repo_root=tmp_path,
+        ledger_path=ledger_path,
+        severities={"blocker", "high"},
+    ) == set()
 
 
 def test_run_settings_apply_run_section_over_run_common(tmp_path: Path) -> None:

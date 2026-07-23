@@ -1887,6 +1887,34 @@ def _run_ticket_process(
 
 
 
+def _exact_codex_resume_model(candidate: BatchCandidate) -> str | None:
+    """Return the model forced by an exact Codex resume, if applicable."""
+
+    if candidate.resume_state_path is None:
+        return None
+    resume_state = _read_json_if_exists(candidate.resume_state_path)
+    if not _is_exact_codex_session_resume(resume_state):
+        return None
+    implementation_author = (
+        resume_state.get("implementation_author")
+        if isinstance(resume_state, dict)
+        and isinstance(resume_state.get("implementation_author"), dict)
+        else {}
+    )
+    author_source_run_dir = _clean_str(implementation_author.get("author_source_run_dir"))
+    target_ref_run_dir = (
+        Path(author_source_run_dir).expanduser()
+        if author_source_run_dir is not None
+        else candidate.resume_state_path.parent
+    )
+    original_target_ref = _read_json_if_exists(target_ref_run_dir / "target_ref.json")
+    return (
+        _clean_str(original_target_ref.get("model"))
+        if isinstance(original_target_ref, dict)
+        else None
+    ) or LATEST_CODEX_MODEL
+
+
 def _run_resume_process(
     *,
     repo_root: Path,
@@ -1904,33 +1932,10 @@ def _run_resume_process(
 ) -> TicketRunResult:
     if candidate.resume_state_path is None:
         raise ValueError("resume candidate is missing resume_state_path")
-    resume_state = _read_json_if_exists(candidate.resume_state_path)
-    implementation_author = (
-        resume_state.get("implementation_author")
-        if isinstance(resume_state, dict)
-        and isinstance(resume_state.get("implementation_author"), dict)
-        else {}
-    )
-    exact_codex_resume = _is_exact_codex_session_resume(resume_state)
+    exact_codex_model = _exact_codex_resume_model(candidate)
+    exact_codex_resume = exact_codex_model is not None
     effective_agent = "codex" if exact_codex_resume else worker.agent
-    effective_model = worker.model
-    if exact_codex_resume:
-        author_source_run_dir = _clean_str(
-            implementation_author.get("author_source_run_dir")
-        )
-        target_ref_run_dir = (
-            Path(author_source_run_dir).expanduser()
-            if author_source_run_dir is not None
-            else candidate.resume_state_path.parent
-        )
-        original_target_ref = _read_json_if_exists(
-            target_ref_run_dir / "target_ref.json"
-        )
-        effective_model = (
-            _clean_str(original_target_ref.get("model"))
-            if isinstance(original_target_ref, dict)
-            else None
-        ) or LATEST_CODEX_MODEL
+    effective_model = exact_codex_model if exact_codex_resume else worker.model
     command = [
         str(implement_python),
         "-m",
@@ -2194,23 +2199,50 @@ def _preflight_agent_roster(
     return roster
 
 
-def _required_resume_agents(*, repo_root: Path, ledger_path: Path) -> set[str]:
-    """Return provider binaries required by currently schedulable exact resumes."""
+def _required_exact_resume_roles(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    severities: set[str],
+) -> list[dict[str, str]]:
+    """Return the exact provider/model roles forced by schedulable resumes."""
 
-    required: set[str] = set()
+    required: list[dict[str, str]] = []
     candidates = _collect_resume_ready_candidates(
         repo_root=repo_root,
         ledger_path=ledger_path,
-        severities=set(SEVERITY_RANK),
+        severities=severities,
         processed=set(),
     )
     for candidate in candidates:
-        if candidate.resume_state_path is None:
-            continue
-        resume_state = _read_json_if_exists(candidate.resume_state_path)
-        if _is_exact_codex_session_resume(resume_state):
-            required.add("codex")
+        model = _exact_codex_resume_model(candidate)
+        if model is not None:
+            required.append(
+                {
+                    "ticket_key": candidate.ticket_key,
+                    "agent": "codex",
+                    "model": model,
+                }
+            )
     return required
+
+
+def _required_resume_agents(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    severities: set[str],
+) -> set[str]:
+    """Return provider binaries required by currently schedulable exact resumes."""
+
+    return {
+        role["agent"]
+        for role in _required_exact_resume_roles(
+            repo_root=repo_root,
+            ledger_path=ledger_path,
+            severities=severities,
+        )
+    }
 
 
 def _apply_run_overrides(
@@ -3398,6 +3430,7 @@ def run_batch(
     required_resume_agents = _required_resume_agents(
         repo_root=repo_root,
         ledger_path=resume_ledger_path,
+        severities={severity for phase in phases for severity in phase.severities},
     )
 
     preflight = run_batch_preflight(
