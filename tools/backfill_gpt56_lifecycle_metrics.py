@@ -36,6 +36,16 @@ from run_artifacts.lifecycle_events import (  # noqa: E402
 )
 
 
+def _manifest_path(path: Path) -> str:
+    """Return a portable path for repository-owned backfill inputs."""
+
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(_REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
 def _read_object(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -504,7 +514,7 @@ def backfill_dashboard(
             "note": "The window is operator-selected and is not asserted as an exact release timestamp.",
         },
         "source": {
-            "path": str(dashboard_path.resolve()),
+            "path": _manifest_path(dashboard_path),
             "sha256": source_digest,
             "schema_version": 3,
         },

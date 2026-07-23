@@ -20,37 +20,37 @@
       "human_touch_free_rate": null,
       "pipeline_autonomous_rate": null,
       "touchless_terminal_yield": null,
-      "withheld_case_count": 5
+      "withheld_case_count": 3
     },
-    "case_count": 5,
+    "case_count": 3,
     "completeness": {
       "certified_case_count": 0,
       "coverage": 0.0,
       "status": "partial",
-      "withheld_case_count": 5
+      "withheld_case_count": 3
     },
     "disposition_pending_case_count": 0,
-    "dispositioned_case_count": 5,
+    "dispositioned_case_count": 3,
     "errors": {
       "clusters": {
-        "count": 5,
-        "median": 7.0,
-        "p75": 14.0,
+        "count": 3,
+        "median": 14.0,
+        "p75": 37.0,
         "p90": 37.0,
-        "total": 64.0
+        "total": 58.0
       },
-      "externally_resolved_clusters": 29,
-      "occurrences": 64,
-      "self_healed_clusters": 12,
+      "externally_resolved_clusters": 27,
+      "occurrences": 58,
+      "self_healed_clusters": 8,
       "unresolved_terminal_clusters": 0
     },
     "interventions": {
       "supervising_agent": {
-        "count": 5,
-        "median": 11.0,
-        "p75": 12.0,
+        "count": 3,
+        "median": 12.0,
+        "p75": 29.0,
         "p90": 29.0,
-        "total": 54.0
+        "total": 52.0
       }
     },
     "manual_actions": {
@@ -69,8 +69,8 @@
         "total": null
       },
       "avoidable": null,
-      "known_action_count": 54,
-      "known_required_for_progress": 54,
+      "known_action_count": 52,
+      "known_required_for_progress": 52,
       "measurement_administration": null,
       "passive_observations": null,
       "policy_mandated": null,
@@ -80,7 +80,7 @@
       "unclassified": null
     },
     "reconciliation_ok": false,
-    "terminal_case_count": 5,
+    "terminal_case_count": 3,
     "timing": {
       "approval_wait_seconds": {
         "count": 0,
@@ -111,11 +111,11 @@
         "total": null
       },
       "lineage_to_disposition_seconds": {
-        "count": 4,
-        "median": 21471.6768545,
-        "p75": 39136.156234,
+        "count": 2,
+        "median": 56420.078117,
+        "p75": 73704.0,
         "p90": 73704.0,
-        "total": 119790.58731
+        "total": 112840.156234
       },
       "manual_active_seconds": {
         "count": 0,
@@ -234,33 +234,33 @@
         "human_touch_free_rate": null,
         "pipeline_autonomous_rate": null,
         "touchless_terminal_yield": null,
-        "withheld_case_count": 2
+        "withheld_case_count": 1
       },
-      "case_count": 2,
+      "case_count": 1,
       "completeness": {
         "certified_case_count": 0,
         "coverage": 0.0,
         "status": "partial",
-        "withheld_case_count": 2
+        "withheld_case_count": 1
       },
       "disposition": "already_addressed",
       "errors": {
         "clusters": {
-          "count": 2,
-          "median": 19.5,
+          "count": 1,
+          "median": 37.0,
           "p75": 37.0,
           "p90": 37.0,
-          "total": 39.0
+          "total": 37.0
         },
         "externally_resolved_clusters": 27,
-        "occurrences": 39,
-        "self_healed_clusters": 6,
+        "occurrences": 37,
+        "self_healed_clusters": 4,
         "unresolved_terminal_clusters": 0
       },
       "interventions": {
         "supervising_agent": {
-          "count": 2,
-          "median": 14.5,
+          "count": 1,
+          "median": 29.0,
           "p75": 29.0,
           "p90": 29.0,
           "total": 29.0
@@ -322,11 +322,11 @@
           "total": null
         },
         "lineage_to_disposition_seconds": {
-          "count": 2,
-          "median": 21471.6768545,
+          "count": 1,
+          "median": 39136.156234,
           "p75": 39136.156234,
           "p90": 39136.156234,
-          "total": 42943.353709
+          "total": 39136.156234
         },
         "manual_active_seconds": {
           "count": 0,
@@ -426,15 +426,15 @@
     {
       "automation_score_v1": {
         "avoidable": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
-        "certified_case_count": 0,
+        "certified_case_count": null,
         "gross": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
@@ -443,109 +443,109 @@
         "human_touch_free_rate": null,
         "pipeline_autonomous_rate": null,
         "touchless_terminal_yield": null,
-        "withheld_case_count": 1
+        "withheld_case_count": null
       },
-      "case_count": 1,
+      "case_count": 0,
       "completeness": {
-        "certified_case_count": 0,
-        "coverage": 0.0,
-        "status": "partial",
-        "withheld_case_count": 1
+        "certified_case_count": null,
+        "coverage": null,
+        "status": "unknown",
+        "withheld_case_count": null
       },
       "disposition": "non_actionable",
       "errors": {
         "clusters": {
-          "count": 1,
-          "median": 4.0,
-          "p75": 4.0,
-          "p90": 4.0,
-          "total": 4.0
+          "count": null,
+          "median": null,
+          "p75": null,
+          "p90": null,
+          "total": null
         },
-        "externally_resolved_clusters": 2,
-        "occurrences": 4,
-        "self_healed_clusters": 2,
-        "unresolved_terminal_clusters": 0
+        "externally_resolved_clusters": null,
+        "occurrences": null,
+        "self_healed_clusters": null,
+        "unresolved_terminal_clusters": null
       },
       "interventions": {
         "supervising_agent": {
-          "count": 1,
-          "median": 2.0,
-          "p75": 2.0,
-          "p90": 2.0,
-          "total": 2.0
+          "count": null,
+          "median": null,
+          "p75": null,
+          "p90": null,
+          "total": null
         }
       },
       "manual_actions": {
         "actions": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "active_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "avoidable": null,
-        "known_action_count": 2,
-        "known_required_for_progress": 2,
+        "known_action_count": null,
+        "known_required_for_progress": null,
         "measurement_administration": null,
         "passive_observations": null,
         "policy_mandated": null,
         "required_for_progress": null,
-        "telemetry_complete": false,
+        "telemetry_complete": null,
         "unavoidable": null,
         "unclassified": null
       },
       "timing": {
         "approval_wait_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "ci_wait_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "external_wait_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "lifecycle_to_disposition_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "lineage_to_disposition_seconds": {
-          "count": 1,
-          "median": 3143.233601,
-          "p75": 3143.233601,
-          "p90": 3143.233601,
-          "total": 3143.233601
+          "count": null,
+          "median": null,
+          "p75": null,
+          "p90": null,
+          "total": null
         },
         "manual_active_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "pipeline_active_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
@@ -559,42 +559,42 @@
           "total": null
         },
         "provider_wait_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "queue_wait_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "raw_to_disposition_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "unclassified_wall_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "verified_outcome_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "worker_resource_seconds": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
@@ -603,21 +603,21 @@
       },
       "tokens": {
         "all_in": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "direct": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
           "total": null
         },
         "inclusive": {
-          "count": 0,
+          "count": null,
           "median": null,
           "p75": null,
           "p90": null,
@@ -1478,12 +1478,12 @@
   "source": {
     "cohort_id": "gpt-5.6-approximate-window",
     "comparison_sha256s": [],
-    "generated_at": "2026-07-21T19:05:32.103849Z",
+    "generated_at": "2026-07-21T15:33:08Z",
     "metric_version": "lifecycle_case_metrics_v2",
     "mixed_version_lifecycle": false,
     "renderer_sha256": "201cd6fc48c8e016c3fee8fa453e15b348cf3cb8d8850d9abec32ce38a1230ca",
     "schema_version": 1,
-    "sha256": "1a9aff8c78d9292fd740a9942ddc0cf6e7427dd3a96e3c8980012d58a2f6d375",
+    "sha256": "c4dc9be833a7fe0208f929541ce1545ce18c08d301928d9b1a4857ff36a8324d",
     "version_warning_codes": [
       "missing_system_fingerprints"
     ]

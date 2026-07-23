@@ -15,6 +15,14 @@ def _module():
     return module
 
 
+def test_manifest_path_is_portable_for_repository_inputs() -> None:
+    mod = _module()
+
+    assert mod._manifest_path(mod._REPO_ROOT / "docs" / "source.json") == (
+        "docs/source.json"
+    )
+
+
 def test_backfill_preserves_unknowns_and_structured_clusters(tmp_path: Path) -> None:
     mod = _module()
     dashboard_path = tmp_path / "dashboard.json"

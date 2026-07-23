@@ -8,8 +8,8 @@
     "note": "The window is operator-selected and is not asserted as an exact release timestamp."
   },
   "source": {
-    "path": "I:\\code\\usertest_backlog_depth\\docs\\design\\historical-automated-backlog-depth-remediation-metrics.json",
-    "sha256": "459048c6cd401401794afb7fa166d9274731fe0303e4f2f41991d68ac22469b4",
+    "path": "docs/design/historical-automated-backlog-depth-remediation-metrics.json",
+    "sha256": "0f36ff49b6d3c08f2cedd363465c0b52fba2c75459b3b64cd8e0b1f72fca3fab",
     "schema_version": 3
   },
   "event_log_path": "lifecycle_events.jsonl",
@@ -275,42 +275,6 @@
       },
       "disposition": null,
       "disposition_evidence": []
-    },
-    {
-      "run_id": "case-gemini-shell-preflight-d896a3f3-20260721",
-      "source_lifecycle_id": "case-lifecycle:case-0bf68ae2f4f05e8f75c0:d896a3f3:20260721",
-      "provenance": {
-        "timing": "operator_attested",
-        "error_clusters": "operator_attested",
-        "self_healed_errors": "operator_attested",
-        "interventions": "operator_attested",
-        "tokens": "unknown",
-        "manual_actions": "operator_attested_minimum",
-        "origin": "unknown",
-        "disposition": "artifact_derived"
-      },
-      "disposition": "non_actionable",
-      "disposition_evidence": [
-        "current_state:not_required/non_actionable"
-      ]
-    },
-    {
-      "run_id": "case-report-schema-d896a3f3-20260721",
-      "source_lifecycle_id": "case-lifecycle:case-4f13410712b8654b0e93:d896a3f3:20260721",
-      "provenance": {
-        "timing": "operator_attested",
-        "error_clusters": "operator_attested",
-        "self_healed_errors": "operator_attested",
-        "interventions": "unknown",
-        "tokens": "unknown",
-        "manual_actions": "unknown",
-        "origin": "unknown",
-        "disposition": "artifact_derived"
-      },
-      "disposition": "already_addressed",
-      "disposition_evidence": [
-        "current_state:not_required/already_addressed"
-      ]
     }
   ],
   "skipped_runs": [
@@ -327,5 +291,5 @@
     "eligible": false,
     "reason": "legacy manual origin, token, action, and disposition evidence is incomplete"
   },
-  "content_sha256": "036b97de92c10187a5510799a3db71bb751e90fbfcdf4161474ec37bc54ec484"
+  "content_sha256": "816a1b292e06cea411cd4fbe8b1ffc55a1ae47c2281abeff1f80d5467225f799"
 }
