@@ -628,6 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to the original ticket_resume_state.json.",
     )
+    _add_settings_args(resume_p)
     _add_resume_execution_args(resume_p)
     resume_p.set_defaults(func=_cmd_resume)
 

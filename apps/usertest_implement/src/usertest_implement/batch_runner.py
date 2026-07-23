@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -42,7 +42,33 @@ from usertest_implement.batch_state import (
     utc_now_z,
     write_json,
 )
+from usertest_implement.ledger import load_ledger
 from usertest_implement.tickets import move_ticket_file
+
+RESUME_STATE_ARTIFACT_NAME = "ticket_resume_state.json"
+
+LIFECYCLE_AWAITING_VERIFICATION = "awaiting_verification"
+LIFECYCLE_AWAITING_CI = "awaiting_ci"
+LIFECYCLE_AWAITING_PR_REVIEW = "awaiting_pr_review"
+LIFECYCLE_AWAITING_REVIEW = "awaiting_review"
+LIFECYCLE_VERIFICATION_FAILED = "verification_failed"
+LIFECYCLE_VERIFICATION_FAILED_RESUME_READY = "verification_failed_resume_ready"
+LIFECYCLE_CI_FAILED = "ci_failed"
+LIFECYCLE_CI_FAILED_RESUME_READY = "ci_failed_resume_ready"
+LIFECYCLE_REVIEW_CHANGES_REQUESTED = "review_changes_requested"
+LIFECYCLE_REVIEW_FAILED_RESUME_READY = "review_failed_resume_ready"
+LIFECYCLE_MERGE_READY = "merge_ready"
+LIFECYCLE_COMPLETE = "complete"
+LIFECYCLE_IMPLEMENTED_LOCAL = "implemented_local"
+_DEFAULT_LEDGER_PATH = Path(".agents/state/backlog_implement_actions.yaml")
+
+
+def _resolve_batch_ledger_path(*, repo_root: Path, raw: Path | None) -> Path:
+    ledger_path = raw if raw is not None else _DEFAULT_LEDGER_PATH
+    if ledger_path.is_absolute():
+        return ledger_path.resolve()
+    return (repo_root / ledger_path).resolve()
+
 
 SEVERITY_RANK = {
     "blocker": 0,
@@ -66,6 +92,28 @@ RUN_HISTORY_ARTIFACT_NAMES = {
     "ticket_resume_state.json",
     "timing.json",
 }
+PARKED_LIFECYCLE_STATES = {
+    LIFECYCLE_AWAITING_VERIFICATION,
+    LIFECYCLE_AWAITING_CI,
+    LIFECYCLE_AWAITING_REVIEW,
+    # Backward-compatible with artifacts emitted by the short-lived
+    # awaiting_pr_review spelling.
+    LIFECYCLE_AWAITING_PR_REVIEW,
+    # Review and CI passed but the merge has not happened yet.
+    LIFECYCLE_MERGE_READY,
+}
+RESUME_READY_LIFECYCLE_STATES = {
+    LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
+    LIFECYCLE_CI_FAILED_RESUME_READY,
+    LIFECYCLE_REVIEW_FAILED_RESUME_READY,
+    # Backward-compatible with pre-resume-ready PR artifacts.
+    LIFECYCLE_VERIFICATION_FAILED,
+    LIFECYCLE_CI_FAILED,
+    LIFECYCLE_REVIEW_CHANGES_REQUESTED,
+}
+COMPLETE_LIFECYCLE_STATES = {LIFECYCLE_COMPLETE}
+LOCAL_COMPLETE_LIFECYCLE_STATES = {LIFECYCLE_IMPLEMENTED_LOCAL}
+
 DOCKER_RESOURCE_PLAN_REASON_SUMMARIES = {
     "per_ticket_image_resolution": (
         "Maintenance Docker image resolution currently runs inside each ticket run, so "
@@ -148,6 +196,13 @@ class BatchCandidate:
     execution_domain: str
     execution_conflict_keys: tuple[str, ...]
     retry_count: int = 0
+    resume_state_path: Path | None = None
+    resume_lifecycle_state: str | None = None
+    resume_attempt_count: int = 0
+
+    @property
+    def is_resume(self) -> bool:
+        return self.resume_state_path is not None
 
     @property
     def ticket_key(self) -> str:
@@ -380,6 +435,114 @@ def _resolve_wave_base_revision(
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _clean_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _parse_ticket_metadata(path: Path) -> dict[str, str]:
+    try:
+        markdown = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    title_match = re.search(r"^#\s+(.+)$", markdown, flags=re.MULTILINE)
+    if title_match is not None:
+        out["title"] = title_match.group(1).strip()
+    for key, label in (
+        ("severity", "Severity"),
+        ("execution_domain", "Execution domain"),
+    ):
+        match = re.search(
+            rf"^-\s*{re.escape(label)}:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        if match is not None and match.group(1).strip():
+            out[key] = match.group(1).strip()
+    conflict_line_match = re.search(
+        r"^-\s*Execution conflict keys:\s*(.+)$",
+        markdown,
+        flags=re.MULTILINE,
+    )
+    if conflict_line_match is not None:
+        conflicts = [
+            value.strip()
+            for value in re.findall(r"`([^`]+)`", conflict_line_match.group(1))
+            if value.strip()
+        ]
+        if conflicts:
+            out["execution_conflict_keys"] = "\n".join(conflicts)
+    return out
+
+
+def _candidate_clone(
+    candidate: BatchCandidate,
+    *,
+    retry_count: int | None = None,
+    execution_conflict_keys: tuple[str, ...] | None = None,
+) -> BatchCandidate:
+    return BatchCandidate(
+        source_name=candidate.source_name,
+        export_path=candidate.export_path,
+        fingerprint=candidate.fingerprint,
+        severity=candidate.severity,
+        title=candidate.title,
+        owner_root=candidate.owner_root,
+        ticket_path=candidate.ticket_path,
+        execution_domain=candidate.execution_domain,
+        execution_conflict_keys=(
+            execution_conflict_keys
+            if execution_conflict_keys is not None
+            else candidate.execution_conflict_keys
+        ),
+        retry_count=candidate.retry_count if retry_count is None else retry_count,
+        resume_state_path=candidate.resume_state_path,
+        resume_lifecycle_state=candidate.resume_lifecycle_state,
+        resume_attempt_count=candidate.resume_attempt_count,
+    )
+
+
+def _remove_ticket_key(entries: object, ticket_key: str) -> list[dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+    return [
+        item
+        for item in entries
+        if not (isinstance(item, dict) and item.get("ticket_key") == ticket_key)
+    ]
+
+
+def _remember_state_entry(
+    state: dict[str, Any],
+    list_name: str,
+    entry: dict[str, Any],
+) -> None:
+    ticket_key = str(entry.get("ticket_key") or "")
+    if ticket_key:
+        for key in ("parked", "resume_ready", "completed", "failed"):
+            state[key] = _remove_ticket_key(state.get(key), ticket_key)
+    state.setdefault(list_name, []).append(entry)
+
+
+def _load_resume_state_for_run(run_dir: Path | None) -> dict[str, Any] | None:
+    if run_dir is None:
+        return None
+    return _read_json_if_exists(run_dir / RESUME_STATE_ARTIFACT_NAME)
 
 
 def _write_log(
@@ -1014,6 +1177,187 @@ def _ready_queue_has_work(repo_root: Path) -> bool:
     return False
 
 
+
+
+def _resume_ledger_path(
+    *,
+    owner_root: Path,
+    defaults: dict[str, Any],
+) -> Path:
+    raw = defaults.get("ledger")
+    if isinstance(raw, Path):
+        return _resolve_batch_ledger_path(repo_root=owner_root, raw=raw)
+    if isinstance(raw, str) and raw.strip():
+        return _resolve_batch_ledger_path(repo_root=owner_root, raw=Path(raw))
+    return _resolve_batch_ledger_path(repo_root=owner_root, raw=_DEFAULT_LEDGER_PATH)
+
+
+
+
+def _latest_resume_state_from_ledger_path(
+    *,
+    repo_root: Path,
+    state_path: Path,
+) -> tuple[Path, dict[str, Any], int] | None:
+    current_path = state_path
+    seen: set[Path] = set()
+    latest_state: dict[str, Any] | None = None
+    latest_path = current_path.resolve()
+    attempt_count = 0
+    for _ in range(10):
+        resolved_path = current_path.resolve()
+        if resolved_path in seen:
+            break
+        seen.add(resolved_path)
+        state = _read_json_if_exists(resolved_path)
+        if not isinstance(state, dict):
+            break
+        latest_state = state
+        latest_path = resolved_path
+        attempts = state.get("resume_attempts")
+        local_attempt_count = len(attempts) if isinstance(attempts, list) else 0
+        persisted_attempt_count = state.get("resume_attempt_count")
+        if (
+            isinstance(persisted_attempt_count, int)
+            and not isinstance(persisted_attempt_count, bool)
+            and persisted_attempt_count >= 0
+        ):
+            attempt_count = max(
+                attempt_count,
+                persisted_attempt_count + local_attempt_count,
+            )
+        else:
+            attempt_count += local_attempt_count
+        next_raw = _clean_str(state.get("last_resumed_state_path"))
+        if next_raw is None:
+            return resolved_path, state, attempt_count
+        if not isinstance(attempts, list):
+            attempt_count += 1
+        next_path = Path(next_raw)
+        current_path = next_path if next_path.is_absolute() else (repo_root / next_path)
+    if latest_state is None:
+        return None
+    return latest_path, latest_state, attempt_count
+
+
+def _candidate_from_resume_ledger_entry(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    fingerprint: str,
+    entry: dict[str, Any],
+) -> BatchCandidate | None:
+    state_path_raw = _clean_str(entry.get("last_resume_state_path"))
+    if state_path_raw is None:
+        return None
+    state_path = Path(state_path_raw)
+    if not state_path.is_absolute():
+        state_path = (repo_root / state_path).resolve()
+    latest = _latest_resume_state_from_ledger_path(
+        repo_root=repo_root,
+        state_path=state_path,
+    )
+    if latest is None:
+        return None
+    state_path, resume_state, resume_attempt_count = latest
+    lifecycle = _clean_str(resume_state.get("lifecycle_state")) or _clean_str(
+        entry.get("last_resume_lifecycle_state")
+    )
+    if lifecycle not in RESUME_READY_LIFECYCLE_STATES:
+        return None
+
+    ticket = resume_state.get("ticket") if isinstance(resume_state.get("ticket"), dict) else {}
+    ticket_path_raw = (
+        _clean_str(ticket.get("path"))
+        or _clean_str(entry.get("idea_path"))
+    )
+    if ticket_path_raw is None:
+        return None
+    ticket_path = Path(ticket_path_raw)
+    if not ticket_path.is_absolute():
+        ticket_path = (repo_root / ticket_path).resolve()
+
+    owner_root_raw = _clean_str(resume_state.get("owner_root")) or _clean_str(
+        entry.get("owner_root")
+    )
+    owner_root = (
+        Path(owner_root_raw).resolve()
+        if owner_root_raw is not None
+        else repo_root.resolve()
+    )
+    metadata = _parse_ticket_metadata(ticket_path)
+    severity = (metadata.get("severity") or "high").strip().lower()
+    if severity not in SEVERITY_RANK:
+        severity = "high"
+    title = (
+        _clean_str(ticket.get("title"))
+        or _clean_str(entry.get("title"))
+        or metadata.get("title")
+        or ticket_path.stem
+    )
+    execution_domain = metadata.get("execution_domain") or "resume"
+    conflict_keys_raw = metadata.get("execution_conflict_keys")
+    conflict_keys = (
+        tuple(value for value in conflict_keys_raw.splitlines() if value.strip())
+        if conflict_keys_raw
+        else (f"ticket:{fingerprint}",)
+    )
+    return BatchCandidate(
+        source_name="resume_ready",
+        export_path=ledger_path,
+        fingerprint=fingerprint,
+        severity=severity,
+        title=title,
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+        execution_domain=execution_domain,
+        execution_conflict_keys=conflict_keys,
+        resume_state_path=state_path,
+        resume_lifecycle_state=lifecycle,
+        resume_attempt_count=resume_attempt_count,
+    )
+
+
+def _collect_resume_ready_candidates(
+    *,
+    repo_root: Path,
+    ledger_path: Path,
+    severities: set[str],
+    processed: set[str],
+) -> list[BatchCandidate]:
+    doc = load_ledger(ledger_path)
+    actions = doc.get("actions")
+    if not isinstance(actions, dict):
+        return []
+    candidates: list[BatchCandidate] = []
+    for fingerprint_raw, entry_raw in actions.items():
+        fingerprint = str(fingerprint_raw or "").strip()
+        if not fingerprint or not isinstance(entry_raw, dict):
+            continue
+        candidate = _candidate_from_resume_ledger_entry(
+            repo_root=repo_root,
+            ledger_path=ledger_path,
+            fingerprint=fingerprint,
+            entry=entry_raw,
+        )
+        if candidate is None:
+            continue
+        if candidate.severity not in severities:
+            continue
+        if candidate.ticket_key in processed:
+            continue
+        candidates.append(candidate)
+    candidates.sort(
+        key=lambda item: (
+            SEVERITY_RANK.get(item.severity, 99),
+            item.execution_domain,
+            item.title.lower(),
+            item.ticket_key,
+        )
+    )
+    return candidates
+
+
 def _collect_wave_candidates(
     *,
     repo_root: Path,
@@ -1027,9 +1371,18 @@ def _collect_wave_candidates(
     severities: set[str],
     processed: set[str],
     refresh_state: dict[str, SourceRefreshState],
+    resume_ledger_path: Path | None = None,
 ) -> list[BatchCandidate]:
     owner_root = (owner_root or repo_root).resolve()
     by_key: dict[str, BatchCandidate] = {}
+    if resume_ledger_path is not None:
+        for candidate in _collect_resume_ready_candidates(
+            repo_root=repo_root,
+            ledger_path=resume_ledger_path,
+            severities=severities,
+            processed=processed,
+        ):
+            by_key.setdefault(candidate.ticket_key, candidate)
     for source in sources:
         export_path = _export_path(source)
         for candidate in _load_ready_queue_candidates(
@@ -1150,6 +1503,17 @@ def _move_ticket_for_review(*, candidate: BatchCandidate, repo_root: Path) -> Pa
         owner_root=candidate.owner_root,
         fingerprint=candidate.fingerprint,
         to_bucket="4 - for_review",
+        dry_run=False,
+    ).resolve()
+    _sync_ticket_atom_actions(owner_root=candidate.owner_root)
+    return path
+
+
+def _move_ticket_complete(*, candidate: BatchCandidate, repo_root: Path) -> Path:
+    path = move_ticket_file(
+        owner_root=candidate.owner_root,
+        fingerprint=candidate.fingerprint,
+        to_bucket="5 - complete",
         dry_run=False,
     ).resolve()
     _sync_ticket_atom_actions(owner_root=candidate.owner_root)
@@ -1361,18 +1725,7 @@ def _add_batch_resource_conflicts(
     merged_keys = tuple(dict.fromkeys((*candidate.execution_conflict_keys, *extra_keys)))
     if merged_keys == candidate.execution_conflict_keys:
         return candidate
-    return BatchCandidate(
-        source_name=candidate.source_name,
-        export_path=candidate.export_path,
-        fingerprint=candidate.fingerprint,
-        severity=candidate.severity,
-        title=candidate.title,
-        owner_root=candidate.owner_root,
-        ticket_path=candidate.ticket_path,
-        execution_domain=candidate.execution_domain,
-        execution_conflict_keys=merged_keys,
-        retry_count=candidate.retry_count,
-    )
+    return _candidate_clone(candidate, execution_conflict_keys=merged_keys)
 
 
 def _run_ticket_process(
@@ -1482,6 +1835,172 @@ def _run_ticket_process(
         timed_out=timed_out,
         duration_seconds=duration_seconds,
     )
+
+
+
+
+def _run_resume_process(
+    *,
+    repo_root: Path,
+    implement_python: Path,
+    batch_dir_path: Path,
+    candidate: BatchCandidate,
+    repo_input: str,
+    worker: WorkerTemplate,
+    settings_path: Path,
+    settings_profile: str,
+    resume_ledger_path: Path,
+    ticket_timeout_seconds: float | None,
+    exec_backend: str,
+    maintenance_image_metadata_path: Path | None = None,
+) -> TicketRunResult:
+    if candidate.resume_state_path is None:
+        raise ValueError("resume candidate is missing resume_state_path")
+    resume_state = _read_json_if_exists(candidate.resume_state_path)
+    implementation_author = (
+        resume_state.get("implementation_author")
+        if isinstance(resume_state, dict)
+        and isinstance(resume_state.get("implementation_author"), dict)
+        else {}
+    )
+    exact_codex_resume = (
+        _clean_str(implementation_author.get("agent")) == "codex"
+        and _clean_str(implementation_author.get("session_id")) is not None
+    )
+    effective_agent = "codex" if exact_codex_resume else worker.agent
+    effective_model = worker.model
+    if exact_codex_resume:
+        author_source_run_dir = _clean_str(
+            implementation_author.get("author_source_run_dir")
+        )
+        target_ref_run_dir = (
+            Path(author_source_run_dir).expanduser()
+            if author_source_run_dir is not None
+            else candidate.resume_state_path.parent
+        )
+        original_target_ref = _read_json_if_exists(
+            target_ref_run_dir / "target_ref.json"
+        )
+        effective_model = (
+            _clean_str(original_target_ref.get("model"))
+            if isinstance(original_target_ref, dict)
+            else None
+        ) or LATEST_CODEX_MODEL
+    command = [
+        str(implement_python),
+        "-m",
+        "usertest_implement.cli",
+        "--repo-root",
+        str(repo_root),
+        "resume",
+        "--resume-state",
+        str(candidate.resume_state_path),
+        "--runs-dir",
+        str(candidate.owner_root / "runs" / "usertest_implement"),
+        "--repo",
+        repo_input,
+        "--settings",
+        str(settings_path),
+        "--settings-profile",
+        settings_profile,
+        "--agent",
+        effective_agent,
+        "--exec-backend",
+        exec_backend.strip().lower() or "docker",
+        "--ledger",
+        str(resume_ledger_path),
+    ]
+    if effective_model is not None:
+        command.extend(["--model", effective_model])
+    if maintenance_image_metadata_path is not None:
+        command.extend(
+            [
+                "--exec-maintenance-image-metadata",
+                str(maintenance_image_metadata_path),
+            ]
+        )
+
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        command,
+        cwd=str(repo_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    timed_out = False
+    stdout = ""
+    stderr = ""
+    while True:
+        if proc.poll() is not None:
+            out, err = proc.communicate()
+            stdout = out or ""
+            stderr = err or ""
+            break
+        if (
+            ticket_timeout_seconds is not None
+            and time.monotonic() - started > ticket_timeout_seconds
+        ):
+            timed_out = True
+            proc.terminate()
+            if proc.poll() is None:
+                proc.kill()
+            out, err = proc.communicate()
+            stdout = out or ""
+            stderr = err or ""
+            break
+        time.sleep(1.0)
+
+    duration_seconds = max(0.0, time.monotonic() - started)
+    log_root = batch_dir_path / "worker_logs" / f"worker_{worker.worker_index}"
+    _write_log(
+        log_root / f"{candidate.fingerprint}_resume.log",
+        command=command,
+        returncode=proc.returncode if proc.returncode is not None else 1,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    run_dir: Path | None = None
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if lines:
+        candidate_run_dir = Path(lines[-1])
+        if candidate_run_dir.exists():
+            run_dir = candidate_run_dir.resolve()
+    return TicketRunResult(
+        run_dir=run_dir,
+        returncode=int(proc.returncode or 0),
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+        duration_seconds=duration_seconds,
+    )
+
+
+def _resume_noop_payload(
+    *,
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+) -> dict[str, Any] | None:
+    if not candidate.is_resume or run_result.returncode != 0 or run_result.timed_out:
+        return None
+    try:
+        payload = json.loads(run_result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "noop_current_gates_green":
+        return None
+    state_path_raw = _clean_str(payload.get("resume_state_path"))
+    run_dir_raw = _clean_str(payload.get("original_run_dir"))
+    if state_path_raw is None or run_dir_raw is None or candidate.resume_state_path is None:
+        return None
+    if Path(state_path_raw).resolve() != candidate.resume_state_path.resolve():
+        return None
+    original_run_dir = Path(run_dir_raw).resolve()
+    if original_run_dir != candidate.resume_state_path.resolve().parent:
+        return None
+    return payload
 
 
 def _read_handoff_summary(run_dir: Path) -> dict[str, Any] | None:
@@ -1624,6 +2143,14 @@ def _record_outcome(
                 "model": worker.model,
             },
             "retry_count": candidate.retry_count,
+            "run_mode": "resume" if candidate.is_resume else "run",
+            "resume_state_path": (
+                str(candidate.resume_state_path)
+                if candidate.resume_state_path is not None
+                else None
+            ),
+            "resume_lifecycle_state": candidate.resume_lifecycle_state,
+            "resume_attempt_count": candidate.resume_attempt_count,
             "run_dir": str(run_result.run_dir) if run_result.run_dir is not None else None,
             "returncode": run_result.returncode,
             "timed_out": run_result.timed_out,
@@ -1706,6 +2233,138 @@ def _record_launch_wave_decision(
     }
     state.setdefault("launch_waves", []).append(wave)
     return wave
+
+
+def _resume_state_lifecycle(resume_state: dict[str, Any] | None) -> str | None:
+    if not isinstance(resume_state, dict):
+        return None
+    return _clean_str(resume_state.get("lifecycle_state"))
+
+
+def _state_entry_base(
+    *,
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+    resume_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    lifecycle = _resume_state_lifecycle(resume_state)
+    state_path = None
+    if run_result.run_dir is not None:
+        state_path = str(run_result.run_dir / RESUME_STATE_ARTIFACT_NAME)
+    return {
+        "ticket_key": candidate.ticket_key,
+        "fingerprint": candidate.fingerprint,
+        "title": candidate.title,
+        "run_mode": "resume" if candidate.is_resume else "run",
+        "run_dir": str(run_result.run_dir) if run_result.run_dir is not None else None,
+        "resume_state_path": state_path,
+        "lifecycle_state": lifecycle,
+        "blocking_reason": (
+            resume_state.get("blocking_reason")
+            if isinstance(resume_state, dict)
+            else None
+        ),
+    }
+
+
+def _record_parked_ticket(
+    *,
+    state: dict[str, Any],
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+    resume_state: dict[str, Any],
+) -> None:
+    entry = _state_entry_base(
+        candidate=candidate,
+        run_result=run_result,
+        resume_state=resume_state,
+    )
+    entry["parked_utc"] = utc_now_z()
+    _remember_state_entry(state, "parked", entry)
+
+
+def _record_resume_ready_ticket(
+    *,
+    state: dict[str, Any],
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+    resume_state: dict[str, Any] | None,
+    failure: dict[str, Any] | None = None,
+) -> None:
+    entry = _state_entry_base(
+        candidate=candidate,
+        run_result=run_result,
+        resume_state=resume_state,
+    )
+    if candidate.resume_state_path is not None:
+        entry["resumed_from_resume_state_path"] = str(candidate.resume_state_path)
+        entry["resumed_from_lifecycle_state"] = candidate.resume_lifecycle_state
+    if failure is not None:
+        entry["failure_class"] = failure.get("failure_class")
+        entry["summary"] = failure.get("summary")
+    entry["resume_ready_utc"] = utc_now_z()
+    _remember_state_entry(state, "resume_ready", entry)
+
+
+def _record_resumed_ticket(
+    *,
+    state: dict[str, Any],
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+    resume_state: dict[str, Any] | None,
+) -> None:
+    if not candidate.is_resume:
+        return
+    entry = _state_entry_base(
+        candidate=candidate,
+        run_result=run_result,
+        resume_state=resume_state,
+    )
+    entry["resumed_from_resume_state_path"] = (
+        str(candidate.resume_state_path) if candidate.resume_state_path is not None else None
+    )
+    entry["resumed_from_lifecycle_state"] = candidate.resume_lifecycle_state
+    entry["resumed_utc"] = utc_now_z()
+    state.setdefault("resumed", []).append(entry)
+
+
+def _record_completed_ticket(
+    *,
+    state: dict[str, Any],
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+    handoff_summary: dict[str, Any] | None,
+    resume_state: dict[str, Any] | None,
+) -> None:
+    entry = _state_entry_base(
+        candidate=candidate,
+        run_result=run_result,
+        resume_state=resume_state,
+    )
+    entry["pr_url"] = (
+        handoff_summary.get("pr_url") if isinstance(handoff_summary, dict) else None
+    )
+    entry["completed_utc"] = utc_now_z()
+    _remember_state_entry(state, "completed", entry)
+
+
+def _record_failed_ticket(
+    *,
+    state: dict[str, Any],
+    candidate: BatchCandidate,
+    run_result: TicketRunResult,
+    failure: dict[str, Any],
+    resume_state: dict[str, Any] | None,
+) -> None:
+    entry = _state_entry_base(
+        candidate=candidate,
+        run_result=run_result,
+        resume_state=resume_state,
+    )
+    entry["failure_class"] = str(failure.get("failure_class") or "")
+    entry["summary"] = failure.get("summary")
+    entry["failed_utc"] = utc_now_z()
+    _remember_state_entry(state, "failed", entry)
 
 
 def _record_candidate_plan_contract_failure(
@@ -1915,7 +2574,9 @@ def _drain_phase(
         if parsed_timeout > 0:
             ticket_timeout_seconds = parsed_timeout
     infra_retry_limit = int(defaults.get("infra_retry_limit") or 1)
+    resume_retry_limit = int(defaults.get("resume_retry_limit") or 1)
     max_phase_cycles = int(defaults.get("max_phase_cycles") or 20)
+    resume_ledger_path = _resume_ledger_path(owner_root=owner_root, defaults=defaults)
 
     state["phase"] = phase.name
     persist_state(batch_dir_path, state)
@@ -1960,6 +2621,7 @@ def _drain_phase(
             severities=phase.severities,
             processed=processed,
             refresh_state=refresh_state,
+            resume_ledger_path=resume_ledger_path,
         )
         candidates = [
             _add_batch_resource_conflicts(
@@ -2008,7 +2670,7 @@ def _drain_phase(
                     if launch_index is None:
                         break
                     candidate = queue.pop(launch_index)
-                    if wave_base_revision is not None:
+                    if wave_base_revision is not None and not candidate.is_resume:
                         try:
                             _validate_candidate_wave_revision(
                                 candidate=candidate,
@@ -2033,26 +2695,29 @@ def _drain_phase(
                             continue
                     worker = workers[next_worker_index % len(workers)]
                     next_worker_index += 1
-                    claim_started_utc = utc_now_z()
-                    claim_started = time.monotonic()
-                    claimed_path = _claim_ticket(candidate=candidate, repo_root=repo_root)
-                    claim_duration_seconds = time.monotonic() - claim_started
-                    owner_key = candidate.owner_root.resolve()
-                    owner_pending = pending_replan_action_sync.get(owner_key)
-                    if owner_pending:
-                        completed_pending = {owner_key: owner_pending}
-                        _flush_deferred_replan_action_sync(
-                            batch_dir_path=batch_dir_path,
-                            state=state,
-                            phase_name=phase.name,
-                            cycle=cycle,
-                            pending=completed_pending,
-                            completed_duration_seconds=claim_duration_seconds,
-                            completed_started_utc=claim_started_utc,
-                            completion_source="claim_sync",
-                        )
-                        if not completed_pending:
-                            pending_replan_action_sync.pop(owner_key, None)
+                    if candidate.is_resume:
+                        claimed_path = candidate.ticket_path
+                    else:
+                        claim_started_utc = utc_now_z()
+                        claim_started = time.monotonic()
+                        claimed_path = _claim_ticket(candidate=candidate, repo_root=repo_root)
+                        claim_duration_seconds = time.monotonic() - claim_started
+                        owner_key = candidate.owner_root.resolve()
+                        owner_pending = pending_replan_action_sync.get(owner_key)
+                        if owner_pending:
+                            completed_pending = {owner_key: owner_pending}
+                            _flush_deferred_replan_action_sync(
+                                batch_dir_path=batch_dir_path,
+                                state=state,
+                                phase_name=phase.name,
+                                cycle=cycle,
+                                pending=completed_pending,
+                                completed_duration_seconds=claim_duration_seconds,
+                                completed_started_utc=claim_started_utc,
+                                completion_source="claim_sync",
+                            )
+                            if not completed_pending:
+                                pending_replan_action_sync.pop(owner_key, None)
                     active_conflict_keys.update(candidate.execution_conflict_keys)
                     state.setdefault("in_flight", []).append(
                         {
@@ -2079,29 +2744,55 @@ def _drain_phase(
                         f"model={worker.model or '<default>'} "
                         f"conflict_keys={list(candidate.execution_conflict_keys)}"
                     )
-                    future = executor.submit(
-                        _run_ticket_process,
-                        repo_root=repo_root,
-                        implement_python=implement_python,
-                        batch_dir_path=batch_dir_path,
-                        ticket_path=claimed_path,
-                        repo_input=repo_input,
-                        worker=worker,
-                        settings_path=settings_path,
-                        settings_profile=settings_profile,
-                        ticket_timeout_seconds=ticket_timeout_seconds,
-                        implementation_ref=wave_base_revision,
-                        implementation_runs_dir=(
-                            candidate.owner_root / "runs" / "usertest_implement"
-                        ),
-                        ledger_path=(
-                            candidate.owner_root
-                            / ".agents"
-                            / "state"
-                            / "backlog_implement_actions.yaml"
-                        ),
-                        maintenance_image_metadata_path=maintenance_image_metadata_path,
-                    )
+                    if candidate.is_resume:
+                        if candidate.resume_attempt_count >= resume_retry_limit:
+                            run_result = TicketRunResult(
+                                run_dir=None,
+                                returncode=2,
+                                stdout="",
+                                stderr=(
+                                    "resume retry limit exhausted before launch: "
+                                    f"{candidate.resume_attempt_count} >= {resume_retry_limit}"
+                                ),
+                                timed_out=False,
+                                duration_seconds=0.0,
+                            )
+                            future = executor.submit(lambda result=run_result: result)
+                        else:
+                            future = executor.submit(
+                                _run_resume_process,
+                                repo_root=repo_root,
+                                implement_python=implement_python,
+                                batch_dir_path=batch_dir_path,
+                                candidate=candidate,
+                                repo_input=repo_input,
+                                worker=worker,
+                                settings_path=settings_path,
+                                settings_profile=settings_profile,
+                                resume_ledger_path=resume_ledger_path,
+                                ticket_timeout_seconds=ticket_timeout_seconds,
+                                exec_backend=exec_backend,
+                                maintenance_image_metadata_path=maintenance_image_metadata_path,
+                            )
+                    else:
+                        future = executor.submit(
+                            _run_ticket_process,
+                            repo_root=repo_root,
+                            implement_python=implement_python,
+                            batch_dir_path=batch_dir_path,
+                            ticket_path=claimed_path,
+                            repo_input=repo_input,
+                            worker=worker,
+                            settings_path=settings_path,
+                            settings_profile=settings_profile,
+                            ticket_timeout_seconds=ticket_timeout_seconds,
+                            implementation_ref=wave_base_revision,
+                            implementation_runs_dir=(
+                                candidate.owner_root / "runs" / "usertest_implement"
+                            ),
+                            ledger_path=resume_ledger_path,
+                            maintenance_image_metadata_path=maintenance_image_metadata_path,
+                        )
                     in_flight[future] = (candidate, worker, candidate.execution_conflict_keys)
 
                 if pending_replan_action_sync:
@@ -2143,26 +2834,74 @@ def _drain_phase(
                 for future in done:
                     candidate, worker, conflict_keys = in_flight.pop(future)
                     active_conflict_keys.difference_update(conflict_keys)
-                    processed.add(candidate.ticket_key)
                     _update_state_lists(
                         state,
                         remove_in_flight_fingerprint=candidate.fingerprint,
                     )
 
                     run_result = future.result()
-                    handoff_summary = (
-                        _read_handoff_summary(run_result.run_dir)
-                        if run_result.run_dir is not None
-                        else None
+                    resume_noop = _resume_noop_payload(
+                        candidate=candidate,
+                        run_result=run_result,
                     )
+                    if resume_noop is not None:
+                        run_result = replace(
+                            run_result,
+                            run_dir=Path(str(resume_noop["original_run_dir"])).resolve(),
+                        )
+                        handoff_summary = {
+                            "schema_version": 1,
+                            "final_status": "success",
+                            "pr_created": True,
+                            "pr_url": resume_noop.get("pr_url"),
+                            "resume_noop": resume_noop,
+                        }
+                    else:
+                        handoff_summary = (
+                            _read_handoff_summary(run_result.run_dir)
+                            if run_result.run_dir is not None
+                            else None
+                        )
                     missing_terminal_artifacts = run_result.run_dir is None
-                    failure = classify_run_outcome(
-                        run_dir=run_result.run_dir or batch_dir_path,
-                        handoff_summary=handoff_summary,
-                        timed_out=run_result.timed_out,
-                        missing_terminal_artifacts=missing_terminal_artifacts,
-                    )
-                    if run_result.run_dir is not None:
+                    if (
+                        candidate.is_resume
+                        and candidate.resume_attempt_count >= resume_retry_limit
+                        and run_result.run_dir is None
+                    ):
+                        failure = {
+                            "failure_class": "ticket_regression",
+                            "retryable": False,
+                            "global_blocker": False,
+                            "summary": (
+                                "Resume retry limit exhausted "
+                                f"({candidate.resume_attempt_count} >= {resume_retry_limit})."
+                            ),
+                            "evidence": {
+                                "resume_state_path": (
+                                    str(candidate.resume_state_path)
+                                    if candidate.resume_state_path is not None
+                                    else None
+                                )
+                            },
+                        }
+                    elif resume_noop is not None:
+                        failure = {
+                            "failure_class": "success",
+                            "retryable": False,
+                            "global_blocker": False,
+                            "summary": str(
+                                resume_noop.get("reason") or "Current PR gates are green."
+                            ),
+                            "evidence": {"resume_noop": resume_noop},
+                        }
+                    else:
+                        failure = classify_run_outcome(
+                            run_dir=run_result.run_dir or batch_dir_path,
+                            handoff_summary=handoff_summary,
+                            timed_out=run_result.timed_out,
+                            missing_terminal_artifacts=missing_terminal_artifacts,
+                        )
+                    if run_result.run_dir is not None and resume_noop is None:
                         write_batch_failure(run_result.run_dir, failure)
                     _record_outcome(
                         batch_dir_path=batch_dir_path,
@@ -2173,24 +2912,94 @@ def _drain_phase(
                         failure=failure,
                     )
 
-                    if failure["failure_class"] == "success":
+                    resume_state = (
+                        {
+                            "schema_version": 1,
+                            "lifecycle_state": LIFECYCLE_MERGE_READY,
+                            "blocking_reason": resume_noop.get("reason"),
+                            "resume_noop": resume_noop,
+                        }
+                        if resume_noop is not None
+                        else _load_resume_state_for_run(run_result.run_dir)
+                    )
+                    lifecycle = _resume_state_lifecycle(resume_state)
+                    _record_resumed_ticket(
+                        state=state,
+                        candidate=candidate,
+                        run_result=run_result,
+                        resume_state=resume_state,
+                    )
+
+                    if lifecycle in PARKED_LIFECYCLE_STATES and isinstance(resume_state, dict):
+                        try:
+                            if lifecycle in {
+                                LIFECYCLE_AWAITING_PR_REVIEW,
+                                LIFECYCLE_AWAITING_REVIEW,
+                                LIFECYCLE_MERGE_READY,
+                            }:
+                                _move_ticket_for_review(
+                                    candidate=candidate,
+                                    repo_root=repo_root,
+                                )
+                        except Exception:
+                            pass
+                        _record_parked_ticket(
+                            state=state,
+                            candidate=candidate,
+                            run_result=run_result,
+                            resume_state=resume_state,
+                        )
+                        processed.add(candidate.ticket_key)
+                        _print(
+                            f"PARK phase={phase.name} fingerprint={candidate.fingerprint} "
+                            f"state={lifecycle} run_dir={run_result.run_dir}"
+                        )
+                    elif lifecycle in RESUME_READY_LIFECYCLE_STATES:
+                        _record_resume_ready_ticket(
+                            state=state,
+                            candidate=candidate,
+                            run_result=run_result,
+                            resume_state=resume_state,
+                            failure=failure,
+                        )
+                        processed.add(candidate.ticket_key)
+                        _print(
+                            f"RESUME_READY phase={phase.name} fingerprint={candidate.fingerprint} "
+                            f"state={lifecycle} run_dir={run_result.run_dir}"
+                        )
+                    elif lifecycle in COMPLETE_LIFECYCLE_STATES:
+                        try:
+                            _move_ticket_complete(candidate=candidate, repo_root=repo_root)
+                        except Exception:
+                            pass
+                        _record_completed_ticket(
+                            state=state,
+                            candidate=candidate,
+                            run_result=run_result,
+                            handoff_summary=handoff_summary,
+                            resume_state=resume_state,
+                        )
+                        processed.add(candidate.ticket_key)
+                        _print(
+                            f"COMPLETE phase={phase.name} fingerprint={candidate.fingerprint} "
+                            f"run_dir={run_result.run_dir}"
+                        )
+                    elif (
+                        failure["failure_class"] == "success"
+                        and (lifecycle in LOCAL_COMPLETE_LIFECYCLE_STATES or lifecycle is None)
+                    ):
                         try:
                             _move_ticket_for_review(candidate=candidate, repo_root=repo_root)
                         except Exception:
                             pass
-                        state.setdefault("completed", []).append(
-                            {
-                                "ticket_key": candidate.ticket_key,
-                                "fingerprint": candidate.fingerprint,
-                                "run_dir": str(run_result.run_dir),
-                                "pr_url": (
-                                    handoff_summary.get("pr_url")
-                                    if isinstance(handoff_summary, dict)
-                                    else None
-                                ),
-                                "completed_utc": utc_now_z(),
-                            }
+                        _record_completed_ticket(
+                            state=state,
+                            candidate=candidate,
+                            run_result=run_result,
+                            handoff_summary=handoff_summary,
+                            resume_state=resume_state,
                         )
+                        processed.add(candidate.ticket_key)
                         _print(
                             f"SUCCESS phase={phase.name} fingerprint={candidate.fingerprint} "
                             f"run_dir={run_result.run_dir}"
@@ -2202,21 +3011,11 @@ def _drain_phase(
                             retryable
                             and failure_class == "infra_transient"
                             and candidate.retry_count < infra_retry_limit
+                            and not candidate.is_resume
                         ):
                             _requeue_ticket(candidate=candidate, repo_root=repo_root)
                             queue.append(
-                                BatchCandidate(
-                                    source_name=candidate.source_name,
-                                    export_path=candidate.export_path,
-                                    fingerprint=candidate.fingerprint,
-                                    severity=candidate.severity,
-                                    title=candidate.title,
-                                    owner_root=candidate.owner_root,
-                                    ticket_path=candidate.ticket_path,
-                                    execution_domain=candidate.execution_domain,
-                                    execution_conflict_keys=candidate.execution_conflict_keys,
-                                    retry_count=candidate.retry_count + 1,
-                                )
+                                _candidate_clone(candidate, retry_count=candidate.retry_count + 1)
                             )
                             _print(
                                 f"RETRY phase={phase.name} fingerprint={candidate.fingerprint} "
@@ -2232,24 +3031,18 @@ def _drain_phase(
                                         candidate=candidate,
                                         repo_root=repo_root,
                                     )
-                                else:
+                                elif not candidate.is_resume:
                                     _requeue_ticket(candidate=candidate, repo_root=repo_root)
                             except Exception:
                                 pass
-                            state.setdefault("failed", []).append(
-                                {
-                                    "ticket_key": candidate.ticket_key,
-                                    "fingerprint": candidate.fingerprint,
-                                    "run_dir": (
-                                        str(run_result.run_dir)
-                                        if run_result.run_dir is not None
-                                        else None
-                                    ),
-                                    "failure_class": failure_class,
-                                    "summary": failure.get("summary"),
-                                    "failed_utc": utc_now_z(),
-                                }
+                            _record_failed_ticket(
+                                state=state,
+                                candidate=candidate,
+                                run_result=run_result,
+                                failure=failure,
+                                resume_state=resume_state,
                             )
+                            processed.add(candidate.ticket_key)
                             _print(
                                 f"FAIL phase={phase.name} fingerprint={candidate.fingerprint} "
                                 f"class={failure_class} summary={failure.get('summary')}"
@@ -2427,30 +3220,35 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
             if state.get("status") == "blocked":
                 break
         else:
-            terminal_proof = _build_terminal_proof(
-                code_root=repo_root,
-                owner_root=owner_root,
-                phases=phases,
-                refresh_state=refresh_state,
-                wave_base_revision=wave_base_revision,
-            )
-            terminal_proof_path = batch_dir_path / "terminal_proof.json"
-            write_json(terminal_proof_path, terminal_proof)
-            state["terminal_proof"] = {
-                "path": str(terminal_proof_path),
-                "sha256": sha256(terminal_proof_path.read_bytes()).hexdigest(),
-                "proof_sha256": terminal_proof["proof_sha256"],
-                "passed": terminal_proof["passed"],
-                "reasons": terminal_proof["reasons"],
-            }
-            # A successfully drained pass is allowed to hand freshly created PRs to
-            # the outer review/outcome reconciler.  Only the explicit proof may call
-            # the overall automated backlog complete.
-            state["status"] = (
-                "completed"
-                if terminal_proof["passed"] is True
-                else "awaiting_terminal_proof"
-            )
+            if state.get("resume_ready"):
+                state["status"] = "resume_ready"
+            elif state.get("parked"):
+                state["status"] = "parked"
+            else:
+                terminal_proof = _build_terminal_proof(
+                    code_root=repo_root,
+                    owner_root=owner_root,
+                    phases=phases,
+                    refresh_state=refresh_state,
+                    wave_base_revision=wave_base_revision,
+                )
+                terminal_proof_path = batch_dir_path / "terminal_proof.json"
+                write_json(terminal_proof_path, terminal_proof)
+                state["terminal_proof"] = {
+                    "path": str(terminal_proof_path),
+                    "sha256": sha256(terminal_proof_path.read_bytes()).hexdigest(),
+                    "proof_sha256": terminal_proof["proof_sha256"],
+                    "passed": terminal_proof["passed"],
+                    "reasons": terminal_proof["reasons"],
+                }
+                # A successfully drained pass is allowed to hand freshly created PRs to
+                # the outer review/outcome reconciler. Only the explicit proof may call
+                # the overall automated backlog complete.
+                state["status"] = (
+                    "completed"
+                    if terminal_proof["passed"] is True
+                    else "awaiting_terminal_proof"
+                )
     except Exception as exc:
         state.setdefault("global_blockers", []).append(
             {
@@ -2470,7 +3268,8 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     print(str(batch_dir_path))
     return (
         0
-        if state.get("status") in {"completed", "awaiting_terminal_proof"}
+        if state.get("status")
+        in {"completed", "awaiting_terminal_proof", "parked", "resume_ready"}
         else 2
     )
 

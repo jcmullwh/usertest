@@ -15,9 +15,13 @@ from usertest_implement.implementation_provenance import (
 from usertest_implement.resume_state import (
     LIFECYCLE_AWAITING_REVIEW,
     LIFECYCLE_CI_FAILED,
+    LIFECYCLE_CI_FAILED_RESUME_READY,
     LIFECYCLE_IMPLEMENTED_LOCAL,
+    LIFECYCLE_LEGACY_CI_FAILED,
+    LIFECYCLE_LEGACY_REVIEW_CHANGES_REQUESTED,
     LIFECYCLE_MERGE_READY,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
+    LIFECYCLE_REVIEW_FAILED_RESUME_READY,
     LIFECYCLE_VERIFICATION_FAILED,
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     RESUME_STATE_ARTIFACT_NAME,
@@ -52,11 +56,15 @@ _VALID_PR_RESUME_STATES = {
     # awaiting_review; a later terminal gate can still require the same author.
     LIFECYCLE_AWAITING_REVIEW,
     LIFECYCLE_CI_FAILED,
+    LIFECYCLE_CI_FAILED_RESUME_READY,
+    LIFECYCLE_LEGACY_CI_FAILED,
+    LIFECYCLE_LEGACY_REVIEW_CHANGES_REQUESTED,
     # A previously accepted exact head can become operationally blocked by a
     # terminal CI failure or a real merge conflict. The live-gate refresh in
     # _cmd_resume_pr still no-ops when that condition has already recovered.
     LIFECYCLE_MERGE_READY,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
+    LIFECYCLE_REVIEW_FAILED_RESUME_READY,
 }
 _PROMPT_ARTIFACT_MAX_CHARS = 5000
 _PROMPT_REPORT_MAX_CHARS = 6000
@@ -844,6 +852,53 @@ def _current_pr_resume_noop_reason(
     return "Current PR merge gate is already green: " + json.dumps(current_gate, ensure_ascii=False)
 
 
+def _persist_current_pr_resume_noop(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    state_path: Path,
+    run_dir: Path,
+    resume_state: dict[str, Any],
+    selected: SelectedTicket,
+    reason: str,
+    pr_url: str,
+    branch: str,
+) -> dict[str, Any]:
+    """Park a recovered PR durably so controllers cannot select the stale failure again."""
+
+    observed_at = _utc_now_z()
+    noop = {
+        "status": "noop_current_gates_green",
+        "reason": reason,
+        "observed_at_utc": observed_at,
+        "pr_url": pr_url,
+        "branch": branch,
+    }
+    persisted_state = {
+        **resume_state,
+        "lifecycle_state": LIFECYCLE_MERGE_READY,
+        "blocking_reason": None,
+        "resume_attempt_count": _next_resume_attempt_count(resume_state),
+        "resume_noop": noop,
+    }
+    _write_json(state_path, persisted_state)
+
+    ledger_path = _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+    update_ledger_file(
+        ledger_path,
+        fingerprint=selected.fingerprint,
+        updates={
+            "last_run_dir": str(run_dir),
+            "last_branch": branch,
+            "last_pr_url": pr_url,
+            "last_resume_state_path": str(state_path),
+            "last_resume_lifecycle_state": LIFECYCLE_MERGE_READY,
+            "last_resume_noop_at": observed_at,
+        },
+    )
+    return persisted_state
+
+
 def _resolve_pr_resume_target(
     *,
     args: argparse.Namespace,
@@ -1050,6 +1105,18 @@ def _mark_original_resume_state(
     _write_json(state_path, state)
 
 
+def _next_resume_attempt_count(resume_state: dict[str, Any]) -> int:
+    persisted = resume_state.get("resume_attempt_count")
+    base_count = (
+        persisted
+        if isinstance(persisted, int) and not isinstance(persisted, bool) and persisted >= 0
+        else 0
+    )
+    attempts = resume_state.get("resume_attempts")
+    prior_local_attempts = len(attempts) if isinstance(attempts, list) else 0
+    return base_count + prior_local_attempts + 1
+
+
 def _cmd_resume_pr(
     *,
     args: argparse.Namespace,
@@ -1107,6 +1174,17 @@ def _cmd_resume_pr(
         review_summary=review_summary,
     )
     if noop_reason is not None:
+        persisted_state = _persist_current_pr_resume_noop(
+            args=args,
+            repo_root=repo_root,
+            state_path=state_path,
+            run_dir=run_dir,
+            resume_state=resume_state,
+            selected=selected,
+            reason=noop_reason,
+            pr_url=pr_url,
+            branch=branch,
+        )
         payload = {
             "schema_version": 1,
             "status": "noop_current_gates_green",
@@ -1116,6 +1194,7 @@ def _cmd_resume_pr(
             "pr_url": pr_url,
             "branch": branch,
             "current_pr_context": pr_context,
+            "persisted_lifecycle_state": persisted_state["lifecycle_state"],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
@@ -1558,6 +1637,7 @@ def _cmd_resume_pr(
         new_state["resumed_from_resume_state_path"] = str(state_path)
         new_state["workspace_strategy"] = workspace_strategy
         new_state["resume_kind"] = "pr"
+        new_state["resume_attempt_count"] = _next_resume_attempt_count(resume_state)
         new_resume_lifecycle = new_state.get("lifecycle_state")
         _write_json(resumed_run_dir / RESUME_STATE_ARTIFACT_NAME, new_state)
         _mark_original_resume_state(
@@ -1971,6 +2051,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         new_state["resumed_from_run_dir"] = str(run_dir)
         new_state["resumed_from_resume_state_path"] = str(state_path)
         new_state["workspace_strategy"] = workspace_strategy
+        new_state["resume_attempt_count"] = _next_resume_attempt_count(resume_state)
         _write_json(resumed_run_dir / RESUME_STATE_ARTIFACT_NAME, new_state)
         _mark_original_resume_state(
             state_path=state_path,

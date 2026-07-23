@@ -137,7 +137,7 @@ def _settings_specs_for_args(args: argparse.Namespace) -> dict[str, _SettingsVal
 
 
 def _settings_sections_for_args(args: argparse.Namespace) -> list[str]:
-    if args.cmd == "run":
+    if args.cmd in {"run", "resume"}:
         return [_SETTINGS_SECTION_RUN_COMMON, _SETTINGS_SECTION_RUN]
     if args.cmd == "tickets" and getattr(args, "tickets_cmd", None) == "run-next":
         return [_SETTINGS_SECTION_RUN_COMMON, _SETTINGS_SECTION_TICKETS_RUN_NEXT]

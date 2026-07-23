@@ -304,7 +304,7 @@ def test_resumable_ci_failure_keeps_lifecycle_open(tmp_path: Path) -> None:
     )
     events = read_lifecycle_events(run_dir / "lifecycle_events.jsonl")
 
-    assert state["lifecycle_state"] == "ci_failed"
+    assert state["lifecycle_state"] == "ci_failed_resume_ready"
     assert all(event.event_type != "lifecycle.closed" for event in events)
     manifest = read_lifecycle_manifest(run_dir / "lifecycle_manifest.json")
     assert manifest.status == "active"

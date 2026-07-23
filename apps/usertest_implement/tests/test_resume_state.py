@@ -7,6 +7,8 @@ import pytest
 
 import usertest_implement.pipeline_efficiency as pipeline_efficiency
 from usertest_implement.resume_state import (
+    LIFECYCLE_AWAITING_CI,
+    LIFECYCLE_AWAITING_VERIFICATION,
     LIFECYCLE_CI_FAILED,
     LIFECYCLE_COMPLETE,
     LIFECYCLE_MERGE_READY,
@@ -207,6 +209,55 @@ def test_resume_state_maps_verification_failure(tmp_path: Path) -> None:
     assert state["lifecycle_state"] == LIFECYCLE_VERIFICATION_FAILED_RESUME_READY
     assert state["blocking_reason"] == "Verification failed: pytest"
     assert state["source_evidence_paths"]["verification"] == str(run_dir / "verification.json")
+
+
+def test_resume_state_maps_pending_verification(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(
+        run_dir / "verification_config.json",
+        {"schema_version": 1, "commands": ["pytest"]},
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_AWAITING_VERIFICATION
+    assert state["blocking_reason"] == "Verification is still pending."
+    assert state["source_evidence_paths"]["verification_config"] == str(
+        run_dir / "verification_config.json"
+    )
+
+
+def test_resume_state_maps_active_ci_as_pending_not_failed(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(run_dir / "verification.json", {"passed": True, "commands": []})
+    _write_json(
+        run_dir / "ci_gate.json",
+        {
+            "passed": False,
+            "status": "in_progress",
+            "conclusion": None,
+            "run_url": "https://example.invalid/runs/7",
+            "error": None,
+            "finished_at_utc": None,
+        },
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_AWAITING_CI
+    assert state["blocking_reason"] == (
+        "CI is still pending: https://example.invalid/runs/7"
+    )
 
 
 def test_resume_state_maps_ci_failure_before_pr_failure(tmp_path: Path) -> None:

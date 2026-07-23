@@ -99,6 +99,9 @@ def build_initial_state(
         "workers": workers,
         "launch_waves": [],
         "in_flight": [],
+        "parked": [],
+        "resume_ready": [],
+        "resumed": [],
         "completed": [],
         "failed": [],
     }
@@ -122,12 +125,23 @@ def persist_state(batch_dir_path: Path, state: dict[str, Any]) -> None:
             "global_blockers": state.get("global_blockers", []),
         },
     )
+    completed = state.get("completed", [])
+    completed_entries = completed if isinstance(completed, list) else []
+    complete_count = sum(
+        1
+        for item in completed_entries
+        if isinstance(item, dict) and item.get("lifecycle_state") == "complete"
+    )
     summary = {
         "schema_version": 1,
         "batch_id": state.get("batch_id"),
         "status": state.get("status"),
         "phase": state.get("phase"),
-        "completed_count": len(state.get("completed", [])),
+        "parked_count": len(state.get("parked", [])),
+        "resume_ready_count": len(state.get("resume_ready", [])),
+        "resumed_count": len(state.get("resumed", [])),
+        "complete_count": complete_count,
+        "completed_count": len(completed_entries),
         "failed_count": len(state.get("failed", [])),
         "global_blocker_count": len(state.get("global_blockers", [])),
         "generated_at": utc_now_z(),
