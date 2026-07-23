@@ -263,6 +263,9 @@ def _render_export_issue_body(
         lines.append(f"- Case ID: `{case_id}`")
     if plan_revision_id:
         lines.append(f"- Plan revision ID: `{plan_revision_id}`")
+    case_lifecycle_id = _coerce_string(ticket.get("case_lifecycle_id"))
+    if case_lifecycle_id:
+        lines.append(f"- Case lifecycle ID: `{case_lifecycle_id}`")
     lines.append(f"- Export kind: `{export_kind}`")
     stage = _coerce_string(ticket.get("stage"))
     if stage:
@@ -730,6 +733,11 @@ def _ticket_export_decision(
     )
     return {
         "fingerprint": fingerprint,
+        **(
+            {"case_lifecycle_id": lifecycle_id}
+            if (lifecycle_id := _coerce_string(ticket.get("case_lifecycle_id")))
+            else {}
+        ),
         "case_id": ticket_export_case_id(ticket),
         "plan_revision_id": ticket_export_plan_revision_id(ticket),
         "stage": stage,
@@ -2262,6 +2270,11 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         exports.append(
             {
                 "fingerprint": fingerprint,
+                **(
+                    {"case_lifecycle_id": lifecycle_id}
+                    if (lifecycle_id := _coerce_string(ticket.get("case_lifecycle_id")))
+                    else {}
+                ),
                 "case_id": ticket_export_case_id(ticket),
                 "plan_revision_id": ticket_export_plan_revision_id(ticket),
                 "export_kind": export_kind,
@@ -2282,6 +2295,15 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 ),
                 "source_ticket": {
                     "fingerprint": fingerprint,
+                    **(
+                        {"case_lifecycle_id": lifecycle_id}
+                        if (
+                            lifecycle_id := _coerce_string(
+                                ticket.get("case_lifecycle_id")
+                            )
+                        )
+                        else {}
+                    ),
                     "case_id": ticket_export_case_id(ticket),
                     "plan_revision_id": ticket_export_plan_revision_id(ticket),
                     "stage": stage_effective,

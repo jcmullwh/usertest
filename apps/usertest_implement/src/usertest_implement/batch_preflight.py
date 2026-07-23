@@ -53,6 +53,35 @@ def _write_log(path: Path, proc: subprocess.CompletedProcess[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _write_local_green_receipt(
+    *,
+    preflight_dir: Path,
+    source: str,
+    head_sha: str,
+    ci_run_url: str | None,
+    lint_executed: bool,
+    test_executed: bool,
+    satisfied: bool,
+) -> None:
+    (preflight_dir / "local_green.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": source,
+                "head_sha": head_sha,
+                "ci_run_url": ci_run_url,
+                "lint_executed": lint_executed,
+                "test_executed": test_executed,
+                "satisfied": satisfied,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -106,12 +135,15 @@ def _github_cli_ready(*, repo_root: Path, preflight_dir: Path) -> bool:
     return user_proc.returncode == 0 and repo_proc.returncode == 0
 
 
-def _git_branch(repo_root: Path) -> str:
+def _git_branch(repo_root: Path) -> str | None:
     proc = _run(["git", "branch", "--show-current"], cwd=repo_root)
     branch = proc.stdout.strip()
-    if proc.returncode != 0 or not branch:
+    if proc.returncode != 0:
         raise RuntimeError("Unable to determine git branch.")
-    return branch
+    # A clean controller runtime is intentionally allowed to be pinned at an
+    # immutable detached HEAD. Branch identity is optional provenance; the
+    # commit below is the authoritative execution and CI identity.
+    return branch or None
 
 
 def _git_head(repo_root: Path) -> str:
@@ -122,24 +154,58 @@ def _git_head(repo_root: Path) -> str:
     return sha
 
 
-def _pick_ci_run(runs: list[dict[str, Any]], *, head_sha: str) -> dict[str, Any] | None:
+def _exact_ci_runs(runs: list[dict[str, Any]], *, head_sha: str) -> list[dict[str, Any]]:
     matches = [
         item
         for item in runs
         if isinstance(item, dict)
         and str(item.get("headSha") or "").strip() == head_sha
-        and str(item.get("event") or "").strip() == "push"
     ]
-    if not matches:
-        matches = [
-            item
-            for item in runs
-            if isinstance(item, dict) and str(item.get("headSha") or "").strip() == head_sha
-        ]
+    matches.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+    return matches
+
+
+def _ci_run_is_successful(run: dict[str, Any]) -> bool:
+    return (
+        str(run.get("status") or "").strip().lower() == "completed"
+        and str(run.get("conclusion") or "").strip().lower() == "success"
+    )
+
+
+def _completed_ci_results_conflict(runs: list[dict[str, Any]], *, head_sha: str) -> bool:
+    conclusions = {
+        str(item.get("conclusion") or "").strip().lower()
+        for item in _exact_ci_runs(runs, head_sha=head_sha)
+        if str(item.get("status") or "").strip().lower() == "completed"
+        and str(item.get("conclusion") or "").strip().lower()
+        in {"success", "failure", "timed_out", "action_required", "startup_failure"}
+    }
+    return "success" in conclusions and len(conclusions) > 1
+
+
+def _pick_ci_run(runs: list[dict[str, Any]], *, head_sha: str) -> dict[str, Any] | None:
+    matches = _exact_ci_runs(runs, head_sha=head_sha)
     if not matches:
         return None
-    matches.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
-    return matches[0]
+    successful = [item for item in matches if _ci_run_is_successful(item)]
+    if successful:
+        # A complete exact-SHA workflow is immutable qualification evidence. A
+        # redundant push twin that is merely queued or running must not hide a
+        # completed pull-request workflow for the same commit.
+        successful.sort(
+            key=lambda item: (
+                str(item.get("event") or "").strip() == "push",
+                str(item.get("createdAt") or ""),
+            ),
+            reverse=True,
+        )
+        return successful[0]
+    completed = [
+        item
+        for item in matches
+        if str(item.get("status") or "").strip().lower() == "completed"
+    ]
+    return completed[0] if completed else matches[0]
 
 
 def _blocker(
@@ -224,6 +290,27 @@ def run_batch_preflight(
     preflight_dir = batch_dir / "preflight"
     preflight_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve cheap, foundational repository identity before any whole-repo
+    # qualification. A malformed repository must not consume the dominant
+    # preflight interval before failing.
+    branch = _git_branch(repo_root)
+    head_sha = _git_head(repo_root)
+    checkout_mode = "branch" if branch is not None else "detached"
+    (preflight_dir / "git_identity.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "checkout_mode": checkout_mode,
+                "branch": branch,
+                "head_sha": head_sha,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     if bool(defaults.get("require_clean_git", True)):
         proc = _run(["git", "status", "--porcelain"], cwd=repo_root)
         _write_log(preflight_dir / "git_status.log", proc)
@@ -246,7 +333,152 @@ def run_batch_preflight(
                 )
             )
 
-    if bool(defaults.get("require_local_green", True)):
+    base_ci_run_url: str | None = None
+    base_ci_green = False
+    require_base_ci = bool(defaults.get("require_ci_green_for_base", True))
+    require_local_green = bool(defaults.get("require_local_green", True))
+    reuse_successful_ci = bool(
+        defaults.get("reuse_successful_ci_for_local_green", False)
+    )
+    require_github = require_base_ci or _batch_remote_handoff_requested(
+        repo_root=repo_root,
+        batch_config=batch_config,
+    )
+
+    if require_github:
+        if not _github_cli_ready(repo_root=repo_root, preflight_dir=preflight_dir):
+            blockers.append(
+                _blocker(
+                    blocker_id="batch_control_plane",
+                    failure_class="batch_control_plane",
+                    summary="GitHub CLI cannot perform required batch push/PR operations.",
+                    evidence={
+                        "auth_path": str(preflight_dir / "gh_auth.log"),
+                        "user_probe_path": str(preflight_dir / "gh_auth_user_probe.log"),
+                        "repo_probe_path": str(preflight_dir / "gh_auth_repo_probe.log"),
+                    },
+                )
+            )
+    else:
+        (preflight_dir / "gh_auth.log").write_text(
+            "skipped: run settings do not request push/PR and base CI preflight is disabled.\n",
+            encoding="utf-8",
+        )
+
+    if require_base_ci:
+        ci_proc = _run(
+            [
+                "gh",
+                "run",
+                "list",
+                "--workflow",
+                "CI",
+                "--commit",
+                head_sha,
+                "--limit",
+                "50",
+                "--json",
+                "databaseId,headSha,event,status,conclusion,createdAt,url",
+            ],
+            cwd=repo_root,
+        )
+        _write_log(preflight_dir / "base_ci.log", ci_proc)
+        if ci_proc.returncode != 0:
+            blockers.append(
+                _blocker(
+                    blocker_id="baseline_repo_red",
+                    failure_class="baseline_repo_regression",
+                    summary="Unable to query GitHub Actions for the batch base commit.",
+                    evidence={"path": str(preflight_dir / "base_ci.log")},
+                )
+            )
+        else:
+            try:
+                runs = json.loads(ci_proc.stdout or "[]")
+            except json.JSONDecodeError:
+                runs = []
+            run_records = runs if isinstance(runs, list) else []
+            picked = _pick_ci_run(run_records, head_sha=head_sha)
+            if _completed_ci_results_conflict(run_records, head_sha=head_sha):
+                blockers.append(
+                    _blocker(
+                        blocker_id="baseline_repo_red",
+                        failure_class="baseline_repo_regression",
+                        summary="Completed CI results for the batch commit conflict.",
+                        evidence={
+                            "head_sha": head_sha,
+                            "path": str(preflight_dir / "base_ci.log"),
+                        },
+                    )
+                )
+            elif picked is None or not _ci_run_is_successful(picked):
+                blockers.append(
+                    _blocker(
+                        blocker_id="baseline_repo_red",
+                        failure_class="baseline_repo_regression",
+                        summary="Latest CI for the batch commit is not green.",
+                        evidence={"head_sha": head_sha, "path": str(preflight_dir / "base_ci.log")},
+                    )
+                )
+            else:
+                base_ci_run_url = str(picked.get("url") or "") or None
+                base_ci_green = True
+
+    local_green_source = "not_required"
+    local_green_satisfied = not require_local_green
+    if require_local_green and reuse_successful_ci and base_ci_green:
+        local_green_source = "exact_commit_ci"
+        local_green_satisfied = True
+        reuse_lines = (
+            "reused: exact_commit_ci\n"
+            f"head_sha={head_sha}\n"
+            f"ci_run_url={base_ci_run_url}\n"
+        )
+        (preflight_dir / "local_lint.log").write_text(
+            "check=lint\n" + reuse_lines,
+            encoding="utf-8",
+        )
+        (preflight_dir / "local_test.log").write_text(
+            "check=test\n" + reuse_lines,
+            encoding="utf-8",
+        )
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=False,
+            test_executed=False,
+            satisfied=True,
+        )
+    elif require_local_green and reuse_successful_ci and require_base_ci:
+        # Base CI is mandatory and already blocks admission. Do not spend the
+        # dominant local interval diagnosing a commit that cannot progress.
+        local_green_source = "skipped_base_ci_blocked"
+        skip_message = (
+            "skipped: mandatory exact-commit CI is not successful; "
+            "batch admission is already blocked.\n"
+            f"head_sha={head_sha}\n"
+        )
+        (preflight_dir / "local_lint.log").write_text(
+            "check=lint\n" + skip_message,
+            encoding="utf-8",
+        )
+        (preflight_dir / "local_test.log").write_text(
+            "check=test\n" + skip_message,
+            encoding="utf-8",
+        )
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=False,
+            test_executed=False,
+            satisfied=False,
+        )
+    elif require_local_green:
+        local_green_source = "local"
         lint_proc = _run(
             [
                 "python",
@@ -292,80 +524,26 @@ def run_batch_preflight(
                     evidence={"path": str(preflight_dir / "local_test.log")},
                 )
             )
-
-    branch = _git_branch(repo_root)
-    head_sha = _git_head(repo_root)
-    base_ci_run_url: str | None = None
-    require_base_ci = bool(defaults.get("require_ci_green_for_base", True))
-    require_github = require_base_ci or _batch_remote_handoff_requested(
-        repo_root=repo_root,
-        batch_config=batch_config,
-    )
-
-    if require_github:
-        if not _github_cli_ready(repo_root=repo_root, preflight_dir=preflight_dir):
-            blockers.append(
-                _blocker(
-                    blocker_id="batch_control_plane",
-                    failure_class="batch_control_plane",
-                    summary="GitHub CLI cannot perform required batch push/PR operations.",
-                    evidence={
-                        "auth_path": str(preflight_dir / "gh_auth.log"),
-                        "user_probe_path": str(preflight_dir / "gh_auth_user_probe.log"),
-                        "repo_probe_path": str(preflight_dir / "gh_auth_repo_probe.log"),
-                    },
-                )
-            )
+        local_green_satisfied = lint_proc.returncode == 0 and test_proc.returncode == 0
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=True,
+            test_executed=True,
+            satisfied=local_green_satisfied,
+        )
     else:
-        (preflight_dir / "gh_auth.log").write_text(
-            "skipped: run settings do not request push/PR and base CI preflight is disabled.\n",
-            encoding="utf-8",
+        _write_local_green_receipt(
+            preflight_dir=preflight_dir,
+            source=local_green_source,
+            head_sha=head_sha,
+            ci_run_url=base_ci_run_url,
+            lint_executed=False,
+            test_executed=False,
+            satisfied=True,
         )
-
-    if require_base_ci:
-        ci_proc = _run(
-            [
-                "gh",
-                "run",
-                "list",
-                "--workflow",
-                "CI",
-                "--branch",
-                branch,
-                "--limit",
-                "50",
-                "--json",
-                "databaseId,headSha,event,status,conclusion,createdAt,url",
-            ],
-            cwd=repo_root,
-        )
-        _write_log(preflight_dir / "base_ci.log", ci_proc)
-        if ci_proc.returncode != 0:
-            blockers.append(
-                _blocker(
-                    blocker_id="baseline_repo_red",
-                    failure_class="baseline_repo_regression",
-                    summary="Unable to query GitHub Actions for the batch base commit.",
-                    evidence={"path": str(preflight_dir / "base_ci.log")},
-                )
-            )
-        else:
-            try:
-                runs = json.loads(ci_proc.stdout or "[]")
-            except json.JSONDecodeError:
-                runs = []
-            picked = _pick_ci_run(runs if isinstance(runs, list) else [], head_sha=head_sha)
-            if picked is None or str(picked.get("conclusion") or "").strip().lower() != "success":
-                blockers.append(
-                    _blocker(
-                        blocker_id="baseline_repo_red",
-                        failure_class="baseline_repo_regression",
-                        summary="Latest CI for the batch commit is not green.",
-                        evidence={"head_sha": head_sha, "path": str(preflight_dir / "base_ci.log")},
-                    )
-                )
-            else:
-                base_ci_run_url = str(picked.get("url") or "") or None
 
     agents_config = _load_yaml(repo_root / "configs" / "agents.yaml").get("agents", {})
     if not isinstance(agents_config, dict):
@@ -560,8 +738,11 @@ def run_batch_preflight(
 
     return {
         "branch": branch,
+        "checkout_mode": checkout_mode,
         "head_sha": head_sha,
         "base_ci_run_url": base_ci_run_url,
+        "local_green_source": local_green_source,
+        "local_green_satisfied": local_green_satisfied,
         "maintenance_image_metadata": maintenance_image_metadata,
         "blockers": blockers,
     }

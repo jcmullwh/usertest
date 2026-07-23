@@ -566,6 +566,7 @@ def test_stage3_wrapper_atomically_persists_progress_and_resumes_without_suffix_
     reused = _dossier(problem_id="problem:reused", case_id="case:reused")
     out_json = tmp_path / "compiled" / "research.json"
     upstream = {"contract_kind": "stage3_resume_upstream", "content_sha256": "a" * 64}
+    observed_progress: list[dict] = []
 
     class SimulatedCrash(RuntimeError):
         pass
@@ -622,6 +623,7 @@ def test_stage3_wrapper_atomically_persists_progress_and_resumes_without_suffix_
         "replay_executor_metadata": {"executor": "blocked", "reason": "test"},
         "reused_research_dossiers": [reused],
         "resume_upstream_contract": upstream,
+        "progress_observer": lambda document: observed_progress.append(dict(document)),
     }
     with pytest.raises(SimulatedCrash):
         reproduction_research._run_repro_research_stage(**common)
@@ -629,6 +631,7 @@ def test_stage3_wrapper_atomically_persists_progress_and_resumes_without_suffix_
     persisted = json.loads(out_json.read_text(encoding="utf-8"))
     assert persisted["items"] == [fresh]
     assert persisted["input_meta"]["resume_upstream"] == upstream
+    assert observed_progress == [persisted]
     temporary_files = list(out_json.parent.glob(f".{out_json.name}.*.tmp"))
     assert temporary_files == []
 

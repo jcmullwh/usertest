@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,11 @@ if str(_IMPLEMENT_SRC) not in sys.path:
     sys.path.insert(0, str(_IMPLEMENT_SRC))
 
 from backlog_repo import is_generated_backlog_ticket  # noqa: E402
+from run_artifacts.lifecycle_events import (  # noqa: E402
+    LIFECYCLE_CONTEXT_FILE_ENV,
+    LifecycleContext,
+    lifecycle_context_env,
+)
 
 from usertest_implement.batch_state import latest_batch_dir, load_json  # noqa: E402
 from usertest_implement.ledger import update_ledger_file  # noqa: E402
@@ -63,6 +69,7 @@ class LoopContext:
     gh_bin: str = "gh"
     last_cleanup_monotonic: float = field(default=0.0)
     last_refresh_monotonic: float = field(default=0.0)
+    controller_context: LifecycleContext | None = field(default=None)
 
 
 def _utc_now_z() -> str:
@@ -101,6 +108,238 @@ def _write_state(ctx: LoopContext, **payload: Any) -> None:
     )
 
 
+def _controller_environment(ctx: LoopContext) -> dict[str, str]:
+    env = dict(os.environ)
+    if ctx.controller_context is not None:
+        env.pop(LIFECYCLE_CONTEXT_FILE_ENV, None)
+        env.update(lifecycle_context_env(ctx.controller_context))
+    return env
+
+
+def _tree_fingerprint(root: Path, paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(
+        {item.resolve() for item in paths if item.is_file()},
+        key=lambda item: item.as_posix().casefold(),
+    ):
+        try:
+            relative = path.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            relative = path.as_posix()
+        digest.update(relative.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _system_commit(repo_root: Path) -> str:
+    inherited = os.environ.get("GITHUB_SHA", "").strip()
+    if inherited:
+        return inherited
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown"
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else "unknown"
+
+
+def _yaml_mapping(path: Path) -> dict[str, Any] | None:
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _clean_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _configured_model(
+    *,
+    agent: str,
+    requested: object,
+    agents: dict[str, Any],
+) -> str | None:
+    explicit = _clean_string(requested)
+    if explicit is not None:
+        return explicit
+    agent_config = agents.get(agent)
+    if not isinstance(agent_config, dict):
+        return None
+    return _clean_string(agent_config.get("default_model"))
+
+
+def _effective_execution_fingerprint(
+    ctx: LoopContext,
+) -> tuple[dict[str, Any], dict[str, Any], Path] | None:
+    """Resolve every agent/model path the controller can dispatch.
+
+    Returning ``None`` deliberately leaves the fingerprint incomplete, preventing
+    certified metrics when the batch roster or its model defaults cannot be proven.
+    """
+
+    agents_path = ctx.repo_root / "configs" / "agents.yaml"
+    agents_doc = _yaml_mapping(agents_path)
+    batch_doc = _yaml_mapping(ctx.batch_config_path)
+    if agents_doc is None or batch_doc is None:
+        return None
+    agents_raw = agents_doc.get("agents")
+    defaults_raw = batch_doc.get("defaults")
+    agents = agents_raw if isinstance(agents_raw, dict) else None
+    defaults = defaults_raw if isinstance(defaults_raw, dict) else None
+    if agents is None or defaults is None:
+        return None
+
+    settings_raw = defaults.get("run_settings_path") or "configs/usertest_implement_settings.yaml"
+    settings_path = Path(str(settings_raw))
+    if not settings_path.is_absolute():
+        settings_path = (ctx.repo_root / settings_path).resolve()
+    settings_doc = _yaml_mapping(settings_path)
+    if settings_doc is None:
+        return None
+    profiles = settings_doc.get("profiles")
+    if not isinstance(profiles, dict):
+        return None
+    profile_name = str(
+        defaults.get("run_settings_profile")
+        or settings_doc.get("default_profile")
+        or "default"
+    ).strip()
+    profile = profiles.get(profile_name)
+    if not isinstance(profile, dict):
+        return None
+    run_common_raw = profile.get("run_common")
+    run_common = run_common_raw if isinstance(run_common_raw, dict) else None
+    roster = defaults.get("worker_roster")
+    if run_common is None or not isinstance(roster, list) or not roster:
+        return None
+
+    worker_models: list[dict[str, Any]] = []
+    worker_providers: list[dict[str, Any]] = []
+    settings_model = run_common.get("model")
+    for index, item in enumerate(roster, start=1):
+        if not isinstance(item, dict):
+            return None
+        agent = (_clean_string(item.get("agent")) or "").lower()
+        if agent not in agents:
+            return None
+        model = _configured_model(
+            agent=agent,
+            requested=item.get("model") or settings_model,
+            agents=agents,
+        )
+        if model is None:
+            return None
+        worker_models.append({"worker_index": index, "model": model})
+        worker_providers.append({"worker_index": index, "agent": agent})
+
+    role_values = {
+        "backlog": (ctx.backlog_agent, ctx.backlog_model),
+        "controller_implementation": (ctx.implementation_agent, ctx.implementation_model),
+        "controller_review": (ctx.review_agent, ctx.review_model),
+    }
+    resolved_roles: dict[str, tuple[str, str]] = {}
+    for role, (raw_agent, requested_model) in role_values.items():
+        agent = raw_agent.strip().lower()
+        model = _configured_model(agent=agent, requested=requested_model, agents=agents)
+        if agent not in agents or model is None:
+            return None
+        resolved_roles[role] = (agent, model)
+
+    batch_review_agent = _clean_string(run_common.get("implementation_review_agent"))
+    batch_review_model: str | None = None
+    if batch_review_agent is not None:
+        batch_review_agent = batch_review_agent.lower()
+        if batch_review_agent not in agents:
+            return None
+        batch_review_model = _configured_model(
+            agent=batch_review_agent,
+            requested=run_common.get("implementation_review_model"),
+            agents=agents,
+        )
+        if batch_review_model is None:
+            return None
+
+    models: dict[str, Any] = {
+        role: model for role, (_agent, model) in resolved_roles.items()
+    }
+    models["batch_workers"] = worker_models
+    models["batch_post_implementation_review"] = batch_review_model
+    providers: dict[str, Any] = {
+        role: agent for role, (agent, _model) in resolved_roles.items()
+    }
+    providers["batch_workers"] = worker_providers
+    providers["batch_post_implementation_review"] = batch_review_agent
+    return models, providers, settings_path
+
+
+def _build_controller_context(ctx: LoopContext) -> LifecycleContext:
+    prompt_paths = [
+        *ctx.repo_root.glob("configs/backlog_prompts/*.md"),
+        *ctx.repo_root.glob("configs/backlog_stage_guidance/*.md"),
+    ]
+    execution_fingerprint = _effective_execution_fingerprint(ctx)
+    config_paths = [
+        path
+        for path in (
+            ctx.settings_path,
+            ctx.batch_config_path,
+            ctx.repo_root / "configs" / "agents.yaml",
+            execution_fingerprint[2] if execution_fingerprint is not None else None,
+            ctx.repo_root / "configs" / "backlog_research.yaml",
+        )
+        if path is not None and path.is_file()
+    ]
+    fingerprint = {
+        "controller_context_verified": "true",
+        "code_commit": _system_commit(ctx.repo_root),
+        "prompt_hash": _tree_fingerprint(ctx.repo_root, prompt_paths),
+        "config_hash": _tree_fingerprint(ctx.repo_root, config_paths),
+        "policy_hash": _tree_fingerprint(
+            ctx.repo_root,
+            [ctx.batch_config_path] if ctx.batch_config_path.is_file() else [],
+        ),
+        "score_version": "automation_score_v1",
+    }
+    if execution_fingerprint is not None:
+        models, providers, _settings_path = execution_fingerprint
+        fingerprint["models"] = json.dumps(
+            models,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint["providers"] = json.dumps(
+            providers,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return LifecycleContext(
+        cycle_id=f"continuous-controller:{uuid.uuid4()}",
+        session_id=f"continuous-controller:{os.getpid()}",
+        system_fingerprint=fingerprint,
+    )
+
+
+def _begin_controller_cycle(ctx: LoopContext) -> LifecycleContext:
+    """Bind one fresh processing-attempt identity to the next controller pass."""
+
+    context = _build_controller_context(ctx)
+    ctx.controller_context = context
+    return context
+
+
 def _run_logged(
     ctx: LoopContext,
     argv: list[str],
@@ -118,6 +357,7 @@ def _run_logged(
         proc = subprocess.run(
             argv,
             cwd=str(cwd),
+            env=_controller_environment(ctx),
             stdout=handle,
             stderr=handle,
             text=True,
@@ -141,6 +381,7 @@ def _run_captured(
     proc = subprocess.run(
         argv,
         cwd=str(cwd),
+        env=_controller_environment(ctx),
         capture_output=True,
         text=True,
         check=False,
@@ -193,6 +434,39 @@ def _run_maintenance_cleanup(ctx: LoopContext) -> None:
     ctx.last_cleanup_monotonic = time.monotonic()
     if proc.returncode != 0:
         _append_log(ctx, "WARNING maintenance image cleanup failed; continuing")
+
+
+def _refresh_observational_metrics(ctx: LoopContext) -> None:
+    """Run the staleness-aware metrics refresh without gating pipeline work."""
+
+    metrics_root = ctx.owner_root / "runs"
+    if not metrics_root.exists() or not next(
+        metrics_root.rglob("lifecycle_events.jsonl"), None
+    ):
+        return
+    refresh_tool = ctx.repo_root / "tools" / "refresh_pipeline_metrics.py"
+    if not refresh_tool.is_file():
+        _append_log(ctx, "WARNING observational metrics refresh tool is missing")
+        return
+    proc = _run_logged(
+        ctx,
+        [
+            str(ctx.implement_python),
+            str(refresh_tool),
+            "--root",
+            str(metrics_root),
+            "--output-dir",
+            str(metrics_root / "_pipeline_metrics"),
+            "--cohort-id",
+            "continuous-pipeline",
+            "--stale-after-hours",
+            "24",
+        ],
+        cwd=ctx.repo_root,
+        label="observational pipeline metrics refresh",
+    )
+    if proc.returncode != 0:
+        _append_log(ctx, "WARNING observational metrics refresh failed; continuing")
 
 
 def _load_ledger(ctx: LoopContext) -> dict[str, Any]:
@@ -807,7 +1081,12 @@ def _merge_review(ctx: LoopContext, fingerprint: str) -> bool:
 def _reconcile_review_queue(ctx: LoopContext) -> bool:
     """Reconcile PRs while keeping incomplete outcome proof case-local."""
 
-    def merged_outcome_pending(fingerprint: str, pr_url: str) -> bool:
+    def merged_outcome_pending(
+        fingerprint: str,
+        pr_url: str,
+        *,
+        ticket_path: Path,
+    ) -> bool:
         refreshed = _load_ledger(ctx)
         actions_raw = refreshed.get("actions")
         entry = actions_raw.get(fingerprint) if isinstance(actions_raw, dict) else None
@@ -825,12 +1104,21 @@ def _reconcile_review_queue(ctx: LoopContext) -> bool:
             .strip()
             .lower()
         )
-        return bool(
+        recorded_merge = bool(
             entry.get("last_merge_pr_url") == pr_url
             and isinstance(entry.get("last_merged_at"), str)
             and str(entry.get("last_merged_at")).strip()
-            and state not in {"resolved", "mitigated"}
         )
+        # Historical generated tickets can predate the merge-ledger fields.  GitHub's
+        # mergedAt proof plus the completed ticket location is enough to establish that
+        # any remaining failure belongs to outcome/provenance progression for this case.
+        # It is not enough to mark the outcome resolved, but it must not turn one stale
+        # historical case into a global gate on unrelated backlog work.
+        historical_completed_merge = ticket_path.parent.name == "5 - complete"
+        return (recorded_merge or historical_completed_merge) and state not in {
+            "resolved",
+            "mitigated",
+        }
 
     ledger = _load_ledger(ctx)
     actions = ledger.get("actions", {})
@@ -880,7 +1168,11 @@ def _reconcile_review_queue(ctx: LoopContext) -> bool:
             # finalizer. It writes merge provenance and drives original/live outcome
             # roles; moving the file alone would falsely treat workflow motion as proof.
             if not _merge_review(ctx, fingerprint):
-                if merged_outcome_pending(fingerprint, pr_url):
+                if merged_outcome_pending(
+                    fingerprint,
+                    pr_url,
+                    ticket_path=ticket_path,
+                ):
                     _append_log(
                         ctx,
                         "Merged PR outcome progression remains case-locally pending; "
@@ -1251,14 +1543,15 @@ def main(argv: list[str] | None = None) -> int:
             repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe"
         ).resolve(),
     )
-
     ctx.pid_path.parent.mkdir(parents=True, exist_ok=True)
     ctx.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
     _append_log(ctx, "continuous implementation loop starting")
 
     while True:
         try:
+            _begin_controller_cycle(ctx)
             _write_state(ctx, status="running", current_action="startup")
+            _refresh_observational_metrics(ctx)
             if _maintenance_cleanup_due(ctx):
                 _run_maintenance_cleanup(ctx)
 

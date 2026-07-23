@@ -204,6 +204,20 @@ def _resume_agent_continuity(
     )
 
 
+def _resume_usage_source_run_dir(
+    *,
+    run_dir: Path,
+    author_continuity: Mapping[str, Any],
+    codex_resume_session_id: str | None,
+) -> Path | None:
+    """Return the run that owns the retained high-water mark for a continuation."""
+
+    if codex_resume_session_id is None:
+        return None
+    source = _clean_str(author_continuity.get("author_source_run_dir"))
+    return Path(source).expanduser().resolve() if source is not None else run_dir.resolve()
+
+
 _CODEX_CONTEXT_EXHAUSTED_FRAGMENT = "ran out of room in the model's context window"
 
 
@@ -893,6 +907,9 @@ def _selected_from_resume_state(
         export_index=ticket_ref.get("export_index")
         if isinstance(ticket_ref.get("export_index"), int)
         else None,
+        case_id=_clean_str(ticket.get("case_id")),
+        plan_revision_id=_clean_str(ticket.get("plan_revision_id")),
+        case_lifecycle_id=_clean_str(ticket.get("case_lifecycle_id")),
     )
 
 
@@ -1222,7 +1239,16 @@ def _cmd_resume_pr(
         agent_config_overrides=tuple(args.agent_config_override or []),
         agent_append_system_prompt=(prompt if codex_resume_session_id is None else None),
         agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
+        evidence_role="implementation" if selected.case_id is not None else None,
+        origin_stage="implementation_resume" if selected.case_id is not None else None,
+        parent_case_id=selected.case_id,
+        case_lifecycle_id=selected.case_lifecycle_id,
         codex_resume_session_id=codex_resume_session_id,
+        codex_resume_usage_source_run_dir=_resume_usage_source_run_dir(
+            run_dir=run_dir,
+            author_continuity=author_continuity,
+            codex_resume_session_id=codex_resume_session_id,
+        ),
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
@@ -1767,7 +1793,16 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         agent_append_system_prompt=(prompt if codex_resume_session_id is None else None),
         agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
         supervisor_instruction=combined_supervisor_instruction or None,
+        evidence_role="verification" if selected.case_id is not None else None,
+        origin_stage="verification_resume" if selected.case_id is not None else None,
+        parent_case_id=selected.case_id,
+        case_lifecycle_id=selected.case_lifecycle_id,
         codex_resume_session_id=codex_resume_session_id,
+        codex_resume_usage_source_run_dir=_resume_usage_source_run_dir(
+            run_dir=run_dir,
+            author_continuity=author_continuity,
+            codex_resume_session_id=codex_resume_session_id,
+        ),
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,

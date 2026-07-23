@@ -35,6 +35,41 @@ broader delegation rollout.
 It must not copy raw prompts, source bodies, secrets, or full command output
 into derived artifacts.
 
+## Invocation usage receipts
+
+Lifecycle instrumentation can attribute a single Codex invocation without
+summing cumulative terminal snapshots:
+
+```python
+from pathlib import Path
+
+from token_monitoring import parse_codex_invocation_usage
+
+result = parse_codex_invocation_usage(
+    Path("raw_agent_events.jsonl"),
+    invocation_id="invocation-123",
+    # Omit for a known-fresh invocation. Pass the preceding receipt's
+    # observed_high_water for a continuation of the same provider session.
+    baseline_high_water=previous_high_water,
+)
+receipt = result.receipt_payload()
+```
+
+`result.semantics` is exactly `per_invocation`, `session_cumulative`, or
+`unattributable`. An unattributable result has `usage=None`; missing evidence is
+never represented as zero usage. Token dimensions include total, input, cached
+input, derived uncached input, output, and reasoning output. Replayed identical
+`turn.completed` records are deduplicated. Multiple distinct terminal counters
+without a baseline, decreasing counters, and malformed or missing evidence are
+unattributable.
+
+The schema-v1 receipt records the invocation/session binding, baseline and
+observed high-water counters, attributable delta, source SHA-256, observation
+counts, and diagnostics. Its `content_sha256` is calculated over canonical JSON
+with the address field omitted, making it suitable for a content-addressed
+`model_usage_receipt.json` artifact. Use `usage_receipt_is_valid()` when reading
+an artifact.
+
 ## Canonical smoke
 
 ## Standalone package checkout (recommended first path)

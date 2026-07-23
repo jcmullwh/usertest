@@ -9,6 +9,7 @@ from usertest.commands.lint import add_lint_command
 from usertest.commands.matrix import add_matrix_command
 from usertest.commands.reports import add_report_commands
 from usertest.commands.run import add_run_command
+from usertest.commands.telemetry import add_telemetry_command
 from usertest.commands.token_monitor import add_token_monitor_command
 
 
@@ -31,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_lint_command(sub)
     add_report_commands(sub)
     add_token_monitor_command(sub)
+    add_telemetry_command(sub)
     return parser
 
 

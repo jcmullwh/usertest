@@ -5513,6 +5513,9 @@ def test_post_verifier_gap_resumes_same_author_with_research_capabilities(
     assert len(requests) == 1
     request = requests[0]
     assert request.codex_resume_session_id == session_id
+    assert request.codex_resume_usage_source_run_dir == Path(
+        source_attempt["run_dir"]
+    ).resolve()
     assert request.resume_workspace_dir == workspace
     assert request.mission_id == mod._MISSION_ID
     assert request.evidence_role == "research"

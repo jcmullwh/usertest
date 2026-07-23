@@ -13,6 +13,7 @@ dependencies = [
   "run_artifacts @ file:///${PROJECT_ROOT}/../../packages/run_artifacts",
   "runner_core @ file:///${PROJECT_ROOT}/../../packages/runner_core",
   "sandbox_runner @ file:///${PROJECT_ROOT}/../../packages/sandbox_runner",
+  "token_monitoring @ file:///${PROJECT_ROOT}/../../packages/token_monitoring",
 ]
 
 [project.scripts]
@@ -39,10 +40,8 @@ known_first_party = ["usertest_implement"]
 
 [tool.deptry.per_rule_ignores]
 # These local paths make the app the composition root for runner_core's bare internal
-# dependencies; token monitoring remains deliberately best-effort telemetry.
-DEP001 = ["token_monitoring"]
+# dependencies.
 DEP002 = ["agent-adapters", "normalized_events", "reporter", "sandbox_runner"]
-DEP003 = ["token_monitoring"]
 
 [tool.ruff]
 target-version = "py311"

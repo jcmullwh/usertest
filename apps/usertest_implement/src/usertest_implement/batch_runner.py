@@ -1127,6 +1127,24 @@ def _requeue_ticket(*, candidate: BatchCandidate, repo_root: Path) -> Path:
     return path
 
 
+def _return_ticket_for_replanning(
+    *,
+    candidate: BatchCandidate,
+    sync_atom_actions: bool = True,
+) -> Path:
+    """Move a candidate with an invalid Stage-6 contract out of the ready queue."""
+
+    path = move_ticket_file(
+        owner_root=candidate.owner_root,
+        fingerprint=candidate.fingerprint,
+        to_bucket="1.5 - to_plan",
+        dry_run=False,
+    ).resolve()
+    if sync_atom_actions:
+        _sync_ticket_atom_actions(owner_root=candidate.owner_root)
+    return path
+
+
 def _move_ticket_for_review(*, candidate: BatchCandidate, repo_root: Path) -> Path:
     path = move_ticket_file(
         owner_root=candidate.owner_root,
@@ -1690,6 +1708,165 @@ def _record_launch_wave_decision(
     return wave
 
 
+def _record_candidate_plan_contract_failure(
+    *,
+    batch_dir_path: Path,
+    state: dict[str, Any],
+    phase_name: str,
+    cycle: int,
+    candidate: BatchCandidate,
+    error: ValueError,
+    defer_atom_action_sync: bool = False,
+) -> Path | None:
+    """Retain one invalid planning artifact without blocking unrelated candidates."""
+
+    failed_at = utc_now_z()
+    replanned_path: Path | None = None
+    replan_error: str | None = None
+    try:
+        replanned_path = _return_ticket_for_replanning(
+            candidate=candidate,
+            sync_atom_actions=not defer_atom_action_sync,
+        )
+    except Exception as exc:  # noqa: BLE001 - retain custody failure as case-local evidence
+        replan_error = f"{type(exc).__name__}: {exc}"
+
+    failure = {
+        "ticket_key": candidate.ticket_key,
+        "fingerprint": candidate.fingerprint,
+        "run_dir": None,
+        "failure_class": "candidate_plan_contract_invalid",
+        "summary": str(error),
+        "failed_utc": failed_at,
+        "global_blocker": False,
+        "retryable": replanned_path is None,
+        "disposition": "replan_required",
+        "original_ticket_path": str(candidate.ticket_path),
+        "replanned_ticket_path": str(replanned_path) if replanned_path is not None else None,
+        "replan_error": replan_error,
+    }
+    state.setdefault("failed", []).append(failure)
+    admission_receipt_error: str | None = None
+    try:
+        append_jsonl(
+            batch_dir_path / "candidate_admission_failures.jsonl",
+            {
+                "schema_version": 1,
+                "recorded_utc": failed_at,
+                "phase": phase_name,
+                "cycle": cycle,
+                "source_name": candidate.source_name,
+                "ticket_key": candidate.ticket_key,
+                "fingerprint": candidate.fingerprint,
+                "severity": candidate.severity,
+                "title": candidate.title,
+                "failure_class": failure["failure_class"],
+                "summary": failure["summary"],
+                "global_blocker": False,
+                "worker_launched": False,
+                "disposition": failure["disposition"],
+                "original_ticket_path": failure["original_ticket_path"],
+                "replanned_ticket_path": failure["replanned_ticket_path"],
+                "replan_error": replan_error,
+            },
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        admission_receipt_error = f"{type(exc).__name__}: {exc}"
+        failure["admission_receipt_error"] = admission_receipt_error
+    _print(
+        f"REPLAN phase={phase_name} fingerprint={candidate.fingerprint} "
+        f"class={failure['failure_class']} moved={replanned_path is not None} "
+        f"receipt_error={admission_receipt_error or '<none>'} summary={error}"
+    )
+    return replanned_path
+
+
+def _flush_deferred_replan_action_sync(
+    *,
+    batch_dir_path: Path,
+    state: dict[str, Any],
+    phase_name: str,
+    cycle: int,
+    pending: dict[Path, set[str]],
+    completed_duration_seconds: float | None = None,
+    completed_started_utc: str | None = None,
+    completion_source: str = "deferred_flush",
+) -> None:
+    """Reconcile derived action state after a contiguous set of ticket moves.
+
+    Successful owner roots are removed from ``pending``. Failed roots remain so
+    the phase can retry them and cannot silently complete with stale derived
+    atom-action state.
+    """
+
+    completed_owner_roots: list[Path] = []
+    for owner_root, fingerprints in sorted(
+        pending.items(), key=lambda item: str(item[0]).lower()
+    ):
+        started_utc = completed_started_utc or utc_now_z()
+        started_monotonic = time.monotonic()
+        sync_error: str | None = None
+        if completed_duration_seconds is None:
+            try:
+                _sync_ticket_atom_actions(owner_root=owner_root)
+            except Exception as exc:  # noqa: BLE001 - retain derived-state failure as evidence
+                sync_error = f"{type(exc).__name__}: {exc}"
+            duration_seconds = time.monotonic() - started_monotonic
+        else:
+            duration_seconds = completed_duration_seconds
+        receipt = {
+            "schema_version": 1,
+            "recorded_utc": utc_now_z(),
+            "started_utc": started_utc,
+            "duration_seconds": round(duration_seconds, 6),
+            "phase": phase_name,
+            "cycle": cycle,
+            "completion_source": completion_source,
+            "owner_root": str(owner_root),
+            "fingerprints": sorted(fingerprints),
+            "candidate_count": len(fingerprints),
+            "sync_status": "error" if sync_error is not None else "success",
+            "receipt_status": "success",
+            "status": "error" if sync_error is not None else "success",
+            "failure_class": (
+                "candidate_admission_action_sync_failed" if sync_error is not None else None
+            ),
+            "error": sync_error,
+            "global_blocker": False,
+            "retryable": sync_error is not None,
+        }
+        receipt_error: str | None = None
+        try:
+            append_jsonl(
+                batch_dir_path / "candidate_admission_action_syncs.jsonl",
+                receipt,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            receipt_error = f"{type(exc).__name__}: {exc}"
+            receipt["receipt_error"] = receipt_error
+            receipt["receipt_status"] = "error"
+            receipt["status"] = "error"
+            receipt["retryable"] = True
+            if sync_error is None:
+                receipt["failure_class"] = (
+                    "candidate_admission_action_sync_receipt_failed"
+                )
+        state.setdefault("candidate_admission_action_syncs", []).append(receipt)
+        if sync_error is not None or receipt_error is not None:
+            state.setdefault("candidate_admission_sync_failures", []).append(receipt)
+        if sync_error is None and receipt_error is None:
+            completed_owner_roots.append(owner_root)
+        _print(
+            f"REPLAN_SYNC phase={phase_name} owner_root={owner_root} "
+            f"candidates={len(fingerprints)} status={receipt['status']} "
+            f"duration_seconds={receipt['duration_seconds']} "
+            f"error={sync_error or '<none>'} "
+            f"receipt_error={receipt_error or '<none>'}"
+        )
+    for owner_root in completed_owner_roots:
+        pending.pop(owner_root, None)
+
+
 def _phase_blocker_id(failure_class: str, handoff_summary: dict[str, Any] | None) -> str:
     if (
         isinstance(handoff_summary, dict)
@@ -1751,7 +1928,11 @@ def _drain_phase(
     failed_keys = {
         entry["ticket_key"]
         for entry in state.get("failed", [])
-        if isinstance(entry, dict) and isinstance(entry.get("ticket_key"), str)
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("ticket_key"), str)
+            and entry.get("retryable") is not True
+        )
     }
     processed = completed_keys | failed_keys
 
@@ -1815,25 +1996,63 @@ def _drain_phase(
         queue = list(candidates)
         next_worker_index = 0
         active_conflict_keys: set[str] = set()
+        pending_replan_action_sync: dict[Path, set[str]] = {}
         in_flight: dict[
             Future[TicketRunResult], tuple[BatchCandidate, WorkerTemplate, tuple[str, ...]]
         ] = {}
 
         with ThreadPoolExecutor(max_workers=len(workers)) as executor:
-            while queue or in_flight:
+            while queue or in_flight or pending_replan_action_sync:
                 while not launch_blocked and len(in_flight) < len(workers):
                     launch_index = _pick_launchable_candidate_index(queue, active_conflict_keys)
                     if launch_index is None:
                         break
                     candidate = queue.pop(launch_index)
                     if wave_base_revision is not None:
-                        _validate_candidate_wave_revision(
-                            candidate=candidate,
-                            wave_base_revision=wave_base_revision,
-                        )
+                        try:
+                            _validate_candidate_wave_revision(
+                                candidate=candidate,
+                                wave_base_revision=wave_base_revision,
+                            )
+                        except ValueError as exc:
+                            replanned_path = _record_candidate_plan_contract_failure(
+                                batch_dir_path=batch_dir_path,
+                                state=state,
+                                phase_name=phase.name,
+                                cycle=cycle,
+                                candidate=candidate,
+                                error=exc,
+                                defer_atom_action_sync=True,
+                            )
+                            if replanned_path is not None:
+                                processed.add(candidate.ticket_key)
+                                pending_replan_action_sync.setdefault(
+                                    candidate.owner_root.resolve(), set()
+                                ).add(candidate.fingerprint)
+                            persist_state(batch_dir_path, state)
+                            continue
                     worker = workers[next_worker_index % len(workers)]
                     next_worker_index += 1
+                    claim_started_utc = utc_now_z()
+                    claim_started = time.monotonic()
                     claimed_path = _claim_ticket(candidate=candidate, repo_root=repo_root)
+                    claim_duration_seconds = time.monotonic() - claim_started
+                    owner_key = candidate.owner_root.resolve()
+                    owner_pending = pending_replan_action_sync.get(owner_key)
+                    if owner_pending:
+                        completed_pending = {owner_key: owner_pending}
+                        _flush_deferred_replan_action_sync(
+                            batch_dir_path=batch_dir_path,
+                            state=state,
+                            phase_name=phase.name,
+                            cycle=cycle,
+                            pending=completed_pending,
+                            completed_duration_seconds=claim_duration_seconds,
+                            completed_started_utc=claim_started_utc,
+                            completion_source="claim_sync",
+                        )
+                        if not completed_pending:
+                            pending_replan_action_sync.pop(owner_key, None)
                     active_conflict_keys.update(candidate.execution_conflict_keys)
                     state.setdefault("in_flight", []).append(
                         {
@@ -1884,6 +2103,38 @@ def _drain_phase(
                         maintenance_image_metadata_path=maintenance_image_metadata_path,
                     )
                     in_flight[future] = (candidate, worker, candidate.execution_conflict_keys)
+
+                if pending_replan_action_sync:
+                    _flush_deferred_replan_action_sync(
+                        batch_dir_path=batch_dir_path,
+                        state=state,
+                        phase_name=phase.name,
+                        cycle=cycle,
+                        pending=pending_replan_action_sync,
+                    )
+                    if pending_replan_action_sync and not in_flight:
+                        _flush_deferred_replan_action_sync(
+                            batch_dir_path=batch_dir_path,
+                            state=state,
+                            phase_name=phase.name,
+                            cycle=cycle,
+                            pending=pending_replan_action_sync,
+                            completion_source="deferred_retry",
+                        )
+                    persist_state(batch_dir_path, state)
+
+                if pending_replan_action_sync and not in_flight:
+                    pending_roots = ", ".join(
+                        str(path)
+                        for path in sorted(
+                            pending_replan_action_sync,
+                            key=lambda item: str(item).lower(),
+                        )
+                    )
+                    raise RuntimeError(
+                        "Deferred atom-action synchronization failed after retry for: "
+                        f"{pending_roots}"
+                    )
 
                 if not in_flight:
                     break
@@ -2106,6 +2357,8 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     state["code_root"] = str(repo_root.resolve())
     state["owner_root"] = str(owner_root)
     state["repo_input"] = repo_input
+    state["local_green_source"] = preflight.get("local_green_source")
+    state["local_green_satisfied"] = preflight.get("local_green_satisfied")
     state["global_blockers"] = list(preflight.get("blockers", []))
     if state["global_blockers"]:
         state["status"] = "blocked"
