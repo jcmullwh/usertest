@@ -8,7 +8,9 @@ dependencies = [
   "agent-adapters",
   "backlog_core",
   "runner_core",
+  "run_artifacts",
   "sandbox_runner",
+  "token_monitoring",
   "pyyaml>=6.0.3",
 ]
 
@@ -38,6 +40,7 @@ dev = [
   "-e file:///${PROJECT_ROOT}/../../packages/triage_engine#egg=triage_engine",
   "-e file:///${PROJECT_ROOT}/../../apps/usertest_implement#egg=usertest_implement",
   "-e file:///${PROJECT_ROOT}/../run_artifacts#egg=run_artifacts",
+  "-e file:///${PROJECT_ROOT}/../token_monitoring#egg=token-monitoring",
   "deptry>=0.20.0",
   "mypy>=1.8.0",
   "pytest>=8.0.0",

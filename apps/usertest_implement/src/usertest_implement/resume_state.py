@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -100,6 +101,41 @@ def _canonical_uuid(value: Any) -> str | None:
     except ValueError:
         return None
     return canonical if text == canonical else None
+
+
+def _stable_case_lifecycle_id(*, run_dir: Path, case_id: str) -> str:
+    encoded = "\x00".join((case_id, str(run_dir.resolve()))).encode(
+        "utf-8", errors="replace"
+    )
+    return f"case-lifecycle:{sha256(encoded).hexdigest()}"
+
+
+def _resume_identity(*, selected: SelectedTicket, run_dir: Path) -> tuple[str, str, str]:
+    case_id = _clean_str(selected.case_id) or f"legacy-case:{selected.fingerprint}"
+    plan_revision_id = (
+        _clean_str(selected.plan_revision_id) or f"legacy-plan:{selected.fingerprint}"
+    )
+    manifest = _read_json(run_dir / "lifecycle_manifest.json")
+    selected_lifecycle_id = _clean_str(selected.case_lifecycle_id)
+    lifecycle_id = None
+    if isinstance(manifest, dict) and manifest.get("case_id") == case_id:
+        lifecycle_id = _clean_str(manifest.get("case_lifecycle_id"))
+    if (
+        selected_lifecycle_id is not None
+        and lifecycle_id is not None
+        and selected_lifecycle_id != lifecycle_id
+    ):
+        raise ValueError(
+            "Ticket lifecycle identity conflicts with retained implementation telemetry: "
+            f"ticket={selected_lifecycle_id!r} manifest={lifecycle_id!r}"
+        )
+    return (
+        case_id,
+        plan_revision_id,
+        selected_lifecycle_id
+        or lifecycle_id
+        or _stable_case_lifecycle_id(run_dir=run_dir, case_id=case_id),
+    )
 
 
 def implementation_author_continuity(run_dir: Path) -> dict[str, Any]:
@@ -403,6 +439,10 @@ def build_ticket_resume_state(
     review_run_dir: Path | None = None,
     ticket_path_override: Path | None = None,
 ) -> dict[str, Any]:
+    case_id, plan_revision_id, case_lifecycle_id = _resume_identity(
+        selected=selected,
+        run_dir=run_dir,
+    )
     workspace_ref = _read_json(run_dir / "workspace_ref.json")
     ticket_ref = _read_json(run_dir / "ticket_ref.json")
     verification = _read_json(run_dir / "verification.json")
@@ -462,7 +502,13 @@ def build_ticket_resume_state(
             "path": ticket_path,
             "title": selected.title,
             "export_kind": selected.export_kind,
+            "case_id": case_id,
+            "plan_revision_id": plan_revision_id,
+            "case_lifecycle_id": case_lifecycle_id,
         },
+        "case_id": case_id,
+        "plan_revision_id": plan_revision_id,
+        "case_lifecycle_id": case_lifecycle_id,
         "owner_root": str(owner_root) if owner_root is not None else None,
         "run_dir": str(run_dir),
         "workspace_path": _workspace_path(run_dir=run_dir, workspace_ref=workspace_ref_dict),
@@ -523,6 +569,22 @@ def write_ticket_resume_state(
     except Exception as exc:  # noqa: BLE001 - telemetry must never become a lifecycle gate
         warnings.warn(
             f"Failed to write observational pipeline efficiency telemetry: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    try:
+        from usertest_implement.lifecycle_telemetry import (
+            write_implementation_lifecycle_telemetry,
+        )
+
+        write_implementation_lifecycle_telemetry(
+            run_dir=run_dir,
+            review_run_dir=review_run_dir,
+            resume_state=state,
+        )
+    except Exception as exc:  # noqa: BLE001 - telemetry must never become a lifecycle gate
+        warnings.warn(
+            f"Failed to write observational lifecycle telemetry: {exc}",
             RuntimeWarning,
             stacklevel=2,
         )

@@ -2550,6 +2550,7 @@ def test_export_body_embeds_exact_hashed_stage6_verification_contract() -> None:
             "suggested_owner": "core",
         }
     )
+    ticket["case_lifecycle_id"] = "case-lifecycle:provenance:1"
     fingerprint = ticket_export_fingerprint(ticket)
     body = export_commands._render_export_issue_body(
         ticket=ticket,
@@ -2567,6 +2568,7 @@ def test_export_body_embeds_exact_hashed_stage6_verification_contract() -> None:
     assert target_contract == plan["target_contract"]
     assert f"- Case ID: `{plan['case_id']}`" in body
     assert f"- Plan revision ID: `{plan['plan_revision_id']}`" in body
+    assert "- Case lifecycle ID: `case-lifecycle:provenance:1`" in body
     for heading in (
         "### Full verified research proof",
         "### Selected causal coverage",

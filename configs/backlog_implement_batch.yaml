@@ -12,6 +12,9 @@ defaults:
   require_clean_git: true
   require_local_green: true
   require_ci_green_for_base: true
+  # A successful complete CI run on the exact clean immutable head covers the
+  # same project lint/test matrix and avoids repeating it on every admission.
+  reuse_successful_ci_for_local_green: true
   halt_on_red_pr: true
   infra_retry_limit: 1
   registry_retry_limit: 1

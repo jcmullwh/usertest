@@ -311,6 +311,7 @@ class SelectedTicket:
     export_index: int | None
     case_id: str | None = None
     plan_revision_id: str | None = None
+    case_lifecycle_id: str | None = None
     ticket_body_sha256: str | None = None
     local_plan_sha256: str | None = None
     verification_contract_sha256: str | None = None

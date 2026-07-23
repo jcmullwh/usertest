@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeline lifecycle metrics — gpt-5.6-approximate-window</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; padding: 2rem; background: #101418; color: #edf2f7; }
+    main { max-width: 1800px; margin: auto; }
+    h1, h2 { letter-spacing: -.02em; }
+    .meta { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; color: #aebbc8; }
+    .notice { border-left: .3rem solid #65a7ff; padding: .75rem 1rem; background: #17212b; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .75rem; margin: 1rem 0 2rem; }
+    .card { border: 1px solid #31404d; border-radius: .6rem; padding: .9rem 1rem; background: #151d24; }
+    .card .value { display: block; margin-top: .35rem; font-size: 1.55rem; color: #b8d7ff; }
+    .card .label { color: #aebbc8; font-size: .82rem; }
+    .table-wrap { overflow-x: auto; border: 1px solid #31404d; border-radius: .6rem; }
+    table { border-collapse: collapse; width: 100%; min-width: 1500px; font-size: .86rem; }
+    th, td { border-bottom: 1px solid #2b3945; padding: .65rem .7rem; text-align: left; vertical-align: top; }
+    thead th { position: sticky; top: 0; background: #1a242e; z-index: 1; }
+    tbody th { white-space: nowrap; color: #a9d0ff; }
+    tbody tr:hover { background: #151d24; }
+    .unknown { color: #aebbc8; font-style: italic; }
+    code { color: #b8d7ff; }
+    footer { margin-top: 2rem; color: #93a1af; font-size: .82rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Pipeline lifecycle metrics</h1>
+  <div class="meta">
+    <span>Cohort: <code>gpt-5.6-approximate-window</code></span>
+    <span>Metric version: <code>lifecycle_case_metrics_v2</code></span>
+    <span>Telemetry through: <code>2026-07-21T15:33:08Z</code></span>
+    <span>Source: <code>c4dc9be833a7fe0208f929541ce1545ce18c08d301928d9b1a4857ff36a8324d</code></span>
+  </div>
+  <p class="notice">Observed measurements only. Missing evidence is shown as <strong>unknown</strong>; no value is estimated as zero.</p>
+  <p class="notice">Version boundary warning: missing_system_fingerprints. Compare like-for-like fingerprint cohorts.</p>
+
+  <h2>All observed cases</h2>
+  <p>Current burden includes active and disposition-pending lifecycles; it is not hidden until closure.</p>
+  <div class="cards">
+    <div class="card"><span class="label">Cases</span><span class="value">3</span></div>
+    <div class="card"><span class="label">Active lifecycles</span><span class="value">0</span></div>
+    <div class="card"><span class="label">Disposition pending</span><span class="value">0</span></div>
+    <div class="card"><span class="label">Terminal lifecycles</span><span class="value">3</span></div>
+    <div class="card"><span class="label">Error clusters</span><span class="value">58</span></div>
+    <div class="card"><span class="label">Error occurrences</span><span class="value">58</span></div>
+    <div class="card"><span class="label">Supervisor interventions</span><span class="value">52</span></div>
+    <div class="card"><span class="label">Manual actions</span><span class="value">known minimum 52</span></div>
+    <div class="card"><span class="label">Required manual actions</span><span class="value">known minimum 52</span></div>
+    <div class="card"><span class="label">Automation cases withheld</span><span class="value">3</span></div>
+    <div class="card"><span class="label">Accounting reconciliation</span><span class="value">incomplete</span></div>
+  </div>
+
+  <h2>Metrics by final disposition</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Disposition</th><th>Cases</th>
+        <th>Raw → disposition</th><th>Admission → disposition</th><th>Lineage → disposition</th>
+        <th>PR creation</th><th>Verified outcome</th><th>Pipeline active</th><th>Wait medians</th><th>Unclassified wall</th>
+        <th>Direct tokens</th><th>Inclusive tokens</th><th>Nonduplicative tokens</th><th>All-in tokens</th>
+        <th>Errors</th><th>Supervisor interventions</th><th>Manual actions</th>
+        <th>Automation gross</th><th>Automation avoidable</th><th>Telemetry completeness</th>
+      </tr></thead>
+      <tbody><tr><th scope="row">Already Addressed</th><td>1</td><td>unknown</td><td>unknown</td><td>median 39,136.2 s / p90 39,136.2 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 37; occurrences 37; self-healed 4; external 27; unresolved 0</td><td>29</td><td>total known minimum 29; required known minimum 29; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Non Actionable</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr><tr><th scope="row">Duplicate</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr><tr><th scope="row">Superseded</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr><tr><th scope="row">PR</th><td>2</td><td>unknown</td><td>unknown</td><td>median 73,704.0 s / p90 73,704.0 s</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters 21; occurrences 21; self-healed 4; external 0; unresolved 0</td><td>23</td><td>total known minimum 23; required known minimum 23; active unknown</td><td>unknown</td><td>unknown</td><td>partial; coverage 0.0%; certified 0</td></tr><tr><th scope="row">Failed Incomplete</th><td>0</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>unknown</td><td>clusters unknown; occurrences unknown; self-healed unknown; external unknown; unresolved unknown</td><td>unknown</td><td>total unknown; required unknown; active unknown</td><td>unknown</td><td>unknown</td><td>unknown; coverage unknown; certified unknown</td></tr></tbody>
+    </table>
+  </div>
+
+  <h2>Before/after factual deltas</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Before</th><th>After</th><th>Disposition</th><th>Metric</th><th>Objective</th>
+        <th>Before value</th><th>After value</th><th>Absolute Δ</th><th>Percentage Δ</th>
+        <th>Sample size</th><th>Coverage</th><th>Observed direction</th>
+      </tr></thead>
+      <tbody><tr><td colspan="12" class="unknown">No retained comparison data; status unknown.</td></tr></tbody>
+    </table>
+  </div>
+  <footer>Dashboard projection schema v4. Rendering is deterministic from the retained machine-readable source.</footer>
+</main>
+</body>
+</html>

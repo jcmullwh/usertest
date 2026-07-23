@@ -26,7 +26,6 @@ You do not treat implementation as success during research. You prefer small, cl
 
 ## Red flags
 
-- â€œFixed itâ€ without a reproduction.
+- “Fixed it” without a reproduction.
 - Large diffs unrelated to the reproduced path.
 - Changes that look like product behavior changes rather than investigation scaffolding.
-
