@@ -393,6 +393,7 @@ def test_exact_codex_resume_ignores_incompatible_worker_agent_and_model(
             }
         },
     )
+    _write_json(state_path.parent / "target_ref.json", {"model": "gpt-5.6-sol"})
     captured: dict[str, object] = {}
 
     class _FinishedProcess:
@@ -442,7 +443,7 @@ def test_exact_codex_resume_ignores_incompatible_worker_agent_and_model(
     command = captured["command"]
     assert isinstance(command, list)
     assert command[command.index("--agent") + 1] == "codex"
-    assert "--model" not in command
+    assert command[command.index("--model") + 1] == "gpt-5.6-sol"
 
 
 def _write_terminal_source_artifacts(

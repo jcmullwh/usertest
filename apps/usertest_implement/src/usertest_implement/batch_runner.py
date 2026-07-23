@@ -1868,6 +1868,16 @@ def _run_resume_process(
         and _clean_str(implementation_author.get("session_id")) is not None
     )
     effective_agent = "codex" if exact_codex_resume else worker.agent
+    effective_model = worker.model
+    if exact_codex_resume:
+        original_target_ref = _read_json_if_exists(
+            candidate.resume_state_path.parent / "target_ref.json"
+        )
+        effective_model = (
+            _clean_str(original_target_ref.get("model"))
+            if isinstance(original_target_ref, dict)
+            else None
+        ) or LATEST_CODEX_MODEL
     command = [
         str(implement_python),
         "-m",
@@ -1892,8 +1902,8 @@ def _run_resume_process(
         "--ledger",
         str(resume_ledger_path),
     ]
-    if worker.model is not None and not exact_codex_resume:
-        command.extend(["--model", worker.model])
+    if effective_model is not None:
+        command.extend(["--model", effective_model])
     if maintenance_image_metadata_path is not None:
         command.extend(
             [
