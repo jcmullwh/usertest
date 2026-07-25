@@ -512,25 +512,25 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One visible row is one complete pipeline cycle, case lifecycle, or delivery lifecycle. Attempts, continuations, preflights, audits, tests, patches, and model-free replays remain linked supporting provenance in JSON rather than peer rows. Visible counts use deduplicated clusters only; legacy totals that cannot be reconciled remain unknown. Restarts and rework are reported separately from errors and interventions.</div>
           <div class="status-grid ops-summary">
-            <div class="stat warn">
+            <div class="stat good">
               <span class="label">Current pipeline state</span>
-              <span class="value">Stages 1-2 complete; Stage 3 acquisition fix green</span>
-              <span class="detail">The exact merged-revision cycle completed Stage 1 and Stage 2 with 20 verified Sol/high calls. It stopped before the first Stage-3 research call because the trusted-root config assumed the target repository was adjacent to the detached checkout. BDS-209 now passes the exact failed-path preflight and the complete application suite locally.</span>
+              <span class="value">2 real cases terminal; no false tickets</span>
+              <span class="detail">The Gemini safety-boundary case and report-schema historical-failure case both reached evidence-supported no-change dispositions. Production downstream stages emitted no options, plans, or tickets for either case.</span>
             </div>
             <div class="stat warn">
-              <span class="label">Latest run efficiency</span>
-              <span class="value">20 calls; 0 author corrections; 1 acquisition stop</span>
-              <span class="detail">All authored Stage-1 and Stage-2 outputs completed once with signed-in subscription provenance. No model output was discarded or corrected. The stopped artifacts are retained for a Stage-3 boundary replay; no full restart has been performed.</span>
+              <span class="label">Latest case efficiency</span>
+              <span class="value">8 calls; 7 continuations; 0 restarts</span>
+              <span class="detail">One Sol/high session moved output findings 5 to 0 and evidence findings 18 to 1 to 2 to 3 to 1 to 0. The result is correct, but the correction path consumed 62.5 minutes in Stage 3.</span>
             </div>
             <div class="stat bad">
               <span class="label">Full qualification</span>
               <span class="value">0 / 2 cycles</span>
-              <span class="detail">Stages 3-6 did not run, so the cycle is incomplete and unscored. There is no new claim about case precision, research readiness, plan quality, ticket throughput, or outcomes.</span>
+              <span class="detail">Two bounded case lifecycles now show correct-negative throughput and zero bad-ready escapes. They do not score aggregate mining precision, actionable-plan quality, implementation outcomes, or the required end-to-end qualification streak.</span>
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Land BDS-209; replay Stage 3; rerun exact revision</span>
-              <span class="detail">Publish the portable repo-input trust binding, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary without regenerating Stage 1/2, then start one fresh exact merged-revision end-to-end cycle.</span>
+              <span class="value">Reconcile remaining selections with outcomes</span>
+              <span class="detail">Do not spend another Stage-3 run on known mitigated maintenance evidence. Audit why implementation-derived cleanup observations became a new selected case despite retained outcome lineage, correct that routing if confirmed, then select a genuinely unactioned case.</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -724,21 +724,43 @@
                 <td><strong>19</strong> author calls; 0 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">The sealed cycle used 19 fresh signed-in Sol/high invocations: six primary mining passes, six coverage/depth reviews, routed and exact cross-partition synthesis with independent…</span></td>
                 <td>Continue the new exact-revision lifecycle at 4b51384d; retain this stopped cycle as unscored historical evidence.</td>
               </tr>
-              <tr class="ops-current">
+              <tr class="">
                 <td><strong>Exact-revision qualification cycle through Stage-2 completion</strong><span class="ops-kind">pipeline cycle</span></td>
-                <td><strong>1 h 11 m active</strong><span class="ops-kind">active</span></td>
-                <td><span class="tag warn">Stage 2 complete; Stage 3 stopped before research authoring</span><span class="ops-detail">The exact 4b51384d cycle retains complete Stage-1 and Stage-2 artifacts and 20 verified model invocation manifests. Stage 3 selected work but made no research call because `..`…</span></td>
-                <td><strong>0 successful qualification cycles; 0 exports; 0 newly implemented cases; 20 authored calls retained; one deterministic Stage-3 acquisition blocker corrected locally</strong></td>
-                <td><strong>1</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">BDS-209 is the sole new stop in this lifecycle: trusted-root configuration encoded a checkout-layout assumption. Repeated diagnostics and the initial wrong-PYTHONPATH test launch…</span></td>
-                <td><strong>0</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">No model-authored output needed correction. The only correction is deterministic controller/configuration work before Stage-3 authoring began.</span></td>
-                <td><strong>1</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision diagnosed BDS-209 from the exact launcher receipt and added a portable repository-input trust binding. No problem record, priority decision, research claim, or plan…</span></td>
+                <td><strong>1 h 30 m 12 s complete</strong><span class="ops-kind">complete</span></td>
+                <td><span class="tag warn">Stage 2 complete; Stage 3 acquisition recovered in merged successor</span><span class="ops-detail">The exact 4b51384d cycle is closed as incomplete and unscored. It retains complete Stage-1 and Stage-2 artifacts and 20 verified model invocation manifests. BDS-209 corrected the…</span></td>
+                <td><strong>0 successful qualification cycles; 0 exports; 0 newly implemented cases; 20 authored calls retained; one deterministic acquisition blocker corrected and merged</strong></td>
+                <td><strong>1</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">BDS-209 is the sole stop in this lifecycle: trusted-root configuration encoded a checkout-layout assumption. Repeated diagnostics and the initial wrong-PYTHONPATH test launch are…</span></td>
+                <td><strong>0</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">No model-authored output needed correction. The only correction was deterministic controller/configuration work before Stage-3 authoring began.</span></td>
+                <td><strong>1</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision diagnosed BDS-209 from the exact launcher receipt and added the portable repository-input trust binding. No problem record, priority decision, research claim, or plan…</span></td>
                 <td><strong>20</strong> author calls; 0 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">The cycle made 20 fresh signed-in Sol/high calls: 19 in Stage 1 and one in Stage 2. None required correction, discard, or restart. The Stage-3 acquisition stop happened before a…</span></td>
-                <td>Commit and publish BDS-209, pass exact PR-event CI, merge it, replay the retained Stage-3 boundary, then run a fresh exact merged-revision shadow through all six stages before…</td>
+                <td>Continue the retained selected work as small exact-revision components before launching another full cycle; this stopped cycle remains unscored historical evidence.</td>
+              </tr>
+              <tr class="">
+                <td><strong>Gemini shell-preflight case to terminal negative disposition</strong><span class="ops-kind">case</span></td>
+                <td><strong>52 m 23 s complete</strong><span class="ops-kind">complete</span></td>
+                <td><span class="tag good">Terminal ticket lineage with no implementation work required</span><span class="ops-detail">The dossier reproduced the observed preflight behavior and established that it is the deliberate local-without-outer-sandbox safety boundary, not accidental Gemini shell denial.…</span></td>
+                <td><strong>1 correct terminal negative disposition; 0 bad-ready escapes; 0 options; 0 plans; 0 tickets; 0 implementations</strong></td>
+                <td><strong>4</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Two nondeterministic author-quality clusters required correction: authored-output consistency and causal/evidence binding. Two already-known supervisor harness clusters recurred:…</span></td>
+                <td><strong>2</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The same author session corrected both quality clusters. Output validation moved 5 -&gt; 1 -&gt; 0. Evidence validation moved 7 -&gt; 1, retained and reworked narrower one-finding states,…</span></td>
+                <td><strong>2</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Supervision adapted the ignored component harness to the current JSONL atom corpus and supplied process-local safe-directory context for the rebooted U: worktree. The pipeline…</span></td>
+                <td><strong>9</strong> author calls; 8 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">One original Stage-3 call and eight same-session continuations used signed-in gpt-5.6-sol/high. Two continuations repaired the authored-output contract and six repaired…</span></td>
+                <td>Select one evidence-backed actionable case from the retained Stage-2 output. Validate Stage 3 alone first, then continue that same system-authored result through optioning,…</td>
+              </tr>
+              <tr class="ops-current">
+                <td><strong>Task-run report-schema case to terminal addressed disposition</strong><span class="ops-kind">case</span></td>
+                <td><strong>1 h 3 m 27 s complete</strong><span class="ops-kind">complete</span></td>
+                <td><span class="tag good">Terminal ticket lineage with historical defect already addressed</span><span class="ops-detail">The dossier reproduced the historical failure class and proved the relevant routing fix is already an ancestor of the pinned revision. Current controls separate verification…</span></td>
+                <td><strong>1 additional correct terminal negative disposition; 0 bad-ready escapes; 0 options; 0 plans; 0 tickets; 0 implementations</strong></td>
+                <td><strong>2</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">Two nondeterministic author-quality clusters required correction: authored-output consistency and causal/evidence binding. Eighteen initial verifier messages and later…</span></td>
+                <td><strong>2</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The same author session corrected both clusters. Output validation moved 5 -&gt; 0 and then passed after a substantive-regression confirmation. Evidence validation moved 18 -&gt; 1 -&gt;…</span></td>
+                <td><strong>0</strong> <span class="ops-kind">deduplicated clusters</span><span class="ops-detail">The production component launched from a green preflight and completed through terminal disposition without a supervisor correction. A read-only liveness check at 50 minutes did…</span></td>
+                <td><strong>8</strong> author calls; 7 continuations; 0 stage reruns; 0 full restarts<span class="ops-detail">One original Stage-3 call and seven same-session continuations used signed-in gpt-5.6-sol/high. Two continuations handled authored-output validation and five handled…</span></td>
+                <td>Reconcile the remaining selected cases against retained implementation and outcome provenance before another live research call. In particular, determine why 42…</td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-21T16:44:21Z. Showing 18 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-21T19:05:32.103849Z. Showing 20 lifecycle runs; detailed JSON provenance retains 47 supporting records and 1 historical baseline. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">

@@ -1,0 +1,85 @@
+{
+  "schema_version": 3,
+  "as_of": "2026-07-21T19:05:32.103849Z",
+  "current_run_id": "case-report-schema-d896a3f3-20260721",
+  "summary_cards": [
+    {
+      "label": "Current pipeline state",
+      "value": "2 real cases terminal; no false tickets",
+      "detail": "The Gemini safety-boundary case and report-schema historical-failure case both reached evidence-supported no-change dispositions. Production downstream stages emitted no options, plans, or tickets for either case.",
+      "tone": "good"
+    },
+    {
+      "label": "Latest case efficiency",
+      "value": "8 calls; 7 continuations; 0 restarts",
+      "detail": "One Sol/high session moved output findings 5 to 0 and evidence findings 18 to 1 to 2 to 3 to 1 to 0. The result is correct, but the correction path consumed 62.5 minutes in Stage 3.",
+      "tone": "warn"
+    },
+    {
+      "label": "Full qualification",
+      "value": "0 / 2 cycles",
+      "detail": "Two bounded case lifecycles now show correct-negative throughput and zero bad-ready escapes. They do not score aggregate mining precision, actionable-plan quality, implementation outcomes, or the required end-to-end qualification streak.",
+      "tone": "bad"
+    },
+    {
+      "label": "Next delivery gate",
+      "value": "Reconcile remaining selections with outcomes",
+      "detail": "Do not spend another Stage-3 run on known mitigated maintenance evidence. Audit why implementation-derived cleanup observations became a new selected case despite retained outcome lineage, correct that routing if confirmed, then select a genuinely unactioned case.",
+      "tone": "warn"
+    }
+  ],
+  "run": {
+    "run_id": "case-report-schema-d896a3f3-20260721",
+    "entry_kind": "lifecycle_run",
+    "lifecycle_id": "case-lifecycle:case-4f13410712b8654b0e93:d896a3f3:20260721",
+    "lifecycle_kind": "case",
+    "rework": {
+      "author_invocations": 8,
+      "continuation_launches": 7,
+      "stage_reruns": 0,
+      "full_restarts": 0,
+      "summary": "One original Stage-3 call and seven same-session continuations used signed-in gpt-5.6-sol/high. Two continuations handled authored-output validation and five handled evidence/causal bindings. A ninth retained attempt record is model-free feedback against the original output, not another author call. Stages 4-6 and ticket assembly each ran once without a model."
+    },
+    "label": "Task-run report-schema case to terminal addressed disposition",
+    "scope": "One real high-severity non-IDEA case from the retained 4b51384d Stage-2 selection, researched and dispositioned by merged controller d896a3f3. The evidence assignment contains one case aggregate and seven occurrences. Export, tickets, implementation, and Docker were disabled; host ChatGPT subscription provenance was required and API billing fallback was forbidden.",
+    "timing": {
+      "start_at": "2026-07-21T18:02:04.906374Z",
+      "end_at": "2026-07-21T19:05:32.103849Z",
+      "elapsed_seconds": 3807.197475,
+      "coverage": "complete",
+      "display": "1 h 3 m 27 s complete",
+      "note": "Complete wall time from Stage-3 launch through terminal ticket-lineage persistence. Stage 3 took 3,749.945 seconds. The eight author invocations account for 2,467.268 seconds; deterministic evidence replay and orchestration account for the balance. Stage 4 took 12.099 seconds and the terminal Stage-5/6/ticket chain took 0.531 seconds. Long model waits used approximately ten-minute observation intervals and no timeout was shortened."
+    },
+    "furthest_stage": "Terminal ticket lineage with historical defect already addressed",
+    "current_state": "The dossier reproduced the historical failure class and proved the relevant routing fix is already an ancestor of the pinned revision. Current controls separate verification failure from malformed-report validation and downstream classification. Stage 4 persisted not_required/already_addressed; Stage 5 emitted no selection, Stage 6 emitted no plan, backlog assembly emitted no ticket, and ticket lineage recorded not_emitted.",
+    "outcome": "1 additional correct terminal negative disposition; 0 bad-ready escapes; 0 options; 0 plans; 0 tickets; 0 implementations",
+    "errors": {
+      "count": 2,
+      "count_kind": "deduplicated_clusters",
+      "summary": "Two nondeterministic author-quality clusters required correction: authored-output consistency and causal/evidence binding. Eighteen initial verifier messages and later one-to-three-finding states are grouped by mechanism rather than counted as separate defects. No controller or supervisor-launch error occurred in this case lifecycle.",
+      "cluster_ids": [
+        "AUTHOR-STAGE3-REPORT-SCHEMA-D896-OUTPUT-01",
+        "AUTHOR-STAGE3-REPORT-SCHEMA-D896-EVIDENCE-01"
+      ]
+    },
+    "automatic_self_corrections": {
+      "count": 2,
+      "count_kind": "deduplicated_clusters",
+      "summary": "The same author session corrected both clusters. Output validation moved 5 -> 0 and then passed after a substantive-regression confirmation. Evidence validation moved 18 -> 1 -> 2 -> 3 -> 1 -> 0. No substantive dossier was discarded and no fresh investigation was started.",
+      "cluster_ids": [
+        "AUTHOR-STAGE3-REPORT-SCHEMA-D896-OUTPUT-01",
+        "AUTHOR-STAGE3-REPORT-SCHEMA-D896-EVIDENCE-01"
+      ]
+    },
+    "supervisor_interventions": {
+      "count": 0,
+      "count_kind": "deduplicated_clusters",
+      "summary": "The production component launched from a green preflight and completed through terminal disposition without a supervisor correction. A read-only liveness check at 50 minutes did not alter the process or authored result.",
+      "cluster_ids": []
+    },
+    "next_action": "Reconcile the remaining selected cases against retained implementation and outcome provenance before another live research call. In particular, determine why 42 implementation-derived maintenance-cleanup observations were selected as a new case alongside the already-mitigated maintenance-image case.",
+    "tone": "good",
+    "data_quality": "Stage-3 receipt U:\\usertest_backlog_qualification\\d896a3f3_component_replays\\report_schema_stage3_sol_high_20260721T182000Z records 2,854 immutable atoms, eight assigned evidence atoms, eight model calls, nine attempt records, one unchanged session, signed-in ChatGPT provenance, blank API provider variables, evidence_sufficient/partial/already_addressed, root-cause confidence 0.99, and zero final verifier findings. Stage-4 and terminal receipts retain source hashes, 31 unchanged case identities, zero model/Docker/export/implementation actions, and one not_emitted ticket-lineage record.",
+    "source_ids": ["backlog_depth_supervision_issue_ledger"]
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": 3,
+  "as_of": "2026-07-21T17:03:19.700369Z",
+  "run": {
+    "run_id": "qualification-cycle-4b51384d-20260721",
+    "entry_kind": "lifecycle_run",
+    "lifecycle_id": "pipeline-cycle:4b51384d:20260721",
+    "lifecycle_kind": "pipeline_cycle",
+    "rework": {
+      "author_invocations": 20,
+      "continuation_launches": 0,
+      "stage_reruns": 0,
+      "full_restarts": 0,
+      "summary": "The cycle made 20 fresh signed-in Sol/high calls: 19 in Stage 1 and one in Stage 2. None required correction, discard, or restart. The Stage-3 acquisition stop happened before a research call, and the completed upstream artifacts were retained for bounded component continuation."
+    },
+    "label": "Exact-revision qualification cycle through Stage-2 completion",
+    "scope": "Preparation and release-shadow execution at merged controller revision 4b51384d over the output-blind 2,854-atom internal-maintenance corpus. Exports were disabled. Host ChatGPT subscription authentication was required, API billing variables were blank, Docker was not invoked, and no source, image, container, ticket, or retained artifact was removed.",
+    "timing": {
+      "start_at": "2026-07-21T15:33:08Z",
+      "end_at": "2026-07-21T17:03:19.700369Z",
+      "elapsed_seconds": 5411.700369,
+      "coverage": "complete",
+      "display": "1 h 30 m 12 s complete",
+      "note": "Wall time through the start of the retained Stage-3 component continuation. Exact model-free preparation took 426.121 seconds. The release-shadow attempt took 2,994.767 seconds through Stage-2 completion and the deterministic Stage-3 acquisition stop. The complete usertest_backlog application suite plus Ruff took 252.686 seconds. PR #223 then passed exact PR-event CI and merged at d896a3f3. No timeout was shortened."
+    },
+    "furthest_stage": "Stage 2 complete; Stage 3 acquisition recovered in merged successor",
+    "current_state": "The exact 4b51384d cycle is closed as incomplete and unscored. It retains complete Stage-1 and Stage-2 artifacts and 20 verified model invocation manifests. BDS-209 corrected the cross-root Stage-3 acquisition defect, passed exact PR-event CI, and merged at d896a3f3. The retained upstream artifacts then fed a bounded real-case Stage-3 continuation on the merged controller.",
+    "outcome": "0 successful qualification cycles; 0 exports; 0 newly implemented cases; 20 authored calls retained; one deterministic acquisition blocker corrected and merged",
+    "errors": {
+      "count": 1,
+      "count_kind": "deduplicated_clusters",
+      "summary": "BDS-209 is the sole stop in this lifecycle: trusted-root configuration encoded a checkout-layout assumption. Repeated diagnostics and the initial wrong-PYTHONPATH test launch are not counted as separate product defects.",
+      "cluster_ids": ["BDS-209"]
+    },
+    "automatic_self_corrections": {
+      "count": 0,
+      "count_kind": "deduplicated_clusters",
+      "summary": "No model-authored output needed correction. The only correction was deterministic controller/configuration work before Stage-3 authoring began.",
+      "cluster_ids": []
+    },
+    "supervisor_interventions": {
+      "count": 1,
+      "count_kind": "deduplicated_clusters",
+      "summary": "Supervision diagnosed BDS-209 from the exact launcher receipt and added the portable repository-input trust binding. No problem record, priority decision, research claim, or plan was manually rewritten.",
+      "cluster_ids": ["BDS-209"]
+    },
+    "next_action": "Continue the retained selected work as small exact-revision components before launching another full cycle; this stopped cycle remains unscored historical evidence.",
+    "tone": "warn",
+    "data_quality": "Preparation sealed 2,854 atoms with zero model calls in 426.121 seconds at exact revision 4b51384d. The launcher receipt records signed-in ChatGPT status, blank API billing variables, gpt-5.6-sol with high reasoning, 2,994.767 seconds, and exit two at the trusted-root error. The cycle contains 20 verified invocation manifests, complete Stage-1 and Stage-2 documents, and no Stage-3 model invocation. PR #223 workflow 29850186404 passed 80 exact-head checks before merge d896a3f3. The following component lifecycle, not this cycle, supplies the Stage-3 result.",
+    "source_ids": ["backlog_depth_supervision_issue_ledger"]
+  }
+}
