@@ -61,13 +61,21 @@ candidate neighborhoods provided. You receive:
   target-surface channel. It helps find historical candidates after atom IDs or wording change,
   but is not causal proof and cannot by itself justify merge or alias. Use the actual symptoms,
   evidence dates, and lifecycle context to decide.
+- `source_evidence_observations` contains a bounded chronological sample of the exact source
+  observations owned by the case; its companion counts distinguish the sample from the complete
+  source set. Empty carried-forward prose is not evidence that the historical case lacks a
+  mechanism or observations. When one candidate owns bracketing or interleaved observations from
+  the same structured series, disjoint atom IDs do not establish a distinct problem. Preserve the
+  cases in one provisional `same_cause_group` unless the evidence exposes a concrete mechanism or
+  boundary that separates them.
 - Evidence whose latest observation predates a verified lifecycle outcome cannot establish
   post-outcome recurrence. When it matches the bounded symptom of a historical candidate,
   preserve that lifecycle relationship instead of treating the old observation as a new
   regression.
-- When new evidence is the same underlying case as a historical candidate, prefer
-  `alias` with the historical item as `alias_target_id`. This preserves stable case
-  identity. Matching a terminal historical case explicitly reopens it.
+- When an objective identity edge establishes that new evidence is the same underlying case as a
+  historical candidate, prefer `alias` with the historical item as `alias_target_id`. Without
+  that identity edge, use `same_cause_group` to preserve the shared research unit without
+  overclaiming identity. Matching a terminal historical case explicitly reopens it.
 
 ## Output
 

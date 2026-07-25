@@ -4948,7 +4948,8 @@ def test_relation_routing_recalls_identity_only_historical_case_with_lifecycle()
         "problem_id": "problem:bounded-image-burst",
         "case_id": "case:historical",
         "title": "problem:bounded-image-burst",
-        "evidence_atom_ids": ["atom:old"],
+        "evidence_atom_ids": ["atom:old", "atom:derived"],
+        "source_evidence_atom_ids": ["atom:old"],
         "_relation_candidate_only": True,
         "case_state": "mitigated",
         "prior_stage_context": {
@@ -4989,7 +4990,24 @@ def test_relation_routing_recalls_identity_only_historical_case_with_lifecycle()
     assert routing[0]["item_id"] == "problem:bounded-image-burst"
     historical_preview = routing[0]["candidate_item"]
     assert historical_preview["candidate_only"] is True
+    assert historical_preview["evidence_atom_ids"] == ["atom:old"]
     assert historical_preview["evidence_observed_at_max"] == "2026-07-04T10:00:00Z"
+    assert historical_preview["source_evidence_observations"] == [
+        {
+            "atom_id": "atom:old",
+            "source": "maintenance_image_cleanup",
+            "origin_stage": "runner_maintenance_image_cleanup",
+            "timestamp_utc": "2026-07-04T10:00:00Z",
+            "status": None,
+            "evidence_class": None,
+            "text": "",
+        }
+    ]
+    assert historical_preview["source_evidence_observation_counts"] == {
+        "source_atom_ids": 1,
+        "resolved_atoms": 1,
+        "sampled_atoms": 1,
+    }
     assert historical_preview["lifecycle_context"] == {
         "state": "mitigated",
         "outcome_recorded_at": "2026-07-16T04:20:38Z",

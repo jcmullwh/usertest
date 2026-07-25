@@ -4561,7 +4561,13 @@ def _run_problem_mining_stage(
 def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
     """Return the evidence-bearing case packet shown to the relation reviewer."""
 
-    evidence_atom_ids = _coerce_string_list(item.get("evidence_atom_ids"))
+    source_evidence_atom_ids = _coerce_string_list(
+        item.get("source_evidence_atom_ids")
+    )
+    evidence_atom_ids = (
+        source_evidence_atom_ids
+        or _coerce_string_list(item.get("evidence_atom_ids"))
+    )
     case_id = _coerce_string(item.get("case_id"))
     provisional_group = item.get("provisional_same_cause_group")
     case_owned_evidence_atom_ids: list[str] | None = None
@@ -4590,6 +4596,12 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
             case_owned_evidence_atom_ids
             if case_owned_evidence_atom_ids is not None
             else evidence_atom_ids
+        ),
+        "source_evidence_observations": (
+            item.get("_relation_source_evidence_observations") or []
+        ),
+        "source_evidence_observation_counts": (
+            item.get("_relation_source_evidence_observation_counts") or {}
         ),
         "evidence_routing_keys": item.get("_relation_evidence_routing_keys") or [],
         "evidence_observed_at_min": item.get("_relation_evidence_observed_at_min"),
@@ -4656,9 +4668,17 @@ def _problem_relation_evidence_context(
     channel key restores candidate recall without asserting causal identity.
     """
 
+    source_evidence_atom_ids = _coerce_string_list(
+        item.get("source_evidence_atom_ids")
+    )
+    evidence_atom_ids = (
+        source_evidence_atom_ids
+        or _coerce_string_list(item.get("evidence_atom_ids"))
+    )
     routing_keys: set[str] = set()
     observed_at: list[str] = []
-    for atom_id in _coerce_string_list(item.get("evidence_atom_ids")):
+    source_observations: list[dict[str, Any]] = []
+    for atom_id in evidence_atom_ids:
         atom = atoms_by_id.get(atom_id)
         if not isinstance(atom, Mapping):
             continue
@@ -4682,8 +4702,41 @@ def _problem_relation_evidence_context(
         timestamp = _coerce_string(atom.get("timestamp_utc"))
         if timestamp is not None:
             observed_at.append(timestamp)
+        source_observations.append(
+            {
+                "atom_id": atom_id,
+                "source": source,
+                "origin_stage": origin_stage,
+                "timestamp_utc": timestamp,
+                "status": _coerce_string(atom.get("status")),
+                "evidence_class": _coerce_string(atom.get("evidence_class")),
+                "text": (_coerce_string(atom.get("text")) or "")[:600],
+            }
+        )
+    source_observations.sort(
+        key=lambda observation: (
+            observation.get("timestamp_utc") is None,
+            observation.get("timestamp_utc") or "",
+            observation["atom_id"],
+        )
+    )
+    sample_limit = 6
+    if len(source_observations) > sample_limit:
+        half = sample_limit // 2
+        source_observation_sample = [
+            *source_observations[:half],
+            *source_observations[-half:],
+        ]
+    else:
+        source_observation_sample = source_observations
     context: dict[str, Any] = {
         "_relation_evidence_routing_keys": sorted(routing_keys),
+        "_relation_source_evidence_observations": source_observation_sample,
+        "_relation_source_evidence_observation_counts": {
+            "source_atom_ids": len(evidence_atom_ids),
+            "resolved_atoms": len(source_observations),
+            "sampled_atoms": len(source_observation_sample),
+        },
     }
     if observed_at:
         context["_relation_evidence_observed_at_min"] = min(observed_at)
