@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
 
@@ -38,6 +38,14 @@ def _gitlab_machine(base_url: str) -> str:
 
 def _gitlab_index_url(base_url: str, project_id: str) -> str:
     return f"{base_url.rstrip('/')}/api/v4/projects/{project_id}/packages/pypi/simple"
+
+
+def _authenticated_url(url: str, username: str, secret: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"Cannot authenticate malformed package index URL: {url!r}")
+    userinfo = f"{quote(username, safe='')}:{quote(secret, safe='')}"
+    return parsed._replace(netloc=f"{userinfo}@{parsed.netloc}").geturl()
 
 
 def _detect_gitlab_pypi_settings(env: Mapping[str, str]) -> tuple[str, str] | None:
@@ -127,8 +135,8 @@ def bootstrap_pip_requirements(
 
     GitLab PyPI support
     -------------------
-    If `GITLAB_PYPI_PROJECT_ID` is set, we treat it as the default index and use a temporary
-    netrc file for auth based on `GITLAB_PYPI_USERNAME`/`GITLAB_PYPI_PASSWORD`.
+    If `GITLAB_PYPI_PROJECT_ID` is set, we treat it as the default index and scope credentials
+    to the bootstrap subprocess environment.
     """
 
     installer_mode = installer.strip().lower()
@@ -426,20 +434,11 @@ def bootstrap_pip_requirements(
 
     with tempfile.TemporaryDirectory(prefix="usertest_pip_home_", **td_kwargs) as td:
         home = Path(td)
-        # pip supports netrc for HTTP basic auth; create both names for Windows safety.
+        authenticated_index_url: str | None = None
         if gitlab_index_url is not None:
             username = base_env.get("GITLAB_PYPI_USERNAME", "").strip()
-            password = base_env.get("GITLAB_PYPI_PASSWORD", "").strip()
-            netrc_body = "\n".join(
-                [
-                    f"machine {gitlab_host}",
-                    f"login {username}",
-                    f"password {password}",
-                    "",
-                ]
-            )
-            (home / ".netrc").write_text(netrc_body, encoding="utf-8")
-            (home / "_netrc").write_text(netrc_body, encoding="utf-8")
+            secret = base_env.get("GITLAB_PYPI_PASSWORD", "").strip()
+            authenticated_index_url = _authenticated_url(gitlab_index_url, username, secret)
 
         env = {**base_env}
         env["HOME"] = str(home)
@@ -464,22 +463,22 @@ def bootstrap_pip_requirements(
             pdm_install = [str(venv_python), "-m", "pdm", "install", "--no-self"]
             if gitlab_index_url is not None:
                 assert extra_index_url is not None
-                env["PIP_INDEX_URL"] = gitlab_index_url
+                assert authenticated_index_url is not None
+                env["PIP_INDEX_URL"] = authenticated_index_url
                 env["PIP_EXTRA_INDEX_URL"] = extra_index_url
             proc = _run_pip(pdm_install, env=env)
         else:
             pip_install = [str(venv_python), "-m", "pip", "install", "-r", requirements_relpath]
             if gitlab_index_url is not None:
                 assert extra_index_url is not None
+                assert authenticated_index_url is not None
+                env["PIP_INDEX_URL"] = authenticated_index_url
+                env["PIP_EXTRA_INDEX_URL"] = extra_index_url
                 pip_install = [
                     str(venv_python),
                     "-m",
                     "pip",
                     "install",
-                    "--index-url",
-                    gitlab_index_url,
-                    "--extra-index-url",
-                    extra_index_url,
                     "--pre",
                     "-r",
                     requirements_relpath,
