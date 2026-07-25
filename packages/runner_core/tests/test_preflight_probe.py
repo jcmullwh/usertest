@@ -181,6 +181,84 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
     return str(wrapper)
 
 
+def _make_dummy_gemini_binary(*, tmp_path: Path, version_sleep_seconds: float) -> str:
+    script = tmp_path / "dummy_gemini.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import json",
+                "import sys",
+                "import time",
+                "",
+                "",
+                "def main() -> int:",
+                "    argv = sys.argv[1:]",
+                "    if '--version' in argv:",
+                f"        time.sleep({float(version_sleep_seconds):g})",
+                "        print('dummy-gemini 0.0.0')",
+                "        return 0",
+                "",
+                "    # Drain stdin prompt (runner passes full prompt via stdin).",
+                "    _ = sys.stdin.read()",
+                "",
+                "    report = {",
+                "        'schema_version': 1,",
+                "        'persona': {'name': 'Dummy Gemini'},",
+                "        'mission': 'Dummy Gemini Mission',",
+                "        'minimal_mental_model': {'summary': 'ok', 'entry_points': ['README.md']},",
+                "        'confidence_signals': {'found': ['has files'], 'missing': ['none']},",
+                "        'confusion_points': [],",
+                "        'adoption_decision': {",
+                "            'recommendation': 'investigate',",
+                "            'rationale': 'dummy',",
+                "        },",
+                "        'suggested_changes': [],",
+                "    }",
+                "    event = {",
+                "        'type': 'message',",
+                "        'role': 'assistant',",
+                "        'delta': False,",
+                "        'content': json.dumps(report),",
+                "    }",
+                "    print(json.dumps(event))",
+                "    return 0",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main())",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    if os.name == "nt":
+        wrapper = tmp_path / "dummy_gemini.cmd"
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "@echo off",
+                    f"\"{sys.executable}\" \"{script}\" %*",
+                    "exit /b %ERRORLEVEL%",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return str(wrapper)
+
+    wrapper = tmp_path / "dummy_gemini.sh"
+    wrapper.write_text(
+        f"#!/bin/sh\nexec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+    return str(wrapper)
+
+
 def test_preflight_command_list_excludes_domain_specific_defaults() -> None:
     commands = _build_preflight_command_list(RunRequest(repo="x"))
     assert "ffmpeg" not in commands
@@ -257,7 +335,7 @@ def test_run_once_writes_preflight_probe_commands(
     assert "resolved_path" in python_diag
     caps = payload.get("capabilities", {})
     assert isinstance(caps, dict)
-    assert caps.get("shell_commands", {}).get("status") == "unknown"
+    assert caps.get("shell_commands", {}).get("status") == "allowed"
 
 
 def test_run_once_fails_fast_when_required_agent_binary_missing(tmp_path: Path) -> None:
@@ -299,9 +377,162 @@ def test_run_once_fails_fast_when_required_agent_binary_missing(tmp_path: Path) 
     assert "configs/agents.yaml" in str(hints.get("config", ""))
     assert "agent_adapters.cli doctor" in str(hints.get("doctor", ""))
     assert "--version" in str(hints.get("verify", ""))
+    assert "npm install -g" in str(hints.get("install", ""))
+    assert "@openai/codex" in str(hints.get("install", ""))
+    assert "examples/golden_runs" in str(hints.get("offline_validation", ""))
 
 
-def test_run_once_warns_when_codex_personality_missing_model_messages(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("agent", "missing_binary", "expected_install_snippet"),
+    [
+        ("codex", "missing-codex-cli-for-usertest", "@openai/codex"),
+        ("claude", "missing-claude-cli-for-usertest", "@anthropic-ai/claude-code"),
+        ("gemini", "missing-gemini-cli-for-usertest", "@google/gemini-cli"),
+    ],
+)
+def test_run_once_binary_missing_includes_agent_specific_install_hint(
+    tmp_path: Path,
+    agent: str,
+    missing_binary: str,
+    expected_install_snippet: str,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    policy_entry: dict[str, object]
+    if agent == "codex":
+        policy_entry = {"sandbox": "read-only", "allow_edits": False}
+    else:
+        policy_entry = {"allow_edits": False}
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={agent: {"binary": missing_binary}},
+        policies={"safe": {agent: policy_entry}},
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent=agent, policy="safe"))
+
+    assert result.exit_code == 1
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "binary_missing"
+    hints = payload.get("hints", {})
+    assert isinstance(hints, dict)
+    assert expected_install_snippet in str(hints.get("install", ""))
+    assert "examples/golden_runs" in str(hints.get("offline_validation", ""))
+
+
+def _install_dummy_version_binary(tmp_path: Path, *, name: str) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    if os.name == "nt":
+        path = bin_dir / f"{name}.cmd"
+        path.write_text(
+            "\n".join(
+                [
+                    "@echo off",
+                    "set ARG1=%1",
+                    "if \"%ARG1%\"==\"--version\" (",
+                    f"  echo {name} 0.0.0",
+                    "  exit /b 0",
+                    ")",
+                    "exit /b 0",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    path = bin_dir / name
+    path.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "if [ \"${1:-}\" = \"--version\" ]; then",
+                f"  echo \"{name} 0.0.0\"",
+                "  exit 0",
+                "fi",
+                "exit 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("agent", "expected_env_var", "env_vars_to_clear"),
+    [
+        ("codex", "OPENAI_API_KEY", ("OPENAI_API_KEY",)),
+        ("claude", "ANTHROPIC_API_KEY", ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY")),
+        ("gemini", "GOOGLE_API_KEY", ("GOOGLE_API_KEY", "GEMINI_API_KEY")),
+    ],
+)
+def test_run_once_fails_fast_when_agent_auth_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    expected_env_var: str,
+    env_vars_to_clear: tuple[str, ...],
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    _install_dummy_version_binary(tmp_path, name=agent)
+    bin_dir = tmp_path / "bin"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    if os.name == "nt":
+        monkeypatch.setenv("PATHEXT", f"{os.environ.get('PATHEXT', '')};.CMD")
+
+    # Point home at an empty temp dir so login state detection is deterministic.
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for key in env_vars_to_clear:
+        monkeypatch.delenv(key, raising=False)
+
+    policy_entry: dict[str, object]
+    if agent == "codex":
+        policy_entry = {"sandbox": "read-only", "allow_edits": False}
+    else:
+        policy_entry = {"allow_edits": False}
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={agent: {"binary": agent}},
+        policies={"safe": {agent: policy_entry}},
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent=agent, policy="safe"))
+
+    assert result.exit_code == 1
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "auth_missing"
+    assert payload.get("code") == "auth_missing"
+    assert payload.get("agent") == agent
+    hints = payload.get("hints", {})
+    assert isinstance(hints, dict)
+    assert "offline_validation" in hints
+    assert "examples/golden_runs" in str(hints.get("offline_validation", ""))
+    assert expected_env_var in str(hints.get("env", ""))
+
+
+def test_run_once_fails_when_codex_personality_missing_model_messages(tmp_path: Path) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     target = tmp_path / "target_repo"
     target.mkdir()
@@ -323,16 +554,16 @@ def test_run_once_warns_when_codex_personality_missing_model_messages(tmp_path: 
 
     result = run_once(cfg, RunRequest(repo=str(target), agent="codex", policy="write"))
 
-    assert result.exit_code == 0
-    assert result.report_validation_errors == []
-    payload = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
-    warnings = payload.get("warnings", [])
-    assert isinstance(warnings, list)
+    assert result.exit_code == 1
     assert any(
-        w.get("code") == "codex_model_messages_missing"
-        for w in warnings
-        if isinstance(w, dict)
+        "code=codex_model_messages_missing" in str(line)
+        for line in result.report_validation_errors
     )
+
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "invalid_agent_config"
+    assert payload.get("code") == "codex_model_messages_missing"
 
 
 def test_run_once_fails_fast_when_shell_blocked_in_inspect_policy(tmp_path: Path) -> None:
@@ -404,7 +635,9 @@ def test_run_once_emits_suggested_command_when_mission_requires_shell(tmp_path: 
     assert isinstance(suggested_command, str)
     assert "--policy inspect" in suggested_command
     assert "--mission-id test_requires_shell_no_edits" in suggested_command
-    assert any(
+    assert "Recommended next command:" in result.report_validation_errors
+    assert suggested_command in result.report_validation_errors
+    assert not any(
         isinstance(line, str) and line.startswith("suggested_command=")
         for line in result.report_validation_errors
     )
@@ -448,6 +681,46 @@ def test_run_once_suggests_write_when_shell_required_and_edits_required(tmp_path
     assert isinstance(suggested_command, str)
     assert "--policy write" in suggested_command
     assert "--mission-id test_requires_shell_with_edits" in suggested_command
+
+
+def test_run_once_marks_pdm_as_unusable_when_version_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cmd_dir = tmp_path / "bin"
+    cmd_dir.mkdir()
+    if os.name == "nt":
+        pdm = cmd_dir / "pdm.cmd"
+        pdm.write_text("@echo off\nexit /b 1\n", encoding="utf-8")
+        monkeypatch.setenv("PATHEXT", f"{os.environ.get('PATHEXT', '')};.CMD")
+    else:
+        pdm = cmd_dir / "pdm"
+        pdm.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        pdm.chmod(pdm.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{cmd_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": _make_dummy_codex_binary(tmp_path)}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent="codex", policy="safe"))
+
+    assert result.exit_code == 0
+    payload = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    pdm_diag = payload.get("command_diagnostics", {}).get("pdm", {})
+    assert pdm_diag.get("status") == "unusable"
+    assert pdm_diag.get("reason_code") == "probe_failed"
+    assert "pdm probe exited non-zero" in str(pdm_diag.get("reason", ""))
+    assert "pip install -U pdm" in str(pdm_diag.get("remediation", ""))
 
 
 def test_run_once_marks_present_commands_as_blocked_by_policy_when_shell_is_disabled(
@@ -504,6 +777,51 @@ def test_run_once_marks_present_commands_as_blocked_by_policy_when_shell_is_disa
     remediation = diagnostics.get("dummycmd", {}).get("remediation")
     assert isinstance(remediation, str)
     assert "Enable shell commands in policy" in remediation
+
+
+def test_run_once_allows_slow_gemini_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gemini `--version` can exceed the default 2.5s probe budget; runner should allow it."""
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    dummy_binary = _make_dummy_gemini_binary(tmp_path=tmp_path, version_sleep_seconds=3.0)
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"gemini": {"binary": dummy_binary}},
+        policies={
+            "safe": {
+                "gemini": {
+                    "allow_edits": False,
+                    "sandbox": True,
+                    "approval_mode": "default",
+                    "allowed_tools": ["read_file"],
+                }
+            }
+        },
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="gemini",
+            policy="safe",
+        ),
+    )
+
+    assert result.exit_code == 0
+    report_path = result.run_dir / "report.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report.get("schema_version") == 1
 
 
 def test_run_once_fails_fast_on_invalid_codex_reasoning_effort_override(tmp_path: Path) -> None:
@@ -574,3 +892,78 @@ def test_run_once_fails_fast_when_required_preflight_command_missing(
     payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert payload.get("type") == "AgentPreflightFailed"
     assert payload.get("subtype") == "required_command_unavailable"
+
+
+def test_run_once_records_delegation_capability_in_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    _install_dummy_version_binary(tmp_path, name="claude")
+    bin_dir = tmp_path / "bin"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    if os.name == "nt":
+        monkeypatch.setenv("PATHEXT", f"{os.environ.get('PATHEXT', '')};.CMD")
+
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"claude": {"binary": "claude", "delegation_tools": ["Task"]}},
+        policies={
+            "safe": {
+                "claude": {
+                    "allow_edits": False,
+                    "allowed_tools": ["Read", "Task"],
+                }
+            }
+        },
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent="claude", policy="safe"))
+
+    assert result.exit_code == 1
+    payload = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    delegation = payload.get("delegation_capability")
+    assert delegation == payload.get("capabilities", {}).get("delegation")
+    delegation_by_agent = payload.get("delegation_capabilities")
+    assert delegation_by_agent == payload.get("capabilities", {}).get("delegation_by_agent")
+    assert set(delegation_by_agent) == {"codex", "claude", "gemini"}
+    assert delegation["agent"] == "claude"
+    assert delegation["state"] == "available"
+    assert delegation["available_under_policy"] is True
+    assert delegation["configured_allowed_tools"] == ["Read", "Task"]
+    assert delegation["delegation_tool_names"] == ["Task"]
+    assert delegation["cli_version"] == "claude 0.0.0"
+    assert delegation["evidence_source"] == "agent_config.delegation_tools"
+    assert payload.get("meta", {}).get("agent_cli_version_probe", {}).get("ok") is True
+    assert payload.get("meta", {}).get("agent_cli_version_probes", {}).get("claude", {}).get(
+        "ok"
+    ) is True
+
+    claude_delegation = delegation_by_agent["claude"]
+    assert claude_delegation == delegation
+    assert claude_delegation["state"] == "available"
+    assert claude_delegation["cli_version"] == "claude 0.0.0"
+    assert claude_delegation["cli_version_probe"]["ok"] is True
+
+    codex_delegation = delegation_by_agent["codex"]
+    assert codex_delegation["agent"] == "codex"
+    assert codex_delegation["state"] == "unknown"
+    assert codex_delegation["available_under_policy"] is None
+
+    gemini_delegation = delegation_by_agent["gemini"]
+    assert gemini_delegation["agent"] == "gemini"
+    assert gemini_delegation["state"] == "unknown"
+    assert gemini_delegation["available_under_policy"] is None

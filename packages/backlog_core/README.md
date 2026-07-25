@@ -33,25 +33,11 @@ pdm run lint
 Dependencies for standalone use:
 - `backlog_core` imports `run_artifacts` and `triage_engine` at runtime.
 - If your package index does not provide those internal packages, install local checkouts first.
-- From a sibling checkout layout, run:
+- For a sibling checkout layout, add them as editable deps using `pdm` (paths relative to this
+  package directory), for example:
 
 ```bash
-python -m pip install -e ../run_artifacts -e ../triage_engine
-```
-
-If you need only a runtime install (without dev tooling commands), use:
-
-```bash
-python -m pip install -e .
-```
-
-From a private GitLab PyPI registry (if you publish it):
-
-```bash
-pip install \
-  --index-url "https://<gitlab-host>/api/v4/projects/<project_id>/packages/pypi/simple" \
-  --extra-index-url "https://pypi.org/simple" \
-  "backlog_core==<version>"
+pdm add -e ../run_artifacts -e ../triage_engine
 ```
 
 > Publishing note
@@ -107,6 +93,7 @@ Most consumers only need the top-level exports:
 - `build_merge_candidates(tickets, ...)`
 - `compute_backlog_coverage(atoms, ...)`
 - `build_backlog_document(...)`
+- `assemble_backlog_tickets(...)` (stage-backed ticket assembly for the six-stage pipeline)
 - `render_backlog_markdown(document)`
 - `write_backlog(path, document)`
 - `BacklogPolicyConfig`, `apply_backlog_policy(...)`
@@ -115,6 +102,28 @@ Source modules:
 
 - `backlog_core.backlog`
 - `backlog_core.backlog_policy`
+- `backlog_core.stage_contracts`
+- `backlog_core.backlog_ticket_assembly`
+
+---
+
+## Six-stage backlog pipeline
+
+`backlog_core` defines:
+
+- strict per-stage parse/validation contracts (`backlog_core.stage_contracts`)
+- ticket assembly from staged artifacts into an export-compatible schema
+  (`backlog_core.backlog_ticket_assembly`)
+
+The final tickets mirror legacy top-level fields for compatibility while also embedding nested
+stage-backed fields:
+
+- `problem_record`
+- `priority`
+- `research`
+- `solution_options`
+- `selected_solution`
+- `change_plan`
 
 ---
 

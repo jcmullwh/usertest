@@ -19,8 +19,8 @@ Example:
         ref: "main"
         agent: "codex"
         policy: "safe"
-        persona_id: "quickstart_sprinter"
-        mission_id: "first_output_smoke"
+        persona_id: "representative_workflow_evaluator"
+        mission_id: "verify_install_to_result"
         seed: 0
 
 ## Per-target fields
@@ -40,7 +40,8 @@ If omitted, these fall back to the corresponding CLI flag values (or to catalog 
 - `persona_id` (string | null): which persona to run. If omitted/null, the catalog default may be used.
 - `mission_id` (string | null): which mission to run. If omitted/null, the catalog default may be used.
 - `seed` (integer): a label used for comparability across runs.
-- `model` (string | null): optional model override (if supported by the selected agent).
+- `model` (string | null): optional model override (if supported by the selected agent). If omitted
+  or null, the selected agent's `configs/agents.yaml` `default_model` is used when configured.
 
 ### Advanced fields
 
@@ -49,7 +50,8 @@ If omitted, these fall back to the corresponding CLI flag values (or to catalog 
 - `preflight_commands` (list[string]): extra commands to probe during preflight in addition to `--preflight-command`.
 - `preflight_required_commands` (list[string]): commands that must be available and permitted (fails fast) in addition to `--require-preflight-command`.
 - `verification_commands` (list[string]): repeatable shell commands that must pass before handing off (in addition to any `--verify-command` flags).
-- `verification_timeout_seconds` (number | null): optional per-command timeout for verification checks (non-positive disables).
+- `verification_timeout_seconds` (number | null): optional per-command timeout for verification checks.
+  - When brokered final verification reuse is active, omitted, `null`, or non-positive values resolve to the runner's bounded high hang guard (`10800` seconds per command) rather than an expected-duration budget.
 
 Retry/backoff tuning (usually only needed when debugging provider capacity issues):
 
@@ -60,7 +62,13 @@ Retry/backoff tuning (usually only needed when debugging provider capacity issue
 
 ## Validation behavior
 
-- `python -m usertest.cli batch --validate-only ...` validates `targets.yaml` and exits without creating run directories or invoking any agent.
+- Batch validation runs in phases:
+  1) Parse/shape checks of `targets.yaml` (YAML syntax, required fields, types)
+  2) Catalog/policy/environment checks (persona/mission resolution, agent/policy checks, local repo path checks, and optional command responsiveness probes)
+
+- `python -m usertest.cli batch --validate-only ...` runs validation and exits without creating run directories or invoking any agent.
+- `python -m usertest.cli batch --print-requests ...` prints the resolved RunRequest list as deterministic JSON and exits without creating run directories or invoking any agent.
+  - Sensitive `KEY=VALUE` pairs (for example `OPENAI_API_KEY=...`) are redacted in the printed JSON.
 - On validation failure, the command prints a structured error summary and exits with code `2`.
 
 For the most up-to-date flags, always prefer:

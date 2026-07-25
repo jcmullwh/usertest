@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "persona_id": "fixture:evaluator",
+  "persona_name": "Evaluator",
+  "persona_source_path": "examples/golden_runs/minimal_claude_run/users.md",
+  "mission_id": "fixture:persona_exploration",
+  "mission_name": "Persona exploration (synthetic)",
+  "mission_source_path": "examples/golden_runs/minimal_claude_run/prompt.template.md",
+  "execution_mode": "fixture",
+  "prompt_template_path": "examples/golden_runs/minimal_claude_run/prompt.template.md",
+  "report_schema_path": "examples/golden_runs/minimal_claude_run/report.schema.json"
+}

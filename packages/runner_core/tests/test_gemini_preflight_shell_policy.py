@@ -6,6 +6,7 @@ from runner_core.runner import _infer_shell_policy_status
 def test_gemini_shell_allowed_when_outer_sandbox_present() -> None:
     status, reason, allowed_tools = _infer_shell_policy_status(
         agent="gemini",
+        codex_policy={},
         claude_policy={},
         gemini_policy={"allowed_tools": ["read_file", "run_shell_command"], "sandbox": True},
         has_outer_sandbox=True,
@@ -20,6 +21,7 @@ def test_gemini_shell_allowed_when_outer_sandbox_present() -> None:
 def test_gemini_shell_blocked_when_no_outer_sandbox_and_policy_disables_sandbox() -> None:
     status, reason, allowed_tools = _infer_shell_policy_status(
         agent="gemini",
+        codex_policy={},
         claude_policy={},
         gemini_policy={"allowed_tools": ["run_shell_command"], "sandbox": False},
         has_outer_sandbox=False,

@@ -1,3 +1,9 @@
+Synthetic fixture note: this is an example of a plausible "last agent message" captured in
+`agent_last_message.txt`.
+
+The report JSON object produced by the agent is embedded below:
+
+```json
 {
   "schema_version": 1,
   "persona": {
@@ -26,3 +32,4 @@
   },
   "suggested_changes": []
 }
+```

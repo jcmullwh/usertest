@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "solution_families": [
+    {
+      "family_id": "most_direct",
+      "label": "Targeted mechanism",
+      "description": "Optional lens for a mechanism confined to one evidenced consumer or failure path. Omit it when it is only a smaller wording of another option."
+    },
+    {
+      "family_id": "most_robust",
+      "label": "Guarded mechanism",
+      "description": "Optional lens for a distinct mechanism whose defining behavior is an evidenced boundary check or defense against a specific recurrence path. Extra validation alone does not make a distinct option."
+    },
+    {
+      "family_id": "most_comprehensive",
+      "label": "Multi-path mechanism",
+      "description": "Optional lens for one mechanism proven across at least two independent consumers or failure paths. Shared or canonical abstractions require evidence references for each path."
+    }
+  ],
+  "prompt_guardrails": {
+    "families_are_optional": true,
+    "maximum_options_per_problem": 3,
+    "selection_principle": "Family IDs are compatibility labels, not a breadth or quality ranking. Generate only genuinely distinct mechanisms and select by causal coverage.",
+    "banned_optimization_adjectives": [
+      "fastest",
+      "quickest",
+      "easiest",
+      "simplest",
+      "lowest-effort",
+      "least-effort",
+      "minimum-effort",
+      "most convenient",
+      "quick-win",
+      "low-hanging"
+    ],
+    "note": "These adjectives are banned from stage prompts unless they appear only through injected taxonomy text. They steer toward expedient solutions rather than correct ones. Use the solution-family labels above to express tradeoffs."
+  }
+}

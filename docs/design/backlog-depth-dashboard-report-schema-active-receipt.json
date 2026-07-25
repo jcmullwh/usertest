@@ -1,0 +1,79 @@
+{
+  "schema_version": 3,
+  "as_of": "2026-07-21T18:02:23.9569297Z",
+  "current_run_id": "case-report-schema-d896a3f3-20260721",
+  "summary_cards": [
+    {
+      "label": "Current pipeline state",
+      "value": "Actionable-candidate Stage 3 running",
+      "detail": "The task-run report-schema case has a complete assignment of one aggregate plus seven occurrence atoms and is running one bounded Stage-3 research lifecycle on merged d896a3f3. No downstream work has been authorized yet.",
+      "tone": "info"
+    },
+    {
+      "label": "Current run efficiency",
+      "value": "1 author call active; 0 restarts",
+      "detail": "The initial signed-in Sol/high research call is active. Counts will be updated from retained attempt records; no correction, discard, or fresh restart is currently recorded.",
+      "tone": "info"
+    },
+    {
+      "label": "Full qualification",
+      "value": "0 / 2 cycles",
+      "detail": "The current unit is a bounded component lifecycle, not a fresh end-to-end cycle. It will not change the qualification streak even if it reaches a correct terminal disposition.",
+      "tone": "bad"
+    },
+    {
+      "label": "Next delivery gate",
+      "value": "Establish root cause and actionability",
+      "detail": "Finish Stage 3 first. Continue through optioning only if the evidence establishes a still-unaddressed product problem; otherwise persist the appropriate no-change or evidence-wait disposition.",
+      "tone": "warn"
+    }
+  ],
+  "run": {
+    "run_id": "case-report-schema-d896a3f3-20260721",
+    "entry_kind": "lifecycle_run",
+    "lifecycle_id": "case-lifecycle:case-4f13410712b8654b0e93:d896a3f3:20260721",
+    "lifecycle_kind": "case",
+    "rework": {
+      "author_invocations": 1,
+      "continuation_launches": 0,
+      "stage_reruns": 0,
+      "full_restarts": 0,
+      "summary": "One initial signed-in gpt-5.6-sol/high Stage-3 author call is active. No correction or restart has yet been observed."
+    },
+    "label": "Task-run report-schema case research lifecycle",
+    "scope": "One real high-severity non-IDEA case from the retained 4b51384d Stage-2 selection, running Stage 3 on merged controller d896a3f3. The evidence assignment contains one case aggregate and seven occurrences. Export, tickets, implementation, and Docker are disabled; host ChatGPT subscription provenance is required and API billing fallback is forbidden.",
+    "timing": {
+      "start_at": "2026-07-21T18:02:04.906374Z",
+      "end_at": null,
+      "elapsed_seconds": 19.050555,
+      "coverage": "active",
+      "display": "Active",
+      "note": "Live elapsed time at the dashboard checkpoint. Model work is observed at approximately ten-minute intervals; the configured timeout remains 86,400 seconds."
+    },
+    "furthest_stage": "Stage 3 initial research active",
+    "current_state": "The preflight authenticated all eight expected atoms, 31-case registry lineage, exact d896a3f3 research revision, trusted I:\\code\\usertest source identity, and zero model calls. The live research launcher is now active in a separate retained output root.",
+    "outcome": "In progress; no research disposition, option, plan, ticket, or implementation claim yet",
+    "errors": {
+      "count": 0,
+      "count_kind": "deduplicated_clusters",
+      "summary": "No error cluster is recorded at this initial checkpoint.",
+      "cluster_ids": []
+    },
+    "automatic_self_corrections": {
+      "count": 0,
+      "count_kind": "deduplicated_clusters",
+      "summary": "No correction has yet been observed.",
+      "cluster_ids": []
+    },
+    "supervisor_interventions": {
+      "count": 0,
+      "count_kind": "deduplicated_clusters",
+      "summary": "The production component launched from a green preflight without a new supervisor correction.",
+      "cluster_ids": []
+    },
+    "next_action": "Wait for the active Stage-3 author and deterministic verifier using model-sized observation intervals, then retain same-author corrections if needed and route the accepted dossier by evidence-supported actionability.",
+    "tone": "info",
+    "data_quality": "The active receipt is U:\\usertest_backlog_qualification\\d896a3f3_component_replays\\report_schema_stage3_sol_high_20260721T182000Z\\stage3_single_case_receipt.json. The preceding preflight records 2,854 atoms, eight expected evidence atoms, complete assignment, 31 source cases, exact d896a3f3 revision, trusted-host source identity I:\\code\\usertest, and zero model calls. Terminal counts are intentionally unknown while the run is active.",
+    "source_ids": ["backlog_depth_supervision_issue_ledger"]
+  }
+}

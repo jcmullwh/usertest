@@ -70,7 +70,8 @@ def test_sanitize_agent_stderr_file_dedupes_codex_personality_warning(tmp_path: 
     _sanitize_agent_stderr_file(agent="codex", path=path)
 
     text = path.read_text(encoding="utf-8")
-    assert "Model personality requested but model_messages is missing" in text
+    assert "Model personality requested but model_messages is missing" not in text
+    assert "code=codex_model_messages_missing" in text
     assert "before" in text
     assert "after" in text
 

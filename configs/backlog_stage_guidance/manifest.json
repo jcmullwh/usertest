@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "stages": {
+    "problem_mining": "problem_mining.md",
+    "problem_prioritization": "problem_prioritization.md",
+    "repro_research": "repro_research.md",
+    "solution_optioning": "solution_optioning.md",
+    "solution_selection": "solution_selection.md",
+    "implementation_planning": "implementation_planning.md"
+  }
+}

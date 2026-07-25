@@ -194,6 +194,52 @@ def _render_task_run_report(
         lines.append(summary.strip())
         lines.append("")
 
+    representative = (
+        report.get("representative_workflow")
+        if isinstance(report.get("representative_workflow"), dict)
+        else {}
+    )
+    representative_entry = (
+        representative.get("entry_point")
+        if isinstance(representative.get("entry_point"), str)
+        else None
+    )
+    representative_workflow = (
+        representative.get("workflow")
+        if isinstance(representative.get("workflow"), str)
+        else None
+    )
+    representative_reason = (
+        representative.get("why_representative")
+        if isinstance(representative.get("why_representative"), str)
+        else None
+    )
+    representative_result = (
+        representative.get("user_visible_result")
+        if isinstance(representative.get("user_visible_result"), str)
+        else None
+    )
+    if any(
+        value
+        for value in (
+            representative_entry,
+            representative_workflow,
+            representative_reason,
+            representative_result,
+        )
+    ):
+        lines.append("## Representative workflow")
+        lines.append("")
+        if representative_entry:
+            lines.append(f"- Entry point: {representative_entry.strip()}")
+        if representative_workflow:
+            lines.append(f"- Workflow: {representative_workflow.strip()}")
+        if representative_reason:
+            lines.append(f"- Why representative: {representative_reason.strip()}")
+        if representative_result:
+            lines.append(f"- User-visible result: {representative_result.strip()}")
+        lines.append("")
+
     steps = report.get("steps")
     steps_list = steps if isinstance(steps, list) else []
     if steps_list:
@@ -254,6 +300,25 @@ def _render_task_run_report(
         lines.append("_None._")
     lines.append("")
 
+    verification = report.get("verification")
+    verification_list = verification if isinstance(verification, list) else []
+    if verification_list:
+        lines.append("## Verification")
+        lines.append("")
+        for item in verification_list:
+            if not isinstance(item, dict):
+                continue
+            check = item.get("check") if isinstance(item.get("check"), str) else ""
+            result = item.get("result") if isinstance(item.get("result"), str) else ""
+            evidence = item.get("evidence") if isinstance(item.get("evidence"), str) else ""
+            header = check.strip() or "check"
+            lines.append(f"- {header}")
+            if result:
+                lines.append(f"  Result: {result.strip()}")
+            if evidence:
+                lines.append(f"  Evidence: {evidence.strip()}")
+        lines.append("")
+
     issues = report.get("issues")
     issues_list = issues if isinstance(issues, list) else []
     if issues_list:
@@ -277,6 +342,66 @@ def _render_task_run_report(
             )
             if suggested_fix:
                 lines.append(f"  Suggested fix: {suggested_fix.strip()}")
+        lines.append("")
+
+    extensions = report.get("extensions")
+    extensions_dict = extensions if isinstance(extensions, dict) else {}
+    shell_capability = extensions_dict.get("shell_capability")
+    shell_capability_dict = shell_capability if isinstance(shell_capability, dict) else {}
+    if shell_capability_dict:
+        state = (
+            shell_capability_dict.get("state")
+            if isinstance(shell_capability_dict.get("state"), str)
+            else "unknown"
+        )
+        reason_code = (
+            shell_capability_dict.get("reason_code")
+            if isinstance(shell_capability_dict.get("reason_code"), str)
+            else None
+        )
+        reason = (
+            shell_capability_dict.get("reason")
+            if isinstance(shell_capability_dict.get("reason"), str)
+            else None
+        )
+        agent = (
+            shell_capability_dict.get("agent")
+            if isinstance(shell_capability_dict.get("agent"), str)
+            else None
+        )
+        backend = (
+            shell_capability_dict.get("backend")
+            if isinstance(shell_capability_dict.get("backend"), str)
+            else None
+        )
+        operating_system = (
+            shell_capability_dict.get("operating_system")
+            if isinstance(shell_capability_dict.get("operating_system"), str)
+            else None
+        )
+        sandbox_mode = (
+            shell_capability_dict.get("sandbox_mode")
+            if isinstance(shell_capability_dict.get("sandbox_mode"), str)
+            else None
+        )
+        lines.append("## Runner diagnostics")
+        lines.append("")
+        lines.append(f"- Shell capability: {state}")
+        if reason_code:
+            lines.append(f"  Reason code: {reason_code}")
+        if reason:
+            lines.append(f"  Reason: {reason.strip()}")
+        details = []
+        if agent:
+            details.append(f"agent={agent}")
+        if operating_system:
+            details.append(f"os={operating_system}")
+        if backend:
+            details.append(f"backend={backend}")
+        if sandbox_mode:
+            details.append(f"sandbox={sandbox_mode}")
+        if details:
+            lines.append(f"  Effective path: {', '.join(details)}")
         lines.append("")
 
     next_actions = report.get("next_actions")

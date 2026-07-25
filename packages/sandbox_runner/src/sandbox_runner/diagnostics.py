@@ -17,6 +17,7 @@ def probe_commands_in_container(
     shell_list = " ".join(shlex.quote(c) for c in safe_cmds)
     script = (
         "set +e\n"
+        "printf 'shell_probe=ok\\n'\n"
         "for c in "
         + shell_list
         + " ; do\n"
@@ -54,10 +55,22 @@ def probe_commands_in_container(
         if key in safe_cmds:
             present[key] = val == "1"
 
+    shell_probe_ok = False
+    for line in proc.stdout.splitlines():
+        if line.strip() == "shell_probe=ok":
+            shell_probe_ok = True
+            break
+
     meta: dict[str, Any] = {
         "exit_code": proc.returncode,
         "stderr": proc.stderr.strip(),
         "uid": uid,
+        "shell_probe": {
+            "kind": "backend_shell_payload",
+            "exit_code": proc.returncode if shell_probe_ok else 1,
+            "stdout": "shell_probe=ok" if shell_probe_ok else "",
+            "stderr": proc.stderr.strip(),
+        },
     }
     return present, meta
 

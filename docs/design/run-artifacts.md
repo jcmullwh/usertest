@@ -4,6 +4,16 @@ This document defines the stable artifact layout for a single `usertest run` out
 It is intended for operators, CI maintainers, and reviewers who need to inspect outputs without
 reading runner source code.
 
+## Security and privacy (read first)
+
+Anything under `runs/` should be treated as sensitive by default.
+
+Run artifacts can include prompts/transcripts, stderr/stdout from tools, rendered reports, patch
+diffs, and other content that may contain proprietary code or credentials printed by tools.
+Review and redact before sharing, and be cautious when archiving in CI.
+
+Operator guidance + CI examples: `docs/ops/security.md`.
+
 ## Run directory shape
 
 Canonical run path:
@@ -31,13 +41,23 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
   mission.resolved.md
   preflight.json
   verification_config.json            # only when --verify-command is configured
-  verification.json                   # only when verification ran (schema-valid attempt)
+  verification.json                   # always (records pass/fail/skip for selected attempt)
   verification_errors.json            # only when verification failed
   verification/                       # only when verification ran
     attempt1/
       verification.json
       cmd_01.stdout.txt
       cmd_01.stderr.txt
+  command_failures/                   # only when agent tool shell commands fail
+    cmd_01/
+      command.json
+      stdout.txt
+      stderr.txt
+      timing.json
+  tool_failures/                      # only when tool edit/write calls fail
+    tool_01_replace/
+      tool.json
+      context.txt
   raw_events.jsonl
   normalized_events.jsonl
   metrics.json
@@ -66,9 +86,11 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
 Offline reference fixtures (minimal / synthetic):
 
 - `examples/golden_runs/minimal_*_run/` provides minimal sanitized run directories used in tests.
-  These fixtures are **not** full “normal operation” runs; they intentionally omit many artifacts
-  that exist in real runs (for example `effective_run_spec.json`, persona/mission markdown,
-  `preflight.json`, sandbox diagnostics, and per-attempt artifacts). Each fixture directory
+  These fixtures are **not** full “normal operation” runs; they are small, synthetic samples.
+  They include lightweight stubs for many stable artifacts (for example `effective_run_spec.json`,
+  `prompt.template.md`, `agent_attempts.json`, `agent_stderr.txt`, `run_meta.json`, and
+  `verification.json`) but intentionally omit heavier and/or sensitive artifacts like
+  `preflight.json`, `sandbox/` diagnostics, and per-attempt subdirectories. Each fixture directory
   includes `FIXTURE_NOTICE.md` describing what is intentionally missing.
 
 ## File-level contract
@@ -99,15 +121,23 @@ Files that are conditionally present:
 - `error.json`: present when run failed (preflight, adapter execution, or other fatal error path).
 - `preflight.json`: present when preflight phase executed (normal path before adapter run).
 - `verification_config.json`: present when verification commands are configured.
-- `verification.json`: present when verification ran for the selected attempt (schema-valid agent output).
+- `verification.json`: always present; when verification did not run it records `skipped`/`skip_reason`.
 - `verification_errors.json`: present when verification failed (even if agent exit code is zero).
 - `verification/*`: per-attempt verification logs (`cmd_*.stdout.txt` / `cmd_*.stderr.txt`).
+- `command_failures/*`: per-failure artifacts for agent-executed shell commands (`command.json`,
+  `stdout.txt`, `stderr.txt`, `timing.json`).
+- `tool_failures/*`: per-failure artifacts for tool edit/write calls (`tool.json` plus optional
+  context/preview files).
 - `patch.diff` and `diff_numstat.json`: present only when edits are allowed and edits occurred.
 - `persona.source.md`, `persona.resolved.md`, `mission.source.md`, `mission.resolved.md`:
   present when catalog resolution succeeds.
 - `users.md`: snapshot of target `USERS.md` when present.
 - `preprocess_commit.txt`: present when preprocess logic writes and commits workspace changes.
-- `agent_prompts/*`: present when prompt override/append files are staged.
+- `agent_prompts/*`: canonical staged prompt override/append artifacts when configured.
+- Workspace root prompt mirrors: during execution, the acquired workspace may also include
+  `append_system_prompt.md` (when append content is configured) and `system_prompt.md`
+  (when an effective system prompt file is configured or composed). These are convenience copies
+  for in-workspace agent reads and are not stored under the run directory tree.
 - `sandbox/*`: present when using docker execution backend.
 
 ## Semantics and stability notes

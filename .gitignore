@@ -86,12 +86,17 @@ $RECYCLE.BIN/
 *.swo
 *.zip
 *.tar.gz
+run_dashboard.html
+backup_artifacts/
 
 ############################################
 # Agent state (local-only)
 ############################################
 .agents/**
 !.agents/.gitkeep
+!.agents/plans/
+!.agents/plans/0.2 - discarded/
+!.agents/plans/0.2 - discarded/.gitkeep
 
 
 ############################################
@@ -104,4 +109,5 @@ $RECYCLE.BIN/
 # Scaffolding artifacts (local-only)
 ############################################
 **/lint_report.json
-
+# usertest: allow reading run artifacts under runs/usertest for agent file tools.
+runs/*

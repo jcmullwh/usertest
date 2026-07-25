@@ -17,8 +17,9 @@ If you are new, start with **Tutorials**.
 
 > Note on “ops” docs
 >
-> Operational/runbook-style docs (security notes, remediation plans, ticket export workflows) live under
-> `.agents/ops/` so agents and maintainers can treat them as working documents.
+> Operational/runbook-style docs sometimes live under `.agents/ops/` for local, repo-specific notes.
+> That folder is treated as local-only (git-ignored). Committed operator guidance lives under
+> `docs/ops/`.
 
 ---
 
@@ -78,4 +79,4 @@ If you are new, start with **Tutorials**.
 - **I need to add repo-specific personas/missions (human or agent)** → `docs/how-to/personas-and-missions.md`
 - **I’m integrating a new agent adapter (developer/agent)** → `docs/agents/`
 - **I’m reviewing the system contract** → `docs/design/run-artifacts.md`
-- **I’m operating the repo (CI/publish/security)** → `.agents/ops/`
+- **I’m operating the repo (CI/publish/security)** → `docs/ops/`

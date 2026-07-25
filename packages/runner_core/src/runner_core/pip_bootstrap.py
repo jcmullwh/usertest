@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
 
@@ -38,6 +38,14 @@ def _gitlab_machine(base_url: str) -> str:
 
 def _gitlab_index_url(base_url: str, project_id: str) -> str:
     return f"{base_url.rstrip('/')}/api/v4/projects/{project_id}/packages/pypi/simple"
+
+
+def _authenticated_url(url: str, username: str, secret: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"Cannot authenticate malformed package index URL: {url!r}")
+    userinfo = f"{quote(username, safe='')}:{quote(secret, safe='')}"
+    return parsed._replace(netloc=f"{userinfo}@{parsed.netloc}").geturl()
 
 
 def _detect_gitlab_pypi_settings(env: Mapping[str, str]) -> tuple[str, str] | None:
@@ -127,8 +135,8 @@ def bootstrap_pip_requirements(
 
     GitLab PyPI support
     -------------------
-    If `GITLAB_PYPI_PROJECT_ID` is set, we treat it as the default index and use a temporary
-    netrc file for auth based on `GITLAB_PYPI_USERNAME`/`GITLAB_PYPI_PASSWORD`.
+    If `GITLAB_PYPI_PROJECT_ID` is set, we treat it as the default index and scope credentials
+    to the bootstrap subprocess environment.
     """
 
     installer_mode = installer.strip().lower()
@@ -167,11 +175,18 @@ def bootstrap_pip_requirements(
 
     if backend_is_docker:
         # A single sh script keeps secrets out of host-side command lines.
-        env_overrides = {
+        env_overrides: dict[str, str | None] = {
             "USERTEST_GITLAB_HOST": gitlab_host or "",
             "USERTEST_GITLAB_INDEX_URL": gitlab_index_url or "",
             "USERTEST_PIP_EXTRA_INDEX_URL": extra_index_url or "",
         }
+        if gitlab_index_url:
+            username = os.environ.get("GITLAB_PYPI_USERNAME", "").strip()
+            password = os.environ.get("GITLAB_PYPI_PASSWORD", "").strip()
+            if username:
+                env_overrides["GITLAB_PYPI_USERNAME"] = None
+            if password:
+                env_overrides["GITLAB_PYPI_PASSWORD"] = None
         prefix = inject_docker_exec_env(command_prefix, env_overrides)
         requested_venv_dir = venv_dir
         requested_venv_python = venv_python
@@ -389,25 +404,41 @@ def bootstrap_pip_requirements(
     base_env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     base_env["PIP_NO_INPUT"] = "1"
 
+    temp_root = run_dir / "tmp"
+    temp_root_str: str | None = None
+    try:
+        temp_root.mkdir(parents=True, exist_ok=True)
+        temp_root_str = str(temp_root)
+        # Ensure pip/pytest subprocesses use a guaranteed-writable temp root. This mitigates
+        # sandboxed / enterprise Windows environments where the default temp directory can be
+        # non-writable (e.g., pip build-tracker / editable install failures).
+        base_env["TMPDIR"] = temp_root_str
+        base_env["TMP"] = temp_root_str
+        base_env["TEMP"] = temp_root_str
+    except OSError:
+        temp_root_str = None
+
+    if temp_root_str is not None:
+        log_lines.append(f"temp_root={temp_root_str}")
+        log_lines.append(f"TMPDIR={base_env.get('TMPDIR', '')}")
+        log_lines.append(f"TMP={base_env.get('TMP', '')}")
+        log_lines.append(f"TEMP={base_env.get('TEMP', '')}")
+        log_lines.append("")
+
     def _run_pip(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return _run_logged(argv, cwd=workspace_dir, env=env, log=log_lines)
 
-    with tempfile.TemporaryDirectory(prefix="usertest_pip_home_") as td:
+    td_kwargs: dict[str, str] = {}
+    if temp_root_str is not None:
+        td_kwargs["dir"] = temp_root_str
+
+    with tempfile.TemporaryDirectory(prefix="usertest_pip_home_", **td_kwargs) as td:
         home = Path(td)
-        # pip supports netrc for HTTP basic auth; create both names for Windows safety.
+        authenticated_index_url: str | None = None
         if gitlab_index_url is not None:
             username = base_env.get("GITLAB_PYPI_USERNAME", "").strip()
-            password = base_env.get("GITLAB_PYPI_PASSWORD", "").strip()
-            netrc_body = "\n".join(
-                [
-                    f"machine {gitlab_host}",
-                    f"login {username}",
-                    f"password {password}",
-                    "",
-                ]
-            )
-            (home / ".netrc").write_text(netrc_body, encoding="utf-8")
-            (home / "_netrc").write_text(netrc_body, encoding="utf-8")
+            secret = base_env.get("GITLAB_PYPI_PASSWORD", "").strip()
+            authenticated_index_url = _authenticated_url(gitlab_index_url, username, secret)
 
         env = {**base_env}
         env["HOME"] = str(home)
@@ -432,22 +463,22 @@ def bootstrap_pip_requirements(
             pdm_install = [str(venv_python), "-m", "pdm", "install", "--no-self"]
             if gitlab_index_url is not None:
                 assert extra_index_url is not None
-                env["PIP_INDEX_URL"] = gitlab_index_url
+                assert authenticated_index_url is not None
+                env["PIP_INDEX_URL"] = authenticated_index_url
                 env["PIP_EXTRA_INDEX_URL"] = extra_index_url
             proc = _run_pip(pdm_install, env=env)
         else:
             pip_install = [str(venv_python), "-m", "pip", "install", "-r", requirements_relpath]
             if gitlab_index_url is not None:
                 assert extra_index_url is not None
+                assert authenticated_index_url is not None
+                env["PIP_INDEX_URL"] = authenticated_index_url
+                env["PIP_EXTRA_INDEX_URL"] = extra_index_url
                 pip_install = [
                     str(venv_python),
                     "-m",
                     "pip",
                     "install",
-                    "--index-url",
-                    gitlab_index_url,
-                    "--extra-index-url",
-                    extra_index_url,
                     "--pre",
                     "-r",
                     requirements_relpath,

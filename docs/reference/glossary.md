@@ -48,6 +48,8 @@ It contains the prompt, resolved persona/mission, tool logs, metrics, and report
 
 Contract: `docs/design/run-artifacts.md`.
 
+Security/CI guidance: `docs/ops/security.md` (treat as sensitive by default).
+
 ## Workspace
 
 The isolated checkout/installation directory where the agent runs.

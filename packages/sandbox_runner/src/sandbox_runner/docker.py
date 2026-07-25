@@ -6,8 +6,9 @@ import re
 import subprocess
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sandbox_runner.image_hash import compute_image_hash
@@ -15,6 +16,22 @@ from sandbox_runner.spec import MountSpec, ResourceSpec, SandboxInstance, Sandbo
 
 _DEFAULT_DOCKER_IMAGE_REPO = "sandbox-runner"
 _DOCKER_TIMEOUT_ENV = "SANDBOX_RUNNER_DOCKER_TIMEOUT_SECONDS"
+_SAFE_ENV_KEYS_FOR_META: frozenset[str] = frozenset(
+    {
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "PIP_CACHE_DIR",
+        "PIP_BUILD_DIR",
+        "PIP_NO_CACHE_DIR",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PIP_NO_INPUT",
+        "PYTEST_ADDOPTS",
+        "USERTEST_MAINT_VENV_CACHE_ENABLED",
+        "USERTEST_MAINT_VENV_CACHE_ROOT",
+        "USERTEST_MAINT_VENV_SEED_ROOT",
+    }
+)
 
 
 def _sanitize_container_name(name: str) -> str:
@@ -112,16 +129,49 @@ def _mount_args(mounts: list[MountSpec]) -> list[str]:
     return out
 
 
-def _env_args(env_allowlist: list[str]) -> list[str]:
+def _env_args_with_overrides(
+    env_allowlist: list[str],
+    env_overrides: Mapping[str, str] | None,
+) -> list[str]:
+    overrides: dict[str, str] = {}
+    if env_overrides:
+        for key, value in env_overrides.items():
+            if not isinstance(key, str) or not key.strip():
+                continue
+            if not isinstance(value, str):
+                continue
+            overrides[key] = value
+
     out: list[str] = []
     for key in env_allowlist:
         if not isinstance(key, str) or not key.strip():
+            continue
+        if key in overrides:
             continue
         value = os.environ.get(key)
         if value is None:
             continue
         out.extend(["-e", f"{key}={value}"])
+
+    for key in sorted(overrides):
+        out.extend(["-e", f"{key}={overrides[key]}"])
     return out
+
+
+def _env_overrides_meta(env_overrides: Mapping[str, str] | None) -> dict[str, Any]:
+    if not env_overrides:
+        return {"env_overrides_keys": [], "env_overrides_safe": {}}
+    keys: list[str] = []
+    safe: dict[str, str] = {}
+    for key, value in env_overrides.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        keys.append(key)
+        if key in _SAFE_ENV_KEYS_FOR_META and isinstance(value, str):
+            safe[key] = value
+    keys_sorted = sorted({k for k in keys if k.strip()})
+    safe_sorted = {k: safe[k] for k in sorted(safe)}
+    return {"env_overrides_keys": keys_sorted, "env_overrides_safe": safe_sorted}
 
 
 @dataclass
@@ -133,7 +183,7 @@ class DockerSandboxInstance(SandboxInstance):
 
     container_name: str
     image_tag: str
-    image_hash: str
+    image_hash: str | None
     docker_timeout_seconds: float | None = None
 
     keep_container: bool = False
@@ -197,70 +247,83 @@ class DockerSandbox:
         _ensure_docker_available(timeout_seconds=docker_timeout_seconds)
         _progress("docker available")
 
-        context_dir = spec.image_context_path
-        if context_dir is None:
-            raise ValueError("Docker sandbox requires spec.image_context_path.")
-        context_dir = context_dir.resolve()
-        if not context_dir.exists() or not context_dir.is_dir():
-            raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
-
-        dockerfile_path = spec.dockerfile
-        if dockerfile_path is None:
-            dockerfile_path = context_dir / "Dockerfile"
-        elif not dockerfile_path.is_absolute():
-            dockerfile_path = context_dir / dockerfile_path
-        dockerfile_path = dockerfile_path.resolve()
-        if not dockerfile_path.exists() or not dockerfile_path.is_file():
-            raise FileNotFoundError(f"Missing Dockerfile: {dockerfile_path}")
-
-        _progress("compute image hash")
-        image_hash = compute_image_hash(context_dir=context_dir, dockerfile=dockerfile_path)
+        image_ref = spec.image_ref.strip() if isinstance(spec.image_ref, str) else ""
+        context_dir: Path | None = None
+        dockerfile_path: Path | None = None
+        image_hash: str | None = None
         image_repo = spec.image_repo.strip() if isinstance(spec.image_repo, str) else ""
         image_repo = image_repo if image_repo else _DEFAULT_DOCKER_IMAGE_REPO
-        image_tag = f"{image_repo}:{image_hash[:12]}"
-        _progress(f"image tag {image_tag}")
-
-        # Make sure we have somewhere to write build logs, even if the build fails.
         build_log_path = self._artifacts_dir / "docker_build.log"
 
-        if spec.rebuild_image or not _docker_image_exists(
-            image_tag, timeout_seconds=docker_timeout_seconds
-        ):
-            dockerfile_ref = str(dockerfile_path)
-            try:
-                dockerfile_ref = (
-                    dockerfile_path.resolve().relative_to(context_dir.resolve()).as_posix()
+        if image_ref:
+            if spec.rebuild_image:
+                raise ValueError(
+                    "SandboxSpec.rebuild_image is not supported with SandboxSpec.image_ref."
                 )
-            except ValueError:
-                dockerfile_ref = str(dockerfile_path)
-
-            # Stream build output to both the console and a log file so long builds
-            # don't look "hung" when invoked from the CLI.
-            _progress("docker build")
-            rc = _docker_build_streaming(
-                argv=[
-                    "docker",
-                    "build",
-                    "--progress=plain",
-                    "-t",
-                    image_tag,
-                    "-f",
-                    dockerfile_ref,
-                    ".",
-                ],
-                cwd=context_dir,
-                log_path=build_log_path,
-            )
-            if rc != 0:
-                raise RuntimeError(
-                    "Docker image build failed.\n"
-                    f"tag={image_tag}\n"
-                    f"context={context_dir}\n"
-                    f"dockerfile={dockerfile_path}\n"
-                    f"build_log={build_log_path}\n"
-                )
+            image_tag = image_ref
+            _progress(f"use image ref {image_tag}")
         else:
-            _progress("docker build skipped (image exists)")
+            context_dir = spec.image_context_path
+            if context_dir is None:
+                raise ValueError(
+                    "Docker sandbox requires spec.image_context_path or spec.image_ref."
+                )
+            context_dir = context_dir.resolve()
+            if not context_dir.exists() or not context_dir.is_dir():
+                raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
+
+            dockerfile_path = spec.dockerfile
+            if dockerfile_path is None:
+                dockerfile_path = context_dir / "Dockerfile"
+            elif not dockerfile_path.is_absolute():
+                dockerfile_path = context_dir / dockerfile_path
+            dockerfile_path = dockerfile_path.resolve()
+            if not dockerfile_path.exists() or not dockerfile_path.is_file():
+                raise FileNotFoundError(f"Missing Dockerfile: {dockerfile_path}")
+
+            _progress("compute image hash")
+            image_hash = compute_image_hash(context_dir=context_dir, dockerfile=dockerfile_path)
+            image_tag = f"{image_repo}:{image_hash[:12]}"
+            _progress(f"image tag {image_tag}")
+
+            if spec.rebuild_image or not _docker_image_exists(
+                image_tag, timeout_seconds=docker_timeout_seconds
+            ):
+                dockerfile_ref = str(dockerfile_path)
+                try:
+                    dockerfile_ref = (
+                        dockerfile_path.resolve().relative_to(context_dir.resolve()).as_posix()
+                    )
+                except ValueError:
+                    dockerfile_ref = str(dockerfile_path)
+
+                # Stream build output to both the console and a log file so long builds
+                # don't look "hung" when invoked from the CLI.
+                _progress("docker build")
+                rc = _docker_build_streaming(
+                    argv=[
+                        "docker",
+                        "build",
+                        "--progress=plain",
+                        "-t",
+                        image_tag,
+                        "-f",
+                        dockerfile_ref,
+                        ".",
+                    ],
+                    cwd=context_dir,
+                    log_path=build_log_path,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        "Docker image build failed.\n"
+                        f"tag={image_tag}\n"
+                        f"context={context_dir}\n"
+                        f"dockerfile={dockerfile_path}\n"
+                        f"build_log={build_log_path}\n"
+                    )
+            else:
+                _progress("docker build skipped (image exists)")
 
         container_name = self._container_name or f"sandbox-{uuid.uuid4().hex[:12]}"
         container_name = _sanitize_container_name(container_name)
@@ -287,6 +350,35 @@ class DockerSandbox:
                 raise ValueError("cache_mode='warm' requires spec.cache_dir.")
             cache_mount = "/cache"
             spec.cache_dir.mkdir(parents=True, exist_ok=True)
+
+            # Best-effort: create a minimal cache directory layout expected by the
+            # built-in sandbox_cli image.
+            #
+            # The sandbox_cli Dockerfile links common tool caches to:
+            #   /cache/pip
+            #   /cache/pdm
+            #   /cache/pdm-share
+            # If these targets don't exist in a fresh host cache dir, some tools can
+            # mis-handle the symlink path and error.
+            for rel in ("pip", "pdm", "pdm-share"):
+                try:
+                    (spec.cache_dir / rel).mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    # If we can't create these directories (permissions, etc), proceed.
+                    # The container may still be able to create what it needs.
+                    pass
+            env_overrides = spec.env_overrides or {}
+            enabled_raw = env_overrides.get("USERTEST_MAINT_VENV_CACHE_ENABLED")
+            root_raw = env_overrides.get("USERTEST_MAINT_VENV_CACHE_ROOT")
+            if str(enabled_raw).strip() == "1" and isinstance(root_raw, str):
+                root = root_raw.strip()
+                posix_root = PurePosixPath(root)
+                rel_parts = posix_root.parts[2:] if posix_root.parts[:2] == ("/", "cache") else ()
+                if rel_parts and ".." not in rel_parts:
+                    try:
+                        (spec.cache_dir / Path(*rel_parts)).mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        pass
             mounts.append(
                 MountSpec(
                     host_path=spec.cache_dir.resolve(),
@@ -311,7 +403,8 @@ class DockerSandbox:
             "-d",
             "--name",
             container_name,
-            *_env_args(spec.env_allowlist),
+            *([] if spec.keep_container else ["--rm"]),
+            *_env_args_with_overrides(spec.env_allowlist, spec.env_overrides),
             *_resource_args(spec.resources),
             *network_args,
             *_mount_args(mounts),
@@ -350,9 +443,10 @@ class DockerSandbox:
             "backend": "docker",
             "image_tag": image_tag,
             "image_hash": image_hash,
-            "image_repo": image_repo,
-            "context_dir": str(context_dir),
-            "dockerfile": str(dockerfile_path),
+            "image_repo": image_repo if image_hash is not None else None,
+            "image_ref": image_ref or image_tag,
+            "context_dir": str(context_dir) if context_dir is not None else None,
+            "dockerfile": str(dockerfile_path) if dockerfile_path is not None else None,
             "container_name": container_name,
             "workspace_mount": workspace_mount,
             "artifacts_mount": artifacts_mount,
@@ -361,6 +455,7 @@ class DockerSandbox:
             "network_mode": spec.network_mode,
             "docker_timeout_seconds": docker_timeout_seconds,
             "env_allowlist": [k for k in spec.env_allowlist if isinstance(k, str) and k.strip()],
+            **_env_overrides_meta(getattr(spec, "env_overrides", None)),
             "extra_mounts": [
                 {
                     "host_path": str(m.host_path),

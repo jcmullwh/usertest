@@ -33,6 +33,42 @@ def _coerce_string(value: Any) -> str | None:
     return cleaned if cleaned else None
 
 
+def _normalize_fingerprints_from_legacy_values(values: Any) -> list[str]:
+    """Coerce legacy fingerprint-like identifiers into canonical fingerprint strings.
+
+    Accepts:
+    - raw 16-char hex fingerprints
+    - legacy backlog atom ticket IDs in ``TKT-<fingerprint>`` form
+
+    Other values (for example ``BLG-001``) are ignored because they are not
+    globally unique and cannot be losslessly mapped back to a fingerprint.
+    """
+
+    raw_values: list[str]
+    if isinstance(values, list):
+        raw_values = [str(value) for value in values if isinstance(value, str)]
+    elif isinstance(values, str):
+        raw_values = [values]
+    elif values is None:
+        raw_values = []
+    else:
+        raw_values = [str(values)]
+
+    out: list[str] = []
+    for raw in raw_values:
+        cleaned = raw.strip().lower()
+        if not cleaned:
+            continue
+        if cleaned.startswith("tkt-"):
+            candidate = cleaned[4:]
+            if len(candidate) == 16 and all(ch in "0123456789abcdef" for ch in candidate):
+                out.append(candidate)
+            continue
+        if len(cleaned) == 16 and all(ch in "0123456789abcdef" for ch in cleaned):
+            out.append(cleaned)
+    return sorted_unique_strings(out)
+
+
 def sorted_unique_strings(values: list[str]) -> list[str]:
     """Return sorted unique non-empty strings.
 
@@ -177,6 +213,28 @@ def load_backlog_actions_yaml(actions_path: Path) -> dict[str, dict[str, Any]]:
     return actions
 
 
+def write_backlog_actions_yaml(actions_path: Path, actions: dict[str, dict[str, Any]]) -> None:
+    """Persist backlog action ledger with deterministic ordering.
+
+    Parameters
+    ----------
+    actions_path:
+        Destination YAML path.
+    actions:
+        Action entries keyed by ticket fingerprint.
+    """
+
+    payload_actions: list[dict[str, Any]] = []
+    for fingerprint in sorted(actions.keys()):
+        entry = dict(actions[fingerprint])
+        entry["fingerprint"] = fingerprint
+        payload_actions.append(entry)
+
+    doc = {"version": 1, "actions": payload_actions}
+    actions_path.parent.mkdir(parents=True, exist_ok=True)
+    actions_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
 def load_atom_actions_yaml(path: Path) -> dict[str, dict[str, Any]]:
     """Load atom action ledger keyed by atom ID.
 
@@ -221,6 +279,16 @@ def load_atom_actions_yaml(path: Path) -> dict[str, dict[str, Any]]:
         item = dict(entry)
         item["atom_id"] = atom_id
         item["status"] = normalize_atom_status(_coerce_string(item.get("status")))
+
+        fingerprints = [
+            value
+            for value in item.get("fingerprints", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        fingerprints.extend(_normalize_fingerprints_from_legacy_values(item.get("ticket_ids")))
+        item["fingerprints"] = sorted_unique_strings(fingerprints)
+        item.pop("ticket_ids", None)
+
         atoms[atom_id] = item
     return atoms
 
@@ -242,11 +310,18 @@ def write_atom_actions_yaml(path: Path, atoms: dict[str, dict[str, Any]]) -> Non
         item["atom_id"] = atom_id
         item["status"] = normalize_atom_status(_coerce_string(item.get("status")))
 
+        fingerprints = [
+            value
+            for value in item.get("fingerprints", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        fingerprints.extend(_normalize_fingerprints_from_legacy_values(item.get("ticket_ids")))
+        item["fingerprints"] = sorted_unique_strings(fingerprints)
+        item.pop("ticket_ids", None)
+
         for list_key in (
-            "ticket_ids",
             "queue_paths",
             "queue_owner_roots",
-            "fingerprints",
             "derived_from_atom_ids",
         ):
             values = item.get(list_key)
@@ -257,6 +332,22 @@ def write_atom_actions_yaml(path: Path, atoms: dict[str, dict[str, Any]]) -> Non
             elif values is None:
                 item[list_key] = []
             else:
+                item[list_key] = sorted_unique_strings([str(values)])
+
+        for list_key in (
+            "dequeued_paths",
+            "dequeued_owner_roots",
+            "discarded_paths",
+            "discarded_owner_roots",
+            "discarded_fingerprints",
+            "reconciled_missing_queue_paths",
+        ):
+            values = item.get(list_key)
+            if isinstance(values, list):
+                item[list_key] = sorted_unique_strings(
+                    [value for value in values if isinstance(value, str)]
+                )
+            elif values is not None:
                 item[list_key] = sorted_unique_strings([str(values)])
 
         payload_atoms.append(item)

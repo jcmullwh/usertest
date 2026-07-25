@@ -168,3 +168,119 @@ def test_bootstrap_pdm_requirements_uses_pdm_install_in_docker(
     assert scripts
     assert any("-m pdm install --no-self" in script for script in scripts)
     assert result.meta["installer"] == "pdm"
+
+
+def test_bootstrap_pip_requirements_passes_gitlab_creds_by_name_in_docker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    run_dir = tmp_path / "run"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("GITLAB_PYPI_PROJECT_ID", "78153495")
+    monkeypatch.setenv("GITLAB_PYPI_USERNAME", "gitlab-user")
+    monkeypatch.setenv("GITLAB_PYPI_PASSWORD", "gitlab-pass")
+    monkeypatch.setattr(pb, "looks_like_docker_exec_prefix", lambda _prefix: True)
+
+    injected_env: dict[str, str | None] = {}
+
+    def _fake_inject(prefix: list[str], env: dict[str, str | None]) -> list[str]:
+        injected_env.update(env)
+        return list(prefix)
+
+    monkeypatch.setattr(pb, "inject_docker_exec_env", _fake_inject)
+
+    def _fake_run_logged(
+        argv: list[str],
+        *,
+        cwd: Path | None,
+        env: dict[str, str] | None,
+        log: list[str],
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        log.append("$ " + " ".join(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(pb, "_run_logged", _fake_run_logged)
+
+    def _fake_subprocess_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if "--format=json" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="/usr/local/bin", stderr="")
+
+    monkeypatch.setattr(pb.subprocess, "run", _fake_subprocess_run)
+
+    pb.bootstrap_pip_requirements(
+        workspace_dir=workspace_dir,
+        requirements_relpath=".usertest/requirements.txt",
+        run_dir=run_dir,
+        command_prefix=["docker", "exec", "-i", "container"],
+        workspace_mount="/workspace",
+    )
+
+    assert injected_env["GITLAB_PYPI_USERNAME"] is None
+    assert injected_env["GITLAB_PYPI_PASSWORD"] is None
+    assert injected_env["USERTEST_GITLAB_INDEX_URL"].endswith(
+        "/projects/78153495/packages/pypi/simple"
+    )
+
+
+def test_local_gitlab_bootstrap_uses_authenticated_index_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    run_dir = tmp_path / "run"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("GITLAB_BASE_URL", "https://gitlab.example")
+    monkeypatch.setenv("GITLAB_PYPI_PROJECT_ID", "123")
+    monkeypatch.setenv("GITLAB_PYPI_USERNAME", "deploy user")
+    monkeypatch.setenv("GITLAB_PYPI_PASSWORD", "p@ss word")
+    monkeypatch.setattr(pb, "looks_like_docker_exec_prefix", lambda _prefix: False)
+
+    calls: list[list[str]] = []
+    envs: list[dict[str, str]] = []
+
+    def _fake_run_logged(
+        argv: list[str],
+        *,
+        cwd: Path | None,
+        env: dict[str, str] | None,
+        log: list[str],
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        calls.append(argv)
+        envs.append(dict(env or {}))
+        log.append("$ " + " ".join(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(pb, "_run_logged", _fake_run_logged)
+
+    def _fake_subprocess_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del argv, kwargs
+        return subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(pb.subprocess, "run", _fake_subprocess_run)
+
+    result = pb.bootstrap_pip_requirements(
+        workspace_dir=workspace_dir,
+        requirements_relpath=".usertest/requirements.txt",
+        run_dir=run_dir,
+        command_prefix=[],
+        workspace_mount=None,
+    )
+
+    assert result.meta["backend"] == "local"
+    assert not any("--index-url" in call for call in calls)
+    install_env = next(env for env in envs if env.get("PIP_INDEX_URL"))
+    assert (
+        install_env["PIP_INDEX_URL"]
+        == "https://deploy%20user:p%40ss%20word@gitlab.example/api/v4/projects/123/packages/pypi/simple"
+    )
+    assert install_env["PIP_EXTRA_INDEX_URL"] == "https://pypi.org/simple"
+    assert "p@ss word" not in (run_dir / "bootstrap_pip.log").read_text(encoding="utf-8")

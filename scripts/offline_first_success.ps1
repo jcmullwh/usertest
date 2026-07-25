@@ -1,6 +1,52 @@
-Write-Warning "offline_first_success.ps1 is deprecated."
-Write-Host "NOTE: This path only rerenders a golden fixture run; it does NOT execute any agents or validate real performance." -ForegroundColor Yellow
-Write-Host "Use scripts/offline_fixture_rerender.ps1 (or run usertest/usertest-backlog normally) for real runs." -ForegroundColor Yellow
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$FixtureName = 'minimal_codex_run'
+)
 
-& "$PSScriptRoot/offline_fixture_rerender.ps1" @Args
-exit $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+
+. (Join-Path $PSScriptRoot 'python_preflight.ps1')
+
+Push-Location $repoRoot
+try {
+    try {
+        $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    }
+    catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
+    }
+
+    $pythonCmd = $pythonInfo.CommandPath
+    $env:USERTEST_PYTHON = $pythonCmd
+    $launcherArgs = @(
+        'tools/first_run_launcher.py'
+        'offline-first-success'
+        '--repo-root'
+        $repoRoot
+        '--python'
+        $pythonCmd
+        '--python-source'
+        $pythonInfo.Name
+        '--shell'
+        'powershell'
+        '--fixture-name'
+        $FixtureName
+    )
+    if ($pythonInfo.Executable) {
+        $launcherArgs += @('--python-executable', $pythonInfo.Executable)
+    }
+    if ($pythonInfo.Version) {
+        $launcherArgs += @('--python-version', $pythonInfo.Version)
+    }
+
+    & $pythonCmd @launcherArgs
+    $exitCode = $LASTEXITCODE
+}
+finally {
+    Pop-Location
+}
+
+exit $exitCode

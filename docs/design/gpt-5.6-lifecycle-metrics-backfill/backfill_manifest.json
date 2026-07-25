@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "artifact_type": "legacy_lifecycle_backfill_manifest",
+  "cohort_label": "gpt-5.6-approximate-window",
+  "selection_basis": {
+    "since": "2026-07-07T04:00:00Z",
+    "run_ids": null,
+    "note": "The window is operator-selected and is not asserted as an exact release timestamp."
+  },
+  "source": {
+    "path": "docs/design/historical-automated-backlog-depth-remediation-metrics.json",
+    "sha256": "0f36ff49b6d3c08f2cedd363465c0b52fba2c75459b3b64cd8e0b1f72fca3fab",
+    "schema_version": 3
+  },
+  "event_log_path": "lifecycle_events.jsonl",
+  "selected_runs": [
+    {
+      "run_id": "controlled-stage3-cdd666f",
+      "source_lifecycle_id": "cycle:controlled-stage3-cdd666f",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "unknown",
+        "tokens": "unknown",
+        "manual_actions": "unknown",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "sealed-a0-cycle001",
+      "source_lifecycle_id": "cycle:sealed-a0-cycle001",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "corrected-v2-9f6-recovery",
+      "source_lifecycle_id": "cycle:corrected-v2-9f6-recovery",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "storage-children-stage3",
+      "source_lifecycle_id": "cycle:storage-children-stage3",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "maintenance-outcome-correction-pr215",
+      "source_lifecycle_id": "case:maintenance-image-burst-retention-unbounded",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "artifact_derived"
+      },
+      "disposition": "pr",
+      "disposition_evidence": [
+        "sources[maintenance_pull_request_215].url"
+      ]
+    },
+    {
+      "run_id": "controller-remediation-integration",
+      "source_lifecycle_id": "delivery:controller-remediation-pr216",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "postmerge-shadow-cycle-1",
+      "source_lifecycle_id": "cycle:postmerge-shadow-cycle-1",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "operator_attested",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "stage12-correction-retraction-reverify-blocked-145807",
+      "source_lifecycle_id": "cycle:bounded-stage12-maintenance-qualification",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "stage3-attempt17-running-223416",
+      "source_lifecycle_id": "case:131290268e2889891e0c",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "operator_attested",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "artifact_derived"
+      },
+      "disposition": "already_addressed",
+      "disposition_evidence": [
+        "current_state:already_addressed"
+      ]
+    },
+    {
+      "run_id": "qualification-cycle-338a373f-20260717",
+      "source_lifecycle_id": "pipeline-cycle:338a373f:20260717",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "operator_attested",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "report-schema-case-4f134107-20260718",
+      "source_lifecycle_id": "case:4f13410712b8654b0e93:20260718",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "operator_attested",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "artifact_derived"
+      },
+      "disposition": "pr",
+      "disposition_evidence": [
+        "sources[report_schema_delivery_outcome_20260719].pr_url"
+      ]
+    },
+    {
+      "run_id": "qualification-cycle-2b0e7048-20260719",
+      "source_lifecycle_id": "pipeline-cycle:2b0e7048:20260719",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "operator_attested",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "qualification-cycle-383cf41f-20260719",
+      "source_lifecycle_id": "pipeline-cycle:383cf41f:20260719",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "operator_attested",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "qualification-cycle-bc70b15b-20260720",
+      "source_lifecycle_id": "pipeline-cycle:bc70b15b:20260720",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "operator_attested",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "qualification-cycle-43b3eae5-20260721",
+      "source_lifecycle_id": "pipeline-cycle:43b3eae5:20260721",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    },
+    {
+      "run_id": "qualification-cycle-4b51384d-20260721",
+      "source_lifecycle_id": "pipeline-cycle:4b51384d:20260721",
+      "provenance": {
+        "timing": "operator_attested",
+        "error_clusters": "operator_attested",
+        "self_healed_errors": "unknown",
+        "interventions": "operator_attested",
+        "tokens": "unknown",
+        "manual_actions": "operator_attested_minimum",
+        "origin": "unknown",
+        "disposition": "unknown"
+      },
+      "disposition": null,
+      "disposition_evidence": []
+    }
+  ],
+  "skipped_runs": [
+    {
+      "run_id": "shadow-c03ed318",
+      "reason": "outside_or_unknown_time_window"
+    },
+    {
+      "run_id": "shadow-1f57437e",
+      "reason": "outside_or_unknown_time_window"
+    }
+  ],
+  "certification": {
+    "eligible": false,
+    "reason": "legacy manual origin, token, action, and disposition evidence is incomplete"
+  },
+  "content_sha256": "816a1b292e06cea411cd4fbe8b1ffc55a1ae47c2281abeff1f80d5467225f799"
+}

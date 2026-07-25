@@ -32,25 +32,11 @@ pdm run lint
 Dependencies for standalone use:
 - `backlog_miner` imports `agent_adapters`, `backlog_core`, and `runner_core` at runtime.
 - If your package index does not provide those internal packages, install local checkouts first.
-- From a sibling checkout layout, run:
+- From a sibling checkout layout, add them as editable deps using `pdm` (paths relative to this
+  package directory), for example:
 
 ```bash
-python -m pip install -e ../agent_adapters -e ../backlog_core -e ../runner_core
-```
-
-If you need only a runtime install (without dev tooling commands), use:
-
-```bash
-python -m pip install -e .
-```
-
-From a private GitLab PyPI registry (if you publish it):
-
-```bash
-pip install \
-  --index-url "https://<gitlab-host>/api/v4/projects/<project_id>/packages/pypi/simple" \
-  --extra-index-url "https://pypi.org/simple" \
-  "backlog_miner==<version>"
+pdm add -e ../agent_adapters -e ../backlog_core -e ../runner_core
 ```
 
 > Publishing note
@@ -100,8 +86,12 @@ Top-level exports:
 
 - `load_prompt_manifest(path)`
 - `run_backlog_prompt(...)`
-- `run_backlog_ensemble(...)`
+- `run_backlog_ensemble(...)` (legacy one-pass analysis only; its output is not
+  eligible for automated ticket export)
 - `run_labeler_jobs(...)`
+- `load_pipeline_prompt_manifest(prompts_dir)` (six-stage pipeline manifest v2)
+- `run_stage_prompt_json(...)` (generic stage prompt runner)
+- `run_repro_research_stage(...)` (stage 3 repro+research runner)
 - `MinerJob`, `PromptManifest`
 
 ---
@@ -116,6 +106,40 @@ Typical flow:
 2) `usertest-backlog reports compile` builds a history file.
 3) `backlog_miner` runs prompts over that history.
 4) `backlog_core` renders backlog documents.
+
+---
+
+## Six-stage backlog pipeline
+
+The six-stage backlog pipeline treats each stage as an inspectable artifact boundary.
+
+Key pieces:
+
+- `configs/backlog_prompts/pipeline_manifest.json` (version 2) declares stage templates
+- `backlog_miner.pipeline.load_pipeline_prompt_manifest(...)` validates templates + repo-owned
+  guidance config
+- `backlog_miner.pipeline.run_stage_prompt_json(...)` runs one stage prompt and persists prompt +
+  response artifacts for auditability
+- `backlog_miner.research_runner.run_repro_research_stage(...)` runs stage 3 in an isolated writable
+  workspace via `runner_core.run_once(...)` and extracts a strict `extensions.backlog_repro_research`
+  dossier block from the run report
+- Stage 3 requires an explicit source ref, resolves local refs to a commit before acquisition, and
+  independently replays each claimed experiment from a clean checkout. Evidence receipts bind the
+  case and atom assignment, original artifacts, inspected baseline blobs and symbols, commands,
+  assertions, outputs, and retained clean planning workspace. Downstream consumers revalidate those
+  receipts before using the proof.
+- Model-authored replay commands never run through a command shell. Production callers must supply
+  an explicit replay executor; the backlog app selects a Docker image from
+  `configs/backlog_research.yaml`, disables container networking, forwards only `CI=1`, receipts the
+  actual sandbox metadata and image identity, and confirms container cleanup. Host execution is
+  denied by default and requires an explicitly approved local source identity.
+- Original and faithful research can replay a practical repository CLI or script, not only a test.
+  The runner accepts the shell-free argv only when it resolves to immutable repository-owned code
+  or config and either exactly matches the assigned source atom's retained command or names an
+  entrypoint whose file was actually inspected. Absolute/traversal paths, URLs, interpreter code
+  strings, PATH-only tools, and unbound model commands remain blocked. Runner-owned atom bindings
+  retain the exact snapshot field path and value hash, including short wrong values and honestly
+  contextual or corroborating atoms.
 
 ---
 

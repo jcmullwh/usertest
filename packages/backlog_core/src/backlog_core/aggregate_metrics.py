@@ -6,6 +6,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from backlog_core.case_lineage import record_lineage_context
+
 _MAX_TOP_FAILED_COMMANDS = 5
 _MAX_FAILED_COMMANDS_PER_RUN = 25
 
@@ -15,6 +17,29 @@ def _coerce_string(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned if cleaned else None
+
+
+def _command_head(command: str) -> str | None:
+    cleaned = command.strip()
+    if not cleaned:
+        return None
+    if cleaned[0] in {'"', "'"}:
+        quote = cleaned[0]
+        end = cleaned.find(quote, 1)
+        if end > 1:
+            return cleaned[1:end]
+    parts = cleaned.split()
+    return parts[0] if parts else None
+
+
+def _is_ripgrep_no_matches(*, command: str, exit_code: int) -> bool:
+    if exit_code != 1:
+        return False
+    head = _command_head(command)
+    if head is None:
+        return False
+    base = Path(head).name.lower()
+    return base in {"rg", "rg.exe"}
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -93,6 +118,8 @@ def _iter_failed_commands_from_metrics(metrics: dict[str, Any]) -> Iterable[dict
         exit_code = item.get("exit_code")
         if command is None or not isinstance(exit_code, int) or exit_code == 0:
             continue
+        if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+            continue
         out.append(
             {
                 "command": command,
@@ -134,6 +161,8 @@ def _iter_failed_commands_from_events(run_dir: Path) -> Iterable[dict[str, Any]]
                     if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
                         command = " ".join(argv)
                 if command is None:
+                    continue
+                if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
                     continue
                 out.append(
                     {
@@ -224,8 +253,10 @@ def build_aggregate_metrics_atoms(
     """
     Build synthetic aggregate-metrics atoms from eligible run records.
 
-    Aggregates are computed only over eligible runs (as defined by upstream atom filtering),
-    so that the aggregate layer reflects current open friction.
+    Aggregates are computed only over eligible runner-authoritative observation runs.
+    The local lineage check is deliberate defense in depth: callers cannot turn a
+    research, implementation, or verification run into fresh observation evidence by
+    including its run ID in ``eligible_run_rels``.
     """
 
     run_id = run_id_prefix
@@ -235,6 +266,12 @@ def build_aggregate_metrics_atoms(
     for record in records:
         rr = _coerce_string(record.get("run_rel"))
         if rr is None or rr not in eligible_run_rels:
+            continue
+        lineage = record_lineage_context(record, run_id=rr)
+        if (
+            lineage.get("evidence_role") != "observation"
+            or _coerce_string(lineage.get("lineage_mining_blocker")) is not None
+        ):
             continue
         metrics_raw = record.get("metrics")
         if not isinstance(metrics_raw, dict):
@@ -254,7 +291,9 @@ def build_aggregate_metrics_atoms(
         target_ref = record.get("target_ref")
         if isinstance(target_ref, dict):
             repo_input = _coerce_string(target_ref.get("repo_input"))
-            mission_id = _coerce_string(target_ref.get("mission_id"))
+            mission_id = _coerce_string(target_ref.get("mission_id")) or _coerce_string(
+                target_ref.get("requested_mission_id")
+            )
             persona_id = _coerce_string(target_ref.get("persona_id"))
 
         metric_runs.append(

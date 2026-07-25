@@ -1,0 +1,657 @@
+{
+  "schema_version": 1,
+  "report_id": "maintenance-image-atom-to-pr-audit-20260715",
+  "generated_at": "2026-07-15T17:37:35Z",
+  "scope": {
+    "case_id": "case:maintenance-image-burst-retention-unbounded",
+    "problem_id": "problem:maintenance-image-burst-retention-unbounded",
+    "ticket_fingerprint": "03f0d43eb78e28fa",
+    "plan_revision_id": "planrev:sha256:ed4d010e810deab419cffd90b5804ca892f19dd48b4570ea1be2ed657975c725",
+    "target_revision": "51e35fbcb50151590604611f10910a7fd13660e4",
+    "question": "Did the automated backlog process identify a real unactioned problem, establish its causal mechanism, produce a decision-complete plan, and implement a change that addresses the mechanism rather than only the visible symptom?",
+    "exclusions": [
+      "IDEA-originated work",
+      "Docker mutation or cleanup during this audit",
+      "claims of live resolution without a live or faithful end-to-end outcome receipt"
+    ]
+  },
+  "counting_definitions": {
+    "invocation_manifest": "One wrapper-created invocation manifest. It may fail before a model session or response exists and therefore is not a model turn.",
+    "authored_model_turn": "One verified model response associated with an authenticated subscription-backed session.",
+    "completed_report": "One completed Terra report on disk. Side runs and orphan reports are included only when explicitly stated.",
+    "numbered_stage3_record": "One record in the Stage 3 numbered ledger; the population contains model reports, verifier-only snapshots, and a model-free recovery record.",
+    "validator_error_occurrence": "One error entry emitted by a validator at one checkpoint. The same exact error can occur repeatedly and multiple entries can describe one underlying defect.",
+    "exact_error_identity": "One byte-identical validator error string after exact-string grouping. It is not a root-cause count.",
+    "guidance_delivery": "One atomic guidance item injected into one prompt. Reinjecting the same source item counts as another delivery.",
+    "guidance_source_unit": "One top-level source instruction before repetition across prompts.",
+    "guidance_block": "One supervisor feedback block. Byte-distinct revisions and repeated serialized entries are reported separately.",
+    "implementation_verification_outcome": "The pass or fail state of a runner-recorded model turn's configured verification. It is not an independent count of defects.",
+    "non_model_controller_failure": "A wrapper or bootstrap failure before the model starts; it is never counted as a model-quality failure.",
+    "non_additivity_warning": "No grand total of errors or guidance is reported. Invocation failures, model turns, validator entries, CI failures, and guidance deliveries overlap or describe different layers and cannot be added into a meaningful defect total."
+  },
+  "executive_findings": {
+    "real_problem": {
+      "status": "supported",
+      "basis": "Three independent historical evidence atoms show a fresh-image burst growing from 2 tags/1 identity to 98 tags/49 identities with automatic cleanup deleting nothing, followed by an operator recovery that removed 49 obsolete image IDs after storage exhaustion."
+    },
+    "root_cause_depth": {
+      "status": "supported_for_stage4",
+      "basis": "Six controlled experiments bound the mechanism to count-or-age retention: 49 fresh identities remained, while the age-controlled arm retained 3 and removed 46. The fail-first contract demonstrated 49 retained against a configured limit of 5."
+    },
+    "plan_depth": {
+      "status": "supported_after_correction",
+      "basis": "The first mechanically green plan still had three material semantic defects. An independent audit found them, and the same planner corrected the final sequence from one remaining material defect to zero in two turns."
+    },
+    "implementation": {
+      "status": "implemented_tests_verified_mitigated",
+      "basis": "Through the last finalized implementation run, one retained author session produced seven commits and a nine-file draft PR. The unchanged fail-first replay and 22 focused behavioral checks passed; package collection passed after relocating an integration test."
+    },
+    "resolution": {
+      "status": "not_established",
+      "basis": "No Docker test body, constrained storage-write recovery arm, live recurrence check, or durable OutcomeRecord has completed. The correct maximum claim is mitigated, not resolved."
+    },
+    "system_autonomy": {
+      "status": "not_yet_baseline_self_maintaining",
+      "basis": "The case reached a draft PR, but the chain was assembled across supervised and replayed stages, live Stage 1 mining was not demonstrated, Stage 3 ran far past causal sufficiency, pre-turn client failures dominated Stage 4-6 manifests, and outcome recording remains incomplete."
+    }
+  },
+  "stage1_atoms": {
+    "provenance_caveat": "The original Stage 2 problem and priority records used on July 14 were hand-authored fixtures. This audit proves that three real atoms existed and were later carried through an authenticated Stage 2 run; it does not prove that a live Stage 1 miner independently discovered and grouped them. The chain is an evidence-authenticated reconstruction, not one uninterrupted autonomous end-to-end run.",
+    "atoms": [
+      {
+        "atom_id": "usertest_implement/usertest/20260704T161642Z/codex/0:maintenance_image_cleanup:1",
+        "sha256": "49a805636091c0b28d8f4cd791e749ab6903f6b66b980b96327e7f749c0169b1",
+        "observation": "Automatic cleanup retained 2 tags representing 1 unique environment hash; it deleted no tags or image IDs and reported no errors.",
+        "run_dir": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\20260704T161642Z\\codex\\0",
+        "evidence_path": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\20260704T161642Z\\codex\\0\\sandbox\\maintenance_image_cleanup.json"
+      },
+      {
+        "atom_id": "usertest_implement/usertest/20260707T135227Z/codex/0:maintenance_image_cleanup:1",
+        "sha256": "b5aa29292f70e3804273a0a7f3a9e5fcdb92fcec252e61f8c21b61b1c2f4544d",
+        "observation": "Automatic cleanup retained 98 tags representing 49 unique hashes; it deleted no tags or image IDs and reported no errors.",
+        "run_dir": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\20260707T135227Z\\codex\\0",
+        "evidence_path": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\20260707T135227Z\\codex\\0\\sandbox\\maintenance_image_cleanup.json"
+      },
+      {
+        "atom_id": "operator_recovery/docker_cleanup_20260713:maintenance_image_cleanup:1",
+        "sha256": "f9b3dd2eae013325d4252161ee1ebec4248abc5da317be7b62e32602451292be",
+        "observation": "After storage exhaustion, the retained operator recovery receipt recorded manual removal of 49 obsolete image IDs. Stopped containers and build cache were explicitly treated as separate mechanisms.",
+        "evidence_path": "I:\\code\\usertest_backlog_depth\\.tmp\\component_validation\\docker_cleanup_20260713.json",
+        "evidence_sha256": "43836965073cf9f1983711c13c9c5a718516fe69e20ce494f96b9bb11f4af7e1"
+      }
+    ]
+  },
+  "stage2": {
+    "run_root": "U:\\usertest_backlog_component_validation\\runs\\stage2_maintenance_image_current_terra_20260715T144500Z",
+    "artifact_path": "U:\\usertest_backlog_component_validation\\runs\\stage2_maintenance_image_current_terra_20260715T144500Z\\prioritized_problems.json",
+    "model": "gpt-5.6-terra",
+    "elapsed_seconds": 9.35,
+    "model_turns": 1,
+    "correction_turns": 0,
+    "priority": "P1",
+    "confidence": 0.93,
+    "pre_score": 0.6011,
+    "breadth_score": 0.85,
+    "subscription_provenance_verified": true,
+    "api_fallback_allowed": false,
+    "result": "One canonical problem was prioritized and selected for research.",
+    "limitation": "This later authenticated run repairs provenance for Stage 2 but does not retroactively demonstrate live Stage 1 mining."
+  },
+  "stage3": {
+    "canonical_run_root": "U:\\usertest_backlog_component_validation\\runs\\stage3_maintenance_image_final_terra_20260714T005030Z",
+    "dossier_path": "U:\\usertest_backlog_component_validation\\runs\\stage3_maintenance_image_final_terra_20260714T005030Z\\research_dossier.json",
+    "canonical_attempt_label": 19,
+    "research_status": "evidence_sufficient",
+    "reproduction_status": "partial_but_not_blocked",
+    "verification_status": "verified",
+    "confidence": 0.93,
+    "experiments": 6,
+    "origin_atoms_covered": 3,
+    "errors": 0,
+    "blockers": 0,
+    "material_unknowns": 0,
+    "mechanism_evidence": {
+      "fresh_arm_retained": 49,
+      "aged_control_retained": 3,
+      "aged_control_removed": 46,
+      "configured_count_in_fail_first": 5,
+      "fail_first_retained": 49,
+      "other_arms": [
+        "build followed by cleanup",
+        "failed build followed by no cleanup"
+      ]
+    },
+    "counted_execution": {
+      "numbered_ledger_records": 48,
+      "numbered_model_reports": 40,
+      "numbered_verifier_only_records": 7,
+      "numbered_model_free_records": 1,
+      "filesystem_completed_reports": 62,
+      "filesystem_numbered_reports": 40,
+      "filesystem_side_reports": 11,
+      "filesystem_orphan_reports": 11,
+      "filesystem_completed_wall_seconds": 10885.246,
+      "reports_at_causal_sufficiency": 15,
+      "wall_seconds_at_causal_sufficiency": 2666.179,
+      "extra_reports_after_sufficiency": 47,
+      "extra_wall_seconds_after_sufficiency": 8219.067,
+      "extra_report_share_percent": 75.806,
+      "extra_wall_share_percent": 75.506,
+      "interpretation": "Attempt 19 is a ledger label, not the nineteenth model turn. Causal sufficiency was reached after 15 completed reports. Roughly 76% of completed-report volume and wall time followed after the case was already ready to leave Stage 3."
+    },
+    "validator_errors": {
+      "population": "48 numbered ledger records only",
+      "occurrences": 170,
+      "exact_identities": 105,
+      "repeat_occurrences_beyond_first": 65,
+      "repeat_share_percent": 38.235,
+      "before_causal_sufficiency": {
+        "occurrences": 22,
+        "categories": 12,
+        "occurrence_share_percent": 12.941
+      },
+      "after_causal_sufficiency": {
+        "occurrences": 148,
+        "categories": 46,
+        "occurrence_share_percent": 87.059
+      },
+      "interpretation": "Most recorded validator churn occurred after sufficient causal evidence already existed; this is controller overrun evidence, not proof that the root cause needed 48 attempts."
+    },
+    "supervisor_guidance": {
+      "distinct_blocks": 11,
+      "top_level_source_units": 49,
+      "block_to_prompt_injections": 46,
+      "prompts": 39,
+      "completed_prompts": 38,
+      "interrupted_prompts": 1,
+      "atomic_deliveries": 197,
+      "deliveries_to_completed_reports": 175,
+      "repeated_deliveries_beyond_source_units": 148,
+      "repeated_delivery_share_percent": 75.127,
+      "classification": {
+        "correct_stage": {
+          "count": 102,
+          "percent": 51.8
+        },
+        "wrong_or_excessive": {
+          "count": 68,
+          "percent": 34.5
+        },
+        "mixed": {
+          "count": 27,
+          "percent": 13.7
+        }
+      },
+      "interpretation": "The controller delivered nearly four atomic items per original source unit. Just over half of deliveries belonged to Stage 3; more than one third were wrong-stage or excessive, chiefly because future solution and outcome proof was demanded from research after the causal mechanism was already established."
+    }
+  },
+  "stages4_to_6": {
+    "invocations": {
+      "invocation_manifests": 484,
+      "pre_turn_client_version_failures": 409,
+      "pre_turn_boundary_reset_failures": 1,
+      "verified_authored_turns": 74,
+      "authored_turn_share_percent": 15.289,
+      "pre_turn_failure_share_percent": 84.711,
+      "role_sessions": 15,
+      "unique_response_hashes": 72,
+      "verified_model_wall_seconds_approx": 6645,
+      "failed_launch_wrapper_seconds": 3139,
+      "boundary_reset_seconds_approx": 15,
+      "known_wrapper_seconds_approx": 9799,
+      "interpretation": "The 484-manifest count is primarily a launch-mechanics failure population. Only 74 manifests contain an authored model turn."
+    },
+    "authored_turns_by_stage": {
+      "stage4": 14,
+      "stage5": 40,
+      "stage6": 20
+    },
+    "automated_correction_prompts": 37,
+    "validator_errors": {
+      "population": "persisted attempt_history.validation_errors deduplicated to 74 verified authored responses by prompt and response hash",
+      "occurrences": 94,
+      "exact_identities": 61,
+      "repeat_occurrences_beyond_first": 33,
+      "by_stage": {
+        "stage4": {
+          "occurrences": 3,
+          "exact_identities": 2
+        },
+        "stage5": {
+          "occurrences": 20,
+          "exact_identities": 9
+        },
+        "stage6": {
+          "occurrences": 71,
+          "exact_identities": 50
+        }
+      },
+      "interpretation": "Stage 6 generated 75.5% of the persisted Stage 4-6 authored-response validator entries. This 94/61 population is deduplicated to verified authored responses by prompt and response hash. It is distinct from, and overlaps, the 138/77 correction-feedback population; neither population can be added to the other or to supervisor requirements as independent flaws."
+    },
+    "correction_feedback": {
+      "population": "every deterministic error line serialized into 37 retained Stage 4-6 correction prompts",
+      "delivered_error_lines": 138,
+      "exact_identities": 77,
+      "repeat_occurrences_beyond_first": 61,
+      "by_stage": {
+        "stage4": {
+          "delivered_error_lines": 3,
+          "exact_identities": 2
+        },
+        "stage5": {
+          "delivered_error_lines": 19,
+          "exact_identities": 9
+        },
+        "stage6": {
+          "delivered_error_lines": 116,
+          "exact_identities": 66
+        }
+      },
+      "interpretation": "This is the correction feedback the model actually received. It is mechanically reproducible and overlaps the 94/61 persisted authored-response ledger, so it is reported separately rather than summed."
+    },
+    "supervisor_guidance": {
+      "deliveries": 14,
+      "bound_deliveries": 13,
+      "adjudication_deliveries": 1,
+      "byte_distinct_blocks": 13,
+      "enumerated_finding_or_action_instances": 51,
+      "exact_distinct_findings_or_actions": 42,
+      "preserve_guardrail_instances": 18,
+      "forbidden_scope_guardrail_instances": 11,
+      "enumerated_instruction_clauses_including_guardrails": 80,
+      "exact_distinct_findings_by_episode": {
+        "initial_stage4_hard_cap": 3,
+        "stage4_lifecycle": 2,
+        "stage4_replay_correction": 5,
+        "stage5_lifecycle": 5,
+        "stage5_outcome_boundary": 3,
+        "stage5_revised_selector": 4,
+        "stage5_falsifier_adjudication": 2,
+        "first_stage6_continuation": 5,
+        "stage6_depth": 4,
+        "stage6_semantic": 6,
+        "stage6_independent_audit": 3
+      },
+      "interpretation": "The 42-item episode breakdown counts exact-distinct finding/action requirements. The 51 count includes repeated enumerated instances. Preserve and forbidden-scope clauses are guardrails, not evidence that 29 more defects existed."
+    },
+    "stage4": {
+      "initial_disposition": "insufficient_evidence",
+      "initial_disposition_assessment": "correct",
+      "initial_gaps": [
+        "unsafe hard-cap behavior",
+        "active-delete safety",
+        "tag-versus-physical-image identity mismatch",
+        "incomplete protected/current identity behavior"
+      ],
+      "final_run_root": "U:\\usertest_backlog_component_validation\\runs\\stage4_maintenance_replay_contract_correction_20260715T012500Z",
+      "final_options_path": "U:\\usertest_backlog_component_validation\\runs\\stage4_maintenance_replay_contract_correction_20260715T012500Z\\solution_options.json",
+      "final_option_count": 1,
+      "final_mechanism": "Apply bounded physical-identity cleanup before relevant storage writes, preserve contextual/current/protected identities, retain post-resolution and manual consumers, and verify actual inventory rather than attempted deletion.",
+      "status": "ready"
+    },
+    "stage5": {
+      "run_root": "U:\\usertest_backlog_component_validation\\runs\\stage5_maintenance_revised_replay_reassessment_20260715T013000Z",
+      "selection_path": "U:\\usertest_backlog_component_validation\\runs\\stage5_maintenance_revised_replay_reassessment_20260715T013000Z\\solution_selection.continued.json",
+      "selected_option_id": "option:pre-resolution-bounded-identity-cleanup-with-contextual-protection",
+      "outcome_contract_id": "stage5_outcome_contract:eccf6cc6541e9d6a3e502b5554c17a40a335c893ebd6ae5f278505e5ec97179f",
+      "status": "approved_for_planning",
+      "maximum_future_claim": "mitigated",
+      "post_change_evidence_status": "unverified"
+    },
+    "stage6": {
+      "authored_turns": 20,
+      "validator_finding_trajectory": [37, 8, 2, 3, 4],
+      "trajectory_stop_assessment": "wrongly_stopped_on_cost",
+      "repeated_drift_example": "exact this/the wording drift",
+      "first_mechanically_green": {
+        "run_root": "U:\\usertest_backlog_component_validation\\runs\\stage6_maintenance_image_final_same_planner_20260715T124500Z",
+        "authenticated_turns": 4,
+        "model_seconds": 644.693,
+        "deterministic_status": "ready_for_ticket",
+        "independent_material_defects": 3,
+        "actual_status": "depth_correction_required"
+      },
+      "final": {
+        "run_root": "U:\\usertest_backlog_component_validation\\runs\\stage6_maintenance_image_decision_complete_20260715T123600Z",
+        "plan_path": "U:\\usertest_backlog_component_validation\\runs\\stage6_maintenance_image_decision_complete_20260715T123600Z\\change_plans.json",
+        "plan_sha256": "51c821cd9cf685d7f7347386878a62c360c8af94c717d51266b6ccbcabdafe13",
+        "same_planner_turns": 2,
+        "model_seconds": 290.026,
+        "material_defect_trajectory": [1, 0],
+        "independent_audit_material_defects": 0,
+        "status": "ready_for_supervised_implementation"
+      },
+      "validator_suite": {
+        "affected_passed": 144,
+        "affected_failed": 0,
+        "broader_passed": 208,
+        "broader_failed": 2,
+        "broader_failure_classification": "unrelated pre-existing Stage 4 fixture failures; the broader run was not green"
+      }
+    }
+  },
+  "export_and_materialization": {
+    "initial_failure": {
+      "error": "outcome_role_selected_positive_contract_ids_invalid",
+      "writes_performed": 0,
+      "root_cause": "The production exporter and runtime outcome-role validator rejected a valid server-bound fail-first replay selected through the Stage 5 outcome contract because they incorrectly required a Stage 3 positive-outcome-contract ID.",
+      "classification": "contract parity defect, not a plan-quality defect"
+    },
+    "correction_verification": {
+      "focused_tests_passed": 6,
+      "focused_tests_failed": 0,
+      "ruff_passed": true,
+      "model_rerun_required": false
+    },
+    "result": {
+      "implementation_tickets_exported": 1,
+      "research_tickets_exported": 0,
+      "existing_tickets_moved_or_removed": false,
+      "docker_used": false,
+      "export_path": "U:\\usertest_backlog_component_validation\\runs\\maintenance_ticket_export_20260715T150000Z\\maintenance_image.tickets_export.json",
+      "export_sha256": "423e8af26029e122306e0d7fab46471419f5bb08a94b31e9840307b15c8a4aa6",
+      "materialization_receipt_path": "U:\\usertest_backlog_component_validation\\runs\\maintenance_ticket_export_20260715T150000Z\\materialization_receipt.json",
+      "materialization_receipt_sha256": "1d49220de6e346f255e1cd79920d003fa33f5b8fecf3ad72c748750203829393",
+      "ticket_path": "I:\\code\\usertest\\.agents\\plans\\2 - ready\\20260715_03f0d43eb78e28fa_Bound-ordinary-maintenance-image-retention-before-storage-writes.md",
+      "ticket_raw_sha256": "dfe83820fc6c95dd227ea8ca9959b0dbc56c2a16151e861e7423a7cdc012bab8",
+      "ticket_canonical_sha256": "349351ebc6d4afe69369575eee77c7fbc1a93e6727078c04a36bfda0fb90be1f",
+      "verification_contract_sha256": "f3e3a62c1a2bd426ed81745e2dccc6c3414f1503ed2a2c24b8cc764112cb5c98",
+      "target_contract_sha256": "98ff1d11ffeea4f537cde3cd9b89cd5d6b393fbe6a9c61ea345cbe0f599278fb"
+    }
+  },
+  "implementation_and_pr": {
+    "finalized_through_run": "20260715T171250Z/codex/0",
+    "run_root": "U:\\usertest_backlog_component_validation\\runs\\usertest_implement\\usertest_20260715T143437Z_codex_0",
+    "workspace": "U:\\usertest_backlog_component_validation\\runs\\usertest_implement\\_workspaces\\usertest_20260715T143437Z_codex_0",
+    "author_session_id": "019f6635-03a2-7f60-acab-3d97e277332f",
+    "model": "gpt-5.6-terra",
+    "subscription_provenance_verified": true,
+    "api_fallback_allowed": false,
+    "model_turns": 14,
+    "attempt_wall_seconds_including_verification": 4987.566,
+    "agent_exec_wall_seconds": 3380.942,
+    "verification_passed_turns": 8,
+    "verification_failed_turns": 6,
+    "initial_false_read_only_no_code_turns": 3,
+    "multi_attempt_runs_that_self_healed_real_test_failures": 3,
+    "controller_invocations": {
+      "scoped_wrapper_invocations": 10,
+      "model_bearing_invocations": 9,
+      "retained_pre_model_failures": 1,
+      "retained_failure": "branch pathspec failure",
+      "outside_scoped_run_corpus": [
+        "missing monorepo PYTHONPATH/import context after reboot",
+        "PowerShell supervisor-argument quoting failure before model dispatch"
+      ],
+      "outside_corpus_evidence": "C:\\Users\\jason\\.codex\\sessions\\2026\\07\\09\\rollout-2026-07-09T16-48-05-019f48a3-2bef-7132-a25b-cdb32dfd0fbc.jsonl",
+      "counting_note": "The two supervisor-transcript launch mistakes are not added to the retained wrapper-run failure count."
+    },
+    "commits": [
+      "e459284cd85c6103ed9c7b1ea3ef88f97c954afa",
+      "3d6f70d08b901889a600eb05dbfcbea641d946b7",
+      "def9e338781a21c1722ca848b2b49957a28286fa",
+      "8eefb5d59745ecd31f2fa1fe061c43cb979857c6",
+      "7965bdb03c33444c0efdeeadea9d3b51c9714f55",
+      "9e680a69b3e5e74dffd6e5a0d65767c5c954a364",
+      "b0a4c225e83497a4c7b2219721ac0f13ddc693c3",
+      "e3f988b8e391ad020e746d3bc3937fca53cf6363"
+    ],
+    "diff": {
+      "files": 11,
+      "insertions": 1812,
+      "deletions": 66
+    },
+    "behavior": [
+      "Enforce keep_local_count as an absolute budget for ordinary managed physical image identities.",
+      "Group local and published aliases by physical identity.",
+      "Preserve configured, current, running, and otherwise protected identities.",
+      "Run cleanup before the batch scratch build and direct resolver pull/build storage writes.",
+      "Preserve distinct prewrite, post-resolution, and manual cleanup results.",
+      "Report actual post-cleanup inventory and retention blockers."
+    ],
+    "finalized_verification": {
+      "unchanged_fail_first_replay": "passed; 5 ordinary identities retained at configured count 5",
+      "runner_core_tests_passed": 435,
+      "runner_core_tests_skipped": 1,
+      "affected_usertest_implement_tests_passed": 10,
+      "isolated_dind_tests_collected": 3,
+      "isolated_dind_test_bodies_executed": 0,
+      "verification_timeout_seconds": 86400,
+      "result_reuse": false
+    },
+    "supervisor_guidance": {
+      "named_guidance_phases": 9,
+      "byte_unique_blocks_including_in_flight_g8": 21,
+      "cumulative_block_deliveries": 97,
+      "repeated_block_deliveries": 76,
+      "manually_segmented_source_clauses": 178,
+      "weighted_clause_deliveries": 832,
+      "weighted_clause_repeats": 654,
+      "requirements_by_phase": {
+        "S0": 6,
+        "G1": 5,
+        "G2": 35,
+        "G3": 30,
+        "G4": 28,
+        "G5": 34,
+        "G6": 18,
+        "G7": 9,
+        "G8": 13
+      },
+      "cumulative_text_chars": [1066, 13316, 14507],
+      "final_to_initial_text_multiple": 13.608,
+      "interpretation": "The 178 count is a subjective manual segmentation of source clauses, not a delivery count and not a defect count. The strongest mechanical metric is 21 byte-unique blocks delivered 97 times; 76 block deliveries were repeats. Weighting the manual clauses by cumulative prompt replay yields 832 clause-deliveries, 654 repeats."
+    },
+    "guidance_quality_findings": {
+      "productive": [
+        "Same-session correction preserved partial progress rather than discarding every imperfect result.",
+        "Three multi-attempt runs corrected real test failures without restarting implementation.",
+        "G7 corrected the package-boundary mistake by relocating the integration test to the application package.",
+        "Long verification used an 86400-second allowance and did not reuse stale results."
+      ],
+      "excessive_or_wrong": [
+        "Three turns spent 1078.183 seconds of attempt wall time, including 1047.811 seconds of agent execution, on an isolated-DIND ratchet whose test bodies were never executed.",
+        "That ratchet produced 1010 gross insertions and 354 gross deletions across its turns; gross churn is not the final PR diff.",
+        "The Stage 6 plan selected runner_core for an integration test that needed usertest_implement; G5 and G6 then locked that path in with modify-only constraints, directly causing the PR CI ModuleNotFoundError.",
+        "Focused verification across five later commits did not expose a metadata assertion; the eventual complete runner_core suite did and the same author corrected it.",
+        "The first three implementation turns repeated a false read-only diagnosis and produced no code."
+      ],
+      "isolated_dind_turns": 3,
+      "isolated_dind_turn_share_percent": 21.429,
+      "isolated_dind_attempt_wall_seconds": 1078.183,
+      "isolated_dind_attempt_wall_share_percent": 21.617,
+      "isolated_dind_agent_exec_seconds": 1047.811,
+      "isolated_dind_agent_exec_share_percent": 30.992
+    },
+    "pull_request": {
+      "number": 213,
+      "url": "https://github.com/jcmullwh/usertest/pull/213",
+      "state_at_snapshot": "OPEN",
+      "draft": true,
+      "base_branch": "codex/backlog-depth-remediation",
+      "base_revision": "450a7332b1bf0b2e05fe1fc9dd7612e8998e59a9",
+      "head_branch": "backlog/03f0d43eb78e",
+      "head_revision_at_final_snapshot": "e3f988b8e391ad020e746d3bc3937fca53cf6363",
+      "commit_count": 8,
+      "changed_files": 11,
+      "additions": 1812,
+      "deletions": 66,
+      "mergeable_at_snapshot": true,
+      "base_ci_unique_failing_packages": [
+        "agent_adapters",
+        "backlog_miner",
+        "usertest_backlog"
+      ],
+      "maintenance_specific_ci_findings": [
+        "The initial isolated-DIND test was placed under runner_core while importing usertest_implement, causing ModuleNotFoundError; fixed in b0a4c225 by relocation.",
+        "The full runner_core suite later exposed a metadata assertion that focused checks had missed; corrected in e3f988b8."
+      ],
+      "final_pr_event_ci": {
+        "run_id": 29437882891,
+        "head_revision": "e3f988b8e391ad020e746d3bc3937fca53cf6363",
+        "runner_core_project": "passed",
+        "runner_core_smokes": "passed",
+        "maintenance_image_validate": "passed",
+        "only_failed_project_jobs": ["agent_adapters", "backlog_miner", "usertest_backlog"],
+        "failed_jobs_reproduced_on_base": true
+      }
+    }
+  },
+  "throughput_snapshot": {
+    "case_denominator": 1,
+    "evidence_supported_real_cases": {
+      "numerator": 1,
+      "denominator": 1,
+      "percent": 100.0,
+      "limitation": "Retrospective one-case audit; not a precision estimate."
+    },
+    "live_stage1_mined_cases_demonstrated": {
+      "numerator": 0,
+      "denominator": 1,
+      "percent": 0.0
+    },
+    "causally_sufficient_research": {
+      "numerator": 1,
+      "denominator": 1,
+      "percent": 100.0
+    },
+    "semantically_ready_final_plans": {
+      "numerator": 1,
+      "denominator": 1,
+      "percent": 100.0
+    },
+    "materialized_implementation_tickets": {
+      "numerator": 1,
+      "denominator": 1,
+      "percent": 100.0
+    },
+    "draft_pull_requests": {
+      "numerator": 1,
+      "denominator": 1,
+      "percent": 100.0
+    },
+    "focused_code_test_mitigations": {
+      "numerator": 1,
+      "denominator": 1,
+      "percent": 100.0,
+      "limitation": "Complete non-Docker affected-package verification passed; live Docker behavior remains unverified."
+    },
+    "live_verified_cases": {
+      "numerator": 0,
+      "denominator": 1,
+      "percent": 0.0
+    },
+    "durable_outcome_records": {
+      "numerator": 0,
+      "denominator": 1,
+      "percent": 0.0
+    },
+    "qualification_streak": {
+      "numerator": 0,
+      "denominator": 2,
+      "percent": 0.0,
+      "automated_export_enabled": false
+    }
+  },
+  "current_outcome_boundary": {
+    "supported": [
+      "implemented",
+      "tests_verified at the complete non-Docker affected-package boundary",
+      "mitigated"
+    ],
+    "not_supported": [
+      "live_verified",
+      "resolved",
+      "recurrence-free",
+      "fully autonomous Stage 1-to-outcome operation"
+    ],
+    "docker_live_proofs": 0,
+    "recurrence_results": 0,
+    "durable_outcome_records": 0,
+    "ticket_location": "2 - ready",
+    "ticket_moved_or_removed": false,
+    "pr_merged": false,
+    "pr_adoption": {
+      "status": "awaiting_review",
+      "run_dir": "U:\\usertest_backlog_component_validation\\runs\\usertest_implement\\_handoff_adoptions\\03f0d43eb78e28fa\\20260715T180528368226Z",
+      "exact_plan_commands_passed": 2,
+      "timeout_seconds": 86400.0,
+      "model_invoked": false,
+      "ticket_mutated": false,
+      "ticket_bucket_preserved": "2 - ready"
+    }
+  },
+  "finalized_code_test_snapshot": {
+    "status": "FINALIZED_CODE_TEST_SNAPSHOT",
+    "snapshot_date": "2026-07-15",
+    "run": "U:\\usertest_backlog_component_validation\\runs\\usertest_implement\\usertest_20260715T143437Z_codex_0\\20260715T171250Z\\codex\\0",
+    "same_author_session": "019f6635-03a2-7f60-acab-3d97e277332f",
+    "attempt_1": "Corrected top-level prewrite versus nested post-resolution metadata; the complete runner suite then exposed two USERTEST_PYTHON test-isolation failures.",
+    "attempt_2": "Removed inherited USERTEST_PYTHON from two tests; all configured non-Docker verification passed.",
+    "final_pr_head": "e3f988b8e391ad020e746d3bc3937fca53cf6363",
+    "pr_event_ci_run": 29437882891,
+    "maintenance_specific_ci_failures": 0,
+    "bounded_disposition": ["implemented", "tests_verified", "mitigated"],
+    "unsupported_dispositions": ["live_verified", "resolved", "recurrence_free"]
+  },
+  "evidence_index": [
+    {
+      "id": "canonical_stage3_dossier",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\stage3_maintenance_image_final_terra_20260714T005030Z\\research_dossier.json"
+    },
+    {
+      "id": "authenticated_stage2",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\stage2_maintenance_image_current_terra_20260715T144500Z\\prioritized_problems.json"
+    },
+    {
+      "id": "final_stage4_options",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\stage4_maintenance_replay_contract_correction_20260715T012500Z\\solution_options.json"
+    },
+    {
+      "id": "final_stage5_selection",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\stage5_maintenance_revised_replay_reassessment_20260715T013000Z\\solution_selection.continued.json"
+    },
+    {
+      "id": "final_stage6_plan",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\stage6_maintenance_image_decision_complete_20260715T123600Z\\change_plans.json",
+      "sha256": "51c821cd9cf685d7f7347386878a62c360c8af94c717d51266b6ccbcabdafe13"
+    },
+    {
+      "id": "ticket_export",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\maintenance_ticket_export_20260715T150000Z\\maintenance_image.tickets_export.json",
+      "sha256": "423e8af26029e122306e0d7fab46471419f5bb08a94b31e9840307b15c8a4aa6"
+    },
+    {
+      "id": "materialization_receipt",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\maintenance_ticket_export_20260715T150000Z\\materialization_receipt.json",
+      "sha256": "1d49220de6e346f255e1cd79920d003fa33f5b8fecf3ad72c748750203829393"
+    },
+    {
+      "id": "local_ticket",
+      "path": "I:\\code\\usertest\\.agents\\plans\\2 - ready\\20260715_03f0d43eb78e28fa_Bound-ordinary-maintenance-image-retention-before-storage-writes.md"
+    },
+    {
+      "id": "implementation_finalized_run",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\usertest_implement\\usertest_20260715T143437Z_codex_0\\20260715T171250Z\\codex\\0"
+    },
+    {
+      "id": "draft_pr",
+      "url": "https://github.com/jcmullwh/usertest/pull/213"
+    },
+    {
+      "id": "pr_adoption_receipt",
+      "path": "U:\\usertest_backlog_component_validation\\runs\\usertest_implement\\_handoff_adoptions\\03f0d43eb78e28fa\\20260715T180528368226Z",
+      "verification_sha256": "f9b7ab29f825f7cb822955583e2dc0815f1d5a05d023ca83085897073f5cd059",
+      "verification_receipt_sha256": "87293f10c563e0ec694e322b6928bbea90b7f2520c5584f456fae2f0ac818c0b",
+      "adoption_ref_sha256": "47396fffab238de99ae0aea560e9fcca92c62eff366969bd7fe24fc87e84822f"
+    },
+    {
+      "id": "base_ci_run",
+      "url": "https://github.com/jcmullwh/usertest/actions/runs/29433871787"
+    },
+    {
+      "id": "final_head_pr_event_ci_run",
+      "url": "https://github.com/jcmullwh/usertest/actions/runs/29437882891"
+    }
+  ]
+}

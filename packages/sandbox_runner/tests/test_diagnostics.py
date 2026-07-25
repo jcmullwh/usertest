@@ -20,7 +20,11 @@ def test_probe_commands_in_container_parses_stdout(monkeypatch: Any) -> None:
 
     def fake_run(argv: list[str], **_kwargs: Any) -> _Proc:
         assert argv[: len(prefix)] == prefix
-        return _Proc(returncode=0, stdout="git=1\npython=0\nuid=1000\n", stderr="warn\n")
+        return _Proc(
+            returncode=0,
+            stdout="shell_probe=ok\ngit=1\npython=0\nuid=1000\n",
+            stderr="warn\n",
+        )
 
     monkeypatch.setattr(diagnostics.subprocess, "run", fake_run)
 
@@ -32,6 +36,12 @@ def test_probe_commands_in_container_parses_stdout(monkeypatch: Any) -> None:
     assert meta["exit_code"] == 0
     assert meta["stderr"] == "warn"
     assert meta["uid"] == 1000
+    assert meta["shell_probe"] == {
+        "kind": "backend_shell_payload",
+        "exit_code": 0,
+        "stdout": "shell_probe=ok",
+        "stderr": "warn",
+    }
 
 
 def test_probe_commands_in_container_is_best_effort(monkeypatch: Any) -> None:

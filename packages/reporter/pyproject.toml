@@ -1,6 +1,6 @@
 [project]
 name = "reporter"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python library (PDM)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -45,6 +45,9 @@ python_version = "3.11"
 strict = true
 warn_unused_configs = true
 
+[tool.deptry]
+known_first_party = ["reporter"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -58,4 +61,3 @@ select = [
   "UP",
 ]
 ignore = ["UP017"]
-

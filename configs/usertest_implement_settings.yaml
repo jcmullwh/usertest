@@ -1,0 +1,63 @@
+version: 1
+default_profile: default
+profiles:
+  default:
+    run_common:
+      repo: null
+      ref: null
+      agent: codex
+      model: null
+      policy: write
+      persona_id: thoughtful_maintainer
+      mission_id: implement_maintenance_backlog_ticket_v1
+      seed: 0
+      agent_config_override: []
+      keep_workspace: false
+      exec_backend: docker
+      exec_use_host_agent_login: true
+      exec_use_target_sandbox_cli_install: false
+      exec_docker_profile: null
+      exec_keep_container: false
+      exec_cache: warm
+      exec_cache_dir: null
+      maintenance_venv_cache: true
+      dry_run: false
+      verification_profile: default_handoff
+      verification_commands: []
+      verification_timeout_seconds: 10800
+      skip_verify: false
+      verify_reuse: auto
+      implementation_review_agent: claude
+      implementation_review_model: null
+      ci_timeout_seconds: null
+      skip_ci_wait: false
+      draft_pr_on_ci_failure: true
+      commit: true
+      branch: null
+      commit_message: null
+      git_user_name: null
+      git_user_email: null
+      push: true
+      remote_name: origin
+      remote_url: null
+      force_push: false
+      base_branch: dev
+      pr: true
+      move_on_start: true
+      move_on_commit: true
+      ledger: .agents/state/backlog_implement_actions.yaml
+    run: {}
+    tickets_run_next:
+      bucket_priority: []
+      kind_priority:
+        - implementation
+      refresh_backlog: true
+      backlog_target: null
+      backlog_runs_dir: null
+      backlog_agent: null
+      backlog_model: null
+      review_agent: null
+      review_model: null
+      commit: true
+      push: true
+      pr: true

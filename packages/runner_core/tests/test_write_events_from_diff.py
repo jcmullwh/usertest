@@ -11,6 +11,47 @@ from normalized_events import iter_events_jsonl
 from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
 
 
+def _install_diff_capture_mission(target_repo: Path) -> str:
+    usertest_dir = target_repo / ".usertest"
+    missions_dir = usertest_dir / "missions"
+    missions_dir.mkdir(parents=True, exist_ok=True)
+
+    mission_id = "test_diff_capture_without_shell"
+    (usertest_dir / "catalog.yaml").write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "missions_dirs:",
+                "  - .usertest/missions",
+                "defaults:",
+                f"  mission_id: {mission_id}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (missions_dir / f"{mission_id}.mission.md").write_text(
+        "\n".join(
+            [
+                "---",
+                f"id: {mission_id}",
+                "name: Test Diff Capture Without Shell",
+                "extends: null",
+                "execution_mode: single_pass_inline_report",
+                "prompt_template: default_inline_report.prompt.md",
+                "report_schema: task_run_evidence_v1.schema.json",
+                "requires_shell: false",
+                "requires_edits: true",
+                "---",
+                "Mission used by write-event diff capture tests.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return mission_id
+
+
 def _make_dummy_codex_binary_that_edits(tmp_path: Path) -> str:
     script = tmp_path / "dummy_codex_edit.py"
     script.write_text(
@@ -47,19 +88,46 @@ def _make_dummy_codex_binary_that_edits(tmp_path: Path) -> str:
                 "",
                 "    report = {",
                 "        'schema_version': 1,",
-                "        'persona': {'name': 'Evaluator'},",
-                "        'mission': 'Assess fit quickly and safely.',",
-                "        'minimal_mental_model': {",
-                "            'summary': 'dummy',",
-                "            'entry_points': ['README.md'],",
+                "        'kind': 'task_run_v1',",
+                "        'status': 'success',",
+                "        'goal': 'Verify edits appear in the run artifacts.',",
+                "        'summary': 'Edited README.md and captured the result.',",
+                "        'representative_workflow': {",
+                "            'entry_point': 'README.md',",
+                "            'workflow': 'Run the tool and inspect the changed file.',",
+                "            'why_representative': 'This test exercises a real write path.',",
+                "            'user_visible_result': 'README.md includes the appended text.',",
                 "        },",
-                "        'confidence_signals': {'found': ['ok'], 'missing': ['ok']},",
-                "        'confusion_points': [],",
-                "        'adoption_decision': {",
-                "            'recommendation': 'investigate',",
-                "            'rationale': 'ok',",
-                "        },",
-                "        'suggested_changes': [],",
+                "        'steps': [",
+                "            {",
+                "                'name': 'Edit README',",
+                "                'attempts': [",
+                "                    {",
+                "                        'action': 'append changed to README.md',",
+                "                        'result': 'success',",
+                "                        'evidence': 'README.md was updated in the workspace',",
+                "                    }",
+                "                ],",
+                "                'outcome': 'success',",
+                "            }",
+                "        ],",
+                "        'outputs': [",
+                "            {",
+                "                'label': 'updated-readme',",
+                "                'path': 'README.md',",
+                "                'description': 'README.md after the tool edit.',",
+                "            }",
+                "        ],",
+                "        'verification': [",
+                "            {",
+                "                'check': 'Confirm README was edited',",
+                "                'result': 'README.md contains the appended marker',",
+                "                'evidence': 'README.md',",
+                "            }",
+                "        ],",
+                "        'next_actions': [",
+                "            'Inspect diff_numstat.json for captured write evidence.',",
+                "        ],",
                 "    }",
                 "    if out_path is not None:",
                 "        Path(out_path).write_text(json.dumps(report) + '\\n', encoding='utf-8')",
@@ -106,6 +174,7 @@ def test_allow_edits_appends_write_events_from_diff(tmp_path: Path) -> None:
     target.mkdir()
     (target / "README.md").write_text("# hi\n", encoding="utf-8")
     (target / "USERS.md").write_text("# Users\n", encoding="utf-8")
+    mission_id = _install_diff_capture_mission(target)
 
     dummy_binary = _make_dummy_codex_binary_that_edits(tmp_path)
     cfg = RunnerConfig(
@@ -121,6 +190,8 @@ def test_allow_edits_appends_write_events_from_diff(tmp_path: Path) -> None:
             repo=str(target),
             agent="codex",
             policy="write",
+            mission_id=mission_id,
+            exec_backend="local",
         ),
     )
 

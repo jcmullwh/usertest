@@ -33,7 +33,7 @@ def test_parser_smoke_backlog_commands() -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--repo", "C:\\tmp\\x"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["batch", "--targets", "configs\\targets.yaml"])
+        parser.parse_args(["batch", "--targets", "configs/targets.yaml"])
     with pytest.raises(SystemExit):
         parser.parse_args(["matrix", "plan", "--spec", "spec.yaml"])
     with pytest.raises(SystemExit):

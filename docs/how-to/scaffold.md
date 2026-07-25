@@ -16,11 +16,18 @@ For the full reference (generators, trust model, vendoring), see `tools/scaffold
 
 ## Validate your environment
 
-```bash
-python tools/scaffold/scaffold.py doctor
-```
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
+- **macOS / Linux:** `bash ./scripts/doctor.sh`
+- **Direct (any OS, advanced):** `python tools/scaffold/scaffold.py doctor`
 
-This checks the manifest and verifies required tools for recorded projects.
+Prefer the wrappers for first-use validation because they resolve a usable Python before invoking
+scaffold. This checks Python + temp directory health, reports whether `python -m pip` works, and
+checks required tools for recorded projects.
+If you want doctor to fail when `pip` is missing, you can run:
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1 -RequirePip`
+- **macOS / Linux:** `bash ./scripts/doctor.sh --require-pip`
+- **Direct (any OS, advanced):** `python tools/scaffold/scaffold.py doctor --require-pip`
 
 ---
 
@@ -64,10 +71,16 @@ Run a task across all projects (skipping those without that task):
 python tools/scaffold/scaffold.py run test --all --skip-missing
 ```
 
+For first-use `lint`/`test` runs, scaffold also applies bootstrap preflight automatically:
+
+- installs missing host prerequisites from `requirements-dev.txt` (for example `pdm`, `pytest`, `ruff`)
+- injects monorepo `src/` directories into `PYTHONPATH` for task execution
+
 ---
 
 ## Common pitfalls
 
 - **The app `usertest` is project id `cli`** (see `tools/scaffold/monorepo.toml`).
+- If `scaffold run lint` fails with a message about missing `ruff` in a PDM project env, run installs first (for example: `python tools/scaffold/scaffold.py run install --all`).
 - If you add a project but want to defer installs, use `--no-install`.
 - Some generators require external tools (Cookiecutter, Node, Terraform, …).

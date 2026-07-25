@@ -1,0 +1,90 @@
+﻿version: 1
+defaults:
+  # Code/config/venvs come from the clean CLI --repo-root. Historical runs,
+  # local queues, and ignored lifecycle ledgers live under this explicit owner.
+  owner_root: I:/code/usertest
+  repo_input: I:/code/usertest
+  # Resolved after a fresh fetch and retained as an exact commit for the batch
+  # wave. Every generated plan target revision must equal this pinned value.
+  wave_base_ref: origin/dev
+  run_settings_path: configs/usertest_implement_settings.yaml
+  run_settings_profile: default
+  require_clean_git: true
+  require_local_green: true
+  require_ci_green_for_base: true
+  # A successful complete CI run on the exact clean immutable head covers the
+  # same project lint/test matrix and avoids repeating it on every admission.
+  reuse_successful_ci_for_local_green: true
+  halt_on_red_pr: true
+  infra_retry_limit: 1
+  registry_retry_limit: 1
+  max_phase_cycles: 20
+  conflict_strategy: execution_domain
+  worker_roster:
+    - agent: codex
+      model: gpt-5.5
+    - agent: claude
+    - agent: gemini
+phases:
+  - name: blocking_high_usertest_implement
+    sources:
+      - name: usertest_implement
+        runs_dir: runs/usertest_implement
+        target: usertest
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+    severities: [blocker, high]
+  - name: blocking_high_all
+    sources:
+      - name: usertest
+        runs_dir: runs/usertest
+        target: usertest
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+      - name: usertest_backlog
+        runs_dir: runs/usertest_backlog
+        target: usertest_backlog
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+      - name: usertest_implement
+        runs_dir: runs/usertest_implement
+        target: usertest
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+    severities: [blocker, high]
+  - name: medium_all
+    sources:
+      - name: usertest
+        runs_dir: runs/usertest
+        target: usertest
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+      - name: usertest_backlog
+        runs_dir: runs/usertest_backlog
+        target: usertest_backlog
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+      - name: usertest_implement
+        runs_dir: runs/usertest_implement
+        target: usertest
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+    severities: [medium]
+  - name: low_all
+    sources:
+      - name: usertest
+        runs_dir: runs/usertest
+        target: usertest
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+      - name: usertest_backlog
+        runs_dir: runs/usertest_backlog
+        target: usertest_backlog
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+      - name: usertest_implement
+        runs_dir: runs/usertest_implement
+        target: usertest
+        breadth_profile: internal_maintenance
+        research_ref: origin/dev
+    severities: [low]

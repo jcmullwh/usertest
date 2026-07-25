@@ -1,10 +1,11 @@
 [project]
 name = "backlog_repo"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python library (PDM)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "run_artifacts",
   "pyyaml>=6.0.2",
 ]
 
@@ -25,6 +26,7 @@ test = "python -m pytest -q"
 lint = "python -m ruff check ."
 [tool.pdm.dev-dependencies]
 dev = [
+  "-e file:///${PROJECT_ROOT}/../run_artifacts#egg=run_artifacts",
   "deptry>=0.20.0",
   "mypy>=1.8.0",
   "pytest>=8.0.0",
@@ -43,6 +45,7 @@ warn_unused_configs = true
 [tool.deptry]
 # Drop-in snippets are transplantable scaffolding and should not affect dependency linting.
 extend_exclude = ["^\\.agents/dropins/"]
+known_first_party = ["backlog_repo", "run_artifacts"]
 
 [tool.ruff]
 target-version = "py311"
@@ -57,4 +60,3 @@ select = [
   "UP",
 ]
 ignore = ["UP017"]
-

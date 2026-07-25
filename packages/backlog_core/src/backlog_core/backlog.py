@@ -4,12 +4,17 @@ import json
 import os
 import re
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from hashlib import sha256
 from json import JSONDecoder
 from pathlib import Path
 from typing import Any
 
 from run_artifacts.capture import CaptureResult, TextCapturePolicy, capture_text_artifact
+from run_artifacts.history import MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH
+from run_artifacts.lifecycle import classify_history_record_lifecycle
+from run_artifacts.path_normalization import normalize_agent_path
 from run_artifacts.run_failure_event import (
     classify_failure_kind,
     classify_known_stderr_warnings,
@@ -35,7 +40,58 @@ from triage_engine import (
 )
 from triage_engine.text import extract_path_anchors_from_chunks, tokenize
 
+from backlog_core.case_lineage import (
+    apply_atom_disposition_decision,
+    record_lineage_context,
+    validate_atom_lineage,
+)
+
 _SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "blocker": 3}
+
+_BACKLOG_EXPORT_PATH_LIKE_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/])?[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+){1,}"
+)
+_BACKLOG_EXPORT_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _ticket_export_anchors(ticket: dict[str, Any]) -> set[str]:
+    chunks: list[str] = []
+    for key in ("title", "problem", "user_impact", "proposed_fix"):
+        value = _coerce_string(ticket.get(key))
+        if value:
+            chunks.append(value)
+    chunks.extend(_coerce_string_list(ticket.get("investigation_steps")))
+
+    anchors: set[str] = set()
+    for chunk in chunks:
+        for match in _BACKLOG_EXPORT_PATH_LIKE_RE.findall(chunk):
+            anchors.add(match.lower().replace("\\", "/"))
+    return anchors
+
+
+def _ticket_export_fingerprint(ticket: dict[str, Any]) -> str:
+    title = _coerce_string(ticket.get("title")) or ""
+    title_tokens = sorted(set(_BACKLOG_EXPORT_TOKEN_RE.findall(title.lower())))
+    anchors = sorted(_ticket_export_anchors(ticket))
+
+    change_surface_raw = ticket.get("change_surface")
+    change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
+    kinds = sorted(set(_coerce_string_list(change_surface.get("kinds"))))
+
+    owner = (
+        _coerce_string(ticket.get("suggested_owner"))
+        or _coerce_string(ticket.get("component"))
+        or "unknown"
+    )
+
+    payload = {
+        "title_tokens": title_tokens[:24],
+        "anchors": anchors[:24],
+        "kinds": kinds[:24],
+        "owner": owner,
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return sha256(blob).hexdigest()[:16]
 
 # Heuristic trust weights by evidence kind.
 #
@@ -45,13 +101,36 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "run_failure_event": 1.00,
     "error_json": 0.95,
     "report_validation_error": 0.90,
+    "token_monitoring_signal": 0.80,
+    "token_monitoring_error": 0.75,
+    "maintenance_image_cleanup": 0.90,
+    "maintenance_image_cleanup_artifact_error": 0.80,
     "agent_stderr_artifact": 0.85,
     "capability_warning_artifact": 0.20,
+    "capability_notice_artifact": 0.20,
     "agent_last_message_artifact": 0.75,
     "confusion_point": 0.70,
+    "report_outcome": 0.90,
+    "task_step_observation": 0.80,
+    "task_attempt_observation": 0.80,
+    "verification_observation": 0.85,
+    "boundary_observation": 0.75,
+    "batch_result_failure": 0.90,
     "suggested_change": 0.65,
     "confidence_missing": 0.45,
 }
+
+# Files consulted directly by ``extract_backlog_atoms`` in addition to the
+# structured record returned by ``iter_report_history(embed="none")``.  Qualification
+# source custody imports this declaration so adding a new direct run-artifact reader
+# cannot require a second, drifting whitelist.
+BACKLOG_ATOM_EXTRACTION_RUN_ARTIFACT_RELATIVE_PATHS: tuple[str, ...] = (
+    "token_monitoring.json",
+    "token_monitoring_error.json",
+    "normalized_events.jsonl",
+    "agent_stderr.txt",
+    "agent_last_message.txt",
+)
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -92,8 +171,14 @@ def _default_capture_policy() -> TextCapturePolicy:
     )
 
 
-def _max_command_failure_atoms_per_run() -> int:
-    """Max number of command-failure atoms emitted per run (env override supported)."""
+def _max_command_failure_atoms_per_run() -> int | None:
+    """Return an explicit operator cap, or ``None`` to retain every failure.
+
+    Evidence capture used to discard all but ten failed commands by default.  Bounded
+    downstream mining jobs now provide the scale control, so default extraction must retain
+    the available evidence.  An operator may still set a positive environment limit; that
+    path emits an explicit truncation atom rather than silently claiming complete coverage.
+    """
 
     names = ("BACKLOG_MAX_COMMAND_FAILURE_ATOMS_PER_RUN", "BACKLOGmax_command_failure_atoms")
     for name in names:
@@ -101,10 +186,213 @@ def _max_command_failure_atoms_per_run() -> int:
         if raw is None:
             continue
         try:
-            return int(str(raw).strip())
+            parsed = int(str(raw).strip())
+            return parsed if parsed > 0 else None
         except ValueError:
             continue
-    return 10
+    return None
+
+
+def _command_head(command: str) -> str | None:
+    cleaned = command.strip()
+    if not cleaned:
+        return None
+    if cleaned[0] in {'"', "'"}:
+        quote = cleaned[0]
+        end = cleaned.find(quote, 1)
+        if end > 1:
+            return cleaned[1:end]
+    parts = cleaned.split()
+    return parts[0] if parts else None
+
+
+def _is_ripgrep_no_matches(*, command: str, exit_code: int) -> bool:
+    if exit_code != 1:
+        return False
+    head = _command_head(command)
+    if head is None:
+        return False
+    base = Path(head).name.lower()
+    return base in {"rg", "rg.exe"}
+
+
+def _command_failure_entry_identity(entry: dict[str, Any]) -> str | None:
+    command = _coerce_string(entry.get("command"))
+    exit_code = entry.get("exit_code")
+    if command is None or not isinstance(exit_code, int) or exit_code == 0:
+        return None
+
+    cwd = _coerce_string(entry.get("cwd"))
+    cwd_key = cwd.replace("\\", "/").lower() if cwd is not None else ""
+
+    # Prefer artifacts for identity when present because they encode per-failure paths.
+    artifact_key = ""
+    artifacts = entry.get("artifacts")
+    if isinstance(artifacts, dict) and artifacts:
+        try:
+            artifact_key = json.dumps(artifacts, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            artifact_key = ""
+    if not artifact_key:
+        excerpt = _coerce_string(entry.get("output_excerpt"))
+        artifact_key = excerpt or ""
+
+    return f"{exit_code}|{_normalize_dedupe_key(command)}|{cwd_key}|{artifact_key}"
+
+
+_COMMAND_FOLLOWUP_SAMPLE_LIMIT = 8
+_COMMAND_CONTEXT_TEXT_LIMIT = 2_000
+
+
+def _bounded_command_context_text(value: Any) -> str | None:
+    text = _coerce_string(value)
+    if text is None:
+        return None
+    return text[:_COMMAND_CONTEXT_TEXT_LIMIT]
+
+
+def _extract_run_commands_from_events(*, events_path: Path) -> list[dict[str, Any]]:
+    """Return a bounded-field command timeline from one normalized event stream."""
+
+    commands: list[dict[str, Any]] = []
+    try:
+        with events_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    not isinstance(event, dict)
+                    or _coerce_string(event.get("type")) != "run_command"
+                ):
+                    continue
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    continue
+                exit_code = data.get("exit_code")
+                if not isinstance(exit_code, int):
+                    continue
+                command = _coerce_string(data.get("command"))
+                if command is None:
+                    argv = data.get("argv")
+                    if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
+                        command = " ".join(argv)
+                if command is None:
+                    continue
+                commands.append(
+                    {
+                        "event_ordinal": len(commands) + 1,
+                        "timestamp_utc": _coerce_string(event.get("ts")),
+                        "command": command,
+                        "exit_code": exit_code,
+                        "cwd": _coerce_string(data.get("cwd")),
+                        "artifacts": data.get("failure_artifacts")
+                        if isinstance(data.get("failure_artifacts"), dict)
+                        else None,
+                        "output_excerpt": _coerce_string(data.get("output_excerpt")),
+                        "output_excerpt_truncated": data.get("output_excerpt_truncated") is True,
+                        "from_events": True,
+                    }
+                )
+    except OSError:
+        return []
+    return commands
+
+
+def _extract_failed_commands_from_events(
+    *,
+    events_path: Path,
+    max_items: int | None = None,
+) -> list[dict[str, Any]]:
+    failed_commands: list[dict[str, Any]] = []
+    for command_event in _extract_run_commands_from_events(events_path=events_path):
+        command = str(command_event["command"])
+        exit_code = int(command_event["exit_code"])
+        if exit_code == 0 or _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+            continue
+        failed_commands.append(command_event)
+        if max_items is not None and len(failed_commands) >= max_items:
+            break
+    return failed_commands
+
+
+def _same_run_command_context(
+    *,
+    failure: Mapping[str, Any],
+    run_commands: Sequence[dict[str, Any]],
+    claimed_event_ordinals: set[int],
+    lifecycle_status: str,
+    report: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Bind a failure to later same-run observations without declaring recovery."""
+
+    failure_command = _coerce_string(failure.get("command"))
+    failure_exit_code = failure.get("exit_code")
+    if failure_command is None or not isinstance(failure_exit_code, int):
+        return None
+
+    normalized_failure = _normalize_dedupe_key(failure_command)
+    failure_cwd = _coerce_string(failure.get("cwd"))
+    failure_cwd_key = failure_cwd.replace("\\", "/").casefold() if failure_cwd else None
+    matched_index: int | None = None
+    for index, command_event in enumerate(run_commands):
+        ordinal = command_event.get("event_ordinal")
+        if not isinstance(ordinal, int) or ordinal in claimed_event_ordinals:
+            continue
+        command = _coerce_string(command_event.get("command"))
+        if (
+            command is None
+            or command_event.get("exit_code") != failure_exit_code
+            or _normalize_dedupe_key(command) != normalized_failure
+        ):
+            continue
+        event_cwd = _coerce_string(command_event.get("cwd"))
+        event_cwd_key = event_cwd.replace("\\", "/").casefold() if event_cwd else None
+        if (
+            failure_cwd_key is not None
+            and event_cwd_key is not None
+            and failure_cwd_key != event_cwd_key
+        ):
+            continue
+        matched_index = index
+        claimed_event_ordinals.add(ordinal)
+        break
+    if matched_index is None:
+        return None
+
+    later = list(run_commands[matched_index + 1 :])
+    sampled = later[:_COMMAND_FOLLOWUP_SAMPLE_LIMIT]
+    projected_commands = []
+    for item in sampled:
+        projected = {
+            "event_ordinal": item.get("event_ordinal"),
+            "timestamp_utc": item.get("timestamp_utc"),
+            "command": _bounded_command_context_text(item.get("command")),
+            "exit_code": item.get("exit_code"),
+        }
+        output_excerpt = _bounded_command_context_text(item.get("output_excerpt"))
+        if output_excerpt is not None:
+            projected["output_excerpt"] = output_excerpt
+        projected_commands.append(projected)
+
+    report_status = _coerce_string(report.get("status")) if isinstance(report, Mapping) else None
+    report_kind = _coerce_string(report.get("kind")) if isinstance(report, Mapping) else None
+    return {
+        "source": "normalized_events.jsonl",
+        "failure_event_ordinal": run_commands[matched_index].get("event_ordinal"),
+        "run_command_count": len(run_commands),
+        "later_command_count": len(later),
+        "later_successful_command_count": sum(item.get("exit_code") == 0 for item in later),
+        "sampled_later_commands": projected_commands,
+        "sample_truncated": len(later) > len(sampled),
+        "run_lifecycle_status": lifecycle_status,
+        "report_status": report_status,
+        "report_kind": report_kind,
+    }
 
 
 def _safe_relpath(path: Path, root: Path) -> str:
@@ -248,6 +536,12 @@ def _infer_severity_hint(*, source: str, text: str, priority: str | None = None)
         return "high"
     if source == "capability_warning_artifact":
         return "low"
+    if source == "capability_notice_artifact":
+        return "low"
+    if source == "token_monitoring_signal":
+        return "medium"
+    if source == "token_monitoring_error":
+        return "high"
     if source == "confidence_missing":
         return "low"
     if source == "confusion_point":
@@ -283,8 +577,8 @@ def _severity_hint_from_report_issue_severity(raw: str | None) -> str:
     return "medium"
 
 
-def _iter_unique_capped_strings(value: Any, *, limit: int) -> list[str]:
-    if limit <= 0:
+def _iter_unique_capped_strings(value: Any, *, limit: int | None) -> list[str]:
+    if limit is not None and limit <= 0:
         return []
     raw_list: list[Any]
     if isinstance(value, str):
@@ -305,9 +599,335 @@ def _iter_unique_capped_strings(value: Any, *, limit: int) -> list[str]:
             continue
         seen.add(key)
         out.append(text)
-        if len(out) >= limit:
+        if limit is not None and len(out) >= limit:
             break
     return out
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _read_optional_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _token_monitoring_dimensions(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key in (
+        "total_tokens",
+        "input_tokens",
+        "cached_input_tokens",
+        "uncached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    ):
+        parsed = _coerce_int(value.get(key))
+        if parsed is not None:
+            out[key] = parsed
+    return out
+
+
+def _token_monitoring_signal_severity(dimensions: dict[str, int]) -> str:
+    input_tokens = int(dimensions.get("input_tokens", 0))
+    total_tokens = int(dimensions.get("total_tokens", 0))
+    if input_tokens >= 100_000 or total_tokens >= 150_000:
+        return "high"
+    if input_tokens >= 10_000 or total_tokens >= 15_000:
+        return "medium"
+    return "low"
+
+
+def _token_monitoring_signal_text(
+    *,
+    signal_id: str,
+    causal_mechanism: str,
+    dimensions: dict[str, int],
+    mitigation: str | None,
+) -> str:
+    pieces = [f"Token inefficiency signal {signal_id}: {causal_mechanism}"]
+    input_tokens = dimensions.get("input_tokens")
+    if input_tokens is not None:
+        pieces.append(f"input_tokens={input_tokens}")
+    if mitigation:
+        pieces.append(f"mitigation={mitigation}")
+    return "; ".join(pieces)
+
+
+def _load_token_monitoring_artifacts(record: dict[str, Any], run_dir: Path) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
+    monitoring = record.get("token_monitoring")
+    monitoring_obj = monitoring if isinstance(monitoring, dict) else None
+    if monitoring_obj is None:
+        monitoring_obj = _read_optional_json_object(run_dir / "token_monitoring.json")
+
+    monitoring_error = record.get("token_monitoring_error")
+    error_obj = monitoring_error if isinstance(monitoring_error, dict) else None
+    if error_obj is None:
+        error_obj = _read_optional_json_object(run_dir / "token_monitoring_error.json")
+
+    return monitoring_obj, error_obj
+
+
+def _maintenance_string_list_count(
+    payload: dict[str, Any],
+    key: str,
+    errors: list[str],
+) -> tuple[int | None, list[str] | None]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        errors.append(f"{key}_not_list")
+        return None, None
+    normalized = [
+        item.strip() for item in value if isinstance(item, str) and item.strip()
+    ]
+    if len(normalized) != len(value):
+        errors.append(f"{key}_contains_invalid_entry")
+        return None, None
+    return len(normalized), normalized
+
+
+def _maintenance_tag_identity(ref: str) -> str | None:
+    """Return the tag component used by the legacy two-repository alias contract."""
+
+    slash_index = ref.rfind("/")
+    colon_index = ref.rfind(":")
+    if colon_index <= slash_index or colon_index == len(ref) - 1:
+        return None
+    return ref[colon_index + 1 :]
+
+
+def _maintenance_cleanup_observation(
+    value: Any,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    errors: list[str] = []
+    if not isinstance(value, dict):
+        return None, ["artifact_root_not_object"]
+    if value.get("schema_version") != 1:
+        errors.append("schema_version_not_1")
+
+    cleanup_enabled = value.get("cleanup_enabled")
+    if not isinstance(cleanup_enabled, bool):
+        errors.append("cleanup_enabled_not_boolean")
+    dry_run = value.get("dry_run")
+    if not isinstance(dry_run, bool):
+        errors.append("dry_run_not_boolean")
+
+    repos_scanned_count, _ = _maintenance_string_list_count(
+        value, "repos_scanned", errors
+    )
+    kept_tag_count, kept_tags = _maintenance_string_list_count(
+        value, "kept_tags", errors
+    )
+    deleted_tag_count, _ = _maintenance_string_list_count(
+        value, "deleted_tags", errors
+    )
+    deleted_image_id_count, _ = _maintenance_string_list_count(
+        value, "deleted_image_ids", errors
+    )
+    error_count, _ = _maintenance_string_list_count(value, "errors", errors)
+
+    derived_tag_suffixes: set[str | None] | None = None
+    if kept_tags is not None:
+        derived_tag_suffixes = {_maintenance_tag_identity(ref) for ref in kept_tags}
+        if None in derived_tag_suffixes:
+            errors.append("kept_tag_identity_unresolved")
+
+    kept_image_id_count: int | None = None
+    if "kept_image_ids" in value:
+        _, retained_identity_list = _maintenance_string_list_count(
+            value, "kept_image_ids", errors
+        )
+        if retained_identity_list is not None:
+            kept_image_id_count = len(set(retained_identity_list))
+
+    if errors:
+        return None, errors
+    assert isinstance(cleanup_enabled, bool)
+    assert isinstance(dry_run, bool)
+    assert repos_scanned_count is not None
+    assert kept_tag_count is not None
+    assert deleted_tag_count is not None
+    assert deleted_image_id_count is not None
+    assert error_count is not None
+    assert derived_tag_suffixes is not None
+    assert None not in derived_tag_suffixes
+    observation: dict[str, Any] = {
+        "cleanup_enabled": cleanup_enabled,
+        "dry_run": dry_run,
+        "repos_scanned_count": repos_scanned_count,
+        "kept_tag_count": kept_tag_count,
+        # Legacy schema-v1 sidecars did not persist Docker image IDs. Distinct tag
+        # suffixes reveal alias growth but do not prove distinct physical identities.
+        "unique_retained_tag_suffix_count": len(derived_tag_suffixes),
+        "retained_identity_measurement_basis": (
+            "kept_image_ids_and_tag_suffix_proxy"
+            if kept_image_id_count is not None
+            else "tag_suffix_proxy_only"
+        ),
+        "physical_retained_identity_count_known": False,
+        "deleted_tag_count": deleted_tag_count,
+        "deleted_image_id_count": deleted_image_id_count,
+        "error_count": error_count,
+    }
+    if kept_image_id_count is not None:
+        # This is deliberately named after the persisted field. Ref-only fallback
+        # identities are absent from `kept_image_ids`, so it is not a claim about the
+        # complete physical identity population.
+        observation["kept_image_id_count"] = kept_image_id_count
+    return observation, []
+
+
+def _runner_operational_observation_lineage(
+    *,
+    run_id: str,
+    origin_stage: str,
+) -> dict[str, Any]:
+    """Return independent lineage for runner-owned operational telemetry.
+
+    A run's mission describes the agent work product, not every runner-owned sidecar
+    written beside it.  In particular, maintenance telemetry can reveal a runner
+    infrastructure problem while an implementation, research, or verification mission
+    is in progress.  Inheriting that mission's derived-evidence role would make an
+    unparented operational observation ineligible for problem mining.
+
+    Keep this override source-specific.  Agent-authored report atoms must continue to
+    inherit the enclosing run's normal lineage contract.
+    """
+
+    return {
+        "origin_run_id": run_id,
+        "origin_stage": origin_stage,
+        "parent_case_id": None,
+        "parent_problem_id": None,
+        "parent_ticket_fingerprint": None,
+        "derived_from_atom_ids": [],
+        "evidence_role": "observation",
+        "case_id": None,
+        "supporting_case_ids": [],
+        "disposition": "unresolved",
+        "disposition_status": "pending",
+        "disposition_receipt": None,
+        "lineage_authorities": ["runner_operational_sidecar"],
+    }
+
+
+def _bounded_terminal_context_text(
+    value: Any,
+    *,
+    max_chars: int = 1_200,
+) -> dict[str, Any] | None:
+    """Return an explicit bounded preview for terminal run context.
+
+    This is routing/interpretation context, not the sole evidence carrier for a problem.
+    Structured issue atoms remain lossless.  The digest and truncation flag make the bound
+    visible rather than silently presenting a prefix as the complete terminal explanation.
+    """
+
+    text = _coerce_string(value)
+    if text is None:
+        return None
+    encoded = text.encode("utf-8")
+    truncated = len(text) > max_chars
+    return {
+        "preview": text[:max_chars].rstrip() if truncated else text,
+        "truncated": truncated,
+        "original_chars": len(text),
+        "sha256": sha256(encoded).hexdigest(),
+    }
+
+
+def _modern_report_terminal_context(
+    *,
+    report: dict[str, Any],
+    report_kind: str,
+    report_status: str,
+) -> tuple[str, dict[str, Any]]:
+    """Build runner-owned terminal context without making success a problem source."""
+
+    summary_value = (
+        report.get("summary")
+        or report.get("failure_point")
+        or (
+            report.get("evidence", {}).get("what_happened")
+            if isinstance(report.get("evidence"), dict)
+            else None
+        )
+    )
+    summary = _bounded_terminal_context_text(summary_value)
+    verification_raw = report.get("verification")
+    verification = verification_raw if isinstance(verification_raw, list) else []
+    verification_results = [
+        result
+        for item in verification
+        if isinstance(item, dict)
+        for result in [_coerce_string(item.get("result"))]
+        if result is not None
+    ]
+    issue_items = [
+        item
+        for block in ("issues", "risks")
+        for item in (
+            report.get(block) if isinstance(report.get(block), list) else []
+        )
+        if isinstance(item, dict)
+    ]
+    issue_severity_counts = Counter(
+        (_coerce_string(item.get("severity")) or "unknown").casefold()
+        for item in issue_items
+    )
+    batch_results_raw = report.get("results")
+    batch_results = batch_results_raw if isinstance(batch_results_raw, list) else []
+    batch_status_counts = Counter(
+        (_coerce_string(item.get("status")) or "unknown").casefold()
+        for item in batch_results
+        if isinstance(item, dict)
+    )
+    outcome_text = (
+        f"Origin run terminal outcome: kind={report_kind}; status={report_status}; "
+        f"verification_checks={len(verification)}; explicit_issues={len(issue_items)}"
+    )
+    if summary is not None:
+        outcome_text += f"; summary={summary['preview']}"
+    return outcome_text, {
+        "terminal_context_schema_version": 1,
+        "terminal_context_scope": "origin_run_outcome_not_case_resolution",
+        "report_kind": report_kind,
+        "report_status": report_status,
+        "report_summary_context": summary,
+        "verification_check_count": len(verification),
+        "verification_result_values": list(dict.fromkeys(verification_results[:20])),
+        "verification_results_omitted_count": max(0, len(verification_results) - 20),
+        "explicit_issue_count": len(issue_items),
+        "issue_severity_counts": dict(sorted(issue_severity_counts.items())),
+        "batch_result_status_counts": dict(sorted(batch_status_counts.items())),
+        "output_count": len(report.get("outputs"))
+        if isinstance(report.get("outputs"), list)
+        else 0,
+        # The context atom must be available to same-run miners but can never originate a case.
+        "problem_mining_context_only": True,
+        "lineage_mining_blocker": "runner_terminal_context_only",
+        "severity_hint": "low",
+    }
 
 
 def _extract_modern_report_atoms(
@@ -322,6 +942,34 @@ def _extract_modern_report_atoms(
     This is intentionally conservative and additive: legacy extraction remains unchanged.
     """
 
+    report_status = (_coerce_string(report.get("status")) or "").casefold()
+    if report_status in {"partial", "failure"}:
+        extensions_raw = report.get("extensions")
+        extensions = extensions_raw if isinstance(extensions_raw, dict) else {}
+        outcome_summary = (
+            _coerce_string(report.get("summary"))
+            or _coerce_string(report.get("failure_point"))
+            or _coerce_string(extensions.get("status_reason"))
+            or _coerce_string(report.get("goal"))
+            or "The report did not complete successfully."
+        )
+        report_evidence = report.get("evidence")
+        emit(
+            "report_outcome",
+            (
+                f"Report outcome: kind={report_kind}; status={report_status}; "
+                f"{outcome_summary}"
+            ),
+            report_kind=report_kind,
+            report_status=report_status,
+            report_summary=_coerce_string(report.get("summary")),
+            report_goal=_coerce_string(report.get("goal")),
+            report_failure_point=_coerce_string(report.get("failure_point")),
+            report_status_reason=_coerce_string(extensions.get("status_reason")),
+            report_evidence=report_evidence,
+            severity_hint="high" if report_status == "failure" else "medium",
+        )
+
     # issues / risks blocks (issue-like dicts)
     for block_name in ("issues", "risks"):
         items = report.get(block_name)
@@ -330,12 +978,7 @@ def _extract_modern_report_atoms(
 
         title_seen: set[str] = set()
         fix_seen: set[str] = set()
-        title_emitted = 0
-        fix_emitted = 0
-
         for issue in items:
-            if title_emitted >= 10 and fix_emitted >= 10:
-                break
             if not isinstance(issue, dict):
                 continue
 
@@ -345,12 +988,12 @@ def _extract_modern_report_atoms(
             details = _coerce_string(issue.get("details"))
             evidence_text = _coerce_string(issue.get("evidence"))
             suggested_fix = _coerce_string(issue.get("suggested_fix"))
+            issue_payload = dict(issue)
 
-            if title is not None and title_emitted < 10:
+            if title is not None:
                 title_key = _normalize_dedupe_key(title)
                 if title_key not in title_seen:
                     title_seen.add(title_key)
-                    title_emitted += 1
                     emit(
                         "confusion_point",
                         title,
@@ -360,14 +1003,14 @@ def _extract_modern_report_atoms(
                         report_issue_block=block_name,
                         issue_severity=severity_raw,
                         issue_title=title,
+                        report_issue=issue_payload,
                         severity_hint=severity_hint,
                     )
 
-            if suggested_fix is not None and fix_emitted < 10:
+            if suggested_fix is not None:
                 fix_key = _normalize_dedupe_key(suggested_fix)
                 if fix_key not in fix_seen:
                     fix_seen.add(fix_key)
-                    fix_emitted += 1
                     emit(
                         "suggested_change",
                         suggested_fix,
@@ -376,26 +1019,29 @@ def _extract_modern_report_atoms(
                         issue_severity=severity_raw,
                         issue_title=title,
                         evidence_text=evidence_text,
+                        report_issue=issue_payload,
                         severity_hint=severity_hint,
                     )
 
     ux = report.get("user_experience")
     if isinstance(ux, dict):
-        for text in _iter_unique_capped_strings(ux.get("friction_points"), limit=10):
+        for text in _iter_unique_capped_strings(ux.get("friction_points"), limit=None):
             emit(
                 "confusion_point",
                 text,
                 report_kind=report_kind,
                 report_ux_block="friction_points",
             )
-        for text in _iter_unique_capped_strings(ux.get("unclear_points"), limit=10):
+        for text in _iter_unique_capped_strings(ux.get("unclear_points"), limit=None):
             emit(
                 "confidence_missing",
                 text,
                 report_kind=report_kind,
                 report_ux_block="unclear_points",
             )
-        for text in _iter_unique_capped_strings(ux.get("what_would_help_next_time"), limit=10):
+        for text in _iter_unique_capped_strings(
+            ux.get("what_would_help_next_time"), limit=None
+        ):
             emit(
                 "suggested_change",
                 text,
@@ -403,14 +1049,14 @@ def _extract_modern_report_atoms(
                 report_ux_block="what_would_help_next_time",
             )
 
-    for text in _iter_unique_capped_strings(report.get("next_actions"), limit=10):
+    for text in _iter_unique_capped_strings(report.get("next_actions"), limit=None):
         emit(
             "suggested_change",
             text,
             report_kind=report_kind,
             report_block="next_actions",
         )
-    for text in _iter_unique_capped_strings(report.get("recommendations"), limit=10):
+    for text in _iter_unique_capped_strings(report.get("recommendations"), limit=None):
         emit(
             "suggested_change",
             text,
@@ -422,42 +1068,141 @@ def _extract_modern_report_atoms(
     if isinstance(failures_and_fixes, list):
         symptom_seen: set[str] = set()
         fix_seen: set[str] = set()
-        symptom_emitted = 0
-        fix_emitted = 0
-
         for entry in failures_and_fixes:
-            if symptom_emitted >= 10 and fix_emitted >= 10:
-                break
             if not isinstance(entry, dict):
                 continue
             symptom = _coerce_string(entry.get("symptom"))
             likely_cause = _coerce_string(entry.get("likely_cause"))
             fix = _coerce_string(entry.get("fix"))
 
-            if symptom is not None and symptom_emitted < 10:
+            if symptom is not None:
                 key = _normalize_dedupe_key(symptom)
                 if key not in symptom_seen:
                     symptom_seen.add(key)
-                    symptom_emitted += 1
                     emit(
                         "confusion_point",
                         symptom,
                         impact=likely_cause,
+                        report_failure_and_fix=dict(entry),
                         report_kind=report_kind,
                         report_block="failures_and_fixes",
                     )
 
-            if fix is not None and fix_emitted < 10:
+            if fix is not None:
                 key = _normalize_dedupe_key(fix)
                 if key not in fix_seen:
                     fix_seen.add(key)
-                    fix_emitted += 1
                     emit(
                         "suggested_change",
                         fix,
+                        report_failure_and_fix=dict(entry),
                         report_kind=report_kind,
                         report_block="failures_and_fixes",
                     )
+
+    # The task schemas make ``issues`` optional, so a failed/partial run can otherwise
+    # retain only proposed next actions while dropping the actual step and verification
+    # evidence.  Free-form result/outcome strings do not provide a safe keyword-free
+    # failure classifier.  Preserve every structured observation for non-success reports
+    # and let problem mining disposition the evidence explicitly.
+    if report_kind == "task_run_v1" and report_status in {"partial", "failure"}:
+        steps_raw = report.get("steps")
+        steps = steps_raw if isinstance(steps_raw, list) else []
+        for step_index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_name = _coerce_string(step.get("name")) or f"step {step_index}"
+            step_outcome = _coerce_string(step.get("outcome")) or "outcome not recorded"
+            emit(
+                "task_step_observation",
+                f"Task step outcome ({step_name}): {step_outcome}",
+                report_kind=report_kind,
+                report_status=report_status,
+                step_index=step_index,
+                task_step=dict(step),
+                severity_hint="high" if report_status == "failure" else "medium",
+            )
+            attempts_raw = step.get("attempts")
+            attempts = attempts_raw if isinstance(attempts_raw, list) else []
+            for attempt_index, attempt in enumerate(attempts, start=1):
+                if not isinstance(attempt, dict):
+                    continue
+                action = _coerce_string(attempt.get("action")) or "action not recorded"
+                result = _coerce_string(attempt.get("result")) or "result not recorded"
+                emit(
+                    "task_attempt_observation",
+                    f"Task attempt ({step_name} / {action}): {result}",
+                    report_kind=report_kind,
+                    report_status=report_status,
+                    step_index=step_index,
+                    attempt_index=attempt_index,
+                    task_attempt=dict(attempt),
+                    severity_hint="high" if report_status == "failure" else "medium",
+                )
+
+        verification_raw = report.get("verification")
+        verification = verification_raw if isinstance(verification_raw, list) else []
+        for verification_index, check in enumerate(verification, start=1):
+            if not isinstance(check, dict):
+                continue
+            check_name = _coerce_string(check.get("check")) or f"check {verification_index}"
+            result = _coerce_string(check.get("result")) or "result not recorded"
+            emit(
+                "verification_observation",
+                f"Verification result ({check_name}): {result}",
+                report_kind=report_kind,
+                report_status=report_status,
+                verification_index=verification_index,
+                verification_check=dict(check),
+                severity_hint="high" if report_status == "failure" else "medium",
+            )
+
+    if report_kind == "boundary_v1":
+        observations_raw = report.get("observations")
+        observations = observations_raw if isinstance(observations_raw, list) else []
+        for observation_index, observation in enumerate(observations, start=1):
+            if not isinstance(observation, dict):
+                continue
+            summary = _coerce_string(observation.get("summary"))
+            if summary is None:
+                continue
+            risk_level = (_coerce_string(observation.get("risk_level")) or "unknown").casefold()
+            severity_hint = (
+                "high"
+                if risk_level == "high"
+                else "medium"
+                if risk_level == "medium"
+                else "low"
+            )
+            emit(
+                "boundary_observation",
+                f"Boundary observation (risk={risk_level}): {summary}",
+                report_kind=report_kind,
+                report_status=report_status or None,
+                observation_index=observation_index,
+                boundary_observation=dict(observation),
+                severity_hint=severity_hint,
+            )
+
+    if report_kind == "batch_v1":
+        results_raw = report.get("results")
+        results = results_raw if isinstance(results_raw, list) else []
+        for result_index, result in enumerate(results, start=1):
+            if not isinstance(result, dict):
+                continue
+            if (_coerce_string(result.get("status")) or "").casefold() != "failure":
+                continue
+            input_name = _coerce_string(result.get("input")) or f"input {result_index}"
+            notes = _coerce_string(result.get("notes")) or "No failure notes recorded."
+            emit(
+                "batch_result_failure",
+                f"Batch result failed ({input_name}): {notes}",
+                report_kind=report_kind,
+                report_status=report_status or None,
+                result_index=result_index,
+                batch_result=dict(result),
+                severity_hint="high",
+            )
 
     failure_point = _coerce_string(report.get("failure_point"))
     if failure_point is not None:
@@ -482,7 +1227,7 @@ def _extract_modern_report_atoms(
             )
 
     for key in ("recommended_fix_path", "prevent_recurrence"):
-        for text in _iter_unique_capped_strings(report.get(key), limit=10):
+        for text in _iter_unique_capped_strings(report.get(key), limit=None):
             emit(
                 "suggested_change",
                 text,
@@ -509,13 +1254,14 @@ def extract_backlog_atoms(
         run_dir = Path(run_dir_raw) if isinstance(run_dir_raw, str) else Path(".")
         run_id = str(record.get("run_rel") or run_dir_raw or f"run_{len(run_ids) + 1}")
         run_rel = str(record.get("run_rel") or run_id)
-        run_path_display = str(run_dir).replace("\\", "/")
+        run_path_display = normalize_agent_path(str(run_dir))
         if repo_root is not None and isinstance(run_dir_raw, str):
             run_path_display = _safe_relpath(Path(run_dir_raw), repo_root)
         run_ids.add(run_id)
 
         agent = str(record.get("agent") or "unknown")
-        status = str(record.get("status") or "unknown")
+        lifecycle = classify_history_record_lifecycle(record)
+        status = lifecycle.status
         timestamp_utc = record.get("timestamp_utc")
         timestamp_utc_s = timestamp_utc if isinstance(timestamp_utc, str) else None
         target_slug = _coerce_string(record.get("target_slug"))
@@ -526,8 +1272,12 @@ def extract_backlog_atoms(
         target_ref = record.get("target_ref")
         if isinstance(target_ref, dict):
             repo_input = _coerce_string(target_ref.get("repo_input"))
-            mission_id = _coerce_string(target_ref.get("mission_id"))
+            mission_id = _coerce_string(target_ref.get("mission_id")) or _coerce_string(
+                target_ref.get("requested_mission_id")
+            )
             persona_id = _coerce_string(target_ref.get("persona_id"))
+
+        lineage_context = record_lineage_context(record, run_id=run_id)
 
         source_index: Counter[str] = Counter()
 
@@ -546,11 +1296,12 @@ def extract_backlog_atoms(
             _mission_id: str | None = mission_id,
             _persona_id: str | None = persona_id,
             _source_index: Counter[str] = source_index,
+            _lineage_context: dict[str, Any] = lineage_context,
             **extras: Any,
-        ) -> None:
+        ) -> str | None:
             cleaned = _clean_atom_text(text)
             if not cleaned:
-                return
+                return None
             _source_index[source] += 1
             atom_id = f"{_run_id}:{source}:{_source_index[source]}"
             priority_hint = _coerce_string(extras.get("priority"))
@@ -569,8 +1320,12 @@ def extract_backlog_atoms(
                 "timestamp_utc": _timestamp_utc,
                 "source": source,
                 "text": cleaned,
+                "evidence_class": (
+                    "proposal" if source == "suggested_change" else "observed"
+                ),
                 "severity_hint": severity_hint,
                 "severity_score_hint": _severity_rank(severity_hint),
+                **_lineage_context,
             }
             if _target_slug:
                 atom["target_slug"] = _target_slug
@@ -583,18 +1338,188 @@ def extract_backlog_atoms(
             for key, value in extras.items():
                 if value is None:
                     continue
-                if key == "severity_hint":
+                if key == "severity_hint" or key in _lineage_context:
                     continue
                 atom[key] = value
+            if atom.get("disposition") == "supports_case":
+                authorities = atom.get("lineage_authorities")
+                source = (
+                    str(authorities[-1])
+                    if isinstance(authorities, list) and authorities
+                    else "runner_parent_lineage"
+                )
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition="supports_case",
+                    source=source,
+                    rationale=(
+                        "Runner-owned lineage attached this derived atom to "
+                        f"{atom.get('parent_case_id')}."
+                    ),
+                )
+            validate_atom_lineage(atom)
             atoms.append(atom)
             source_counts[source] += 1
             severity_counts[severity_hint] += 1
+            return atom_id
+
+        cleanup_sidecar = record.get("maintenance_image_cleanup")
+        cleanup_read_raw = record.get("maintenance_image_cleanup_read")
+        cleanup_read = cleanup_read_raw if isinstance(cleanup_read_raw, dict) else None
+        cleanup_artifact_ref_raw = record.get(
+            "maintenance_image_cleanup_artifact_ref"
+        )
+        cleanup_artifact_ref = (
+            dict(cleanup_artifact_ref_raw)
+            if isinstance(cleanup_artifact_ref_raw, dict)
+            else {
+                "path": MAINTENANCE_IMAGE_CLEANUP_ARTIFACT_PATH,
+                "exists": cleanup_sidecar is not None,
+            }
+        )
+        cleanup_exists = cleanup_sidecar is not None or (
+            cleanup_read is not None and cleanup_read.get("exists") is True
+        )
+        if cleanup_exists:
+            cleanup_lineage_context = _runner_operational_observation_lineage(
+                run_id=run_id,
+                origin_stage="runner_maintenance_image_cleanup",
+            )
+            cleanup_observation, cleanup_contract_errors = (
+                _maintenance_cleanup_observation(cleanup_sidecar)
+            )
+            if cleanup_observation is not None:
+                kept_image_id_text = (
+                    "kept_image_ids="
+                    f"{cleanup_observation['kept_image_id_count']}; "
+                    if "kept_image_id_count" in cleanup_observation
+                    else ""
+                )
+                _emit(
+                    "maintenance_image_cleanup",
+                    (
+                        "Maintenance image cleanup observation: "
+                        f"enabled={str(cleanup_observation['cleanup_enabled']).lower()}; "
+                        f"dry_run={str(cleanup_observation['dry_run']).lower()}; "
+                        "repos_scanned="
+                        f"{cleanup_observation['repos_scanned_count']}; "
+                        f"kept_tags={cleanup_observation['kept_tag_count']}; "
+                        "unique_retained_tag_suffixes="
+                        f"{cleanup_observation['unique_retained_tag_suffix_count']}; "
+                        f"{kept_image_id_text}"
+                        "physical_retained_identity_count=unknown; "
+                        f"deleted_tags={cleanup_observation['deleted_tag_count']}; "
+                        "deleted_image_ids="
+                        f"{cleanup_observation['deleted_image_id_count']}; "
+                        f"errors={cleanup_observation['error_count']}."
+                    ),
+                    **cleanup_observation,
+                    artifact_ref=cleanup_artifact_ref,
+                    artifact_read=cleanup_read,
+                    severity_hint="medium",
+                    _lineage_context=cleanup_lineage_context,
+                )
+            else:
+                read_failure = (
+                    cleanup_read.get("error_type")
+                    if cleanup_read is not None
+                    else None
+                )
+                detail = read_failure or ",".join(cleanup_contract_errors) or "unknown"
+                _emit(
+                    "maintenance_image_cleanup_artifact_error",
+                    f"Maintenance image cleanup artifact is unreadable or invalid: {detail}.",
+                    artifact_ref=cleanup_artifact_ref,
+                    artifact_read=cleanup_read,
+                    contract_errors=(
+                        cleanup_contract_errors if cleanup_contract_errors else None
+                    ),
+                    severity_hint="medium",
+                    _lineage_context=cleanup_lineage_context,
+                )
+
+        token_monitoring, token_monitoring_error = _load_token_monitoring_artifacts(record, run_dir)
+        if isinstance(token_monitoring, dict):
+            signals_raw = token_monitoring.get("signals")
+            signals = signals_raw if isinstance(signals_raw, list) else []
+            for signal in signals:
+                if not isinstance(signal, dict):
+                    continue
+                signal_id = _coerce_string(signal.get("signal_id"))
+                causal_mechanism = _coerce_string(signal.get("causal_mechanism"))
+                if signal_id is None or causal_mechanism is None:
+                    continue
+                dimensions = _token_monitoring_dimensions(
+                    signal.get("token_dimensions_affected")
+                )
+                mitigation = _coerce_string(signal.get("mitigation_lever"))
+                evidence_raw = signal.get("evidence")
+                evidence = evidence_raw if isinstance(evidence_raw, dict) else {}
+                call_count = _coerce_int(evidence.get("call_count"))
+                call_indexes_raw = evidence.get("call_indexes")
+                call_indexes = (
+                    [
+                        parsed
+                        for item in call_indexes_raw[:20]
+                        for parsed in [_coerce_int(item)]
+                        if parsed is not None
+                    ]
+                    if isinstance(call_indexes_raw, list)
+                    else []
+                )
+                paths_preview = _iter_unique_capped_strings(
+                    [
+                        *_iter_unique_capped_strings(evidence.get("paths_from_calls"), limit=12),
+                        *_iter_unique_capped_strings(evidence.get("largest_read_files"), limit=12),
+                    ],
+                    limit=12,
+                )
+                _emit(
+                    "token_monitoring_signal",
+                    _token_monitoring_signal_text(
+                        signal_id=signal_id,
+                        causal_mechanism=causal_mechanism,
+                        dimensions=dimensions,
+                        mitigation=mitigation,
+                    ),
+                    token_signal_id=signal_id,
+                    token_signal_confidence=_coerce_string(signal.get("confidence")),
+                    token_dimensions_affected=dimensions if dimensions else None,
+                    confirmed_by_counters=signal.get("confirmed_by_counters") is True,
+                    mitigation_lever=mitigation,
+                    false_positive_risk=_coerce_string(signal.get("false_positive_risk")),
+                    evidence_call_count=call_count,
+                    evidence_call_indexes=call_indexes if call_indexes else None,
+                    evidence_paths_preview=paths_preview if paths_preview else None,
+                    token_monitoring_artifact="token_monitoring.json",
+                    severity_hint=_token_monitoring_signal_severity(dimensions),
+                )
+
+        if isinstance(token_monitoring_error, dict):
+            error_type = _coerce_string(token_monitoring_error.get("type")) or "unknown"
+            message = (
+                _coerce_string(token_monitoring_error.get("message"))
+                or "Token monitoring failed."
+            )
+            _emit(
+                "token_monitoring_error",
+                f"Token monitoring failed: type={error_type}; message={message}",
+                token_monitoring_artifact="token_monitoring_error.json",
+                error_type=error_type,
+                non_fatal=token_monitoring_error.get("non_fatal") is True,
+                generated_at_utc=_coerce_string(token_monitoring_error.get("generated_at_utc")),
+            )
+
+        report_raw = record.get("report")
+        report_for_context = report_raw if isinstance(report_raw, Mapping) else None
 
         metrics_raw = record.get("metrics")
         metrics = metrics_raw if isinstance(metrics_raw, dict) else None
 
         failed_commands: list[dict[str, Any]] = []
         failed_commands_omitted_hint: int | None = None
+        metrics_failed_commands_count: int | None = None
+        metrics_failed_commands_truncated = False
         if metrics is not None:
             failed_raw = metrics.get("failed_commands")
             if isinstance(failed_raw, list):
@@ -605,72 +1530,100 @@ def extract_backlog_atoms(
                     exit_code = item.get("exit_code")
                     if command is None or not isinstance(exit_code, int) or exit_code == 0:
                         continue
+                    if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+                        continue
                     failed_commands.append(
                         {
                             "command": command,
                             "exit_code": exit_code,
                             "cwd": _coerce_string(item.get("cwd")),
+                            "artifacts": item.get("artifacts")
+                            if isinstance(item.get("artifacts"), dict)
+                            else None,
                             "output_excerpt": _coerce_string(item.get("output_excerpt")),
                             "output_excerpt_truncated": item.get("output_excerpt_truncated")
                             is True,
                             "from_metrics": True,
                         }
                     )
+            commands_failed = metrics.get("commands_failed")
+            if isinstance(commands_failed, int) and commands_failed >= 0:
+                metrics_failed_commands_count = commands_failed
             if metrics.get("failed_commands_truncated") is True:
+                metrics_failed_commands_truncated = True
                 omitted = metrics.get("failed_commands_omitted_count")
                 if isinstance(omitted, int) and omitted > 0:
                     failed_commands_omitted_hint = omitted
 
-        if not failed_commands:
-            events_path = run_dir / "normalized_events.jsonl"
-            if events_path.exists():
-                try:
-                    with events_path.open("r", encoding="utf-8") as f:
-                        for line in f:
-                            raw = line.strip()
-                            if not raw:
-                                continue
-                            try:
-                                event = json.loads(raw)
-                            except json.JSONDecodeError:
-                                continue
-                            if not isinstance(event, dict):
-                                continue
-                            if _coerce_string(event.get("type")) != "run_command":
-                                continue
-                            data = event.get("data")
-                            if not isinstance(data, dict):
-                                continue
-                            exit_code = data.get("exit_code")
-                            if not isinstance(exit_code, int) or exit_code == 0:
-                                continue
-                            command = _coerce_string(data.get("command"))
-                            if command is None:
-                                argv = data.get("argv")
-                                if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
-                                    command = " ".join(argv)
-                            if command is None:
-                                continue
-                            failed_commands.append(
-                                {
-                                    "command": command,
-                                    "exit_code": exit_code,
-                                    "cwd": _coerce_string(data.get("cwd")),
-                                    "output_excerpt": _coerce_string(data.get("output_excerpt")),
-                                    "output_excerpt_truncated": data.get("output_excerpt_truncated")
-                                    is True,
-                                    "from_events": True,
-                                }
-                            )
-                            if len(failed_commands) >= max_command_failure_atoms:
-                                break
-                except OSError:
-                    failed_commands = []
+        metrics_incomplete = False
+        if metrics_failed_commands_truncated:
+            metrics_incomplete = True
+        elif failed_commands_omitted_hint is not None and failed_commands_omitted_hint > 0:
+            metrics_incomplete = True
+        elif (
+            metrics_failed_commands_count is not None
+            and metrics_failed_commands_count > len(failed_commands)
+        ):
+            metrics_incomplete = True
+
+        events_path = run_dir / "normalized_events.jsonl"
+        run_command_events = (
+            _extract_run_commands_from_events(events_path=events_path)
+            if events_path.exists()
+            else []
+        )
+        if not failed_commands and events_path.exists():
+            failed_commands = _extract_failed_commands_from_events(
+                events_path=events_path,
+                max_items=max_command_failure_atoms,
+            )
+        elif failed_commands and metrics_incomplete and events_path.exists():
+            event_failed_commands = _extract_failed_commands_from_events(events_path=events_path)
+            if event_failed_commands:
+                deduped: list[dict[str, Any]] = []
+                seen_identities: set[str] = set()
+                for entry in failed_commands:
+                    identity = _command_failure_entry_identity(entry)
+                    if identity is not None and identity in seen_identities:
+                        continue
+                    if identity is not None:
+                        seen_identities.add(identity)
+                    deduped.append(entry)
+                for entry in event_failed_commands:
+                    identity = _command_failure_entry_identity(entry)
+                    if identity is not None and identity in seen_identities:
+                        continue
+                    if identity is not None:
+                        seen_identities.add(identity)
+                    deduped.append(entry)
+                failed_commands = deduped
+                if max_command_failure_atoms is None:
+                    failed_commands_omitted_hint = None
+                else:
+                    omitted_after_reconcile = (
+                        len(failed_commands) - max_command_failure_atoms
+                    )
+                    failed_commands_omitted_hint = (
+                        omitted_after_reconcile if omitted_after_reconcile > 0 else None
+                    )
 
         if failed_commands:
+            if (
+                max_command_failure_atoms is not None
+                and len(failed_commands) > max_command_failure_atoms
+            ):
+                cap_omitted = len(failed_commands) - max_command_failure_atoms
+                failed_commands_omitted_hint = max(
+                    cap_omitted,
+                    failed_commands_omitted_hint or 0,
+                )
             emitted = 0
+            claimed_event_ordinals: set[int] = set()
             for entry in failed_commands:
-                if emitted >= max_command_failure_atoms:
+                if (
+                    max_command_failure_atoms is not None
+                    and emitted >= max_command_failure_atoms
+                ):
                     break
                 command = _coerce_string(entry.get("command"))
                 exit_code = entry.get("exit_code")
@@ -680,16 +1633,27 @@ def extract_backlog_atoms(
                 output_excerpt_truncated = (
                     True if entry.get("output_excerpt_truncated") is True else None
                 )
+                same_run_context = _same_run_command_context(
+                    failure=entry,
+                    run_commands=run_command_events,
+                    claimed_event_ordinals=claimed_event_ordinals,
+                    lifecycle_status=status,
+                    report=report_for_context,
+                )
                 _emit(
                     "command_failure",
                     f"Command failed: exit_code={exit_code}; command={command}",
                     command=command,
                     exit_code=exit_code,
                     cwd=_coerce_string(entry.get("cwd")),
+                    artifacts=entry.get("artifacts")
+                    if isinstance(entry.get("artifacts"), dict)
+                    else None,
                     output_excerpt=output_excerpt,
                     output_excerpt_truncated=output_excerpt_truncated,
                     from_events=True if entry.get("from_events") else None,
                     from_metrics=True if entry.get("from_metrics") else None,
+                    same_run_command_context=same_run_context,
                 )
                 emitted += 1
 
@@ -704,7 +1668,7 @@ def extract_backlog_atoms(
                     severity_hint="low",
                 )
 
-        report = record.get("report")
+        report = report_raw
         if isinstance(report, dict):
             confusion = report.get("confusion_points")
             if isinstance(confusion, list):
@@ -721,6 +1685,7 @@ def extract_backlog_atoms(
                         summary,
                         impact=impact,
                         evidence=evidence if evidence else None,
+                        report_confusion_point=dict(item),
                     )
 
             suggested = report.get("suggested_changes")
@@ -751,8 +1716,23 @@ def extract_backlog_atoms(
                     _emit("confidence_missing", missing)
 
             report_kind = _coerce_string(report.get("kind"))
-            if report_kind is not None:
-                _extract_modern_report_atoms(report=report, report_kind=report_kind, emit=_emit)
+            report_status = _coerce_string(report.get("status"))
+            if report_kind is not None or report_status is not None:
+                terminal_text, terminal_fields = _modern_report_terminal_context(
+                    report=report,
+                    report_kind=report_kind or "unknown",
+                    report_status=(report_status or "unknown").casefold(),
+                )
+                _emit(
+                    "run_outcome_context",
+                    terminal_text,
+                    **terminal_fields,
+                )
+                _extract_modern_report_atoms(
+                    report=report,
+                    report_kind=report_kind or "unknown",
+                    emit=_emit,
+                )
 
         validation_values = coerce_validation_errors(record.get("report_validation_errors"))
         sanitized_error = sanitize_error(record.get("error"))
@@ -765,6 +1745,7 @@ def extract_backlog_atoms(
 
         run_capture_entries: list[dict[str, Any]] = []
         attachments: list[dict[str, Any]] = []
+        failure_attachment_atom_ids: list[str] = []
         for filename, source in (
             ("agent_stderr.txt", "agent_stderr_artifact"),
             ("agent_last_message.txt", "agent_last_message_artifact"),
@@ -791,6 +1772,25 @@ def extract_backlog_atoms(
                         "capture_error": capture.error,
                     }
                 )
+                artifact_text = _clean_atom_text(_compose_artifact_text(capture))
+                if not artifact_text:
+                    artifact_text = (
+                        f"[capture_error] {capture.error}"
+                        if isinstance(capture.error, str) and capture.error.strip()
+                        else "[empty artifact]"
+                    )
+                attachment_atom_id = _emit(
+                    source,
+                    artifact_text,
+                    excerpt_head=excerpt_head,
+                    excerpt_tail=excerpt_tail,
+                    truncated=truncated,
+                    capture_error=capture.error,
+                    artifact_ref=_artifact_ref_public(capture),
+                    severity_hint="high",
+                )
+                if attachment_atom_id is not None:
+                    failure_attachment_atom_ids.append(attachment_atom_id)
                 continue
             if not capture.artifact.exists:
                 continue
@@ -814,6 +1814,25 @@ def extract_backlog_atoms(
                 warning_codes = warning_meta.get("codes")
                 warning_counts = warning_meta.get("counts")
                 if warning_only and isinstance(warning_codes, list):
+                    if warning_codes == ["shell_snapshot_powershell_unsupported"]:
+                        _emit(
+                            "capability_notice_artifact",
+                            (
+                                "Known capability notice in agent stderr: "
+                                "PowerShell shell snapshot metadata unavailable (expected)."
+                            ),
+                            warning_codes=warning_codes,
+                            warning_counts=warning_counts
+                            if isinstance(warning_counts, dict)
+                            else None,
+                            excerpt_head=excerpt_head,
+                            excerpt_tail=excerpt_tail,
+                            truncated=truncated,
+                            capture_error=capture.error,
+                            artifact_ref=_artifact_ref_public(capture),
+                            severity_hint="low",
+                        )
+                        continue
                     _emit(
                         "capability_warning_artifact",
                         (
@@ -849,7 +1868,10 @@ def extract_backlog_atoms(
                 error=sanitized_error,
                 report_validation_errors=validation_values,
                 artifacts=artifacts,
-                attachments=attachments,
+                terminal_artifact_reads=record.get("terminal_artifact_reads"),
+                # Full bounded head/tail evidence is emitted as linked artifact atoms so
+                # one large failure record cannot hide or overflow the evidence chunks.
+                attachments=None,
             )
             _emit(
                 "run_failure_event",
@@ -859,7 +1881,9 @@ def extract_backlog_atoms(
                 error=sanitized_error,
                 report_validation_errors=validation_values,
                 artifacts=artifacts,
+                terminal_artifact_reads=record.get("terminal_artifact_reads"),
                 attachments=attachments,
+                linked_atom_ids=failure_attachment_atom_ids,
             )
 
     return {
@@ -887,6 +1911,8 @@ def add_atom_links(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "command_failure",
         "run_failure_event",
         "report_validation_error",
+        "token_monitoring_signal",
+        "token_monitoring_error",
         "confusion_point",
         "confidence_missing",
     }
@@ -1416,8 +2442,9 @@ def build_backlog_document(
 
     enriched = enrich_tickets_with_atom_context(tickets, atoms)
     ordered = sorted(enriched, key=_ticket_sort_key)
-    for idx, ticket in enumerate(ordered, start=1):
-        ticket["ticket_id"] = f"BLG-{idx:03d}"
+    for ticket in ordered:
+        ticket["fingerprint"] = _ticket_export_fingerprint(ticket)
+        ticket.pop("ticket_id", None)
 
     coverage = compute_backlog_coverage(atoms, ordered)
     miners = miners_meta or {}
@@ -1505,12 +2532,15 @@ def render_backlog_markdown(
         lines.append("")
     else:
         for ticket in ticket_list:
-            ticket_id = _coerce_string(ticket.get("ticket_id")) or "BLG-???"
+            fingerprint = (
+                _coerce_string(ticket.get("fingerprint")) or _ticket_export_fingerprint(ticket)
+            )
             title_s = _coerce_string(ticket.get("title")) or "Untitled"
             severity = (_coerce_string(ticket.get("severity")) or "medium").lower()
             confidence = _coerce_confidence(ticket.get("confidence"))
             runs_citing = int(ticket.get("runs_citing", 0))
-            lines.append(f"### {ticket_id}: {title_s}")
+            lines.append(f"### {fingerprint}: {title_s}")
+            lines.append(f"- Fingerprint: `{fingerprint}`")
             lines.append(
                 f"- Severity: `{severity}` | Confidence: `{confidence:.2f}` | "
                 f"Runs citing: `{runs_citing}`"
@@ -1562,15 +2592,88 @@ def render_backlog_markdown(
             user_impact = _coerce_string(ticket.get("user_impact"))
             if user_impact:
                 lines.append(f"- User impact: {user_impact}")
-            proposed_fix = _coerce_string(ticket.get("proposed_fix"))
-            if proposed_fix:
-                lines.append(f"- Proposed fix: {proposed_fix}")
 
-            investigation_steps = _coerce_string_list(ticket.get("investigation_steps"))
-            if investigation_steps:
-                lines.append("- Investigation steps:")
-                for step in investigation_steps[:6]:
-                    lines.append(f"  - {step}")
+            selected_solution_raw = ticket.get("selected_solution")
+            selected_solution = (
+                selected_solution_raw if isinstance(selected_solution_raw, dict) else {}
+            )
+            selected_family_id = _coerce_string(selected_solution.get("selected_family_id"))
+            selected_option_id = (
+                _coerce_string(selected_solution.get("selected_option_id"))
+                or _coerce_string(ticket.get("selected_option_id"))
+            )
+            selected_option_raw = selected_solution.get("selected_option")
+            selected_option = selected_option_raw if isinstance(selected_option_raw, dict) else {}
+            selected_option_summary = _coerce_string(selected_option.get("summary"))
+            selection_rationale = _coerce_string(selected_solution.get("selection_rationale"))
+            if selected_family_id or selected_option_id or selected_option_summary:
+                bits = []
+                if selected_family_id:
+                    bits.append(f"family=`{selected_family_id}`")
+                if selected_option_id:
+                    bits.append(f"option=`{selected_option_id}`")
+                if bits:
+                    lines.append("- Selected solution: " + " | ".join(bits))
+                if selected_option_summary:
+                    lines.append(f"- Selected option summary: {selected_option_summary}")
+                if selection_rationale:
+                    lines.append(f"- Selection rationale: {selection_rationale}")
+
+            change_plan_raw = ticket.get("change_plan")
+            change_plan = change_plan_raw if isinstance(change_plan_raw, dict) else {}
+            change_plan_id = (
+                _coerce_string(change_plan.get("change_plan_id"))
+                or _coerce_string(ticket.get("change_plan_id"))
+            )
+            change_plan_status = _coerce_string(change_plan.get("change_plan_status"))
+            has_change_plan = bool(change_plan_id) or bool(change_plan)
+
+            if has_change_plan:
+                plan_bits = []
+                if change_plan_id:
+                    plan_bits.append(f"`{change_plan_id}`")
+                if change_plan_status:
+                    plan_bits.append(f"status=`{change_plan_status}`")
+                if plan_bits:
+                    lines.append("- Change plan: " + " ".join(plan_bits))
+
+                proposed_fix = _coerce_string(ticket.get("proposed_fix")) or _coerce_string(
+                    change_plan.get("proposed_fix")
+                )
+                if proposed_fix:
+                    lines.append(f"- Proposed fix (planned): {proposed_fix}")
+
+                rollback_notes = _coerce_string(ticket.get("rollback_notes")) or _coerce_string(
+                    change_plan.get("rollback_notes")
+                )
+                if rollback_notes:
+                    lines.append(f"- Rollback notes: {rollback_notes}")
+
+                implementation_steps = _coerce_string_list(
+                    ticket.get("implementation_steps")
+                ) or _coerce_string_list(change_plan.get("implementation_steps"))
+                if implementation_steps:
+                    lines.append("- Implementation steps:")
+                    for step in implementation_steps[:6]:
+                        lines.append(f"  - {step}")
+
+                verification_steps = _coerce_string_list(
+                    ticket.get("verification_steps")
+                ) or _coerce_string_list(change_plan.get("verification_steps"))
+                if verification_steps:
+                    lines.append("- Verification steps:")
+                    for step in verification_steps[:6]:
+                        lines.append(f"  - {step}")
+            else:
+                proposed_fix = _coerce_string(ticket.get("proposed_fix"))
+                if proposed_fix:
+                    lines.append(f"- Proposed fix: {proposed_fix}")
+
+                investigation_steps = _coerce_string_list(ticket.get("investigation_steps"))
+                if investigation_steps:
+                    lines.append("- Investigation steps:")
+                    for step in investigation_steps[:6]:
+                        lines.append(f"  - {step}")
 
             success_criteria = _coerce_string_list(ticket.get("success_criteria"))
             if success_criteria:

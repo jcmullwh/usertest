@@ -104,11 +104,11 @@ Then install normally:
 
 For a fresh-install usertest, use a package target:
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters==<version>" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters==<version>" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
 
 PDM-based package target:
 
-`python -m usertest.cli run --repo-root . --repo "pdm:agent-adapters==<version> normalized-events==<version>" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
+`python -m usertest.cli run --repo-root . --repo "pdm:agent-adapters==<version> normalized-events==<version>" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
 
 This creates a synthetic workspace, installs package requirements into an isolated virtualenv, and
 runs the selected agent in that environment.

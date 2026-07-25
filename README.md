@@ -2,11 +2,18 @@
 
 [![CI](https://github.com/jcmullwh/usertest/actions/workflows/ci.yml/badge.svg)](https://github.com/jcmullwh/usertest/actions/workflows/ci.yml)
 
-This repo contains **usertest**, a runner for repeatable “agentic usertests” and **usertest-backlog**, a backlog miner. We aim to solve two core problems:
+This repo contains: 
 
-1. The only way to actually test software is to have users use it. Developers (agent and human) have great ideas about how
+**usertest**, a runner for repeatable “agentic usertests" of a repo
+**usertest-backlog**, which mines the usertest results and creates a prioritized backlog.
+**usertest-implement**, which generates, reviews and merges PR's based on the backlog
+
+We aim to solve three core problems:
+
+1. The only way to really test software is to have users use it. Developers (agent and human) have great ideas about how
 well their software works, but those ideas are just guesses until they are put into contact with users.
 2. User feedback/suggestions/input is often noisy, overlapping, and sometimes contradictory, making it difficult to aggregate and act upon.
+3. Agents are narrowly focused and will generate ever-more slop unless controlled.
 
 **usertest**
 
@@ -29,8 +36,32 @@ The backlog CLI provides tools to mine and analyze data produced by usertest, ge
 
 Once we have all of those target issues, we need to implement them.
 
-- Use the same mechanisms as usertest and usertest-backlog to generate a PR.
+- Use the same mechanisms as usertest and usertest-backlog to generate a PR for a ticket.
+- Review the PR
+- Merge the PR
 - Track metrics on the implementers to identify rising complexity and tech debt.
+
+## Quickstart (one command)
+
+Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
+
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/offline_first_success.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/offline_first_success.sh
+  ```
+
+Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
+
+## Developer smoke (one command, optional)
+
+For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytest smoke suite):
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
 
 ## Start here
 
@@ -38,35 +69,39 @@ Once we have all of those target issues, we need to implement them.
 - **Tutorial:** `docs/tutorials/getting-started.md`
 - **Monorepo setup + scaffold workflow:** `docs/tutorials/monorepo-setup.md`
 - **One-command smoke (per OS):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
+- **Shareable repo snapshot ZIP:** `scripts/snapshot_repo.ps1` (Windows) / `scripts/snapshot_repo.sh` (macOS/Linux)
 
-## Fastest output (no setup)
+## Preview a run artifact (no setup)
 
-Open the checked-in golden fixture artifacts directly (no Python deps required):
+Open the checked-in golden fixture artifacts directly (no Python deps required) to see what a run directory looks like. This is a fixture preview, not a usertest or installation check:
 
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
 
-Re-render that fixture from raw events (requires minimal Python deps + import-path setup):
+### One-command "from source" verification
 
-**Note:** this does not execute any agent runs; it just re-renders an existing golden fixture.
+See “Quickstart (one command)” above.
 
-One-command (recommended):
+### Running from source (manual)
 
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
-- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
+If you prefer to manage your environment manually:
 
-Manual steps (if you want to control an existing env):
+1. **Install minimal dependencies:**
+   `python -m pip install -r requirements-dev.txt`
+2. **Install the package (editable):**
+   `python -m pip install -e apps/usertest`
 
-- Install minimal deps:
-  `python -m pip install -r requirements-dev.txt`
-- Configure `PYTHONPATH`:
-  - PowerShell: `. .\scripts\set_pythonpath.ps1`
-  - macOS/Linux: `source scripts/set_pythonpath.sh`
-- Re-render:
+   *Alternative (source-run without editable installs):* set `PYTHONPATH` instead:
+   - **Windows PowerShell:** `. .\scripts\set_pythonpath.ps1`
+   - **macOS / Linux:** `source scripts/set_pythonpath.sh`
+3. **Verify:**
+   `python -m usertest.cli --help`
 
-`python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics`
+Success signal: the command prints help output.
 
-Success signal: the command prints the exact `report.md` output path.
+If you see a `Missing import ...` message, either the editable install did not complete or `PYTHONPATH` is not
+configured. Run `bash ./scripts/smoke.sh` (macOS/Linux) or
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1` (Windows) to resolve setup in one step.
 
 ## Repo structure
 
@@ -88,6 +123,7 @@ The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task ru
 ### Requirements
 
 - Python 3.11+ (CI currently runs 3.11; newer versions are best-effort)
+- `pip` (via `python -m pip`; if missing, try `python -m ensurepip --upgrade`)
 - `git`
 - Optional: GitHub CLI (`gh`) (needed for `usertest-implement run --pr`)
 - At least one of: agent CLIs on PATH + credentials
@@ -103,6 +139,11 @@ Run this first in any setup path:
 
 `python tools/scaffold/scaffold.py doctor`
 
+Convenience wrappers:
+
+- Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
+- macOS/Linux: `bash ./scripts/doctor.sh`
+
 ### One copy-paste smoke command per OS
 
 These commands are self-contained (no implicit prior shell state) and enforce non-zero exit on
@@ -115,6 +156,10 @@ Windows PowerShell:
 macOS/Linux:
 
 `bash ./scripts/smoke.sh`
+
+Note: on some Windows sandboxes, `bash.exe` may be on `PATH` (for example via Git for Windows) but
+execution is blocked ("Access is denied"). In that case, use the PowerShell smoke command above
+and avoid bash-based validation steps.
 
 The smoke scripts run:
 
@@ -130,17 +175,35 @@ and continue with the pip-based flow. For CI or strict preflight runs, require d
 - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor`
 - macOS/Linux: `bash ./scripts/smoke.sh --require-doctor`
 
-Fallback mode if you want PYTHONPATH-based execution instead of editable installs:
+Advanced: restricted-environment flags (not needed for a typical first-run):
 
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath`
-- macOS/Linux: `bash ./scripts/smoke.sh --use-pythonpath`
+These flags exist for environments that cannot use editable installs (pre-provisioned containers, CI
+pipelines that manage deps separately, etc.). For a normal developer first-run, use the plain
+`smoke.ps1` / `smoke.sh` command above with no extra flags.
 
-Restricted environments (no editable installs / pre-provisioned deps):
-
-- No editable installs (still installs `requirements-dev.txt`): use the PYTHONPATH modes above.
-- No installs at runtime (deps already provisioned, e.g., offline wheelhouse): run smoke with both flags:
+- PYTHONPATH mode (installs deps, skips editable installs):
+  - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath`
+  - macOS/Linux: `bash ./scripts/smoke.sh --use-pythonpath`
+- No-install mode (deps already provisioned, e.g., offline wheelhouse):
   - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath`
   - macOS/Linux: `bash ./scripts/smoke.sh --skip-install --use-pythonpath`
+  - Note: `--skip-install` skips *all* installs (including `requirements-dev.txt`); smoke runs an
+    import preflight and fails fast with actionable guidance if imports are not available.
+
+### Share this repo as a ZIP (snapshot)
+
+Use `snapshot_repo.py` when you need a shareable copy of this repo for debugging or review.
+
+- Minimal:
+  - `python tools/snapshot_repo.py --out repo_snapshot.zip`
+  - Windows wrapper: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\snapshot_repo.ps1`
+  - macOS/Linux wrapper: `bash ./scripts/snapshot_repo.sh`
+- Key defaults / gotchas:
+  - `.gitignore` files are excluded by default; pass `--include-gitignore-files` to include them.
+  - If `repo_snapshot.zip` already exists, pass `--overwrite`.
+  - Preview/audit without writing an archive:
+    - `python tools/snapshot_repo.py --dry-run`
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\snapshot_repo.ps1 -DryRun`
 
 ### Manual editable install (no PYTHONPATH)
 
@@ -175,17 +238,30 @@ macOS/Linux:
 
 ## Run a single target
 
-After install (editable or PYTHONPATH), run:
+Representative validation (default built-in path):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write`
+
+Defaults come from `configs/catalog.yaml`:
+
+- persona: `representative_workflow_evaluator`
+- mission: `verify_install_to_result`
+
+This path is intended to answer: “Can a real user install this repo, run its main workflow, and get a representative result?”
+
+Preflight probe (faster, weaker evidence):
+
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke`
+
+Use this only to establish sign-of-life or isolate the first blocker. It is not enough evidence for adoption-quality conclusions.
 
 Local directory example (initializes `.usertest/` scaffold):
 
 `python -m usertest.cli init-usertest --repo-root . --repo "PATH_TO_LOCAL_DIR"`
 
-Then run against that directory (requires an agent CLI + credentials):
+Then run against that directory with representative validation (requires an agent CLI + credentials):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result`
 
 List built-in personas/missions:
 
@@ -195,34 +271,35 @@ List built-in personas/missions:
 
 ## Backlog CLI
 
+
 Backlog mining/inclusion commands are provided by the separate backlog CLI app:
 
 `python -m usertest_backlog.cli --help`
 
 Defaults are configured in `configs/catalog.yaml`.
 
-Example: quick output with defaults-first mission:
+Example: representative output with defaults-first mission:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id burst_user --mission-id produce_default_output`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id produce_default_output`
 
 Claude Code variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result`
 
 Gemini variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result`
 
 ### Evaluate a published Python package (fresh install)
 
 To usertest a deployed Python package (fresh install into an isolated virtualenv before the agent
 runs), pass a pip target:
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend docker`
 
-This repo provides support for private registries(GitLab PyPI in particular); in that case also set the additionaly flags below with environment variables and optionally `GITLAB_BASE_URL`. For details, see `docs/monorepo-packages.md`.`
+This repo provides support for private registries (GitLab PyPI in particular); in that case also set the additional flags below with environment variables and optionally `GITLAB_BASE_URL`. For details, see `docs/monorepo-packages.md`.
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
 
 Notes:
 
@@ -236,16 +313,16 @@ Execution-policy notes:
 - Execution policies apply to agent tool permissions during `run`/`batch`; host-side CLI commands
   such as `python -m usertest.cli --help` are unaffected.
 - `--policy safe` is strictest (no writes; and for Claude/Gemini, no shell commands).
-- `--policy inspect` is read-only but allows shell commands (recommended for first-success probing
-  workflows on Claude/Gemini).
-- Built-in `first_output_smoke` / `produce_default_output` missions require edits; use `--policy write` for those runs.
+- `--policy inspect` is read-only but allows shell commands. Use it for preflight probes, blocker isolation, and other read-only exploration.
+- `--policy write` is the normal choice for representative install-to-result validation.
 - Which policy should I use?
   - Read-only + shell (no edits): `--policy inspect`
-  - Any workflow that requires edits: `--policy write`
+  - Representative workflows that may need setup/output creation: `--policy write`
   - Claude/Gemini with *no shell commands at all*: `--policy safe`
   - Common missions:
     - `privacy_locked_run`: `--policy inspect`
-    - `first_output_smoke`: `--policy write`
+    - `first_output_smoke`: `--policy inspect` (preflight only)
+    - `verify_install_to_result`: `--policy write`
     - `produce_default_output`: `--policy write`
 - If you need repo-specific tool probes, add `--preflight-command <CMD>` (repeatable) and optional
   `--require-preflight-command <CMD>`.
@@ -269,6 +346,10 @@ Artifacts land under `runs/usertest/<target>/<timestamp>/<agent>/<seed>/`:
 For the full file-level contract (required vs optional files, semantics, and a redacted sample
 layout), see `docs/design/run-artifacts.md`. For offline fixtures, see `examples/golden_runs/`.
 
+These run directories may contain sensitive data (prompts/transcripts, stderr, reports, diffs, and
+anything printed by tools). Review and redact before sharing or archiving in CI; see
+`docs/ops/security.md`.
+
 ### Docker execution backend (optional)
 
 `python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker`
@@ -282,10 +363,22 @@ If you want API-key auth instead, opt in explicitly with:
 
 `--exec-use-api-key-auth --exec-env OPENAI_API_KEY`
 
-Note: the agent CLI itself runs *inside* the Docker container in this repo. Setting
-`--exec-network none` will prevent Codex/Claude/Gemini from reaching their hosted APIs, so it is
-not a “privacy-locked agent run” mode. For a no-network / no-credentials first success signal, use
-the golden fixtures in “Fastest output (no setup)” above.
+`--exec-network` controls only the Docker sandbox container's *runtime* network (maps to
+`docker run --network ...`). It is **not** an end-to-end "no network" / privacy mode:
+
+- `docker build` may still pull base images and download dependencies.
+- Any host-side steps (for `--exec-backend local`) are unaffected.
+
+In this repo's Docker execution backend, the agent CLI runs inside the container by default, so
+`--exec-network none` will also prevent Codex/Claude/Gemini from reaching their hosted APIs and
+the run will fail.
+
+Decision table:
+
+| What you want | Recommended workflow | Expected outcome |
+| --- | --- | --- |
+| No-network baseline / artifact validation | Run `scripts/offline_first_success.ps1` (Windows) or `scripts/offline_first_success.sh` (macOS/Linux) | Verifies report rendering with **no agents** and **no network calls** |
+| Real agent run (hosted API) | Use Docker backend with `--exec-network open` | Agent can reach its provider API; target commands may still choose to use network unless your mission/policy avoids it |
 
 If you need to override the Docker build context, pass `--exec-docker-context` explicitly (default:
 the built-in sandbox_cli context shipped with `sandbox_runner`).
@@ -326,6 +419,16 @@ Golden fixture verification command:
 
 ## Troubleshooting
 
+- If the smoke script reports `No usable Python interpreter found`, the wrapper tried several
+  candidates (workspace `.venv`, `VIRTUAL_ENV`, `py -0p` on Windows, `python`/`python3` on PATH)
+  and rejected all. The script requires Python 3.11+.
+  - Windows / PowerShell fix options:
+    1. Install CPython 3.11+ from python.org or your package manager and ensure it appears on `PATH`.
+    2. Disable the "App Execution Aliases" for Python in Windows Settings.
+    3. Use a portable or vendored Python and put its folder first on `PATH`.
+  - macOS / Linux fix options:
+    1. Install CPython 3.11+ from python.org or your package manager and ensure it appears on `PATH`.
+    2. Export `USERTEST_PYTHON=/path/to/python` before rerunning smoke if you need to pin a known-good interpreter.
 - If `usertest` is "command not found" / not on PATH, either:
   - run via module invocation (after installing deps): `python -m usertest.cli --help`, or
   - install the console script: `python -m pip install -e apps/usertest`
@@ -333,6 +436,13 @@ Golden fixture verification command:
   `minimal|low|medium|high` (example: `--agent-config model_reasoning_effort=high`).
 - If preflight reports `blocked_by_policy`, switch to `--policy inspect` (read-only + shell) or
   update `configs/policies.yaml`.
+- If you're on Windows and `python`/`python3` resolves to a WindowsApps alias (for example
+  `...\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe`) and spawning Python fails (often
+  `Access is denied`), install/select a full CPython interpreter and ensure it takes precedence
+  over WindowsApps on PATH (or disable the "App execution aliases" for Python in Windows
+  Settings). When `--verify-command` uses pytest, the runner fails fast with actionable details in
+  `preflight.json` (`python_toolchain`, derived `command_diagnostics`, `python_runtime`,
+  `pytest_probe`) and `error.json` (`python_unavailable` / `pytest_unavailable`).
 - If you use a Windows-host checkout inside WSL or a Linux container and `git status` shows
   widespread unrelated modifications, it is usually a CRLF/LF line ending mismatch. Mitigations:
   - For new clones: `git config --global core.autocrlf input`
@@ -355,6 +465,10 @@ Golden fixture verification command:
   `python tools/snapshot_repo.py --out repo_snapshot.zip`
   - `.gitignore` files are excluded by default; pass `--include-gitignore-files` to include them.
   - If the output already exists, pass `--overwrite`.
+  - Preview/audit (no archive written):
+    - `python tools/snapshot_repo.py --dry-run`
+    - `python tools/snapshot_repo.py --list-included`
+    - `python tools/snapshot_repo.py --list-excluded --list-limit 200` (prints `PATH<TAB>REASON`)
 - If a run fails mid-acquisition or disk usage grows, delete `runs/usertest/_workspaces/`.
 - If you change `packages/runner_core`, `packages/agent_adapters`, or `packages/reporter` and the
   CLI still behaves like old code, refresh the CLI env:
@@ -365,18 +479,17 @@ Windows coverage is enforced in CI by `.github/workflows/ci.yml` jobs
 
 ## Security
 
-Operational security/runbook notes live under `.agents/ops/`.
-
 Key points:
 
 - Run policies constrain agent tool permissions during `run`/`batch`; they do not sanitize run
   artifacts globally.
-- Run artifacts (`prompt.txt`, `raw_events.jsonl`, `normalized_events.jsonl`, `report.*`) may
-  contain sensitive data.
-- `.env`-style files are not automatically excluded from target workspace acquisition; treat targets
-  and artifacts as sensitive by default.
+- Treat `runs/` (including `runs/usertest/` and `runs/usertest_implement/`) as sensitive by default.
+- Run artifacts (`prompt.txt`, `raw_events.jsonl`, `normalized_events.jsonl`, `report.*`, `patch.diff`)
+  can contain proprietary code, secrets printed by tools, or target `.env` contents.
+- Do not upload run directories to public systems by default; when archiving for debugging, prefer
+  opt-in/on-failure uploads with restricted access + short retention.
 
-For details, see `.agents/ops/security.md`.
+Guidance and CI examples: `docs/ops/security.md`.
 
 ## Snapshot publishing (private registry)
 

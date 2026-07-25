@@ -15,6 +15,43 @@ The runner can drive multiple agent CLIs (Codex, Claude Code, Gemini) in headles
 
 ---
 
+## Step 0: doctor (recommended)
+
+Run the doctor first to get a one-screen **PASS/FAIL** and copy/paste next actions:
+
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/doctor.sh
+  ```
+
+---
+
+## Step 1: offline-safe first success (one command)
+
+Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
+
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/offline_first_success.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/offline_first_success.sh
+  ```
+
+Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
+
+## Developer smoke (one command, optional)
+
+For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytest smoke suite):
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
+
 ## What you get
 
 Each run writes a folder under `runs/usertest/…` with:
@@ -25,6 +62,10 @@ Each run writes a folder under `runs/usertest/…` with:
 - `raw_events.jsonl` → `normalized_events.jsonl` – the tool transcript in a stable contract
 
 If writes are allowed and edits occurred, a `patch.diff` is also written.
+
+These artifacts are evidence logs and may contain sensitive data (prompts/transcripts, tool output,
+and anything printed by the target). Review/redact before sharing; CI archiving guidance:
+`docs/ops/security.md`.
 
 See `docs/design/run-artifacts.md` for the full contract.
 
@@ -60,6 +101,42 @@ Built-in missions live under `configs/missions/builtin/`.
 
 Policies are configured in `configs/policies.yaml`.
 
+Policies are **not** artifact-redaction rules and are **not** a guarantee that a command is local-only.
+Run artifacts can still contain prompts, transcripts, tool output, target paths, patches, or other
+sensitive data. Treat run/export artifacts as sensitive until you review and redact them.
+
+### CLI remote-effect boundaries
+
+The existing CLIs use separate flags for dry runs, printing resolved requests, ticket export,
+and implementation handoff. Use this table as the first-use boundary:
+
+<!-- BEGIN REMOTE_EFFECTS_TABLE -->
+| Command | Boundary | Local artifacts | Sensitive artifacts | Draft/export | Commit | Push | PR/merge | Key modifiers / defaults |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `usertest run` | local-only | Default | Default | No | No | No | No | --policy safe\|inspect\|write; --exec-network none |
+| `usertest batch` | local-only | Default | Default | No | No | No | No | --validate-only; --print-requests |
+| `usertest report` | local-only | Default | May | No | No | No | No | - |
+| `usertest init-usertest` | local-only | Default | No | No | No | No | No | - |
+| `usertest-backlog reports backlog` | local-only | Default | May | No | No | No | No | --dry-run |
+| `usertest-backlog reports export-tickets` | draft/export | Default | May | Default | No | No | No | - |
+| `usertest-implement run` | remote-write | Default | Default | No | Default | Default | Default | --dry-run; --no-commit; --no-push; --no-pr; --settings/--settings-profile; defaults: configs/usertest_implement_settings.yaml profiles.default.run_common |
+| `usertest-implement tickets run-next` | remote-write | Default | Default | Default | Default | Default | Default | --dry-run; --no-refresh-backlog; --no-commit/--no-push/--no-pr; defaults: configs/usertest_implement_settings.yaml profiles.default.run_common + tickets_run_next |
+| `usertest-implement tickets move` | local-only | Default | No | No | No | No | No | --dry-run |
+| `usertest-implement review merge` | remote-write | Default | May | No | No | No | May | - |
+<!-- END REMOTE_EFFECTS_TABLE -->
+
+Legend:
+
+- **local-only**: the command may write local files but has no built-in commit, push, PR, or merge step.
+- **draft/export**: the command writes local draft ticket/export artifacts and local ledgers; it does
+  not publish them to an issue tracker.
+- **remote-write**: the command can write to git hosting or PR state. In particular, the default
+  `configs/usertest_implement_settings.yaml` profile enables `commit`, `push`, and `pr` for
+  `usertest-implement run` / `tickets run-next`; disable those with existing `--no-commit`,
+  `--no-push`, and `--no-pr` flags when you want a local-only implementation pass.
+  On `tickets run-next`, `--dry-run` stops implementation/finalization but the default backlog
+  refresh still runs unless `--no-refresh-backlog` is also passed.
+
 ### Target-local `.usertest/`
 
 If you want repo-specific personas/missions **versioned inside the target repo**, add a
@@ -69,41 +146,67 @@ This is the preferred way to encode: “How should we evaluate *this* repo?”
 
 ---
 
-## Fastest output (no setup)
+## Preview a run artifact (no setup)
 
-To understand what a run produces without installing anything, open the checked-in golden fixture:
+To understand what a run produces without installing anything, open the checked-in golden fixture. This is a fixture preview, not a usertest or installation check:
 
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
 
-You can also re-render that fixture from raw events:
+### One-command "from source" verification
 
-```text
-python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics
-```
-
-If you haven't set up a Python environment for this repo yet, use the one-command scripts (creates `.venv`, installs minimal deps, sets `PYTHONPATH`, renders a scratch copy). These scripts do **not** execute any agents:
-
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
-- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
+See “Quickstart (one command)” above.
 
 ---
 
-## One-command smoke (recommended)
+## Running from source (manual)
 
-For a fast, deterministic end-to-end sanity check (doctor -> deps -> CLI help -> smoke tests), use the OS-specific smoke script:
+If you prefer to manage your environment manually:
 
-Windows PowerShell:
+1. **Install minimal dependencies:**
+   ```bash
+   python -m pip install -r requirements-dev.txt
+   ```
 
-```text
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1
-```
+2. **Install the package (editable):**
+   ```bash
+   python -m pip install -e apps/usertest
+   ```
 
-macOS/Linux:
+   *Alternative (source-run without editable installs):* set `PYTHONPATH` instead:
+   - **Windows PowerShell:** `. .\scripts\set_pythonpath.ps1`
+   - **macOS / Linux:** `source scripts/set_pythonpath.sh`
 
-```text
-bash ./scripts/smoke.sh
-```
+3. **Verify:**
+   ```bash
+   python -m usertest.cli --help
+   ```
+
+If you see a `Missing import ...` message, either the editable install did not complete or `PYTHONPATH`
+is not configured. Run `bash ./scripts/smoke.sh` (macOS/Linux) or the PowerShell equivalent to
+resolve setup in one step.
+
+---
+
+## Agent setup (first real run)
+
+Your first real agent run can fail fast if the agent CLI is missing (`code=binary_missing`) or credentials are missing (`code=auth_missing`).
+The error output includes copy/paste remediation, but the common fixes are:
+
+- **Codex:** `npm install -g @openai/codex`, then `codex login` (or set `OPENAI_API_KEY` and run `codex login --with-api-key`).
+- **Claude Code:** `npm install -g @anthropic-ai/claude-code`, then set `ANTHROPIC_API_KEY` (or run `claude login` if your CLI supports it).
+- **Gemini CLI:** `npm install -g @google/gemini-cli`, then set `GOOGLE_API_KEY` (or configure the CLI's login state under `~/.gemini`).
+
+Useful helpers:
+
+- `python -m agent_adapters.cli doctor` - checks whether `codex`/`claude`/`gemini` are on `PATH`.
+- Offline validation without running agents: `usertest batch --validate-only` and/or `examples/golden_runs/`.
+
+---
+
+## One-command smoke (recommended for developers)
+
+See “Developer smoke (one command, optional)” above.
 
 ---
 
@@ -186,11 +289,26 @@ and what “success” means. If present, it is snapshotted into the run directo
 
 ### 4) Run
 
-For a first attempt, use `inspect` (read-only + allows shell commands):
+Representative validation (default built-in path):
+
+```text
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write
+```
+
+Defaults come from `configs/catalog.yaml`:
+
+- persona: `representative_workflow_evaluator`
+- mission: `verify_install_to_result`
+
+Use this path when you want evidence that a real user can reach a representative result.
+
+Preflight probe (faster, weaker evidence):
 
 ```text
 usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke
 ```
+
+Use this only to establish sign-of-life or isolate the first blocker.
 
 Strictest mode (no shell, no writes):
 
@@ -199,6 +317,7 @@ usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy safe
 ```
 
 ### 5) Inspect the output
+
 
 The command prints the run directory path. The most useful files:
 
@@ -229,11 +348,12 @@ Full guide: `docs/how-to/personas-and-missions.md`.
 
 ## If you run into issues
 
-- If the agent is blocked by policy, switch to `--policy inspect` (read-only + shell).
+- If the agent is blocked by policy during a representative workflow, switch to `--policy write`.
+- If you only need a preflight probe, switch to `--policy inspect` (read-only + shell).
 - If you need isolation or want fewer OS-specific shell issues, use the Docker backend:
 
 ```bash
-usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker
 ```
 
 More workflows: `docs/how-to/run-usertest.md`.

@@ -102,6 +102,11 @@ print(result.run_dir)
 Most callers should use the CLI, because it loads `agents.yaml` / `policies.yaml` and handles
 logging and run directory naming.
 
+For Docker execution, `RunRequest.exec_docker_profile` selects between:
+
+- `standard`: the existing generic `sandbox_cli` image/context flow
+- `maintenance`: the same-repo maintenance image flow used by `usertest-implement`
+
 ## Public API
 
 - `RunnerConfig`, `RunRequest`, `RunResult`

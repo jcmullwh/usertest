@@ -10,6 +10,9 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as _dt
+import difflib
+import importlib.util
+import json
 import os
 import re
 import shutil
@@ -19,6 +22,31 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
+
+def _load_install_cache_common() -> Any:
+    try:
+        from tools.scaffold import install_cache_common as module
+
+        return module
+    except ModuleNotFoundError:
+        pass
+
+    module_path = Path(__file__).resolve().with_name("install_cache_common.py")
+    spec = importlib.util.spec_from_file_location("install_cache_common", module_path)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f"Unable to load install_cache_common from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+_install_cache_common = _load_install_cache_common()
+INSTALL_CACHE_SCHEMA_VERSION = _install_cache_common.INSTALL_CACHE_SCHEMA_VERSION
+build_install_cache_fingerprint = _install_cache_common.build_install_cache_fingerprint
+probe_pdm_version = _install_cache_common.probe_pdm_version
+safe_cache_project_id = _install_cache_common.safe_cache_project_id
+sha256_file_or_none = _install_cache_common.sha256_file_or_none
 
 
 def _eprint(*args: object) -> None:
@@ -217,6 +245,14 @@ def _which(cmd: str) -> str | None:
     return shutil.which(cmd)
 
 
+def _pdm_importable() -> bool:
+    return importlib.util.find_spec("pdm") is not None
+
+
+def _virtualenv_importable() -> bool:
+    return importlib.util.find_spec("virtualenv") is not None
+
+
 def _resolve_argv(argv: list[str]) -> list[str]:
     """Resolve argv[0] via PATH for cross-platform execution.
 
@@ -228,18 +264,28 @@ def _resolve_argv(argv: list[str]) -> list[str]:
         raise ScaffoldError("Internal error: empty argv")
 
     cmd = argv[0]
+    has_sep = any(sep and sep in cmd for sep in ("/", "\\", os.path.sep, os.path.altsep))
+    cmd_name = Path(cmd).name.lower()
 
     # Windows-only: `pdm` can hang at import time on hosts where stdlib `platform.system()` hangs due to WMI queries.
     # We route pdm invocations through a shim that disables WMI-backed platform queries.
     if os.name == "nt":
-        cmd_name = Path(cmd).name.lower()
-        if cmd_name in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+        if cmd_name in _PDM_COMMAND_NAMES:
             shim = _repo_root() / "tools" / "pdm_shim.py"
             if not shim.exists():
                 raise ScaffoldError(f"Missing PDM shim: {shim}")
-            return ["python", str(shim), *argv[1:]]
+            # Prefer running PDM in the same interpreter as this scaffold process. This avoids relying on `python`
+            # being on PATH and avoids mixing tool installations across interpreters.
+            if _pdm_importable():
+                return [sys.executable, str(shim), *argv[1:]]
+            # Fall back to invoking `pdm` directly. This keeps `scaffold` usable when PDM is installed in a different
+            # interpreter than the one running scaffold.
 
-    if any(sep and sep in cmd for sep in ("/", "\\", os.path.sep, os.path.altsep)):
+    # Non-Windows fallback: if `pdm` is importable but no entrypoint is on PATH, run via `python -m pdm`.
+    if os.name != "nt" and not has_sep and cmd_name in _PDM_COMMAND_NAMES and _which(cmd) is None and _pdm_importable():
+        return [sys.executable, "-m", "pdm", *argv[1:]]
+
+    if has_sep:
         return argv
 
     resolved = _which(cmd)
@@ -271,14 +317,171 @@ def _run(
     _eprint(f"+ ({cwd}) {' '.join(argv)}")
     if resolved_argv != argv:
         _eprint(f"  -> ({cwd}) {' '.join(resolved_argv)}")
-    return subprocess.run(
-        resolved_argv,
-        cwd=str(cwd),
-        env=env,
-        text=True,
-        check=False,
-        capture_output=capture,
+    try:
+        return subprocess.run(
+            resolved_argv,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            check=False,
+            capture_output=capture,
+        )
+    except FileNotFoundError as exc:
+        cmd_name = Path(argv[0]).name
+        hint = ""
+        if cmd_name.lower() in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+            hint = f" Install PDM: {sys.executable} -m pip install -U pdm"
+        raise ScaffoldError(f"Command not found: {cmd_name!r}.{hint}") from exc
+    except OSError as exc:
+        raise ScaffoldError(f"Failed to execute {argv[0]!r}: {exc}") from exc
+
+
+def _probe(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command without emitting it to stdout/stderr, capturing output for inspection."""
+
+    resolved_argv = _resolve_argv(argv)
+    try:
+        return subprocess.run(
+            resolved_argv,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:
+        cmd_name = Path(argv[0]).name
+        hint = ""
+        if cmd_name.lower() in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+            hint = f" Install PDM: {sys.executable} -m pip install -U pdm"
+        raise ScaffoldError(f"Command not found: {cmd_name!r}.{hint}") from exc
+    except OSError as exc:
+        raise ScaffoldError(f"Failed to execute {argv[0]!r}: {exc}") from exc
+
+
+def _probe_tool_version(*, argv: list[str], timeout_seconds: float) -> tuple[bool, str | None, str | None]:
+    """
+    Best-effort `--version` probe for a tool.
+
+    Returns
+    -------
+    tuple[bool, str | None, str | None]
+        `(ok, version_line, error)`.
+    """
+    try:
+        cp = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, f"timed out after {timeout_seconds:.1f}s"
+    except OSError as exc:
+        return False, None, str(exc)
+
+    combined = "\n".join(x for x in (cp.stdout, cp.stderr) if x).strip()
+    line = combined.splitlines()[0].strip() if combined else None
+    if cp.returncode != 0:
+        return False, line, f"exit_code={cp.returncode}"
+    return True, line, None
+
+
+def _probe_bash(*, bash_path: str, timeout_seconds: float) -> tuple[bool, str | None, str | None]:
+    """
+    Probe bash usability without loading slow shell startup files.
+
+    On some Linux CI runners, `bash -lc ...` can hit the timeout because login/profile
+    startup is unexpectedly slow. Prefer a clean shell and retry once on timeout before
+    declaring bash unusable.
+    """
+    argv = [bash_path, "--noprofile", "--norc", "-lc", "printf ok"]
+    ok, version_line, err = _probe_tool_version(argv=argv, timeout_seconds=timeout_seconds)
+    if ok or err != f"timed out after {timeout_seconds:.1f}s":
+        return ok, version_line, err
+    return _probe_tool_version(argv=argv, timeout_seconds=timeout_seconds)
+
+
+def _dedup_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _probe_temp_writable(*, timeout_seconds: float) -> tuple[bool, str | None, str | None]:
+    del timeout_seconds  # reserved for future parity with other probes
+    tmp_dir = Path(tempfile.gettempdir())
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix="scaffold_doctor_", dir=str(tmp_dir))
+        try:
+            os.write(fd, b"ok")
+        finally:
+            os.close(fd)
+        os.unlink(name)
+    except OSError as exc:
+        return False, str(tmp_dir), str(exc)
+    return True, str(tmp_dir), None
+
+
+def _pip_remediation_hint(*, python_exe: str) -> str:
+    parts: list[str] = []
+    parts.append(f"Try: {python_exe} -m ensurepip --upgrade")
+    parts.append(f"Then: {python_exe} -m pip --version")
+    parts.append("If ensurepip is missing, install a full CPython (python.org) with pip included.")
+    return " ".join(parts)
+
+
+def _pdm_remediation_hint(*, python_exe: str, pip_ok: bool) -> str:
+    if pip_ok:
+        return f"Install PDM (try): {python_exe} -m pip install -U pdm"
+    return f"Install pip first ({_pip_remediation_hint(python_exe=python_exe)}) then: {python_exe} -m pip install -U pdm"
+
+
+def _virtualenv_remediation_hint(*, python_exe: str) -> str:
+    return (
+        f"Install virtualenv (try): {python_exe} -m pip install -U virtualenv"
+        "  (PDM uses virtualenv to create project venvs; without it PDM falls back to stdlib venv"
+        " which may have reduced features or fail in some container environments)"
     )
+
+
+def _git_remediation_hint() -> str:
+    if os.name == "nt":
+        return "Install Git and ensure 'git' is on PATH (for example: winget install -e --id Git.Git)."
+    return "Install Git and ensure 'git' is on PATH."
+
+
+def _bash_remediation_hint() -> str:
+    if os.name == "nt":
+        return "Install a bash (Git for Windows or WSL) or use PowerShell-only workflows."
+    return "Install bash (required for scripts/smoke.sh) and ensure it is on PATH."
+
+
+def _write_doctor_tool_report(*, repo_root: Path, payload: dict[str, Any]) -> Path | None:
+    out_path = repo_root / ".scaffold" / "doctor_tool_report.json"
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return out_path
+    except OSError as exc:
+        _eprint(f"WARNING: failed to write doctor tool report: {out_path}: {exc}")
+        return None
 
 
 _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS: tuple[str, ...] = (
@@ -291,14 +494,379 @@ _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS: tuple[str, ...] = (
     "no such file or directory",
 )
 
+_INSTALL_CACHE_ENABLED_ENV = "USERTEST_MAINT_VENV_CACHE_ENABLED"
+_INSTALL_CACHE_ROOT_ENV = "USERTEST_MAINT_VENV_CACHE_ROOT"
+_INSTALL_CACHE_SEED_ROOT_ENV = "USERTEST_MAINT_VENV_SEED_ROOT"
+_INSTALL_CACHE_LOCAL_META_FILENAME = ".usertest_install_cache.json"
+_PDM_VERSION_FOR_CACHE: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _InstallCacheState:
+    enabled: bool
+    cache_root: Path | None
+    project_cache_dir: Path | None
+    entry_dir: Path | None
+    venv_cache_dir: Path | None
+    entry_meta_path: Path | None
+    lock_path: Path | None
+    local_meta_path: Path
+    fingerprint: str
+    fingerprint_payload: dict[str, Any]
+    seed_root: Path | None
+    seed_project_dir: Path | None
+    seed_entry_dir: Path | None
+    seed_venv_dir: Path | None
+
+
+def _install_cache_enabled() -> bool:
+    raw = os.environ.get(_INSTALL_CACHE_ENABLED_ENV, "")
+    if not raw.strip():
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cache_root_from_env() -> Path | None:
+    raw = os.environ.get(_INSTALL_CACHE_ROOT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw)
+    except OSError:
+        return None
+
+
+def _seed_root_from_env() -> Path | None:
+    raw = os.environ.get(_INSTALL_CACHE_SEED_ROOT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw)
+    except OSError:
+        return None
+
+
+def _safe_cache_project_id(project_id: str) -> str:
+    return safe_cache_project_id(project_id)
+
+
+def _sha256_file_or_none(path: Path) -> str | None:
+    return sha256_file_or_none(path)
+
+
+def _project_relpath_for_cache(*, repo_root: Path, project_dir: Path) -> str:
+    try:
+        rel = project_dir.resolve().relative_to(repo_root.resolve())
+    except Exception:
+        return project_dir.name
+    return rel.as_posix()
+
+
+def _pdm_version_for_cache(*, cwd: Path) -> str:
+    global _PDM_VERSION_FOR_CACHE
+    if _PDM_VERSION_FOR_CACHE is not None:
+        return _PDM_VERSION_FOR_CACHE
+    _PDM_VERSION_FOR_CACHE = probe_pdm_version(cwd=cwd)
+    return _PDM_VERSION_FOR_CACHE
+
+
+def _build_install_cache_state(
+    *,
+    repo_root: Path,
+    project_dir: Path,
+    project_id: str,
+    install_cmd: list[str],
+    cache_enabled: bool,
+) -> _InstallCacheState:
+    local_meta_path = project_dir / ".venv" / _INSTALL_CACHE_LOCAL_META_FILENAME
+    fingerprint_entry = build_install_cache_fingerprint(
+        repo_root=repo_root,
+        project_dir=project_dir,
+        project_id=project_id,
+        install_cmd=install_cmd,
+        python_major_minor=f"{sys.version_info.major}.{sys.version_info.minor}",
+        pdm_version=_pdm_version_for_cache(cwd=project_dir),
+    )
+    payload = fingerprint_entry.payload
+    fingerprint = fingerprint_entry.fingerprint
+    safe_project_id = _safe_cache_project_id(project_id)
+    seed_root = _seed_root_from_env()
+    seed_project_dir = seed_root / safe_project_id if seed_root is not None else None
+    seed_entry_dir = seed_project_dir / fingerprint if seed_project_dir is not None else None
+    seed_venv_dir = seed_entry_dir / "venv" if seed_entry_dir is not None else None
+
+    if not cache_enabled:
+        return _InstallCacheState(
+            enabled=False,
+            cache_root=None,
+            project_cache_dir=None,
+            entry_dir=None,
+            venv_cache_dir=None,
+            entry_meta_path=None,
+            lock_path=None,
+            local_meta_path=local_meta_path,
+            fingerprint=fingerprint,
+            fingerprint_payload=payload,
+            seed_root=seed_root,
+            seed_project_dir=seed_project_dir,
+            seed_entry_dir=seed_entry_dir,
+            seed_venv_dir=seed_venv_dir,
+        )
+
+    cache_root = _cache_root_from_env()
+    if cache_root is None:
+        return _InstallCacheState(
+            enabled=False,
+            cache_root=None,
+            project_cache_dir=None,
+            entry_dir=None,
+            venv_cache_dir=None,
+            entry_meta_path=None,
+            lock_path=None,
+            local_meta_path=local_meta_path,
+            fingerprint=fingerprint,
+            fingerprint_payload=payload,
+            seed_root=seed_root,
+            seed_project_dir=seed_project_dir,
+            seed_entry_dir=seed_entry_dir,
+            seed_venv_dir=seed_venv_dir,
+        )
+
+    project_cache_dir = cache_root / safe_project_id
+    entry_dir = project_cache_dir / fingerprint
+    return _InstallCacheState(
+        enabled=True,
+        cache_root=cache_root,
+        project_cache_dir=project_cache_dir,
+        entry_dir=entry_dir,
+        venv_cache_dir=entry_dir / "venv",
+        entry_meta_path=entry_dir / "meta.json",
+        lock_path=project_cache_dir / ".cache_write.lock",
+        local_meta_path=local_meta_path,
+        fingerprint=fingerprint,
+        fingerprint_payload=payload,
+        seed_root=seed_root,
+        seed_project_dir=seed_project_dir,
+        seed_entry_dir=seed_entry_dir,
+        seed_venv_dir=seed_venv_dir,
+    )
+
+
+def _venv_python_executable(*, project_dir: Path) -> Path:
+    if os.name == "nt":
+        return project_dir / ".venv" / "Scripts" / "python.exe"
+    return project_dir / ".venv" / "bin" / "python"
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return cast(dict[str, Any], data)
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _local_install_metadata_matches(*, state: _InstallCacheState) -> bool:
+    if not (state.local_meta_path.parent.exists() and state.local_meta_path.parent.is_dir()):
+        return False
+    meta = _read_json_file(state.local_meta_path)
+    if meta is None:
+        return False
+    return str(meta.get("fingerprint", "")).strip() == state.fingerprint
+
+
+def _write_local_install_metadata(*, state: _InstallCacheState) -> None:
+    payload = {
+        "schema_version": INSTALL_CACHE_SCHEMA_VERSION,
+        "fingerprint": state.fingerprint,
+        "payload": state.fingerprint_payload,
+    }
+    _write_json_file(state.local_meta_path, payload)
+
+
+def _validate_project_venv(*, project_dir: Path) -> bool:
+    python_exe = _venv_python_executable(project_dir=project_dir)
+    if not python_exe.exists() or not python_exe.is_file():
+        return False
+    try:
+        cp = subprocess.run(
+            [str(python_exe), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if cp.returncode != 0:
+        return False
+    version = (cp.stdout or "").strip()
+    expected = f"{sys.version_info.major}.{sys.version_info.minor}"
+    return version == expected
+
+
+def _install_cache_restore(*, state: _InstallCacheState, project_dir: Path, project_id: str) -> bool:
+    if not state.enabled or state.venv_cache_dir is None:
+        return False
+    if not state.venv_cache_dir.exists():
+        _eprint(f"INFO: {project_id}: maint-venv-cache miss ({state.fingerprint[:12]}).")
+        return False
+    restore_parent = project_dir.parent
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f".maint_venv_restore_{_safe_cache_project_id(project_id)}_",
+            dir=restore_parent,
+        ) as tmp:
+            tmp_path = Path(tmp)
+            staged = tmp_path / "venv"
+            shutil.copytree(state.venv_cache_dir, staged, symlinks=True)
+            target = project_dir / ".venv"
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.move(str(staged), str(target))
+    except OSError as exc:
+        _eprint(f"INFO: {project_id}: maint-venv-cache restore-failed ({exc}).")
+        return False
+    if not _validate_project_venv(project_dir=project_dir):
+        shutil.rmtree(project_dir / ".venv", ignore_errors=True)
+        _eprint(f"INFO: {project_id}: maint-venv-cache restore-failed (invalid venv).")
+        return False
+    try:
+        _write_local_install_metadata(state=state)
+    except OSError as exc:
+        _eprint(f"INFO: {project_id}: maint-venv-cache restore-failed ({exc}).")
+        return False
+    _eprint(f"INFO: {project_id}: maint-venv-cache hit ({state.fingerprint[:12]}).")
+    return True
+
+
+def _install_cache_restore_from_seed(
+    *, state: _InstallCacheState, project_dir: Path, project_id: str
+) -> bool:
+    if state.seed_venv_dir is None:
+        return False
+    if not state.seed_venv_dir.exists():
+        return False
+    restore_parent = project_dir.parent
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f".maint_venv_seed_{_safe_cache_project_id(project_id)}_",
+            dir=restore_parent,
+        ) as tmp:
+            tmp_path = Path(tmp)
+            staged = tmp_path / "venv"
+            shutil.copytree(state.seed_venv_dir, staged, symlinks=True)
+            target = project_dir / ".venv"
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.move(str(staged), str(target))
+    except OSError as exc:
+        _eprint(f"INFO: {project_id}: maint-venv-seed restore-failed ({exc}).")
+        return False
+    if not _validate_project_venv(project_dir=project_dir):
+        shutil.rmtree(project_dir / ".venv", ignore_errors=True)
+        _eprint(f"INFO: {project_id}: maint-venv-seed restore-failed (invalid venv).")
+        return False
+    try:
+        _write_local_install_metadata(state=state)
+    except OSError as exc:
+        _eprint(f"INFO: {project_id}: maint-venv-seed restore-failed ({exc}).")
+        return False
+    _eprint(f"INFO: {project_id}: maint-venv-seed hit ({state.fingerprint[:12]}).")
+    return True
+
+
+def _acquire_best_effort_lock(lock_path: Path) -> int | None:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+    try:
+        return os.open(str(lock_path), flags)
+    except OSError:
+        return None
+
+
+def _release_best_effort_lock(*, lock_path: Path, lock_fd: int | None) -> None:
+    if lock_fd is None:
+        return
+    try:
+        os.close(lock_fd)
+    except OSError:
+        pass
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _install_cache_save(*, state: _InstallCacheState, project_dir: Path, project_id: str) -> None:
+    if not state.enabled:
+        return
+    venv_dir = project_dir / ".venv"
+    if not venv_dir.exists() or not venv_dir.is_dir():
+        return
+    if state.project_cache_dir is None or state.entry_dir is None:
+        return
+    if state.lock_path is None or state.entry_meta_path is None:
+        return
+
+    lock_fd = _acquire_best_effort_lock(state.lock_path)
+    if lock_fd is None:
+        _eprint(f"INFO: {project_id}: maint-venv-cache save-skipped (lock unavailable).")
+        return
+
+    temp_entry = state.project_cache_dir / f".tmp_{state.fingerprint}"
+    try:
+        if temp_entry.exists():
+            shutil.rmtree(temp_entry, ignore_errors=True)
+        (temp_entry / "venv").parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(venv_dir, temp_entry / "venv", symlinks=True)
+        _write_json_file(
+            temp_entry / "meta.json",
+            {
+                "schema_version": INSTALL_CACHE_SCHEMA_VERSION,
+                "fingerprint": state.fingerprint,
+                "payload": state.fingerprint_payload,
+            },
+        )
+        if state.entry_dir.exists():
+            shutil.rmtree(state.entry_dir, ignore_errors=True)
+        shutil.move(str(temp_entry), str(state.entry_dir))
+        _eprint(f"INFO: {project_id}: maint-venv-cache save-complete ({state.fingerprint[:12]}).")
+    except OSError as exc:
+        _eprint(f"INFO: {project_id}: maint-venv-cache save-skipped ({exc}).")
+        shutil.rmtree(temp_entry, ignore_errors=True)
+    finally:
+        _release_best_effort_lock(lock_path=state.lock_path, lock_fd=lock_fd)
+_PDM_COMMAND_NAMES: set[str] = {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+_PYTEST_COMMAND_NAMES: set[str] = {"pytest", "pytest.exe", "pytest.cmd", "pytest.bat"}
+_PYTHON_COMMAND_NAMES: set[str] = {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
+
 
 def _is_pdm_install_command(argv: list[str]) -> bool:
     if len(argv) < 2:
         return False
     cmd_name = Path(argv[0]).name.lower()
-    if cmd_name not in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+    if cmd_name not in _PDM_COMMAND_NAMES:
         return False
     return argv[1].strip().lower() == "install"
+
+
+def _is_pdm_command(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    cmd_name = Path(argv[0]).name.lower()
+    return cmd_name in _PDM_COMMAND_NAMES
 
 
 def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) -> bool:
@@ -310,15 +878,27 @@ def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) ->
     return any(marker in text for marker in _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS)
 
 
+def _write_stream_backslashescaped(stream: Any, text: str) -> None:
+    try:
+        stream.write(text)
+        return
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        escaped = text.encode(encoding, errors="backslashreplace").decode(
+            encoding, errors="ignore"
+        )
+        stream.write(escaped)
+
+
 def _emit_captured_process_output(cp: subprocess.CompletedProcess[str]) -> None:
     if cp.stdout:
-        sys.stdout.write(cp.stdout)
+        _write_stream_backslashescaped(sys.stdout, cp.stdout)
         if not cp.stdout.endswith("\n"):
-            sys.stdout.write("\n")
+            _write_stream_backslashescaped(sys.stdout, "\n")
     if cp.stderr:
-        sys.stderr.write(cp.stderr)
+        _write_stream_backslashescaped(sys.stderr, cp.stderr)
         if not cp.stderr.endswith("\n"):
-            sys.stderr.write("\n")
+            _write_stream_backslashescaped(sys.stderr, "\n")
 
 
 def _run_manifest_task(
@@ -327,13 +907,79 @@ def _run_manifest_task(
     cwd: Path,
     task_name: str,
     project_id: str,
+    extra_env: dict[str, str] | None = None,
+    force_install: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    if task_name != "install" or not _is_pdm_install_command(cmd):
-        return _run(cmd, cwd=cwd)
+    if not _is_pdm_command(cmd):
+        if not extra_env:
+            return _run(cmd, cwd=cwd)
+        env = dict(os.environ)
+        env.update(extra_env)
+        return _run(cmd, cwd=cwd, env=env)
 
-    first = _run(cmd, cwd=cwd, capture=True)
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    # PDM will reuse the currently active virtualenv by default. That's convenient for single-project workflows, but
+    # causes surprising (and on Windows, sometimes broken) behavior when a monorepo task runner invokes PDM across many
+    # projects. For example, `pdm install` may attempt to update the running CLI's own entrypoint executable, which
+    # fails due to Windows file locking.
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    if task_name != "install" or not _is_pdm_install_command(cmd):
+        return _run(cmd, cwd=cwd, env=env)
+
+    # Some environments (including certain containerized/CI setups) disallow creating symlinks inside bind mounts.
+    # PDM's default `venv.backend=virtualenv` may attempt to symlink the interpreter into the venv, which fails with
+    # `PermissionError: [Errno 1] Operation not permitted`.
+    #
+    # `virtualenv` honors `VIRTUALENV_COPIES=1` and will copy instead of symlinking, making installs more reliable.
+    env.setdefault("VIRTUALENV_COPIES", "1")
+
+    # If `virtualenv` is not installed, PDM will raise `VirtualenvCreateError` when attempting to create a project
+    # venv. Fall back to PDM's stdlib `venv` backend which is always available. This makes `pdm install` work in
+    # container environments where only a bare CPython is present (no `virtualenv` package).
+    if not _virtualenv_importable():
+        env.setdefault("PDM_VENV_BACKEND", "venv")
+        _eprint(
+            "INFO: 'virtualenv' package not found; setting PDM_VENV_BACKEND=venv to use stdlib venv backend."
+            f" Install virtualenv for richer venv support: {sys.executable} -m pip install -U virtualenv"
+        )
+
+    cache_state = _build_install_cache_state(
+        repo_root=_repo_root(),
+        project_dir=cwd,
+        project_id=project_id,
+        install_cmd=cmd,
+        cache_enabled=_install_cache_enabled(),
+    )
+    if (
+        not force_install
+        and cache_state.enabled
+        and _local_install_metadata_matches(state=cache_state)
+    ):
+        _eprint(f"INFO: {project_id}: maint-venv-cache hit-local ({cache_state.fingerprint[:12]}).")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+    if (
+        not force_install
+        and _install_cache_restore(state=cache_state, project_dir=cwd, project_id=project_id)
+    ):
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+    if (
+        not force_install
+        and _install_cache_restore_from_seed(state=cache_state, project_dir=cwd, project_id=project_id)
+    ):
+        _install_cache_save(state=cache_state, project_dir=cwd, project_id=project_id)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    first = _run(cmd, cwd=cwd, capture=True, env=env)
     _emit_captured_process_output(first)
     if first.returncode == 0:
+        try:
+            _write_local_install_metadata(state=cache_state)
+        except OSError as exc:
+            _eprint(f"INFO: {project_id}: maint-venv-cache save-skipped ({exc}).")
+        _install_cache_save(state=cache_state, project_dir=cwd, project_id=project_id)
         return first
 
     if not _looks_like_transient_pdm_local_path_failure(
@@ -346,8 +992,14 @@ def _run_manifest_task(
         "WARNING: transient PDM local-path resolution failure detected for "
         f"project '{project_id}'. Retrying install once."
     )
-    second = _run(cmd, cwd=cwd, capture=True)
+    second = _run(cmd, cwd=cwd, capture=True, env=env)
     _emit_captured_process_output(second)
+    if second.returncode == 0:
+        try:
+            _write_local_install_metadata(state=cache_state)
+        except OSError as exc:
+            _eprint(f"INFO: {project_id}: maint-venv-cache save-skipped ({exc}).")
+        _install_cache_save(state=cache_state, project_dir=cwd, project_id=project_id)
     return second
 
 
@@ -381,6 +1033,17 @@ def _validate_simple_name(name: str) -> None:
         seps.add(os.path.altsep)
     if any(sep in name for sep in seps):
         raise ScaffoldError("Name must not contain path separators.")
+
+
+def _normalize_repo_rel_path(value: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    while normalized.startswith("/"):
+        normalized = normalized[1:]
+    while normalized.endswith("/"):
+        normalized = normalized[:-1]
+    return normalized
 
 
 _SNAKE_NON_ALNUM_RE = re.compile(r"[^a-zA-Z0-9]+")
@@ -542,6 +1205,310 @@ def _validate_task_name(task_name: str, *, where: str) -> None:
     """Validate a task name is safe to serialize as `tasks.<name>` in TOML."""
     if not _TOML_BARE_KEY_RE.match(task_name):
         raise ScaffoldError(f"{where}: task name must match ^[a-zA-Z0-9_-]+$ (rejects dots and spaces): {task_name!r}")
+
+
+def _ruff_check_with_fix(cmd: list[str]) -> list[str] | None:
+    """Return a ruff-check command with `--fix` inserted, or None if not recognized."""
+    if "--fix" in cmd:
+        return cmd
+    for i in range(len(cmd) - 1):
+        if Path(cmd[i]).name.lower() in {"ruff", "ruff.exe", "ruff.cmd", "ruff.bat"} and cmd[i + 1] == "check":
+            return [*cmd[: i + 2], "--fix", *cmd[i + 2 :]]
+    return None
+
+
+_RUFF_COMMAND_NAMES: set[str] = {"ruff", "ruff.exe", "ruff.cmd", "ruff.bat"}
+
+
+def _looks_like_pdm_run_ruff_check(cmd: list[str]) -> bool:
+    return (
+        len(cmd) >= 4
+        and _is_pdm_command(cmd)
+        and cmd[1] == "run"
+        and Path(cmd[2]).name.lower() in _RUFF_COMMAND_NAMES
+        and cmd[3] == "check"
+    )
+
+
+def _pdm_run_pytest_probe_argv(cmd: list[str]) -> list[str] | None:
+    if len(cmd) < 3 or not _is_pdm_command(cmd) or cmd[1] != "run":
+        return None
+    if Path(cmd[2]).name.lower() in _PYTEST_COMMAND_NAMES:
+        return [cmd[0], "run", cmd[2], "--version"]
+    if (
+        len(cmd) >= 5
+        and Path(cmd[2]).name.lower() in _PYTHON_COMMAND_NAMES
+        and cmd[3] == "-m"
+        and cmd[4] == "pytest"
+    ):
+        return [cmd[0], "run", cmd[2], "-m", "pytest", "--version"]
+    return None
+
+
+def _looks_like_pdm_run_pytest(cmd: list[str]) -> bool:
+    return _pdm_run_pytest_probe_argv(cmd) is not None
+
+
+def _looks_like_host_pytest_command(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    cmd_name = Path(cmd[0]).name.lower()
+    if cmd_name in _PYTEST_COMMAND_NAMES:
+        return True
+    return len(cmd) >= 3 and cmd_name in _PYTHON_COMMAND_NAMES and cmd[1] == "-m" and cmd[2] == "pytest"
+
+
+def _looks_like_host_ruff_command(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    cmd_name = Path(cmd[0]).name.lower()
+    if cmd_name in _RUFF_COMMAND_NAMES:
+        return True
+    return len(cmd) >= 3 and cmd_name in _PYTHON_COMMAND_NAMES and cmd[1] == "-m" and cmd[2] == "ruff"
+
+
+def _pip_probe_ok(*, cwd: Path) -> bool:
+    cp = _probe([sys.executable, "-m", "pip", "--version"], cwd=cwd)
+    return cp.returncode == 0
+
+
+def _pytest_probe_ok(*, cwd: Path) -> bool:
+    cp = _probe([sys.executable, "-m", "pytest", "--version"], cwd=cwd)
+    return cp.returncode == 0
+
+
+def _ruff_probe_ok(*, cwd: Path) -> bool:
+    cp = _probe([sys.executable, "-m", "ruff", "--version"], cwd=cwd)
+    return cp.returncode == 0
+
+
+def _bootstrap_lint_test_prereqs_if_needed(
+    *,
+    repo_root: Path,
+    task_name: str,
+    projects: list[dict[str, Any]],
+    fix: bool,
+) -> None:
+    if task_name not in {"lint", "test"}:
+        return
+
+    needs_pdm = False
+    needs_host_pytest = False
+    needs_host_ruff = False
+    fix_task_name = f"{task_name}_fix"
+    for project in projects:
+        tasks = project.get("tasks")
+        if not isinstance(tasks, dict):
+            continue
+
+        cmd = tasks.get(fix_task_name) if fix else tasks.get(task_name)
+        if cmd is None and fix:
+            cmd = tasks.get(task_name)
+        if cmd is None:
+            continue
+
+        try:
+            cmd_list = _validate_task_cmd(cmd, where=f"projects.{project.get('id')}.tasks.{task_name}")
+        except ScaffoldError:
+            continue
+
+        if _is_pdm_command(cmd_list):
+            needs_pdm = True
+        if task_name == "test" and _looks_like_host_pytest_command(cmd_list):
+            needs_host_pytest = True
+        if task_name == "lint" and _looks_like_host_ruff_command(cmd_list):
+            needs_host_ruff = True
+
+    reasons: list[str] = []
+    if needs_pdm and _which("pdm") is None and not _pdm_importable():
+        reasons.append("pdm")
+    if needs_host_pytest and not _pytest_probe_ok(cwd=repo_root):
+        reasons.append("pytest")
+    if needs_host_ruff and not _ruff_probe_ok(cwd=repo_root):
+        reasons.append("ruff")
+    if not reasons:
+        return
+
+    requirements_path = repo_root / "requirements-dev.txt"
+    if not requirements_path.exists():
+        joined = ", ".join(reasons)
+        raise ScaffoldError(
+            f"Missing requirements-dev.txt; cannot auto-bootstrap {joined} for scaffold run {task_name}."
+        )
+
+    if not _pip_probe_ok(cwd=repo_root):
+        _eprint("INFO: pip is unavailable; attempting ensurepip bootstrap for lint/test prerequisites.")
+        ensure_cp = _run([sys.executable, "-m", "ensurepip", "--upgrade"], cwd=repo_root)
+        if ensure_cp.returncode != 0 or not _pip_probe_ok(cwd=repo_root):
+            raise ScaffoldError(
+                "pip is required to auto-bootstrap lint/test prerequisites but could not be initialized."
+                f" {_pip_remediation_hint(python_exe=sys.executable)}"
+            )
+
+    _eprint(
+        "INFO: bootstrapping lint/test prerequisites via requirements-dev.txt"
+        f" (missing: {', '.join(reasons)})."
+    )
+    install_cp = _run([sys.executable, "-m", "pip", "install", "-r", str(requirements_path)], cwd=repo_root)
+    if install_cp.returncode != 0:
+        raise ScaffoldError(
+            "Failed to install lint/test prerequisites from requirements-dev.txt "
+            f"(exit {install_cp.returncode})."
+        )
+
+    if "pdm" in reasons and _which("pdm") is None and not _pdm_importable():
+        raise ScaffoldError(
+            "Auto-bootstrap completed but 'pdm' is still unavailable. "
+            f"Install pdm into this interpreter: {sys.executable} -m pip install -U pdm"
+        )
+    if "pytest" in reasons and not _pytest_probe_ok(cwd=repo_root):
+        raise ScaffoldError(
+            "Auto-bootstrap completed but pytest is still unavailable. "
+            f"Install pytest into this interpreter: {sys.executable} -m pip install -U pytest"
+        )
+    if "ruff" in reasons and not _ruff_probe_ok(cwd=repo_root):
+        raise ScaffoldError(
+            "Auto-bootstrap completed but ruff is still unavailable. "
+            f"Install ruff into this interpreter: {sys.executable} -m pip install -U ruff"
+        )
+
+
+def _collect_repo_src_paths(*, repo_root: Path, projects: list[dict[str, Any]]) -> list[str]:
+    src_paths: list[str] = []
+    for project in projects:
+        project_path = project.get("path")
+        if not isinstance(project_path, str) or not project_path:
+            continue
+        src_dir = repo_root / project_path / "src"
+        if src_dir.exists():
+            src_paths.append(str(src_dir))
+    return _dedup_preserve_order(src_paths)
+
+
+def _build_lint_test_env(*, repo_root: Path, projects: list[dict[str, Any]], task_name: str) -> dict[str, str] | None:
+    if task_name not in {"lint", "test"}:
+        return None
+    src_paths = _collect_repo_src_paths(repo_root=repo_root, projects=projects)
+    if not src_paths:
+        return None
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        src_paths.append(existing)
+    return {"PYTHONPATH": os.pathsep.join(src_paths)}
+
+
+def _format_run_install_remediation_cmd(
+    args: argparse.Namespace,
+    *,
+    failing_project_id: str,
+) -> str:
+    parts: list[str] = ["python", "tools/scaffold/scaffold.py", "run", "install"]
+    if bool(args.all):
+        parts.append("--all")
+        return " ".join(parts)
+    kind = getattr(args, "kind", None)
+    if kind:
+        parts.extend(["--kind", str(kind)])
+        return " ".join(parts)
+
+    selected_projects = getattr(args, "project", None)
+    if isinstance(selected_projects, list) and selected_projects:
+        for project_id in selected_projects:
+            parts.extend(["--project", str(project_id)])
+        return " ".join(parts)
+
+    parts.extend(["--project", failing_project_id])
+    return " ".join(parts)
+
+
+def _ensure_ruff_available_for_lint(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    project_id: str,
+    remediation_cmd: str,
+    install_cmd: list[str] | None,
+    extra_env: dict[str, str] | None,
+) -> None:
+    if not _looks_like_pdm_run_ruff_check(cmd):
+        return
+
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    probe_argv = [cmd[0], "run", cmd[2], "--version"]
+    cp = _probe(probe_argv, cwd=cwd, env=env)
+    if cp.returncode == 0:
+        return
+
+    if install_cmd is not None:
+        _eprint(
+            f"INFO: {project_id}: lint prerequisites missing; running tasks.install before retrying lint probe."
+        )
+        install_cp = _run_manifest_task(
+            cmd=install_cmd,
+            cwd=cwd,
+            task_name="install",
+            project_id=project_id,
+            extra_env=extra_env,
+            force_install=True,
+        )
+        if install_cp.returncode == 0:
+            cp = _probe(probe_argv, cwd=cwd, env=env)
+            if cp.returncode == 0:
+                return
+
+    raise ScaffoldError(
+        f"{project_id}: lint requires 'ruff' but it is not available in this project's PDM environment.\n"
+        f"Remediation: {remediation_cmd}"
+    )
+
+
+def _ensure_pytest_available_for_test(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    project_id: str,
+    remediation_cmd: str,
+    install_cmd: list[str] | None,
+    extra_env: dict[str, str] | None,
+) -> None:
+    probe_argv = _pdm_run_pytest_probe_argv(cmd)
+    if probe_argv is None:
+        return
+
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    cp = _probe(probe_argv, cwd=cwd, env=env)
+    if cp.returncode == 0:
+        return
+
+    if install_cmd is not None:
+        _eprint(
+            f"INFO: {project_id}: test prerequisites missing; running tasks.install before retrying pytest probe."
+        )
+        install_cp = _run_manifest_task(
+            cmd=install_cmd,
+            cwd=cwd,
+            task_name="install",
+            project_id=project_id,
+            extra_env=extra_env,
+            force_install=True,
+        )
+        if install_cp.returncode == 0:
+            cp = _probe(probe_argv, cwd=cwd, env=env)
+            if cp.returncode == 0:
+                return
+
+    raise ScaffoldError(
+        f"{project_id}: test requires 'pytest' but it is not available in this project's task environment.\n"
+        f"Remediation: {remediation_cmd}"
+    )
 
 
 def _ensure_unique_project_id(projects: list[dict[str, Any]], project_id: str) -> None:
@@ -1044,6 +2011,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     projects = _load_projects(repo_root)
 
     _validate_task_name(args.task, where="scaffold run")
+    fix = bool(getattr(args, "fix", False))
+    task_name = str(args.task)
 
     selectors = [bool(args.all), bool(args.kind), bool(args.project)]
     if sum(1 for x in selectors if x) != 1:
@@ -1061,6 +2030,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         if missing:
             raise ScaffoldError(f"Unknown project id(s): {', '.join(sorted(str(x) for x in missing))}")
 
+    _bootstrap_lint_test_prereqs_if_needed(
+        repo_root=repo_root,
+        task_name=task_name,
+        projects=selected,
+        fix=fix,
+    )
+    # Selection limits execution; tests still exercise the checkout's complete first-party graph.
+    source_projects = projects if task_name == "test" else selected
+    lint_test_env = _build_lint_test_env(
+        repo_root=repo_root,
+        projects=source_projects,
+        task_name=task_name,
+    )
+
     failures: list[str] = []
     for project in selected:
         project_id = project.get("id")
@@ -1069,27 +2052,109 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not isinstance(project_id, str) or not isinstance(path, str) or not isinstance(tasks, dict):
             raise ScaffoldError("Invalid project entry in monorepo.toml")
 
-        cmd = tasks.get(args.task)
-        if cmd is None:
-            msg = f"{project_id}: missing tasks.{args.task}"
-            if args.skip_missing:
-                _eprint(f"WARNING: {msg} (skipping)")
-                continue
-            raise ScaffoldError(msg)
+        fix_task_name = f"{task_name}_fix"
 
-        cmd_list = _validate_task_cmd(cmd, where=f"projects.{project_id}.tasks.{args.task}")
+        cmd = tasks.get(fix_task_name) if fix else tasks.get(task_name)
+        if cmd is None:
+            if fix:
+                base = tasks.get(task_name)
+                if base is None:
+                    msg = f"{project_id}: missing tasks.{task_name}"
+                    if args.skip_missing:
+                        _eprint(f"WARNING: {msg} (skipping)")
+                        continue
+                    raise ScaffoldError(msg)
+
+                base_cmd_list = _validate_task_cmd(base, where=f"projects.{project_id}.tasks.{task_name}")
+                fixed = _ruff_check_with_fix(base_cmd_list) if task_name == "lint" else None
+                if fixed is None:
+                    msg = f"{project_id}: missing tasks.{fix_task_name}"
+                    if args.skip_missing:
+                        _eprint(f"WARNING: {msg} (skipping)")
+                        continue
+                    raise ScaffoldError(
+                        msg
+                        + f" (no known --fix support for tasks.{task_name}; define tasks.{fix_task_name} in the manifest)"
+                    )
+                cmd_list = fixed
+            else:
+                msg = f"{project_id}: missing tasks.{task_name}"
+                if args.skip_missing:
+                    _eprint(f"WARNING: {msg} (skipping)")
+                    continue
+                raise ScaffoldError(msg)
+        else:
+            where_task = fix_task_name if fix else task_name
+            cmd_list = _validate_task_cmd(cmd, where=f"projects.{project_id}.tasks.{where_task}")
+
         project_dir = repo_root / path
         if not project_dir.exists():
             raise ScaffoldError(f"{project_id}: project directory does not exist: {path}")
 
+        install_cmd_list: list[str] | None = None
+        install_task = tasks.get("install")
+        if install_task is not None:
+            install_cmd_list = _validate_task_cmd(
+                install_task, where=f"projects.{project_id}.tasks.install"
+            )
+
+        if (
+            task_name in {"lint", "test"}
+            and _is_pdm_command(cmd_list)
+            and install_cmd_list is not None
+            and not (project_dir / ".venv").exists()
+        ):
+            _eprint(
+                f"INFO: {project_id}: project venv missing; running tasks.install before {task_name}."
+            )
+            install_cp = _run_manifest_task(
+                cmd=install_cmd_list,
+                cwd=project_dir,
+                task_name="install",
+                project_id=project_id,
+                extra_env=lint_test_env,
+            )
+            if install_cp.returncode != 0:
+                failures.append(f"{project_id}:install ({install_cp.returncode})")
+                if not args.keep_going:
+                    break
+                continue
+
+        if task_name == "lint":
+            _ensure_ruff_available_for_lint(
+                cmd=cmd_list,
+                cwd=project_dir,
+                project_id=project_id,
+                remediation_cmd=_format_run_install_remediation_cmd(
+                    args,
+                    failing_project_id=project_id,
+                ),
+                install_cmd=install_cmd_list if _is_pdm_command(cmd_list) else None,
+                extra_env=lint_test_env,
+            )
+
+        if task_name == "test":
+            _ensure_pytest_available_for_test(
+                cmd=cmd_list,
+                cwd=project_dir,
+                project_id=project_id,
+                remediation_cmd=_format_run_install_remediation_cmd(
+                    args,
+                    failing_project_id=project_id,
+                ),
+                install_cmd=install_cmd_list if _is_pdm_command(cmd_list) else None,
+                extra_env=lint_test_env,
+            )
+
         cp = _run_manifest_task(
             cmd=cmd_list,
             cwd=project_dir,
-            task_name=args.task,
+            task_name=task_name,
             project_id=project_id,
+            extra_env=lint_test_env,
         )
         if cp.returncode != 0:
-            failures.append(f"{project_id}:{args.task} ({cp.returncode})")
+            failures.append(f"{project_id}:{task_name} ({cp.returncode})")
             if not args.keep_going:
                 break
 
@@ -1104,6 +2169,117 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     projects = _load_projects(repo_root)
 
     errors: list[str] = []
+    warnings: list[str] = []
+    next_actions: list[str] = []
+    skip_tool_checks = bool(getattr(args, "skip_tool_checks", False))
+    require_pip = bool(getattr(args, "require_pip", False))
+
+    baseline_timeout_seconds = 3.0
+    baseline: dict[str, Any] = {
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version.split()[0],
+            "min_version": "3.11",
+            "ok": sys.version_info >= (3, 11),
+        }
+    }
+    if not bool(baseline["python"]["ok"]):
+        errors.append(
+            f"python {baseline['python']['version']} is too old (need {baseline['python']['min_version']}+)"
+        )
+        next_actions.append("Install Python 3.11+ and re-run doctor.")
+
+    ok, tmp_dir, err = _probe_temp_writable(timeout_seconds=baseline_timeout_seconds)
+    baseline["temp"] = {"ok": ok, "dir": tmp_dir, "error": err}
+    if not ok:
+        errors.append(f"temp directory is not writable: {tmp_dir} ({err})")
+        next_actions.append("Fix temp directory permissions/free space and re-run doctor.")
+
+    ok, version_line, err = _probe_tool_version(
+        argv=[sys.executable, "-m", "pip", "--version"],
+        timeout_seconds=baseline_timeout_seconds,
+    )
+    baseline["pip"] = {
+        "required": require_pip,
+        "ok": ok,
+        "probe": "python -m pip",
+        "version": version_line,
+        "error": err,
+    }
+    if not ok:
+        details_parts = [p for p in (version_line, err) if p]
+        details = "; ".join(details_parts) if details_parts else "unknown_error"
+        if require_pip:
+            errors.append(f"pip is required but not usable: {details}")
+        else:
+            warnings.append(f"pip is not usable: {details}")
+        next_actions.append(_pip_remediation_hint(python_exe=sys.executable))
+    pip_ok = bool(baseline["pip"]["ok"])
+
+    git_path = _which("git")
+    if git_path is None:
+        baseline["git"] = {"ok": False, "probe": "path", "resolved_path": None, "version": None, "error": "missing"}
+        if not skip_tool_checks:
+            errors.append("git is required but was not found on PATH")
+        next_actions.append(_git_remediation_hint())
+    else:
+        ok, version_line, err = _probe_tool_version(
+            argv=[git_path, "--version"],
+            timeout_seconds=baseline_timeout_seconds,
+        )
+        baseline["git"] = {
+            "ok": ok,
+            "probe": "path",
+            "resolved_path": git_path,
+            "version": version_line,
+            "error": err,
+        }
+        if not ok:
+            details_parts = [p for p in (version_line, err) if p]
+            details = "; ".join(details_parts) if details_parts else "unknown_error"
+            if not skip_tool_checks:
+                errors.append(f"git is required but not usable: {details}")
+            next_actions.append(_git_remediation_hint())
+
+    bash_required = os.name != "nt"
+    bash_path = _which("bash")
+    if bash_path is None:
+        baseline["bash"] = {
+            "required": bash_required,
+            "ok": False,
+            "probe": "path",
+            "resolved_path": None,
+            "version": None,
+            "error": "missing",
+        }
+        if bash_required and not skip_tool_checks:
+            errors.append("bash is required (for scripts/smoke.sh) but was not found on PATH")
+            next_actions.append(_bash_remediation_hint())
+        elif not bash_required:
+            warnings.append("bash was not found on PATH (bash-based scripts will not work)")
+            next_actions.append(_bash_remediation_hint())
+    else:
+        ok, version_line, err = _probe_bash(
+            bash_path=bash_path,
+            timeout_seconds=baseline_timeout_seconds,
+        )
+        baseline["bash"] = {
+            "required": bash_required,
+            "ok": ok,
+            "probe": "bash --noprofile --norc -lc",
+            "resolved_path": bash_path,
+            "version": version_line,
+            "error": err,
+        }
+        if bash_required and not ok and not skip_tool_checks:
+            details = err or "unknown_error"
+            errors.append(f"bash is required (for scripts/smoke.sh) but not usable: {details}")
+            next_actions.append(_bash_remediation_hint())
+        elif not ok:
+            warnings.append(f"bash is not usable: {err or 'unknown_error'}")
+            next_actions.append(_bash_remediation_hint())
+
+    required_tools: dict[str, list[str]] = {}
     for project in projects:
         project_id = project.get("id")
         kind = project.get("kind")
@@ -1170,20 +2346,366 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 if ci.get(task_name) is True:
                     required_tasks.add(task_name)
 
-        if not bool(getattr(args, "skip_tool_checks", False)):
-            for task_name in sorted(required_tasks):
-                cmd = validated_task_cmds.get(task_name)
-                if cmd is None:
-                    continue
-                try:
-                    _require_on_path(cmd[0], why=f"task '{task_name}' for project '{project_id}'")
-                except ScaffoldError as exc:
-                    errors.append(f"{project_id}: {exc}")
+        for task_name in sorted(required_tasks):
+            cmd = validated_task_cmds.get(task_name)
+            if cmd is None:
+                continue
+            tool = str(cmd[0])
+            required_tools.setdefault(tool, []).append(f"{project_id}:{task_name}")
+
+    pdm_on_path = _which("pdm") is not None
+    pdm_importable = _pdm_importable()
+    pdm_tool_names = {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+    pdm_tool_required = any(Path(tool).name.lower() in pdm_tool_names for tool in required_tools)
+    pdm_uses_scaffold_python = os.name == "nt" and pdm_importable
+
+    # Check virtualenv availability. PDM uses `virtualenv` (when installed) to create project venvs.
+    # When pdm resolves to an external interpreter, probing via importlib in this process is advisory only.
+    virtualenv_ok_current = _virtualenv_importable()
+    virtualenv_ok: bool | None = virtualenv_ok_current
+    virtualenv_scope = "scaffold_python"
+    virtualenv_note = "optional; PDM uses virtualenv when available; scaffold falls back to stdlib venv when missing"
+    if pdm_tool_required and pdm_on_path and not pdm_uses_scaffold_python:
+        virtualenv_ok = None
+        virtualenv_scope = "external_pdm_interpreter_unknown"
+        virtualenv_note = (
+            "virtualenv probe reflects scaffold's interpreter only; pdm is expected to run via an external command, "
+            "so pdm's interpreter may differ"
+        )
+        if not virtualenv_ok_current and not skip_tool_checks:
+            warnings.append(
+                "virtualenv package is not importable in scaffold's Python interpreter. pdm is expected to run via "
+                "an external command, so virtualenv availability for pdm is unknown."
+            )
+    elif virtualenv_ok is False and not skip_tool_checks:
+        warnings.append(
+            "virtualenv package is not importable: PDM may raise VirtualenvCreateError when creating project venvs."
+            " scaffold will set PDM_VENV_BACKEND=venv automatically for managed installs, but direct `pdm install`"
+            " calls outside scaffold may still fail."
+        )
+        next_actions.append(_virtualenv_remediation_hint(python_exe=sys.executable))
+
+    baseline["virtualenv"] = {
+        "ok": virtualenv_ok,
+        "probe": "importlib",
+        "scope": virtualenv_scope,
+        "checked_python": sys.executable,
+        "ok_in_checked_python": virtualenv_ok_current,
+        "note": virtualenv_note,
+    }
+
+    tool_timeout_seconds = 4.0
+    # Deterministic preflight summary: pdm availability + chosen install fallback.
+    # Smoke scripts and verification paths can read .scaffold/doctor_tool_report.json
+    # and key on preflight_summary.install_fallback to decide which install path to use.
+    pdm_usable = pdm_on_path or (os.name == "nt" and pdm_importable)
+    if pdm_usable:
+        install_fallback = "pdm"
+    elif pip_ok:
+        install_fallback = "pip"
+    else:
+        install_fallback = "none"
+    preflight_summary: dict[str, Any] = {
+        "pdm_present": pdm_on_path,
+        "pdm_importable": pdm_importable,
+        "pdm_usable": pdm_usable,
+        "pip_ok": pip_ok,
+        "install_fallback": install_fallback,
+    }
+    tool_report: dict[str, Any] = {
+        "kind": "scaffold_doctor_tool_report",
+        "generated_at": (
+            _dt.datetime.now(tz=_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        ),
+        "python": {"executable": sys.executable, "version": sys.version.split()[0]},
+        "baseline": baseline,
+        "preflight_summary": preflight_summary,
+        "tools": {},
+    }
+
+    for tool, contexts in sorted(required_tools.items(), key=lambda kv: kv[0]):
+        resolved = _which(tool)
+        entry: dict[str, Any] = {"required_by": contexts, "resolved_path": resolved}
+
+        tool_l = tool.lower()
+        if tool_l in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+            if os.name == "nt" and _pdm_importable():
+                ok, version, err = _probe_tool_version(
+                    argv=[sys.executable, str(repo_root / "tools" / "pdm_shim.py"), "--version"],
+                    timeout_seconds=tool_timeout_seconds,
+                )
+                entry.update({"probe": "shim", "ok": ok, "version": version, "error": err})
+            elif resolved is None:
+                entry.update({"probe": "path", "ok": False, "version": None, "error": "missing"})
+                entry["remediation"] = _pdm_remediation_hint(python_exe=sys.executable, pip_ok=pip_ok)
+            else:
+                ok, version, err = _probe_tool_version(
+                    argv=[resolved, "--version"],
+                    timeout_seconds=tool_timeout_seconds,
+                )
+                entry.update({"probe": "path", "ok": ok, "version": version, "error": err})
+                if os.name == "nt" and not ok and not _pdm_importable():
+                    entry["remediation"] = (
+                        f"Install pdm into this Python to enable the shim: {sys.executable} -m pip install -U pdm"
+                    )
+        else:
+            if resolved is None:
+                entry.update({"probe": "path", "ok": False, "version": None, "error": "missing"})
+            else:
+                ok, version, err = _probe_tool_version(
+                    argv=[resolved, "--version"],
+                    timeout_seconds=tool_timeout_seconds,
+                )
+                entry.update({"probe": "path", "ok": ok, "version": version, "error": err})
+
+        tool_report["tools"][tool] = entry
+
+        if not skip_tool_checks and not bool(entry.get("ok")):
+            details = entry.get("error") or "unknown_error"
+            hint = entry.get("remediation")
+            ctx = ", ".join(contexts[:3]) + ("..." if len(contexts) > 3 else "")
+            if hint:
+                errors.append(f"tool {tool!r} is required (by {ctx}) but not usable: {details} (hint: {hint})")
+            else:
+                errors.append(f"tool {tool!r} is required (by {ctx}) but not usable: {details}")
+        elif not bool(entry.get("ok")):
+            hint = entry.get("remediation")
+            if hint:
+                next_actions.append(hint)
+
+    report_path = _write_doctor_tool_report(repo_root=repo_root, payload=tool_report)
 
     if errors:
-        raise ScaffoldError("Doctor found problems:\n" + "\n".join(f"- {e}" for e in errors))
+        status = "FAIL"
+    elif warnings:
+        status = "PASS (with warnings)"
+    else:
+        status = "PASS"
+    _eprint(f"Doctor: {status}")
+    _eprint(f"Repo: {repo_root}")
+    _eprint("==> Baseline preflight")
+    py = cast(dict[str, Any], baseline.get("python", {}))
+    py_ok = bool(py.get("ok"))
+    py_ver = py.get("version") or "unknown"
+    _eprint(f"    - python: {'OK' if py_ok else 'NOT OK'} ({py_ver})")
+    tmp = cast(dict[str, Any], baseline.get("temp", {}))
+    tmp_suffix = f" ({tmp.get('error')})" if tmp.get("error") else ""
+    _eprint(f"    - temp: {'OK' if bool(tmp.get('ok')) else 'NOT OK'} ({tmp.get('dir') or 'unknown'}){tmp_suffix}")
+    pip = cast(dict[str, Any], baseline.get("pip", {}))
+    pip_required = bool(pip.get("required"))
+    pip_label = "pip (required)" if pip_required else "pip (optional)"
+    _eprint(
+        f"    - {pip_label}: {'OK' if bool(pip.get('ok')) else 'NOT OK'} ({pip.get('version') or pip.get('error') or 'unknown'})"
+    )
+    git = cast(dict[str, Any], baseline.get("git", {}))
+    _eprint(f"    - git: {'OK' if bool(git.get('ok')) else 'NOT OK'} ({git.get('version') or git.get('error') or 'unknown'})")
+    bash = cast(dict[str, Any], baseline.get("bash", {}))
+    bash_required = bool(bash.get("required"))
+    bash_ok = bool(bash.get("ok"))
+    if bash_required:
+        bash_status = "OK" if bash_ok else "NOT OK"
+    else:
+        bash_status = "OK" if bash_ok else ("MISSING" if not bash.get("resolved_path") else "NOT OK")
+    bash_label = "bash (required)" if bash_required else "bash (optional)"
+    _eprint(f"    - {bash_label}: {bash_status} ({bash.get('version') or bash.get('error') or 'unknown'})")
+    venv_entry = cast(dict[str, Any], baseline.get("virtualenv", {}))
+    venv_ok_raw = venv_entry.get("ok")
+    if venv_ok_raw is True:
+        venv_status = "OK"
+    elif venv_ok_raw is False:
+        venv_status = "MISSING (scaffold uses stdlib venv as fallback; direct pdm install may fail)"
+    else:
+        checked_ok = bool(venv_entry.get("ok_in_checked_python"))
+        if checked_ok:
+            venv_status = "UNKNOWN (scaffold python has virtualenv; external pdm interpreter context was not probed)"
+        else:
+            venv_status = (
+                "UNKNOWN (scaffold python lacks virtualenv; external pdm interpreter context was not probed)"
+            )
+    _eprint(f"    - virtualenv (optional): {venv_status}")
+
+    if required_tools:
+        _eprint("==> Tool preflight")
+        for tool in sorted(required_tools.keys()):
+            entry = cast(dict[str, Any], tool_report["tools"].get(tool, {}))
+            ok = bool(entry.get("ok"))
+            probe = entry.get("probe") or "unknown"
+            version = entry.get("version")
+            if ok:
+                suffix = f" ({version})" if version else ""
+                _eprint(f"    - {tool}: OK via {probe}{suffix}")
+            else:
+                details = entry.get("error") or "unknown_error"
+                _eprint(f"    - {tool}: NOT OK via {probe} ({details})")
+
+    if report_path is not None:
+        _eprint(f"==> Tool report: {report_path}")
+
+    if errors:
+        _eprint("==> Problems")
+        for e in errors:
+            _eprint(f"    - {e}")
+    if warnings:
+        _eprint("==> Warnings")
+        for w in warnings:
+            _eprint(f"    - {w}")
+    actions = _dedup_preserve_order([a for a in next_actions if a.strip()])
+    if actions and (errors or warnings):
+        _eprint("==> Next actions")
+        for a in actions:
+            _eprint(f"    - {a}")
+    if errors:
+        return 1
 
     print("OK")
+    return 0
+
+
+def cmd_fix(args: argparse.Namespace) -> int:
+    repo_root = _repo_root()
+    registry = _load_registry(repo_root)
+    manifest_path = _manifest_path(repo_root)
+    manifest = _load_manifest(repo_root)
+
+    projects_raw = manifest.get("projects", [])
+    if projects_raw is None:
+        projects_raw = []
+    if not isinstance(projects_raw, list):
+        raise ScaffoldError("monorepo.toml: expected [[projects]] array")
+
+    sync_tasks = bool(getattr(args, "sync_tasks", False))
+    sync_ci = bool(getattr(args, "sync_ci", False))
+    prune_missing = bool(getattr(args, "prune_missing", False))
+    check = bool(getattr(args, "check", False))
+    show_diff = bool(getattr(args, "diff", False))
+
+    changes: list[str] = []
+    updated_projects: list[dict[str, Any]] = []
+    for project in projects_raw:
+        if not isinstance(project, dict):
+            raise ScaffoldError("monorepo.toml: each [[projects]] entry must be a table")
+
+        project_id = project.get("id")
+        kind = project.get("kind")
+        generator_id = project.get("generator")
+        path_raw = project.get("path")
+        if not isinstance(project_id, str) or not project_id:
+            raise ScaffoldError("monorepo.toml: projects[].id must be a non-empty string")
+        if not isinstance(kind, str) or not kind:
+            raise ScaffoldError(f"{project_id}: projects[].kind must be a non-empty string")
+        if not isinstance(generator_id, str) or not generator_id:
+            raise ScaffoldError(f"{project_id}: projects[].generator must be a non-empty string")
+        if not isinstance(path_raw, str) or not path_raw:
+            raise ScaffoldError(f"{project_id}: projects[].path must be a non-empty string")
+
+        normalized_path = _normalize_repo_rel_path(path_raw)
+        if not normalized_path:
+            raise ScaffoldError(f"{project_id}: projects[].path normalizes to empty: {path_raw!r}")
+        if normalized_path != path_raw:
+            project["path"] = normalized_path
+            changes.append(f"{project_id}: normalized path {path_raw!r} -> {normalized_path!r}")
+
+        project_dir = repo_root / normalized_path
+        if prune_missing and not project_dir.exists():
+            changes.append(f"{project_id}: pruned missing path {normalized_path!r}")
+            continue
+
+        kind_cfg = _get_kind(registry, kind)
+        generator = _get_generator(registry, generator_id)
+
+        toolchain = _require_generator_str(generator, "toolchain")
+        package_manager = _require_generator_str(generator, "package_manager")
+
+        if project.get("toolchain") != toolchain:
+            project["toolchain"] = toolchain
+            changes.append(f"{project_id}: set toolchain={toolchain!r}")
+        if project.get("package_manager") != package_manager:
+            project["package_manager"] = package_manager
+            changes.append(f"{project_id}: set package_manager={package_manager!r}")
+
+        kind_ci_raw = kind_cfg.get("ci", {"lint": False, "test": False, "build": False})
+        if not isinstance(kind_ci_raw, dict):
+            raise ScaffoldError(f"kinds.{kind}.ci must be a table")
+        kind_ci: dict[str, Any] = {}
+        for key in ("lint", "test", "build"):
+            if key in kind_ci_raw:
+                kind_ci[key] = _require_bool(kind_ci_raw[key], where=f"kinds.{kind}.ci.{key}")
+
+        ci_raw = project.get("ci")
+        if sync_ci or ci_raw is None:
+            if project.get("ci") != kind_ci:
+                project["ci"] = kind_ci
+                changes.append(f"{project_id}: synced ci from kinds.{kind}.ci")
+        else:
+            if not isinstance(ci_raw, dict):
+                raise ScaffoldError(f"{project_id}: projects[].ci must be a table when present")
+            ci: dict[str, Any] = dict(ci_raw)
+            for key in ("lint", "test", "build"):
+                if key in ci:
+                    ci[key] = _require_bool(ci[key], where=f"projects.{project_id}.ci.{key}")
+                elif key in kind_ci:
+                    ci[key] = kind_ci[key]
+            if ci != ci_raw:
+                project["ci"] = ci
+                changes.append(f"{project_id}: filled missing ci flags from kinds.{kind}.ci")
+
+        project_tasks = _normalize_tasks(project.get("tasks"), where=f"projects.{project_id}")
+        generator_tasks = _normalize_tasks(generator.get("tasks"), where=f"generators.{generator_id}")
+        if sync_tasks:
+            for task_name, cmd in generator_tasks.items():
+                if project_tasks.get(task_name) != cmd:
+                    project_tasks[task_name] = cmd
+                    changes.append(f"{project_id}: synced tasks.{task_name} from generators.{generator_id}")
+        else:
+            for task_name, cmd in generator_tasks.items():
+                if task_name not in project_tasks:
+                    project_tasks[task_name] = cmd
+                    changes.append(f"{project_id}: added missing tasks.{task_name} from generators.{generator_id}")
+        project["tasks"] = project_tasks
+
+        updated_projects.append(project)
+
+    if prune_missing and len(updated_projects) != len(projects_raw):
+        manifest["projects"] = updated_projects
+    else:
+        manifest["projects"] = projects_raw
+
+    existing_text = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else ""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        rendered_path = Path(tmp_dir) / "monorepo.toml"
+        _write_manifest(rendered_path, manifest)
+        new_text = rendered_path.read_text(encoding="utf-8")
+
+    if existing_text == new_text:
+        print("Nothing to do.")
+        return 0
+
+    if show_diff:
+        diff = difflib.unified_diff(
+            existing_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=str(manifest_path),
+            tofile=str(manifest_path),
+        )
+        print("".join(diff).rstrip())
+
+    if check:
+        _eprint("Fix would update tools/scaffold/monorepo.toml.")
+        if changes:
+            for line in changes:
+                _eprint(f"- {line}")
+        else:
+            _eprint("- formatting only")
+        return 1
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(new_text, encoding="utf-8")
+    if changes:
+        print("Updated tools/scaffold/monorepo.toml:")
+        for line in changes:
+            print(f"- {line}")
+    else:
+        print("Updated tools/scaffold/monorepo.toml.")
     return 0
 
 
@@ -1469,6 +2991,14 @@ def build_parser() -> argparse.ArgumentParser:
     sel.add_argument("--all", action="store_true")
     sel.add_argument("--kind")
     sel.add_argument("--project", action="append", default=[])
+    p_run.add_argument(
+        "--fix",
+        action="store_true",
+        help=(
+            "Run the task in autofix mode when supported. For lint, this uses tasks.lint_fix if present, "
+            "otherwise attempts a best-effort transformation (e.g. ruff check --fix)."
+        ),
+    )
     p_run.add_argument("--skip-missing", action="store_true", help="Skip projects that do not define this task.")
     p_run.add_argument("--keep-going", action="store_true", help="Continue running even if a task fails.")
     p_run.set_defaults(func=cmd_run)
@@ -1484,7 +3014,40 @@ def build_parser() -> argparse.ArgumentParser:
             "This keeps manifest/config validation while allowing pip-first flows without pdm."
         ),
     )
+    p_doctor.add_argument(
+        "--require-pip",
+        action="store_true",
+        help="Require 'python -m pip' to be usable (fails doctor if pip is missing).",
+    )
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_fix = sub.add_parser("fix", help="Normalize/sync tools/scaffold/monorepo.toml from registry.toml.")
+    p_fix.add_argument(
+        "--sync-tasks",
+        action="store_true",
+        help="Overwrite generator-defined tasks in each project from registry.toml (preserves extra project tasks).",
+    )
+    p_fix.add_argument(
+        "--sync-ci",
+        action="store_true",
+        help="Overwrite each project's ci flags from kinds.<kind>.ci in registry.toml.",
+    )
+    p_fix.add_argument(
+        "--prune-missing",
+        action="store_true",
+        help="Remove manifest entries whose project directories do not exist.",
+    )
+    p_fix.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit with status 1 if changes would be made; do not write.",
+    )
+    p_fix.add_argument(
+        "--diff",
+        action="store_true",
+        help="Print a unified diff of tools/scaffold/monorepo.toml changes.",
+    )
+    p_fix.set_defaults(func=cmd_fix)
 
     p_vendor = sub.add_parser("vendor", help="Vendoring helpers for external templates.")
     vendor_sub = p_vendor.add_subparsers(dest="vendor_cmd", required=True)

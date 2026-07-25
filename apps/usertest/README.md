@@ -16,7 +16,16 @@ If you’re looking for the fastest on-ramp, start at `docs/tutorials/getting-st
 
 ## Install
 
-From the monorepo root (editable install):
+From a monorepo checkout, prefer the repo bootstrap/smoke flow first so the wrapper resolves a
+usable Python before installs:
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
+
+That path installs the shared requirements plus the local editable apps/packages used by this repo.
+
+Advanced/manual fallback if you already have a known-good interpreter and intentionally want only
+this app installed:
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -43,12 +52,14 @@ usertest --help
 
 Run a single target and write a run directory under `runs/usertest/…`.
 
+Defaults come from `configs/catalog.yaml`: `representative_workflow_evaluator` + `verify_install_to_result`.
+
 ```bash
 usertest run \
   --repo-root . \
   --repo "PATH_OR_GIT_URL" \
   --agent codex \
-  --policy inspect
+  --policy write
 ```
 
 ### `usertest batch`
@@ -66,6 +77,10 @@ Re-render `report.md` (and optionally recompute metrics) for an existing run dir
 ```bash
 usertest report --repo-root . --run-dir "RUN_DIR" --recompute-metrics
 ```
+
+`--recompute-metrics` overwrites `normalized_events.jsonl` as a side effect; when an existing
+`normalized_events.jsonl` is present, its timestamps are reused when possible to keep reruns
+diff-minimal/reproducible.
 
 ### `usertest init-usertest`
 
@@ -119,6 +134,9 @@ Contract: `docs/design/run-artifacts.md`.
 From the repo root:
 
 ```bash
+# Run the repo bootstrap once first if this is a fresh checkout:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
+#   # or: bash ./scripts/smoke.sh
 python tools/scaffold/scaffold.py run install --project cli
 python tools/scaffold/scaffold.py run test --project cli
 python tools/scaffold/scaffold.py run lint --project cli

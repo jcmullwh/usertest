@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "problem_miner_templates": [
+    "../backlog_prompts/problem_miner_default.md",
+    "../backlog_prompts/problem_miner_onboarding.md",
+    "../backlog_prompts/problem_miner_harness.md",
+    "../backlog_prompts/problem_miner_schema.md"
+  ],
+  "relation_reviewer_template": "../backlog_prompts/relation_reviewer.md",
+  "prioritizer_template": "../backlog_prompts/prioritizer.md",
+  "solution_optioner_template": "solution_optioner.md",
+  "solution_selector_template": "solution_selector.md",
+  "solution_falsifier_template": "../backlog_prompts/solution_falsifier.md",
+  "selected_solution_labeler_template": "../backlog_prompts/selected_solution_labeler.md",
+  "change_planner_template": "../backlog_prompts/change_planner.md",
+  "stage_guidance_manifest": "configs/backlog_stage_guidance_internal_maintenance/manifest.json",
+  "taxonomy_file": "configs/backlog_taxonomy.json",
+  "relation_review_config": "configs/backlog_relation_review.yaml"
+}

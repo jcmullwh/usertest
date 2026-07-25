@@ -1,0 +1,82 @@
+# Relation-review candidate-ranking settings.
+#
+# These settings govern which neighbors are surfaced for human review at each stage.
+# They do NOT make merge, split, or grouping decisions. Those decisions require an
+# explicit reviewer-prompt output.
+#
+# All automatic relation logic is supplementary and exclusion-oriented.
+# Tests must never assert that automatic logic alone decides the final grouping.
+
+version: 1
+
+# Global defaults applied when a stage-specific override is absent.
+defaults:
+  top_k_by_semantic: 3
+  top_k_by_evidence_overlap: 3
+  top_k_by_evidence_routing: 3
+  top_k_by_metadata: 2
+  top_k_by_path_anchor: 2
+  union_cap: 8
+  min_evidence_overlap: 1
+  min_semantic_similarity: 0.55
+  split_hint_min_disjoint_evidence_fraction: 0.70
+
+# Per-stage overrides.
+stages:
+  problem_mining:
+    top_k_by_semantic: 4
+    top_k_by_evidence_overlap: 4
+    top_k_by_evidence_routing: 4
+    top_k_by_metadata: 2
+    top_k_by_path_anchor: 2
+    union_cap: 10
+    # Problem mining uses a lower semantic threshold because problems may share
+    # cause without sharing exact vocabulary.
+    min_semantic_similarity: 0.50
+    split_hint_min_disjoint_evidence_fraction: 0.65
+
+  problem_prioritization:
+    top_k_by_semantic: 3
+    top_k_by_evidence_overlap: 3
+    top_k_by_metadata: 2
+    top_k_by_path_anchor: 2
+    union_cap: 8
+    min_semantic_similarity: 0.55
+    split_hint_min_disjoint_evidence_fraction: 0.70
+
+  repro_research:
+    top_k_by_semantic: 3
+    top_k_by_evidence_overlap: 4
+    top_k_by_metadata: 2
+    top_k_by_path_anchor: 3
+    union_cap: 8
+    # Research dossiers should be compared by code evidence; anchor overlap matters.
+    min_semantic_similarity: 0.55
+    split_hint_min_disjoint_evidence_fraction: 0.60
+
+  solution_optioning:
+    top_k_by_semantic: 3
+    top_k_by_evidence_overlap: 3
+    top_k_by_metadata: 2
+    top_k_by_path_anchor: 2
+    union_cap: 8
+    min_semantic_similarity: 0.60
+    split_hint_min_disjoint_evidence_fraction: 0.70
+
+  solution_selection:
+    top_k_by_semantic: 2
+    top_k_by_evidence_overlap: 2
+    top_k_by_metadata: 2
+    top_k_by_path_anchor: 2
+    union_cap: 6
+    min_semantic_similarity: 0.65
+    split_hint_min_disjoint_evidence_fraction: 0.75
+
+  implementation_planning:
+    top_k_by_semantic: 2
+    top_k_by_evidence_overlap: 2
+    top_k_by_metadata: 1
+    top_k_by_path_anchor: 1
+    union_cap: 5
+    min_semantic_similarity: 0.65
+    split_hint_min_disjoint_evidence_fraction: 0.75

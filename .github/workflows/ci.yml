@@ -8,6 +8,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   PDM_VERSION: "2.26.2"
 
@@ -27,6 +30,28 @@ jobs:
         run: |
           echo "matrix=$(python tools/scaffold/ci_matrix.py)" >> "$GITHUB_OUTPUT"
 
+  maintenance_image_validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install maintenance image prep deps
+        run: python -m pip install --upgrade pip pyyaml
+
+      - name: Prepare maintenance image context
+        run: |
+          python tools/maintenance_image/prepare_context.py \
+            --repo-root . \
+            --output-dir .tmp/maintenance_image_context \
+            --metadata-out .tmp/maintenance_image_context.json
+
+      - name: Build maintenance image
+        run: docker build --progress=plain -t usertest-maintenance-ci -f .tmp/maintenance_image_context/Dockerfile .tmp/maintenance_image_context
+
   readme_contract:
     runs-on: ubuntu-latest
     steps:
@@ -42,8 +67,11 @@ jobs:
       - name: Validate package README contract
         run: python tools/check_package_readme_contract.py
 
-      - name: Test README contract checker
-        run: python -m pytest -q tools/tests/test_check_package_readme_contract.py
+      - name: Test repository contracts
+        run: >-
+          python -m pytest -q
+          tools/tests/test_check_package_readme_contract.py
+          tools/tests/test_ci_workflow_contract.py
 
   project:
     runs-on: ubuntu-latest
@@ -115,6 +143,7 @@ jobs:
 
   package_smoke_linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -164,6 +193,7 @@ jobs:
 
   package_smoke_windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -256,6 +286,14 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt', '**/pdm.lock', '**/poetry.lock') }}
           restore-keys: |
             ${{ runner.os }}-pip-
+
+      - name: PowerShell parse preflight (Windows PowerShell)
+        shell: powershell
+        run: .\scripts\parse_preflight.ps1 .\scripts\smoke.ps1
+
+      - name: PowerShell parse preflight (pwsh)
+        shell: pwsh
+        run: .\scripts\parse_preflight.ps1 .\scripts\smoke.ps1
 
       - name: Smoke script (help + smoke tests)
         shell: pwsh

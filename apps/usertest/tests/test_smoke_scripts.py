@@ -2,23 +2,71 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from runner_core import find_repo_root
 
+def test_first_run_wrappers_delegate_to_shared_launcher_contract() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    launcher = repo_root / "tools" / "first_run_launcher.py"
+    launcher_module = repo_root / "apps" / "usertest" / "src" / "usertest" / "first_run_launcher.py"
+    assert launcher.exists()
+    assert launcher_module.exists()
 
-def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
-    scripts = [
+    smoke_wrappers = [
         repo_root / "scripts" / "smoke.ps1",
         repo_root / "scripts" / "smoke.sh",
     ]
+    onboarding_wrappers = [
+        repo_root / "scripts" / "offline_first_success.ps1",
+        repo_root / "scripts" / "offline_first_success.sh",
+    ]
 
-    for path in scripts:
-        assert path.exists(), f"missing smoke script: {path}"
+    for path in smoke_wrappers:
         text = path.read_text(encoding="utf-8")
-        assert "usertest.cli --help" in text
-        assert "usertest_backlog.cli --help" in text
-        assert "apps/usertest/tests/test_smoke.py" in text
-        assert "apps/usertest/tests/test_golden_fixture.py" in text
-        assert "apps/usertest_backlog/tests/test_smoke.py" in text
-        assert "packages/run_artifacts" in text
-        assert "pip install -U pdm" in text
+        assert "tools/first_run_launcher.py" in text
+        assert "smoke" in text
+        assert "USERTEST_PYTHON" in text
+        if path.suffix == ".sh":
+            assert 'source "${SCRIPT_DIR}/python_preflight.sh"' in text
+            assert "--shell posix" in text
+        else:
+            assert "Resolve-UsablePython -RepoRoot $repoRoot" in text
+            assert "'powershell'" in text
+        assert "usertest.cli --help" not in text
+        assert "Smoke preflight failed:" not in text
+
+    for path in onboarding_wrappers:
+        text = path.read_text(encoding="utf-8")
+        assert "tools/first_run_launcher.py" in text
+        assert "offline-first-success" in text
+        assert "USERTEST_PYTHON" in text
+        if path.suffix == ".sh":
+            assert 'source "${SCRIPT_DIR}/python_preflight.sh"' in text
+            assert "--shell posix" in text
+        else:
+            assert "Resolve-UsablePython -RepoRoot $repoRoot" in text
+            assert "'powershell'" in text
+            assert "Write-Err" not in text
+
+    launcher_text = launcher_module.read_text(encoding="utf-8")
+    assert "Smoke preflight failed:" in launcher_text
+    assert "tools/smoke_import_guard.py" in launcher_text
+    assert "usertest.cli" in launcher_text
+    assert "usertest_backlog.cli" in launcher_text
+    assert "usertest_implement.cli" in launcher_text
+    assert "apps/usertest/tests/test_smoke.py" in launcher_text
+    assert "apps/usertest/tests/test_golden_fixture.py" in launcher_text
+    assert "apps/usertest_backlog/tests/test_smoke.py" in launcher_text
+    assert "apps/usertest_implement/tests/test_smoke.py" in launcher_text
+    assert "pip install -U pdm" in launcher_text
+
+
+def test_windows_python_preflight_prefers_path_python_without_tiny_total_budget() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "scripts" / "python_preflight.ps1").read_text(encoding="utf-8")
+
+    assert "Fail fast (default: within ~5s total)" not in text
+    assert "_Resolve-PythonPreflightTimeoutSeconds" in text
+    assert "USERTEST_PYTHON_PREFLIGHT_TIMEOUT_SECONDS" in text
+    assert "No usable Python interpreter found after probing candidates" in text
+    path_python_loop = "foreach ($entry in (_Get-WindowsWhereAll -CommandName 'python'))"
+    py_launcher_loop = "foreach ($entry in (_Get-WindowsPy0pInterpreters))"
+    assert text.index(path_python_loop) < text.index(py_launcher_loop)

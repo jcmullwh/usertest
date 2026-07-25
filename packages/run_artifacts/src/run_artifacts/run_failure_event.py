@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-MAX_ATTACHMENT_EXCERPT_CHARS = 1_200
+MAX_ATTACHMENT_EXCERPT_CHARS = 25_000
 MAX_ERROR_FALLBACK_CHARS = 2_000
 
 _SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
@@ -20,6 +20,8 @@ _TURN_METADATA_TIMEOUT_HINT = (
 _CODEX_MODEL_REFRESH_TIMEOUT_HINT = (
     "hint=Codex model refresh timed out; model list may be stale."
 )
+_LEGACY_MISSING_REPORT_STATUS = "no_terminal_artifact"
+_MISSING_REPORT_STATUS = "missing_report"
 
 
 def _truncate_text(text: str, *, max_chars: int, marker: str) -> str:
@@ -77,10 +79,27 @@ def classify_failure_kind(
 ) -> tuple[bool, str]:
     status_lower = status.strip().lower() if isinstance(status, str) else ""
     if error is not None:
+        err_type = error.get("type")
+        err_subtype = error.get("subtype")
+        err_code = error.get("code")
+        if err_type == "AgentQuotaExceeded":
+            return True, "quota_exhausted"
+        if err_subtype == "provider_quota_exceeded":
+            return True, "quota_exhausted"
+        if isinstance(err_code, str) and err_code.strip().lower() in {
+            "claude_out_of_extra_usage",
+        }:
+            return True, "quota_exhausted"
         return True, "error"
     if validation_errors:
         return True, "report_validation_error"
-    if status_lower in {"error", "report_validation_error", "missing_report"}:
+    if status_lower in {_MISSING_REPORT_STATUS, _LEGACY_MISSING_REPORT_STATUS}:
+        return True, _MISSING_REPORT_STATUS
+    if status_lower in {
+        "error",
+        "report_validation_error",
+        "terminal_artifact_unreadable",
+    }:
         return True, status_lower
     return False, "unknown"
 
@@ -148,6 +167,7 @@ def render_failure_text(
     error: dict[str, Any] | None,
     report_validation_errors: list[str],
     artifacts: dict[str, Any] | None,
+    terminal_artifact_reads: dict[str, Any] | None = None,
     attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     lines: list[str] = [
@@ -201,6 +221,34 @@ def render_failure_text(
         for value in report_validation_errors:
             lines.append(f"- {value}")
 
+    if isinstance(terminal_artifact_reads, dict):
+        unreadable_lines: list[str] = []
+        for artifact_path, raw in terminal_artifact_reads.items():
+            if not isinstance(raw, dict):
+                continue
+            exists = raw.get("exists")
+            error_phase = raw.get("error_phase")
+            error_type = raw.get("error_type")
+            error_message = raw.get("error_message")
+            if exists is not True or not isinstance(error_phase, str) or not error_phase:
+                continue
+
+            detail = f"- {artifact_path}: {error_phase}"
+            if isinstance(error_type, str) and error_type.strip():
+                detail += f" {error_type.strip()}"
+            if isinstance(error_message, str) and error_message.strip():
+                detail += f": {error_message.strip()}"
+
+            line = raw.get("error_line")
+            column = raw.get("error_column")
+            if isinstance(line, int) and isinstance(column, int):
+                detail += f" (line {line}, column {column})"
+            unreadable_lines.append(detail)
+
+        if unreadable_lines:
+            lines.append("terminal_artifact_reads:")
+            lines.extend(unreadable_lines)
+
     filenames = extract_artifact_filenames(artifacts)
     if filenames:
         lines.append(f"artifacts: {', '.join(filenames)}")
@@ -217,10 +265,21 @@ def render_failure_text(
                 continue
             excerpt_head = entry.get("excerpt_head")
             if isinstance(excerpt_head, str) and excerpt_head.strip():
+                excerpt = excerpt_head.strip()
+                excerpt_tail = entry.get("excerpt_tail")
+                if (
+                    entry.get("truncated") is True
+                    and isinstance(excerpt_tail, str)
+                    and excerpt_tail.strip()
+                ):
+                    excerpt += (
+                        "\n...[middle omitted; full content retained by artifact_ref]...\n"
+                        + excerpt_tail.strip()
+                    )
                 lines.append(f"{path} excerpt:")
                 lines.append(
                     _truncate_text(
-                        excerpt_head.strip(),
+                        excerpt,
                         max_chars=MAX_ATTACHMENT_EXCERPT_CHARS,
                         marker="\n...[truncated_attachment_excerpt]...",
                     )

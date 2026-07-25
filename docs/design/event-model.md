@@ -21,6 +21,7 @@ Each run emits `normalized_events.jsonl` where each line is a JSON object:
 - Adapters should be permissive in what they accept from raw logs and conservative in what they emit.
 - Anything unrecognized can be emitted as `error` with `category="unparsed_raw_event"`.
 - `write_file` represents actual workspace changes. Attempted edits from agent tool calls should be recorded as `tool_call` events instead (they vary by agent and are not comparable).
+- If the underlying agent CLI does not emit wall-clock timestamps, runners may record them separately (e.g. `raw_events.ts.jsonl`, one timestamp per raw JSONL line) and pass them into adapters so `ts` reflects when the event occurred during the run (not when normalization happened).
 
 ## Golden fixtures and drift checks
 

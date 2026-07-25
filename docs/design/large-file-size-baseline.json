@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-06",
+  "command": "wc -l -c packages/runner_core/src/runner_core/runner.py apps/usertest/src/usertest/cli.py apps/usertest_backlog/src/usertest_backlog/cli.py apps/usertest_implement/src/usertest_implement/cli.py",
+  "entries": [
+    {
+      "path": "packages/runner_core/src/runner_core/runner.py",
+      "lines": 9445,
+      "bytes": 393825
+    },
+    {
+      "path": "apps/usertest/src/usertest/cli.py",
+      "lines": 4272,
+      "bytes": 167033
+    },
+    {
+      "path": "apps/usertest_backlog/src/usertest_backlog/cli.py",
+      "lines": 8926,
+      "bytes": 331330
+    },
+    {
+      "path": "apps/usertest_implement/src/usertest_implement/cli.py",
+      "lines": 3781,
+      "bytes": 144880
+    }
+  ]
+}

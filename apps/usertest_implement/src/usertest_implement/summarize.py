@@ -175,7 +175,6 @@ def iter_implementation_rows(
             "schema_version": 1,
             "ticket": {
                 "fingerprint": ticket_ref_dict.get("fingerprint"),
-                "ticket_id": ticket_ref_dict.get("ticket_id"),
                 "title": ticket_ref_dict.get("title"),
             },
             "repo": {

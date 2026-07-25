@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
+from agent_adapters.events import utc_now_iso
+
+_PLAINTEXT_FALLBACK_TAIL_BYTES = 24_000
+_PLAINTEXT_FALLBACK_MAX_CHARS = 4_000
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,52 @@ def _iter_json_lines(path: Path) -> Iterator[dict[str, Any]]:
                 continue
             if isinstance(payload, dict):
                 yield payload
+
+
+def _read_tail_text(path: Path, *, max_bytes: int) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size <= 0:
+        return ""
+    offset = max(0, size - max(1, int(max_bytes)))
+    try:
+        with path.open("rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return ""
+    if not data:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_plaintext_fallback(raw_events_path: Path) -> str:
+    tail = _read_tail_text(raw_events_path, max_bytes=_PLAINTEXT_FALLBACK_TAIL_BYTES)
+    if not tail.strip():
+        return ""
+
+    kept: list[str] = []
+    for line in tail.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            kept.append(stripped)
+            continue
+        if isinstance(parsed, dict):
+            continue
+        kept.append(stripped)
+
+    if not kept:
+        return ""
+    text = "\n".join(kept).strip()
+    if len(text) > _PLAINTEXT_FALLBACK_MAX_CHARS:
+        text = text[-_PLAINTEXT_FALLBACK_MAX_CHARS :]
+    return text
 
 
 def _extract_last_message_text(raw_events_path: Path) -> str:
@@ -89,7 +139,9 @@ def _extract_last_message_text(raw_events_path: Path) -> str:
         if parts:
             last_text = "".join(parts)
 
-    return last_text or ""
+    if isinstance(last_text, str) and last_text.strip():
+        return last_text
+    return _extract_plaintext_fallback(raw_events_path) or ""
 
 
 def run_claude_print(
@@ -115,6 +167,7 @@ def run_claude_print(
     raw_events_path.parent.mkdir(parents=True, exist_ok=True)
     last_message_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
 
     prefix = [p for p in command_prefix if isinstance(p, str) and p]
     resolved_binary = binary if prefix else _resolve_executable(binary)
@@ -150,9 +203,11 @@ def run_claude_print(
 
     full_argv = [*prefix, *argv] if prefix else argv
 
-    with raw_events_path.open("w", encoding="utf-8", newline="\n") as stdout_f, stderr_path.open(
-        "w", encoding="utf-8", newline="\n"
-    ) as stderr_f:
+    with (
+        raw_events_path.open("w", encoding="utf-8", newline="\n") as stdout_f,
+        raw_events_ts_path.open("w", encoding="utf-8", newline="\n") as ts_f,
+        stderr_path.open("w", encoding="utf-8", newline="\n") as stderr_f,
+    ):
         try:
             env: dict[str, str] | None = None
             if env_overrides is not None:
@@ -162,16 +217,15 @@ def run_claude_print(
                 else:
                     env = os.environ.copy()
                     env.update(env_overrides)
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 full_argv,
-                input=prompt,
-                stdout=stdout_f,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
                 stderr=stderr_f,
                 text=True,
                 encoding="utf-8",
                 cwd=str(workspace_dir) if not prefix else None,
                 env=env,
-                check=False,
             )
         except FileNotFoundError as e:
             stderr_f.write(
@@ -187,11 +241,32 @@ def run_claude_print(
                 "configs/agents.yaml `agents.claude.binary` to the full path."
             ) from e
 
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(prompt)
+            except BrokenPipeError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                stdout_f.write(line)
+                stdout_f.flush()
+                if line.strip():
+                    ts_f.write(utc_now_iso() + "\n")
+                    ts_f.flush()
+
+        proc.wait()
+
     last_message_path.write_text(_extract_last_message_text(raw_events_path), encoding="utf-8")
 
     return ClaudePrintResult(
         argv=full_argv,
-        exit_code=proc.returncode,
+        exit_code=proc.returncode if proc.returncode is not None else 1,
         raw_events_path=raw_events_path,
         last_message_path=last_message_path,
         stderr_path=stderr_path,

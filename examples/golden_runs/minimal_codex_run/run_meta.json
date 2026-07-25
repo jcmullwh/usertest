@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_started_utc": "2026-02-14T20:15:00Z",
+  "run_finished_utc": "2026-02-14T20:15:06Z",
+  "run_wall_seconds": 6.0,
+  "phases": {
+    "setup_seconds": 1.0,
+    "agent_seconds": 5.0,
+    "postprocess_seconds": 0.0,
+    "cleanup_seconds": 0.0
+  }
+}

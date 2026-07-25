@@ -10,6 +10,19 @@ class PublishCommandError(RuntimeError):
     pass
 
 
+def _write_stream(stream: object, text: str) -> None:
+    writer = getattr(stream, "write")
+    try:
+        writer(text)
+        return
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        escaped = text.encode(encoding, errors="backslashreplace").decode(
+            encoding, errors="ignore"
+        )
+        writer(escaped)
+
+
 def _run(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
     proc = subprocess.run(
         cmd,
@@ -20,9 +33,9 @@ def _run(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> Non
         check=False,
     )
     if proc.stdout:
-        print(proc.stdout, end="")
+        _write_stream(sys.stdout, proc.stdout)
     if proc.stderr:
-        print(proc.stderr, end="", file=sys.stderr)
+        _write_stream(sys.stderr, proc.stderr)
     if proc.returncode == 0:
         return
     raise PublishCommandError(f"Command failed (exit {proc.returncode}): {' '.join(cmd)}")

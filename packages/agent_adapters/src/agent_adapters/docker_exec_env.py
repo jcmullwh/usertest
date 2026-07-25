@@ -25,7 +25,7 @@ def looks_like_docker_exec_prefix(prefix: list[str]) -> bool:
     return not prefix[-1].startswith("-")
 
 
-def inject_docker_exec_env(prefix: list[str], env_overrides: dict[str, str]) -> list[str]:
+def inject_docker_exec_env(prefix: list[str], env_overrides: dict[str, str | None]) -> list[str]:
     """
     Return a copy of `prefix` with `docker exec -e KEY=VALUE` flags injected.
 
@@ -51,9 +51,11 @@ def inject_docker_exec_env(prefix: list[str], env_overrides: dict[str, str]) -> 
     keys = [k for k in env_overrides.keys() if isinstance(k, str) and k.strip()]
     for key in sorted(keys):
         value = env_overrides.get(key)
-        if not isinstance(value, str):
+        if value is None:
+            out.extend(["-e", key])
             continue
-        out.extend(["-e", f"{key}={value}"])
+        if isinstance(value, str):
+            out.extend(["-e", f"{key}={value}"])
 
     out.append(container_name)
     return out

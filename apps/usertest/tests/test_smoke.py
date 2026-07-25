@@ -54,6 +54,7 @@ def test_parser_smoke() -> None:
     )
     assert args.exec_use_target_sandbox_cli_install is True
     args = parser.parse_args(["run", "--repo", "C:\\tmp\\x"])
+    assert args.exec_backend == "docker"
     assert args.exec_use_host_agent_login is True
     args = parser.parse_args(
         [
@@ -76,11 +77,15 @@ def test_parser_smoke() -> None:
     )
     assert args.exec_use_host_agent_login is False
 
-    args = parser.parse_args(["report", "--run-dir", "runs\\x\\y\\codex\\0"])
-    assert args.run_dir == Path("runs\\x\\y\\codex\\0")
+    args = parser.parse_args(["report", "--run-dir", "runs/x/y/codex/0"])
+    assert args.run_dir == Path("runs/x/y/codex/0")
 
     args = parser.parse_args(["reports", "analyze", "--target", "x"])
     assert args.target == "x"
+    args = parser.parse_args(["token-monitor", "analyze", "--run-dir", "runs/x/y/codex/0"])
+    assert args.token_monitor_cmd == "analyze"
+    args = parser.parse_args(["token-monitor", "batch-context", "--batch-dir", "runs/_batch/x/y"])
+    assert args.token_monitor_cmd == "batch-context"
     args = parser.parse_args(
         [
             "reports",
@@ -88,10 +93,10 @@ def test_parser_smoke() -> None:
             "--target",
             "x",
             "--actions",
-            "configs\\issue_actions.json",
+            "configs/issue_actions.json",
         ]
     )
-    assert args.actions == Path("configs\\issue_actions.json")
+    assert args.actions == Path("configs/issue_actions.json")
     with pytest.raises(SystemExit):
         parser.parse_args(["reports", "intent-snapshot", "--target", "x"])
     with pytest.raises(SystemExit):
@@ -101,12 +106,16 @@ def test_parser_smoke() -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["reports", "backlog", "--target", "x", "--dry-run"])
 
-    args = parser.parse_args(["batch", "--targets", "configs\\targets.yaml"])
+    args = parser.parse_args(["batch", "--targets", "configs/targets.yaml"])
+    assert args.exec_backend == "docker"
     assert args.exec_use_host_agent_login is True
     args = parser.parse_args(
-        ["batch", "--targets", "configs\\targets.yaml", "--exec-use-api-key-auth"]
+        ["batch", "--targets", "configs/targets.yaml", "--exec-use-api-key-auth"]
     )
     assert args.exec_use_host_agent_login is False
+
+    args = parser.parse_args(["matrix", "plan", "--spec", "configs/matrix.yaml"])
+    assert args.exec_backend == "docker"
 
     args = parser.parse_args(["init-usertest", "--repo", "C:\\tmp\\x"])
     assert args.repo == Path("C:\\tmp\\x")

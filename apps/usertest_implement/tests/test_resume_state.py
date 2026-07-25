@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+import usertest_implement.pipeline_efficiency as pipeline_efficiency
+from usertest_implement.resume_state import (
+    LIFECYCLE_AWAITING_CI,
+    LIFECYCLE_AWAITING_VERIFICATION,
+    LIFECYCLE_CI_FAILED,
+    LIFECYCLE_COMPLETE,
+    LIFECYCLE_MERGE_READY,
+    LIFECYCLE_PR_CREATION_FAILED,
+    LIFECYCLE_REVIEW_CHANGES_REQUESTED,
+    LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
+    build_ticket_resume_state,
+    implementation_author_continuity,
+    write_ticket_resume_state,
+)
+from usertest_implement.shared import SelectedTicket
+
+
+def _write_json(path: Path, obj: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _selected(tmp_path: Path) -> SelectedTicket:
+    ticket_path = tmp_path / ".agents" / "plans" / "3 - in_progress" / "ticket.md"
+    ticket_path.parent.mkdir(parents=True, exist_ok=True)
+    ticket_path.write_text("# Ticket\n", encoding="utf-8")
+    return SelectedTicket(
+        fingerprint="abc123abc123abcd",
+        title="Ticket",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=ticket_path,
+        ticket_markdown="# Ticket\n",
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+
+def _base_run(tmp_path: Path) -> tuple[SelectedTicket, Path, Path]:
+    selected = _selected(tmp_path)
+    run_dir = tmp_path / "runs" / "impl" / "0"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+    _write_json(
+        run_dir / "ticket_ref.json",
+        {
+            "fingerprint": selected.fingerprint,
+            "owner_repo": {"root": str(tmp_path), "idea_path": str(selected.idea_path)},
+        },
+    )
+    _write_json(run_dir / "git_ref.json", {"branch": "backlog/test", "head_commit": "abc"})
+    _write_json(run_dir / "target_ref.json", {"agent": "codex"})
+    (run_dir / "raw_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "thread.started",
+                "thread_id": "019f5000-0000-7000-8000-000000000001",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return selected, run_dir, workspace
+
+
+def test_resume_state_records_required_identity_fields(tmp_path: Path) -> None:
+    selected, run_dir, workspace = _base_run(tmp_path)
+    _write_json(run_dir / "handoff_summary.json", {"final_status": "success"})
+
+    state = write_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+    )
+
+    assert (run_dir / "ticket_resume_state.json").exists()
+    assert state["ticket"]["fingerprint"] == selected.fingerprint
+    assert state["ticket"]["path"] == str(selected.idea_path)
+    assert state["owner_root"] == str(tmp_path)
+    assert state["run_dir"] == str(run_dir)
+    assert state["workspace_path"] == str(workspace)
+    assert state["branch"] == "backlog/test"
+    assert state["implementation_author"] == {
+        "agent": "codex",
+        "session_id": "019f5000-0000-7000-8000-000000000001",
+        "status": "exact_session_available",
+        "exact_session_available": True,
+        "agent_source": str(run_dir / "target_ref.json"),
+        "session_source": str(run_dir / "raw_events.jsonl"),
+    }
+    assert state["source_evidence_paths"]["ticket_ref"] == str(run_dir / "ticket_ref.json")
+    assert state["source_evidence_paths"]["raw_events"] == str(run_dir / "raw_events.jsonl")
+    telemetry = json.loads(
+        (run_dir / "pipeline_efficiency.json").read_text(encoding="utf-8")
+    )
+    assert telemetry["kind"] == "ticket_pipeline_efficiency"
+    assert telemetry["ticket"]["fingerprint"] == selected.fingerprint
+    assert telemetry["lifecycle"]["current_state"] == "implemented_local"
+    assert telemetry["lifecycle"]["resume_state_terminal"] is True
+    assert telemetry["lifecycle"]["implementation_workflow_terminal"] is False
+    assert telemetry["lifecycle"]["outcome_terminal"] is False
+    assert telemetry["measurement_scope"]["end_to_end"] is False
+
+
+def test_efficiency_telemetry_failure_does_not_block_resume_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(run_dir / "handoff_summary.json", {"final_status": "success"})
+
+    def fail_telemetry(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("telemetry failed")
+
+    monkeypatch.setattr(
+        pipeline_efficiency,
+        "write_ticket_pipeline_efficiency",
+        fail_telemetry,
+    )
+
+    with pytest.warns(RuntimeWarning, match="pipeline efficiency telemetry"):
+        state = write_ticket_resume_state(
+            selected=selected,
+            run_dir=run_dir,
+            owner_root=tmp_path,
+            exit_code=0,
+        )
+
+    assert state["lifecycle_state"] == "implemented_local"
+    assert (run_dir / "ticket_resume_state.json").exists()
+    assert not (run_dir / "pipeline_efficiency.json").exists()
+
+
+def test_resume_state_never_claims_exact_continuity_for_malformed_thread_id(
+    tmp_path: Path,
+) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    (run_dir / "raw_events.jsonl").write_text(
+        json.dumps({"type": "thread.started", "thread_id": "not-a-canonical-session"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=1,
+    )
+
+    assert state["implementation_author"]["session_id"] is None
+    assert state["implementation_author"]["status"] == "author_session_unavailable"
+    assert state["implementation_author"]["exact_session_available"] is False
+
+
+def test_implementation_author_continuity_survives_existing_pr_adoption(
+    tmp_path: Path,
+) -> None:
+    _selected_ticket, source_run, _workspace = _base_run(tmp_path)
+    adopted_run = tmp_path / "runs" / "adopted" / "0"
+    _write_json(
+        adopted_run / "target_ref.json",
+        {"model_invoked": False, "acquire_mode": "existing_handoff_adoption"},
+    )
+    _write_json(
+        adopted_run / "adoption_ref.json",
+        {
+            "kind": "existing_pr_adoption",
+            "source_run_dir": str(source_run),
+            "flags": {"pr_adopted": True, "model_invoked": False},
+        },
+    )
+
+    continuity = implementation_author_continuity(adopted_run)
+
+    assert continuity["agent"] == "codex"
+    assert continuity["session_id"] == "019f5000-0000-7000-8000-000000000001"
+    assert continuity["exact_session_available"] is True
+    assert continuity["status"] == "exact_session_available_via_adoption"
+    assert continuity["author_source_run_dir"] == str(source_run.resolve())
+    assert continuity["via_adoption_ref"] == str(
+        adopted_run.resolve() / "adoption_ref.json"
+    )
+
+
+def test_resume_state_maps_verification_failure(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(
+        run_dir / "verification.json",
+        {"passed": False, "commands": [{"command": "pytest", "exit_code": 1}]},
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=2,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_VERIFICATION_FAILED_RESUME_READY
+    assert state["blocking_reason"] == "Verification failed: pytest"
+    assert state["source_evidence_paths"]["verification"] == str(run_dir / "verification.json")
+
+
+def test_resume_state_maps_pending_verification(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(
+        run_dir / "verification_config.json",
+        {"schema_version": 1, "commands": ["pytest"]},
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_AWAITING_VERIFICATION
+    assert state["blocking_reason"] == "Verification is still pending."
+    assert state["source_evidence_paths"]["verification_config"] == str(
+        run_dir / "verification_config.json"
+    )
+
+
+def test_resume_state_maps_active_ci_as_pending_not_failed(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(run_dir / "verification.json", {"passed": True, "commands": []})
+    _write_json(
+        run_dir / "ci_gate.json",
+        {
+            "passed": False,
+            "status": "in_progress",
+            "conclusion": None,
+            "run_url": "https://example.invalid/runs/7",
+            "error": None,
+            "finished_at_utc": None,
+        },
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_AWAITING_CI
+    assert state["blocking_reason"] == (
+        "CI is still pending: https://example.invalid/runs/7"
+    )
+
+
+def test_resume_state_maps_ci_failure_before_pr_failure(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(run_dir / "ci_gate.json", {"passed": False, "error": "tests failed"})
+    _write_json(
+        run_dir / "pr_ref.json",
+        {"requested": True, "created": False, "error": "CI gate failed."},
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=5,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_CI_FAILED
+    assert state["blocking_reason"] == "tests failed"
+
+
+def test_resume_state_maps_pr_creation_failure(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(
+        run_dir / "pr_ref.json",
+        {"requested": True, "created": False, "error": "gh auth failed"},
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=5,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_PR_CREATION_FAILED
+    assert state["blocking_reason"] == "gh auth failed"
+
+
+def test_resume_state_maps_review_changes_requested(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    review_run_dir = tmp_path / "runs" / "review" / "0"
+    _write_json(
+        review_run_dir / "review_summary.json",
+        {
+            "review_decision": "changes_requested",
+            "merge_ready": False,
+            "rationale": "Fix the edge case.",
+            "pr_url": "https://example.invalid/pr/1",
+        },
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+        review_run_dir=review_run_dir,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_REVIEW_CHANGES_REQUESTED
+    assert state["blocking_reason"] == "Fix the edge case."
+    assert state["pr_url"] == "https://example.invalid/pr/1"
+    assert state["source_evidence_paths"]["review_summary"] == str(
+        review_run_dir / "review_summary.json"
+    )
+
+
+def test_resume_state_maps_merge_ready(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    review_run_dir = tmp_path / "runs" / "review" / "0"
+    _write_json(
+        review_run_dir / "review_summary.json",
+        {"review_decision": "approved", "merge_ready": True, "head_ref_name": "backlog/review"},
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+        review_run_dir=review_run_dir,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_MERGE_READY
+    assert state["blocking_reason"] is None
+    assert state["branch"] == "backlog/test"
+
+
+def test_resume_state_maps_complete_from_merge_ref(tmp_path: Path) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    review_run_dir = tmp_path / "runs" / "review" / "0"
+    _write_json(
+        review_run_dir / "review_summary.json",
+        {"review_decision": "approved", "merge_ready": True},
+    )
+    _write_json(review_run_dir / "merge_ref.json", {"merged": True})
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=0,
+        review_run_dir=review_run_dir,
+    )
+
+    assert state["lifecycle_state"] == LIFECYCLE_COMPLETE
+    assert state["blocking_reason"] is None
+    assert state["source_evidence_paths"]["merge_ref"] == str(review_run_dir / "merge_ref.json")

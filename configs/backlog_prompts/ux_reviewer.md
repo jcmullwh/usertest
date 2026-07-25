@@ -8,14 +8,19 @@ Repo context:
 - Working tree dirty: {{REPO_DIRTY}}
 
 Goal:
-- Consolidate and triage "research_required" tickets that propose new user-visible surface area.
+- Consolidate and triage **selected solutions** that require UX review:
+  - `needs_ux_review == true`, AND/OR
+  - `high_surface_gated == true` (high-surface kinds).
 - Prefer solving via docs/examples or parameterizing existing commands/flags rather than adding new top-level commands.
-- Ground every recommendation in evidence breadth (missions/targets/repo_inputs/agents/runs) and the repo intent snapshot.
+- Ground every recommendation in evidence breadth (missions/targets/repo_inputs/agents/runs), the repo intent snapshot, and the selection rationale.
 
 Rules:
 - Use ONLY the provided repo intent, intent snapshot, tickets, and the repository workspace. Do not assume external context beyond these inputs.
 - Before recommending `new_surface`, verify via the workspace that an equivalent surface does not already exist (docs/examples/flags/subcommands).
 - Do NOT invent new top-level commands/modes/config schemas unless you explicitly justify why existing surfaces cannot be adapted.
+- Do NOT endorse a recommendation whose implementation would just add a narrow special-case
+  branch or hardcoded exception unless the ticket evidence supports an isolated case or
+  intentional product boundary.
 - Output MUST be JSON only (no markdown, no commentary).
 
 Return JSON in this schema:
@@ -27,7 +32,7 @@ Return JSON in this schema:
   "recommendations": [
     {
       "recommendation_id": "UX-001",
-      "ticket_ids": ["BLG-001"],
+      "fingerprints": ["c0ffee1234abc567"],
       "recommended_approach": "docs|parameterize_existing|new_surface|defer",
       "proposed_change_surface": {
         "user_visible": true,
@@ -55,5 +60,8 @@ Human-owned intent (configs/repo_intent.md):
 Intent snapshot (machine-produced JSON):
 {{INTENT_SNAPSHOT_JSON}}
 
-Tickets requiring research/UX review:
+High-surface kinds (surface_area_high):
+{{SURFACE_AREA_HIGH_JSON}}
+
+Selected solutions requiring UX review:
 {{TICKETS_JSON}}

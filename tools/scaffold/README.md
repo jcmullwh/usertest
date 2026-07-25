@@ -13,13 +13,34 @@ List available kinds and generators, then scaffold a project and run its tasks:
     python tools/scaffold/scaffold.py run install --project billing-api --skip-missing
     python tools/scaffold/scaffold.py run test --project billing-api
 
+## Lint autofix
+
+To run lint in autofix mode across projects (when supported), use `scaffold run` with `--fix`:
+
+    python tools/scaffold/scaffold.py run lint --fix --kind lib
+
+## Fixing / syncing the manifest
+
+`tools/scaffold/monorepo.toml` is the source of truth for repo-wide tasks and CI. If you update
+`tools/scaffold/registry.toml` (for example to add or change generator tasks), you can normalize/sync the manifest:
+
+    python tools/scaffold/scaffold.py fix
+
+Options:
+
+- `--sync-tasks`: overwrite generator-defined tasks in each project from `registry.toml` (keeps extra per-project tasks)
+- `--sync-ci`: overwrite each project's `ci` flags from `kinds.<kind>.ci`
+- `--prune-missing`: drop manifest entries whose project directories do not exist
+- `--check`: do not write; exit non-zero if changes would be made (useful for CI)
+- `--diff`: print a unified diff of the changes
+
 ## Minimal requirements
 
 - Always required: `python` on PATH (Python 3.11+ recommended; older Pythons need `tomli` installed to parse TOML).
 - Required only for Cookiecutter-based generators: `cookiecutter` on PATH.
--
 - Required only for external Cookiecutter sources and vendoring: `git` on PATH.
-- Required only for running tasks: whatever commands your `tasks.*` reference (e.g. `poetry`, `uv`, `npm`, `cargo`, `terraform`).
+- Required only for most running tasks: whatever commands your `tasks.*` reference (e.g. `poetry`, `uv`, `npm`, `cargo`, `terraform`).
+- For `scaffold run lint|test`, scaffold auto-bootstraps missing host prerequisites from `requirements-dev.txt` (for example `pdm`, `pytest`, `ruff`) and injects repo `src/` paths into `PYTHONPATH`.
 
 ## Cookiecutter sources
 
@@ -29,9 +50,14 @@ List available kinds and generators, then scaffold a project and run its tasks:
 
 ## Virtual environments
 
-This tool does not create or manage virtual environments. For Python projects, use whatever per-project environment
-strategy your generator and `tasks.*` imply (Poetry/uv/pip-tools/conda/PDM/venv/etc.). The scaffolder runs tasks exactly
-as recorded in `tools/scaffold/monorepo.toml`.
+This tool does not define project environment strategy; it runs tasks exactly as recorded in
+`tools/scaffold/monorepo.toml`.
+
+For PDM projects, `scaffold run install` executes each project's `tasks.install` command. When maintenance cache env
+vars are present (`USERTEST_MAINT_VENV_CACHE_ENABLED=1` + `USERTEST_MAINT_VENV_CACHE_ROOT=...`), install steps can
+reuse cached `.venv` snapshots keyed by dependency fingerprint. Cache failures are non-fatal and fall back to normal
+install behavior. When `USERTEST_MAINT_VENV_SEED_ROOT=...` is also present, install steps will try a
+seeded `.venv` restore after host-cache miss and before running a real `pdm install`.
 
 ## Configuration model
 
@@ -116,6 +142,8 @@ The repo-level workflow at `.github/workflows/ci.yml` is driven by the manifest:
 - CI installs a pinned PDM version (`2.26.2`) for deterministic behavior.
 - `scaffold.py run install` applies a bounded one-time retry only for a known transient PDM local-path resolution
   signature involving `normalized-events`.
+- When maintenance cache env vars are enabled, `scaffold.py run install` may restore/save per-project `.venv` cache
+  entries and emit INFO lines for `hit`, `miss`, `restore-failed`, and `save-complete` outcomes.
 - The `scaffold_golden_path_smoke` CI job exercises the documented scaffold flow end to end by running
   `doctor -> add -> run install --skip-missing -> run test` on a generated sample app and asserting expected files plus
   manifest entries.

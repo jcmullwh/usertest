@@ -71,6 +71,25 @@ def test_claude_cli_includes_system_prompt_files(tmp_path: Path) -> None:
     assert ("--append-system-prompt-file", str(append_path)) in pairs
 
 
+def test_claude_cli_write_policy_tools_keep_edit_and_include_delegation(
+    tmp_path: Path,
+) -> None:
+    dummy = _make_dummy_executable(tmp_path)
+    result = run_claude_print(
+        workspace_dir=tmp_path,
+        prompt="hi",
+        raw_events_path=tmp_path / "raw.jsonl",
+        last_message_path=tmp_path / "last.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        binary=dummy,
+        output_format="stream-json",
+        allowed_tools=["Read", "Edit", "Bash", "Grep", "Glob", "Agent"],
+    )
+    assert result.exit_code == 0
+    pairs = set(zip(result.argv, result.argv[1:], strict=False))
+    assert ("--allowedTools", "Read,Edit,Bash,Grep,Glob,Agent") in pairs
+
+
 def test_gemini_cli_injects_env_for_docker_exec_prefix(tmp_path: Path) -> None:
     docker_dir = tmp_path / "docker_bin"
     docker_dir.mkdir(parents=True, exist_ok=True)
@@ -170,11 +189,11 @@ def test_gemini_cli_injects_env_for_docker_exec_prefix(tmp_path: Path) -> None:
         binary=dummy,
         sandbox=True,
         command_prefix=[str(docker), "exec", "-i", "-w", "/workspace", "container"],
-        env_overrides={"GEMINI_SYSTEM_MD": "/run_dir/system.md"},
+        env_overrides={"SENTINEL": "1"},
     )
     assert result.exit_code == 0
     pairs = set(zip(result.argv, result.argv[1:], strict=False))
-    assert ("-e", "GEMINI_SYSTEM_MD=/run_dir/system.md") in pairs
+    assert ("-e", "SENTINEL=1") in pairs
 
 
 def test_gemini_cli_includes_sandbox_and_allowed_tools(tmp_path: Path) -> None:
@@ -194,6 +213,35 @@ def test_gemini_cli_includes_sandbox_and_allowed_tools(tmp_path: Path) -> None:
     pairs = set(zip(result.argv, result.argv[1:], strict=False))
     assert ("--allowed-tools", "read_file") in pairs
     assert ("--allowed-tools", "run_shell_command") in pairs
+
+
+def test_gemini_cli_write_policy_tools_keep_writes_and_include_delegation(
+    tmp_path: Path,
+) -> None:
+    dummy = _make_dummy_executable(tmp_path)
+    result = run_gemini(
+        workspace_dir=tmp_path,
+        prompt="hi",
+        raw_events_path=tmp_path / "raw.jsonl",
+        last_message_path=tmp_path / "last.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        binary=dummy,
+        sandbox=True,
+        allowed_tools=[
+            "read_file",
+            "search_file_content",
+            "write_file",
+            "replace",
+            "write_todos",
+            "run_shell_command",
+            "invoke_agent",
+        ],
+    )
+    assert result.exit_code == 0
+    pairs = set(zip(result.argv, result.argv[1:], strict=False))
+    assert ("--allowed-tools", "write_file") in pairs
+    assert ("--allowed-tools", "replace") in pairs
+    assert ("--allowed-tools", "invoke_agent") in pairs
 
 
 def test_gemini_cli_includes_include_directories(tmp_path: Path) -> None:

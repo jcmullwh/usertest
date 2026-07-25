@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def find_repo_root(start: Path | None = None) -> Path:
@@ -18,6 +18,15 @@ def find_repo_root(start: Path | None = None) -> Path:
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
+# On local backend there is no `run_dir` bind mount into a sandbox, so a workspace-scoped
+# agent (or a subprocess it spawns, such as the verification broker client script) has no
+# way to reach paths under `run_dir` at all. Content that an agent must read or write at
+# runtime (verification broker client/IPC files, mirrored verification artifacts) is staged
+# under this alias inside the workspace instead. It is excluded from workspace state
+# hashing (see `workspace_state_hash.py`) so this runner-owned scratch content never affects
+# agent-change detection.
+LOCAL_BACKEND_RUN_DIR_ALIAS = ".usertest_run_dir"
+
 
 def slugify(value: str) -> str:
     s = value.strip()
@@ -31,3 +40,29 @@ def slugify(value: str) -> str:
 
 def utc_timestamp_compact() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def normalize_agent_path(path: str | Path) -> str:
+    """
+    Produces a canonical agent-visible POSIX path.
+    Separators are always '/', and trailing separators are stripped.
+    """
+    if isinstance(path, Path):
+        s = path.as_posix()
+    else:
+        s = str(path).replace("\\", "/")
+
+    # PurePosixPath handles basic normalization like stripping trailing slashes
+    # and collapsing // while preserving POSIX-style paths.
+    return PurePosixPath(s).as_posix()
+
+
+def agent_path_join(root: str, *leaves: str) -> str:
+    """
+    Join path components into a canonical agent-visible POSIX path.
+    """
+    # We use string replacement for the initial root to handle potential backslashes
+    # before passing to PurePosixPath, which is strictly POSIX.
+    root_norm = str(root).replace("\\", "/")
+    leaves_norm = [str(leaf).replace("\\", "/") for leaf in leaves]
+    return PurePosixPath(root_norm, *leaves_norm).as_posix()

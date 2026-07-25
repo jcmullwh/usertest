@@ -4,6 +4,8 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from run_artifacts.history import iter_report_history
+
 from backlog_core.backlog import (
     add_atom_links,
     build_backlog_document,
@@ -14,6 +16,7 @@ from backlog_core.backlog import (
     render_backlog_markdown,
     write_backlog_atoms,
 )
+from backlog_core.case_lineage import eligible_problem_mining_atoms, normalize_atom_lineage
 
 
 class _DeterministicEmbedder:
@@ -28,11 +31,92 @@ class _DeterministicEmbedder:
         return vectors
 
 
+def test_extract_backlog_atoms_quarantines_model_lineage_from_runner_research(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "target_ref": {"requested_mission_id": "backlog_repro_research"},
+            "report": {
+                "confusion_points": [
+                    {
+                        "summary": "Research found another symptom.",
+                        "impact": "The original case needs more evidence.",
+                    }
+                ],
+                "extensions": {
+                    "backlog_lineage": {
+                        "origin_stage": "observation",
+                        "evidence_role": "observation",
+                        "parent_case_id": "case:attacker-selected",
+                        "disposition": "novel_case",
+                        "novel_case_rationale": "Model prose is not a classification.",
+                    }
+                },
+            },
+        }
+    ]
+
+    extracted = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    atoms = normalize_atom_lineage(extracted, strict_new_output=True)
+
+    assert atoms
+    assert {atom["origin_stage"] for atom in atoms} == {"repro_research"}
+    assert {atom["evidence_role"] for atom in atoms} == {"research"}
+    assert {atom["parent_case_id"] for atom in atoms} == {None}
+    assert {atom["disposition"] for atom in atoms} == {"unresolved"}
+    assert all("novel_case_rationale" not in atom for atom in atoms)
+    assert eligible_problem_mining_atoms(atoms) == []
+
+
+def test_extract_backlog_atoms_uses_ticket_ref_as_implementation_parent(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "target_ref": {"mission_id": "implement_maintenance_backlog_ticket_v1"},
+            "ticket_ref": {"case_id": "case:trusted", "fingerprint": "ticket:trusted"},
+            "report": {
+                "confusion_points": [{"summary": "Implementation exposed a follow-up."}],
+                "extensions": {
+                    "backlog_lineage": {
+                        "parent_case_id": "case:attacker-selected",
+                        "case_id": "case:attacker-selected",
+                    }
+                },
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+
+    assert atoms
+    assert {atom["origin_stage"] for atom in atoms} == {"implementation"}
+    assert {atom["evidence_role"] for atom in atoms} == {"implementation"}
+    assert {atom["parent_case_id"] for atom in atoms} == {"case:trusted"}
+    assert {atom["case_id"] for atom in atoms} == {"case:trusted"}
+    assert {atom["disposition"] for atom in atoms} == {"supports_case"}
+
+
 def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "agent_stderr.txt").write_text(
-        "EPIPE writing to socket\n" + ("x" * 200 + "\n") * 6000,
+        "EPIPE writing to socket\n"
+        + ("x" * 200 + "\n") * 6000
+        + "TAIL ROOT CAUSE: provider closed the final stream\n",
         encoding="utf-8",
     )
     (run_dir / "agent_last_message.txt").write_text(
@@ -70,6 +154,19 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
             },
             "report_validation_errors": ["$: failed to parse JSON from agent output"],
             "error": {"type": "AgentExecFailed", "message": "command not found"},
+            "terminal_artifact_reads": {
+                "report.json": {
+                    "path": "report.json",
+                    "exists": True,
+                    "decode_ok": True,
+                    "parse_ok": False,
+                    "error_phase": "parse",
+                    "error_type": "JSONDecodeError",
+                    "error_message": "Expecting value",
+                    "error_line": 1,
+                    "error_column": 1,
+                }
+            },
         }
     ]
 
@@ -96,6 +193,11 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
     ]
     assert failure_atom["error"]["type"] == "AgentExecFailed"
     assert failure_atom["error"]["message"] == "command not found"
+    assert failure_atom["terminal_artifact_reads"]["report.json"]["error_phase"] == "parse"
+    stderr_atom = next(item for item in atoms if item["source"] == "agent_stderr_artifact")
+    assert "EPIPE writing to socket" in stderr_atom["text"]
+    assert "TAIL ROOT CAUSE: provider closed the final stream" in stderr_atom["text"]
+    assert stderr_atom["atom_id"] in failure_atom["linked_atom_ids"]
 
     attachments = failure_atom["attachments"]
     stderr_attachment = next(item for item in attachments if item["path"] == "agent_stderr.txt")
@@ -120,8 +222,57 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
 
     totals = atoms_doc["totals"]
     assert totals["source_counts"]["run_failure_event"] == 1
-    assert totals["source_counts"].get("agent_stderr_artifact", 0) == 0
-    assert totals["source_counts"].get("agent_last_message_artifact", 0) == 0
+    assert totals["source_counts"]["agent_stderr_artifact"] == 1
+    assert totals["source_counts"]["agent_last_message_artifact"] == 1
+
+
+def test_extract_backlog_atoms_does_not_emit_missing_report_for_nonterminal_run(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"repo_input": "C:/repo/target_a"}) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "effective_run_spec.json").write_text("{}\n", encoding="utf-8")
+
+    records = list(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert [record["status"] for record in records] == ["nonterminal"]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+
+    assert atoms_doc["totals"]["source_counts"].get("run_failure_event", 0) == 0
+    assert atoms_doc["capture_manifest"]["target_a/20260101T000000Z/codex/0"]
+
+
+def test_extract_backlog_atoms_emits_missing_report_for_completed_run_without_report(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"repo_input": "C:/repo/target_a"}) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "effective_run_spec.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "run_meta.json").write_text(
+        json.dumps({"run_finished_utc": "2026-01-01T00:00:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+
+    records = list(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert [record["status"] for record in records] == ["missing_report"]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+
+    failure = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "run_failure_event"
+    )
+    assert failure["failure_kind"] == "missing_report"
+    assert failure["severity_hint"] == "high"
 
 
 def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path) -> None:
@@ -185,6 +336,278 @@ def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path
         and atom.get("report_ux_block") == "unclear_points"
         for atom in atoms
     )
+
+
+def test_success_report_emits_non_originating_terminal_context_without_agent_message(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "metrics": {
+                "commands_failed": 1,
+                "failed_commands": [
+                    {"command": "python -m package doctor", "exit_code": 1}
+                ],
+            },
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "success",
+                "goal": "Complete the documented workflow",
+                "summary": "Setup recovered and the intended workflow completed.",
+                "steps": [{"name": "workflow", "attempts": [{"action": "run"}], "outcome": "ok"}],
+                "outputs": [{"label": "result", "path": "result.txt"}],
+                "verification": [
+                    {"check": "original scenario", "result": "passed"}
+                ],
+                "issues": [],
+                "next_actions": ["No follow-up required."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    [context] = [atom for atom in atoms if atom.get("source") == "run_outcome_context"]
+
+    assert context["report_status"] == "success"
+    assert context["verification_result_values"] == ["passed"]
+    assert context["verification_check_count"] == 1
+    assert context["explicit_issue_count"] == 0
+    assert context["problem_mining_context_only"] is True
+    assert context["lineage_mining_blocker"] == "runner_terminal_context_only"
+    assert context not in eligible_problem_mining_atoms(atoms)
+    assert any(atom.get("source") == "command_failure" for atom in atoms)
+
+
+def test_extract_backlog_atoms_retains_every_structured_issue_by_default(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    issue_titles = [f"Observed issue {index:02d}" for index in range(25)]
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "success",
+                "issues": [
+                    {
+                        "severity": "warn",
+                        "title": title,
+                        "details": f"Evidence details for {title}",
+                    }
+                    for title in issue_titles
+                ],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    extracted_titles = {
+        str(atom.get("text"))
+        for atom in atoms
+        if atom.get("report_issue_block") == "issues"
+        and atom.get("source") == "confusion_point"
+    }
+
+    assert extracted_titles == set(issue_titles)
+
+
+def test_extract_backlog_atoms_preserves_failed_task_outcome_steps_and_verification(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    count = 25
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "failure",
+                "goal": "Exercise the canonical workflow",
+                "summary": "The workflow failed before producing output.",
+                "steps": [
+                    {
+                        "name": f"step-{index}",
+                        "attempts": [
+                            {
+                                "action": f"run-{index}",
+                                "result": f"failed-{index}",
+                                "evidence": f"exact-output-{index}",
+                            }
+                        ],
+                        "outcome": f"outcome-{index}",
+                    }
+                    for index in range(count)
+                ],
+                "outputs": [],
+                "verification": [
+                    {
+                        "check": f"oracle-{index}",
+                        "result": f"not-satisfied-{index}",
+                        "evidence": f"oracle-evidence-{index}",
+                    }
+                    for index in range(count)
+                ],
+                # Deliberately omit optional issues[]. The observed failure must not be
+                # replaced by this proposal atom.
+                "next_actions": ["Repair the execution path."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    outcomes = [atom for atom in atoms if atom.get("source") == "report_outcome"]
+    steps = [atom for atom in atoms if atom.get("source") == "task_step_observation"]
+    attempts = [
+        atom for atom in atoms if atom.get("source") == "task_attempt_observation"
+    ]
+    verification = [
+        atom for atom in atoms if atom.get("source") == "verification_observation"
+    ]
+    proposals = [atom for atom in atoms if atom.get("source") == "suggested_change"]
+
+    assert len(outcomes) == 1
+    assert outcomes[0]["report_status"] == "failure"
+    assert outcomes[0]["report_summary"] == "The workflow failed before producing output."
+    assert outcomes[0]["evidence_class"] == "observed"
+    assert len(steps) == count
+    assert len(attempts) == count
+    assert len(verification) == count
+    assert attempts[-1]["task_attempt"] == {
+        "action": "run-24",
+        "result": "failed-24",
+        "evidence": "exact-output-24",
+    }
+    assert verification[-1]["verification_check"]["evidence"] == "oracle-evidence-24"
+    assert proposals[0]["evidence_class"] == "proposal"
+
+
+def test_extract_backlog_atoms_preserves_every_boundary_risk_observation(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    count = 25
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "boundary_v1",
+                "status": "partial",
+                "constraints": ["read only"],
+                "observations": [
+                    {
+                        "category": "credentials",
+                        "summary": f"Shareable artifact exposes secret {index}",
+                        "where_found": f"artifact-{index}.txt",
+                        "evidence": f"token-{index}",
+                        "how_to_disable_or_avoid": f"disable-path-{index}",
+                        "risk_level": "high" if index == count - 1 else "medium",
+                    }
+                    for index in range(count)
+                ],
+                # Deliberately omit optional risks[].
+                "recommendations": ["Redact shareable artifacts."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    observations = [
+        atom for atom in atoms if atom.get("source") == "boundary_observation"
+    ]
+
+    assert len(observations) == count
+    assert observations[-1]["severity_hint"] == "high"
+    assert observations[-1]["boundary_observation"] == {
+        "category": "credentials",
+        "summary": "Shareable artifact exposes secret 24",
+        "where_found": "artifact-24.txt",
+        "evidence": "token-24",
+        "how_to_disable_or_avoid": "disable-path-24",
+        "risk_level": "high",
+    }
+    assert all(atom["evidence_class"] == "observed" for atom in observations)
+    assert any(atom.get("source") == "report_outcome" for atom in atoms)
+
+
+def test_extract_backlog_atoms_preserves_every_failed_batch_result(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    count = 25
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "batch_v1",
+                "status": "partial",
+                "goal": "Process every input",
+                "inputs": [f"input-{index}" for index in range(count)],
+                "results": [
+                    {
+                        "input": f"input-{index}",
+                        "status": "failure",
+                        "outputs": [
+                            {
+                                "label": f"diagnostic-{index}",
+                                "path": f"diagnostics/{index}.json",
+                                "description": f"full diagnostic {index}",
+                            }
+                        ],
+                        "notes": f"parser rejected valid input {index}",
+                    }
+                    for index in range(count)
+                ],
+                "summary": "Every input failed.",
+                # Deliberately omit optional issues[].
+                "next_actions": ["Repair the parser."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    failures = [
+        atom for atom in atoms if atom.get("source") == "batch_result_failure"
+    ]
+
+    assert len(failures) == count
+    assert failures[-1]["batch_result"]["outputs"] == [
+        {
+            "label": "diagnostic-24",
+            "path": "diagnostics/24.json",
+            "description": "full diagnostic 24",
+        }
+    ]
+    assert failures[-1]["batch_result"]["notes"] == "parser rejected valid input 24"
+    assert all(atom["evidence_class"] == "observed" for atom in failures)
+    assert any(atom.get("source") == "report_outcome" for atom in atoms)
 
 
 def test_extract_backlog_atoms_extracts_boundary_v1_risks_and_recommendations(
@@ -391,10 +814,12 @@ def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: 
     (run_dir / "agent_stderr.txt").write_text(
         "\n".join(
             [
-                "[codex_warning_summary] code=shell_snapshot_powershell_unsupported "
+                "[codex_notice_summary] code=shell_snapshot_powershell_unsupported "
                 "occurrences=4 classification=capability_notice",
-                "hint=PowerShell shell snapshot unsupported; "
-                "continuing without shell snapshot metadata.",
+                (
+                    "hint=PowerShell shell snapshot unsupported; "
+                    "continuing without shell snapshot metadata."
+                ),
             ]
         )
         + "\n",
@@ -417,12 +842,12 @@ def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: 
     atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
     sources = {item["source"] for item in atoms_doc["atoms"]}
     assert "agent_stderr_artifact" not in sources
-    assert "capability_warning_artifact" in sources
-    warning_atom = next(
-        atom for atom in atoms_doc["atoms"] if atom.get("source") == "capability_warning_artifact"
+    assert "capability_notice_artifact" in sources
+    notice_atom = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "capability_notice_artifact"
     )
-    assert warning_atom.get("severity_hint") == "low"
-    assert "shell_snapshot_powershell_unsupported" in warning_atom.get("warning_codes", [])
+    assert notice_atom.get("severity_hint") == "low"
+    assert "shell_snapshot_powershell_unsupported" in notice_atom.get("warning_codes", [])
 
 
 def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path: Path) -> None:
@@ -441,7 +866,7 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
             "error": None,
             "metrics": {
                 "commands_executed": 3,
-                "commands_failed": 2,
+                "commands_failed": 3,
                 "failed_commands": [
                     {
                         "command": "python -m pip install -e .",
@@ -451,6 +876,10 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
                             "ERROR: Could not find a version that satisfies the requirement ..."
                         ),
                         "output_excerpt_truncated": True,
+                    },
+                    {
+                        "command": "rg -n \"WindowsApps\" README.md docs -S",
+                        "exit_code": 1,
                     },
                     {
                         "command": "python -m pytest -q",
@@ -467,6 +896,9 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
     atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
     failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
     assert len(failures) == 2
+    assert all(
+        not str(atom.get("command", "")).lstrip().lower().startswith("rg ") for atom in failures
+    )
 
     first = failures[0]
     assert first.get("from_metrics") is True
@@ -481,6 +913,695 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
         if atom.get("source") == "command_failure_truncated"
     )
     assert trunc.get("omitted_count") == 3
+
+
+def test_command_failure_atom_retains_bounded_same_run_followup_context(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "claude" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "ts": "2026-01-01T00:00:01Z",
+            "type": "run_command",
+            "data": {
+                "command": "powershell -File .\\scripts\\check.ps1",
+                "exit_code": 1,
+                "output_excerpt": "The relative path was not found",
+            },
+        },
+        {
+            "ts": "2026-01-01T00:00:02Z",
+            "type": "run_command",
+            "data": {
+                "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                "exit_code": 0,
+                "output_excerpt": "Success",
+            },
+        },
+        {
+            "ts": "2026-01-01T00:00:03Z",
+            "type": "run_command",
+            "data": {"command": "python -m tool --help", "exit_code": 0},
+        },
+    ]
+    (run_dir / "normalized_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/claude/0",
+            "agent": "claude",
+            "status": "ok",
+            "report": {"kind": "smoke_v1", "status": "success"},
+            "metrics": {
+                "commands_executed": 3,
+                "commands_failed": 1,
+                "failed_commands": [
+                    {
+                        "command": "powershell -File .\\scripts\\check.ps1",
+                        "exit_code": 1,
+                        "output_excerpt": "The relative path was not found",
+                    }
+                ],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    [failure] = [atom for atom in atoms if atom.get("source") == "command_failure"]
+    context = failure["same_run_command_context"]
+
+    assert context == {
+        "source": "normalized_events.jsonl",
+        "failure_event_ordinal": 1,
+        "run_command_count": 3,
+        "later_command_count": 2,
+        "later_successful_command_count": 2,
+        "sampled_later_commands": [
+            {
+                "event_ordinal": 2,
+                "timestamp_utc": "2026-01-01T00:00:02Z",
+                "command": "powershell -File C:\\workspace\\scripts\\check.ps1",
+                "exit_code": 0,
+                "output_excerpt": "Success",
+            },
+            {
+                "event_ordinal": 3,
+                "timestamp_utc": "2026-01-01T00:00:03Z",
+                "command": "python -m tool --help",
+                "exit_code": 0,
+            },
+        ],
+        "sample_truncated": False,
+        "run_lifecycle_status": "ok",
+        "report_status": "success",
+        "report_kind": "smoke_v1",
+    }
+
+
+def test_extract_backlog_atoms_retains_every_command_failure_by_default(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    commands = [f"python tool_{index:02d}.py" for index in range(25)]
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "metrics": {
+                "commands_executed": len(commands),
+                "commands_failed": len(commands),
+                "failed_commands": [
+                    {"command": command, "exit_code": 1} for command in commands
+                ],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    failures = [atom for atom in atoms if atom.get("source") == "command_failure"]
+
+    assert [atom.get("command") for atom in failures] == commands
+    assert not any(
+        atom.get("source") == "command_failure_truncated" for atom in atoms
+    )
+
+
+def test_extract_backlog_atoms_reconciles_incomplete_metrics_with_events(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python -m pip install -e .",
+                "exit_code": 1,
+                "cwd": "C:/ws",
+                "output_excerpt": "ERROR: could not build wheels",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_01/stderr.txt",
+                },
+            },
+        },
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python -m pytest -q",
+                "exit_code": 2,
+                "output_excerpt": "ImportError: No module named foo",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_02/stderr.txt",
+                },
+            },
+        },
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python tools/scaffold/scaffold.py run test --all",
+                "exit_code": 1,
+                "output_excerpt": "FAILED tests/test_example.py::test_x",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_03/stderr.txt",
+                },
+            },
+        },
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python -m pip install -e .",
+                "exit_code": 1,
+                "cwd": "C:/ws",
+                "output_excerpt": "ERROR: could not build wheels",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_01/stderr.txt",
+                },
+            },
+        },
+    ]
+    (run_dir / "normalized_events.jsonl").write_text(
+        "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+            "metrics": {
+                "commands_executed": 3,
+                "commands_failed": 3,
+                "failed_commands": [
+                    {
+                        "command": "python -m pip install -e .",
+                        "exit_code": 1,
+                        "cwd": "C:/ws",
+                        "output_excerpt": "ERROR: could not build wheels",
+                        "artifacts": {
+                            "stderr": "command_failures/cmd_01/stderr.txt",
+                        },
+                    }
+                ],
+                "failed_commands_truncated": True,
+                "failed_commands_omitted_count": 2,
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
+    assert [atom.get("command") for atom in failures] == [
+        "python -m pip install -e .",
+        "python -m pytest -q",
+        "python tools/scaffold/scaffold.py run test --all",
+    ]
+    assert len(failures) == 3
+    assert failures[0].get("from_metrics") is True
+    assert failures[0].get("from_events") is None
+    assert failures[1].get("from_events") is True
+    assert failures[2].get("from_events") is True
+    assert [
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "command_failure_truncated"
+    ] == []
+
+
+def test_extract_backlog_atoms_does_not_reconcile_complete_metrics_with_events(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "normalized_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "run_command",
+                "data": {
+                    "command": "python -m pip install -e .",
+                    "exit_code": 1,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "run_command",
+                "data": {
+                    "command": "python -m pytest -q",
+                    "exit_code": 2,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+            "metrics": {
+                "commands_executed": 1,
+                "commands_failed": 1,
+                "failed_commands": [
+                    {
+                        "command": "python -m pip install -e .",
+                        "exit_code": 1,
+                    }
+                ],
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
+    assert [atom.get("command") for atom in failures] == ["python -m pip install -e ."]
+    assert failures[0].get("from_metrics") is True
+    assert failures[0].get("from_events") is None
+
+
+def test_extract_backlog_atoms_ignores_ripgrep_no_matches_from_events(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "normalized_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "run_command",
+                "data": {
+                    "command": "rg -n \"WindowsApps\" README.md docs -S",
+                    "exit_code": 1,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    assert [
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") in {"command_failure", "command_failure_truncated"}
+    ] == []
+
+
+def test_extract_backlog_atoms_emits_token_monitoring_signal_atoms(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "token_monitoring.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "signals": [
+                    {
+                        "signal_id": "broad_source_config_read",
+                        "confidence": "authoritative",
+                        "causal_mechanism": (
+                            "Source/config exploration was retained in context."
+                        ),
+                        "token_dimensions_affected": {
+                            "total_tokens": 130000,
+                            "input_tokens": 125000,
+                            "cached_input_tokens": 100000,
+                            "uncached_input_tokens": 25000,
+                            "output_tokens": 5000,
+                            "reasoning_output_tokens": 500,
+                        },
+                        "evidence": {
+                            "call_count": 3,
+                            "call_indexes": [4, 5, "6"],
+                            "paths_from_calls": ["packages/runner_core/src/runner_core/runner.py"],
+                            "raw_prompt": "do not copy this raw prompt text",
+                        },
+                        "mitigation_lever": "Use targeted section reads.",
+                        "false_positive_risk": "Low.",
+                        "confirmed_by_counters": True,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    signal = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "token_monitoring_signal"
+    )
+    assert signal["token_signal_id"] == "broad_source_config_read"
+    assert signal["severity_hint"] == "high"
+    assert signal["token_dimensions_affected"]["input_tokens"] == 125000
+    assert signal["evidence_call_count"] == 3
+    assert signal["evidence_call_indexes"] == [4, 5, 6]
+    assert signal["evidence_paths_preview"] == [
+        "packages/runner_core/src/runner_core/runner.py"
+    ]
+    assert signal["confirmed_by_counters"] is True
+    assert "do not copy this raw prompt text" not in json.dumps(signal)
+    assert atoms_doc["totals"]["source_counts"]["token_monitoring_signal"] == 1
+
+
+def test_extract_backlog_atoms_emits_token_monitoring_error_atoms(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "token_monitoring_error.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "type": "RuntimeError",
+                "message": "monitor failed",
+                "generated_at_utc": "2026-01-01T00:00:01Z",
+                "non_fatal": True,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    error_atom = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "token_monitoring_error"
+    )
+    assert error_atom["severity_hint"] == "high"
+    assert error_atom["error_type"] == "RuntimeError"
+    assert error_atom["non_fatal"] is True
+    assert atoms_doc["totals"]["source_counts"]["token_monitoring_error"] == 1
+
+
+def test_extract_backlog_atoms_emits_bounded_maintenance_cleanup_observation(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    (run_dir / "sandbox").mkdir(parents=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"repo_input": "C:/repo/target_a"}) + "\n",
+        encoding="utf-8",
+    )
+    sidecar_path = run_dir / "sandbox" / "maintenance_image_cleanup.json"
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cleanup_enabled": True,
+                "dry_run": False,
+                "repos_scanned": ["local", "registry.example/maintenance"],
+                "protected_tags": ["dev-latest"],
+                "kept_tags": [
+                    "local:identity-a",
+                    "registry.example/maintenance:identity-a",
+                    "local:identity-b",
+                    "registry.example/maintenance:identity-b",
+                    "local:dev-latest",
+                ],
+                "deleted_tags": [],
+                "deleted_image_ids": [],
+                "errors": [],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = list(iter_report_history(runs_dir, embed="none"))
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    cleanup_atom = next(
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "maintenance_image_cleanup"
+    )
+
+    assert cleanup_atom["atom_id"].endswith(":maintenance_image_cleanup:1")
+    assert cleanup_atom["evidence_class"] == "observed"
+    assert cleanup_atom["cleanup_enabled"] is True
+    assert cleanup_atom["dry_run"] is False
+    assert cleanup_atom["repos_scanned_count"] == 2
+    assert cleanup_atom["kept_tag_count"] == 5
+    assert cleanup_atom["unique_retained_tag_suffix_count"] == 3
+    assert cleanup_atom["retained_identity_measurement_basis"] == (
+        "tag_suffix_proxy_only"
+    )
+    assert cleanup_atom["physical_retained_identity_count_known"] is False
+    assert "kept_image_id_count" not in cleanup_atom
+    assert cleanup_atom["deleted_tag_count"] == 0
+    assert cleanup_atom["deleted_image_id_count"] == 0
+    assert cleanup_atom["error_count"] == 0
+    assert cleanup_atom["artifact_ref"]["path"] == (
+        "sandbox/maintenance_image_cleanup.json"
+    )
+    assert cleanup_atom["artifact_ref"]["sha256"]
+    assert cleanup_atom["artifact_read"]["parse_ok"] is True
+    assert atoms_doc["totals"]["source_counts"]["maintenance_image_cleanup"] == 1
+
+
+def test_maintenance_cleanup_kept_image_ids_do_not_overclaim_ref_only_identity(
+    tmp_path: Path,
+) -> None:
+    records = [
+        {
+            "run_dir": str(tmp_path / "runs" / "target_a" / "run"),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "target_ref": {"repo_input": "C:/repo/target_a"},
+            "maintenance_image_cleanup": {
+                "schema_version": 1,
+                "cleanup_enabled": True,
+                "dry_run": False,
+                "repos_scanned": ["local", "registry.example/maintenance"],
+                "kept_image_ids": ["sha256:known"],
+                "kept_tags": [
+                    "local:known-tag",
+                    "registry.example/maintenance:known-tag",
+                    # The runner can retain a ref-only fallback identity while omitting
+                    # it from kept_image_ids because Docker supplied no image ID.
+                    "local:ref-only-tag",
+                ],
+                "deleted_tags": [],
+                "deleted_image_ids": [],
+                "errors": [],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    cleanup_atom = next(
+        atom for atom in atoms if atom["source"] == "maintenance_image_cleanup"
+    )
+
+    assert cleanup_atom["kept_tag_count"] == 3
+    assert cleanup_atom["unique_retained_tag_suffix_count"] == 2
+    assert cleanup_atom["kept_image_id_count"] == 1
+    assert cleanup_atom["retained_identity_measurement_basis"] == (
+        "kept_image_ids_and_tag_suffix_proxy"
+    )
+    assert cleanup_atom["physical_retained_identity_count_known"] is False
+    assert "kept_image_ids=1" in cleanup_atom["text"]
+    assert "physical_retained_identity_count=unknown" in cleanup_atom["text"]
+
+
+def test_maintenance_cleanup_sidecar_is_independent_of_derived_run_mission(
+    tmp_path: Path,
+) -> None:
+    sidecar = {
+        "schema_version": 1,
+        "cleanup_enabled": True,
+        "dry_run": False,
+        "repos_scanned": ["local", "registry.example/maintenance"],
+        "kept_tags": [
+            "local:identity-a",
+            "registry.example/maintenance:identity-a",
+        ],
+        "deleted_tags": [],
+        "deleted_image_ids": [],
+        "errors": [],
+    }
+    mission_expectations = (
+        ("implement_maintenance_backlog_ticket_v1", "implementation", "implementation"),
+        ("review_backlog_implementation_pr_v1", "verification", "verification"),
+    )
+    records: list[dict[str, object]] = []
+    for index, (mission_id, _origin_stage, _evidence_role) in enumerate(
+        mission_expectations,
+        start=1,
+    ):
+        run_rel = f"target_a/2026010{index}T000000Z/codex/0"
+        records.append(
+            {
+                "run_dir": str(tmp_path / "runs" / run_rel),
+                "run_rel": run_rel,
+                "agent": "codex",
+                "status": "ok",
+                "target_ref": {
+                    "repo_input": "C:/repo/target_a",
+                    "requested_mission_id": mission_id,
+                    "mission_id": mission_id,
+                },
+                "report": {
+                    "confusion_points": [
+                        {"summary": f"Agent-authored output for {mission_id}."}
+                    ]
+                },
+                "maintenance_image_cleanup": dict(sidecar),
+                "maintenance_image_cleanup_read": {
+                    "path": "sandbox/maintenance_image_cleanup.json",
+                    "exists": True,
+                    "decode_ok": True,
+                    "parse_ok": True,
+                },
+            }
+        )
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    eligible_ids = {
+        atom["atom_id"] for atom in eligible_problem_mining_atoms(atoms)
+    }
+
+    for record, (_mission_id, expected_stage, expected_role) in zip(
+        records,
+        mission_expectations,
+        strict=True,
+    ):
+        run_rel = str(record["run_rel"])
+        run_atoms = [atom for atom in atoms if atom["run_rel"] == run_rel]
+        cleanup_atom = next(
+            atom
+            for atom in run_atoms
+            if atom["source"] == "maintenance_image_cleanup"
+        )
+        report_atom = next(
+            atom for atom in run_atoms if atom["source"] == "confusion_point"
+        )
+
+        assert cleanup_atom["origin_stage"] == "runner_maintenance_image_cleanup"
+        assert cleanup_atom["evidence_role"] == "observation"
+        assert cleanup_atom["parent_case_id"] is None
+        assert cleanup_atom["disposition"] == "unresolved"
+        assert cleanup_atom["lineage_authorities"] == ["runner_operational_sidecar"]
+        assert cleanup_atom["atom_id"] in eligible_ids
+
+        assert report_atom["origin_stage"] == expected_stage
+        assert report_atom["evidence_role"] == expected_role
+        assert report_atom["atom_id"] not in eligible_ids
+
+
+def test_extract_backlog_atoms_does_not_fabricate_malformed_cleanup_counts(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    (run_dir / "sandbox").mkdir(parents=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps(
+            {
+                "repo_input": "C:/repo/target_a",
+                "requested_mission_id": "implement_maintenance_backlog_ticket_v1",
+                "mission_id": "implement_maintenance_backlog_ticket_v1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "sandbox" / "maintenance_image_cleanup.json").write_text(
+        "{not-json}\n",
+        encoding="utf-8",
+    )
+
+    records = list(iter_report_history(runs_dir, embed="none"))
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    assert not any(
+        atom.get("source") == "maintenance_image_cleanup"
+        for atom in atoms_doc["atoms"]
+    )
+    error_atom = next(
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "maintenance_image_cleanup_artifact_error"
+    )
+    assert error_atom["artifact_read"]["parse_ok"] is False
+    assert error_atom["artifact_read"]["error_type"] == "JSONDecodeError"
+    assert error_atom["artifact_ref"]["sha256"]
+    assert error_atom["origin_stage"] == "runner_maintenance_image_cleanup"
+    assert error_atom["evidence_role"] == "observation"
+    assert error_atom["atom_id"] in {
+        atom["atom_id"]
+        for atom in eligible_problem_mining_atoms(atoms_doc["atoms"])
+    }
+    for key in (
+        "repos_scanned_count",
+        "kept_tag_count",
+        "unique_retained_tag_suffix_count",
+        "kept_image_id_count",
+        "retained_identity_measurement_basis",
+        "physical_retained_identity_count_known",
+        "deleted_tag_count",
+        "deleted_image_id_count",
+        "error_count",
+    ):
+        assert key not in error_atom
 
 
 def test_parse_ticket_list_recovers_array_and_normalizes() -> None:

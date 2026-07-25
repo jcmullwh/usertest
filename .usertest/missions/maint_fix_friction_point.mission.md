@@ -13,32 +13,29 @@ report_schema: task_run_v1.schema.json
 Simulate the “maintainer as a user” experience:
 
 - identify one concrete friction point that would slow down a real operator/new user
-- implement a **small but meaningful** fix in this repo (docs/config/code)
-- validate that the fix works and doesn’t obviously break other things
+- implement a **meaningful** fix in this repo (code)
+- validate that the fix works
+- run the full test and lint suite
 
 This mission measures how hard it is to make changes safely.
 
 ## Constraints
 
-- The fix must be **user-visible** (docs, CLI help/errors, defaults, or a workflow improvement).
-- Avoid large refactors.
-- Prefer reversible changes.
+- The fix must be **user-visible**.
+- The fix must be **meaningful**.
 
 ## Tasks
 
-1) Pick one friction point from any of:
-   - confusing docs/instructions
-   - unclear CLI help text
-   - error messages that don’t suggest the fix
-   - inconsistent naming across docs/config/code
+1) Select a significant friction point
 
-2) Reproduce the friction point enough to show it’s real (a specific quote, CLI output, or failing command).
+2) Reproduce the friction point enough to show it’s real
 
 3) Implement a fix.
 
 4) Validate:
    - re-run the relevant command/path and show the improved behavior
    - run an appropriate fast check (unit test, lint, or a targeted script) to reduce regression risk
+   - run full regression test and lint
 
 ## Evidence to include in your report (measurable)
 
