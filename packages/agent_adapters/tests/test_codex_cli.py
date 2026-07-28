@@ -153,7 +153,7 @@ def _make_completed_turn_hanging_dummy_codex(tmp_path: Path) -> str:
                 "print(json.dumps({'type': 'agent_message', 'text': "
                 "'{\"status\":\"partial\"}'}), flush=True)",
                 "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)",
-                "time.sleep(15)",
+                "time.sleep(30)",
                 "raise SystemExit(7)",
                 "",
             ]
@@ -702,7 +702,10 @@ def test_run_codex_exec_salvages_persisted_terminal_turn_from_orphaned_process(
         agent_last_message_path="",
     )
 
-    assert time.monotonic() - started < 10.0
+    # Windows process-tree cleanup can take more than ten seconds in restricted-token
+    # environments. The dummy sleeps for 30 seconds, so this wider bound still proves
+    # that the completed turn was salvaged before the orphan exited naturally.
+    assert time.monotonic() - started < 20.0
     assert result.exit_code == 0
     assert result.terminal_turn_salvaged is True
     assert result.thread_id == "019f2cca-9011-7e32-88ae-6c25af578b49"
