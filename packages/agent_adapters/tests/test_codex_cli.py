@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from agent_adapters.codex_cli import (
+# The contracted command can run under a maintenance interpreter that also has an
+# older agent_adapters installed. Put this checkout first before importing the
+# production symbol so the oracle always exercises the reviewed implementation.
+_AGENT_ADAPTERS_SOURCE = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(_AGENT_ADAPTERS_SOURCE))
+
+from agent_adapters.codex_cli import (  # noqa: E402
     CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS,
     CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
     CodexLoginStatusResult,

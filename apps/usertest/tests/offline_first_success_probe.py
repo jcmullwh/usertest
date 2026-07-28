@@ -441,7 +441,10 @@ def _run_dir_from_output(output: str) -> Path:
 
 
 def _output_last_message_arg(run_dir: Path) -> str | None:
-    attempts_payload = _load_json_object(run_dir / "agent_attempts.json")
+    attempts_path = run_dir / "agent_attempts.json"
+    if not attempts_path.is_file():
+        return None
+    attempts_payload = _load_json_object(attempts_path)
     attempts = attempts_payload.get("attempts")
     if not isinstance(attempts, list):
         return None
@@ -490,33 +493,124 @@ def _last_raw_codex_agent_message(raw_events_path: Path) -> str | None:
     return last_message
 
 
-def _run_live_codex_docker(repo_root: Path) -> dict[str, Any]:
-    # Omit --exec-backend deliberately: this is an outcome probe for the default
-    # Windows-host/Linux-container boundary rather than for an explicitly selected
-    # alternate backend. A list argv also avoids adding another shell/path boundary.
-    child = subprocess.run(
+def _copy_tracked_workspace(repo_root: Path, destination: Path) -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    if tracked.returncode != 0:
+        raise RuntimeError(
+            "Could not enumerate the reviewed workspace for the live probe: "
+            f"{tracked.stderr.decode(errors='replace').strip()}"
+        )
+    destination.mkdir(parents=True)
+    for raw_relative_path in tracked.stdout.split(b"\0"):
+        if not raw_relative_path:
+            continue
+        relative_path = Path(os.fsdecode(raw_relative_path))
+        source = repo_root / relative_path
+        target = destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def _repository_python_environment(repo_root: Path) -> tuple[dict[str, str], dict[str, str]]:
+    source_roots = [repo_root / "apps" / "usertest" / "src"]
+    source_roots.extend(sorted((repo_root / "packages").glob("*/src")))
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(str(path.resolve()) for path in source_roots)
+
+    expected_roots = {
+        "usertest.cli": repo_root / "apps" / "usertest" / "src",
+        "agent_adapters.codex_cli": repo_root / "packages" / "agent_adapters" / "src",
+        "runner_core": repo_root / "packages" / "runner_core" / "src",
+    }
+    probe = subprocess.run(
         [
             sys.executable,
-            "-m",
-            "usertest.cli",
-            "run",
-            "--repo-root",
-            str(repo_root),
-            "--repo",
-            str(repo_root),
-            "--agent",
-            "codex",
-            "--policy",
-            _LIVE_POLICY_NAME,
+            "-P",
+            "-c",
+            (
+                "import importlib, json; "
+                "names = ('usertest.cli', 'agent_adapters.codex_cli', 'runner_core'); "
+                "print(json.dumps({name: importlib.import_module(name).__file__ "
+                "for name in names}))"
+            ),
         ],
         cwd=repo_root,
+        env=environment,
         text=True,
         encoding="utf-8",
         errors="replace",
         capture_output=True,
-        timeout=7_200,
+        timeout=60,
         check=False,
     )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "Could not validate the repository-local live probe environment: "
+            f"{probe.stderr.strip()}"
+        )
+    try:
+        origins = json.loads(probe.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Repository-local import probe returned invalid JSON") from exc
+    if not isinstance(origins, dict):
+        raise RuntimeError("Repository-local import probe returned a non-object")
+
+    validated_origins: dict[str, str] = {}
+    for module_name, expected_root in expected_roots.items():
+        origin = origins.get(module_name)
+        if not isinstance(origin, str):
+            raise RuntimeError(f"Import probe did not report an origin for {module_name}")
+        resolved_origin = Path(origin).resolve()
+        if not resolved_origin.is_relative_to(expected_root.resolve()):
+            raise RuntimeError(
+                f"{module_name} resolved outside the reviewed workspace: {resolved_origin}"
+            )
+        validated_origins[module_name] = str(resolved_origin)
+    return environment, validated_origins
+
+
+def _run_live_codex_docker(repo_root: Path) -> dict[str, Any]:
+    # Omit --exec-backend deliberately: this is an outcome probe for the default
+    # Windows-host/Linux-container boundary rather than for an explicitly selected
+    # alternate backend. A list argv also avoids adding another shell/path boundary.
+    environment, source_origins = _repository_python_environment(repo_root)
+    # The runner acquires git repositories with `git clone --no-local`, which requires
+    # Git's sh.exe on Windows. Restricted-token verification hosts cannot create the
+    # shell signal pipe, so use an equivalent tracked-file snapshot that follows the
+    # runner's copy-and-init acquisition path instead.
+    with tempfile.TemporaryDirectory(prefix="usertest-live-codex-source-") as scratch:
+        repo_snapshot = Path(scratch) / "repo"
+        _copy_tracked_workspace(repo_root, repo_snapshot)
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-P",
+                "-m",
+                "usertest.cli",
+                "run",
+                "--repo-root",
+                str(repo_root),
+                "--repo",
+                str(repo_snapshot),
+                "--agent",
+                "codex",
+                "--policy",
+                _LIVE_POLICY_NAME,
+            ],
+            cwd=repo_root,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=7_200,
+            check=False,
+        )
     combined_output = f"{child.stdout}\n{child.stderr}"
     run_dir = _run_dir_from_output(combined_output)
 
@@ -566,6 +660,7 @@ def _run_live_codex_docker(repo_root: Path) -> dict[str, Any]:
         "report_status": report_status,
         "raw_event_final_message_matches_artifact": (raw_event_final_message_matches_artifact),
         "run_dir": str(run_dir),
+        "source_origins": source_origins,
     }
     observation["ok"] = all(
         (
