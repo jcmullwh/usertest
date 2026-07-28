@@ -417,11 +417,270 @@ def _run_live_claude(repo_root: Path) -> dict[str, Any]:
     return observation
 
 
+def _load_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected a JSON object: {path}")
+    return payload
+
+
+def _run_dir_from_output(output: str) -> Path:
+    # `usertest run` prints the run directory as its own line after run_once returns.
+    # Work backwards so any earlier diagnostics containing paths cannot win.
+    for line in reversed(output.splitlines()):
+        raw_path = line.strip().strip('"')
+        if not raw_path:
+            continue
+        candidate = Path(raw_path)
+        try:
+            if candidate.is_dir() and (candidate / "report.schema.json").is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    raise RuntimeError("Could not resolve the emitted usertest run directory")
+
+
+def _output_last_message_arg(run_dir: Path) -> str | None:
+    attempts_path = run_dir / "agent_attempts.json"
+    if not attempts_path.is_file():
+        return None
+    attempts_payload = _load_json_object(attempts_path)
+    attempts = attempts_payload.get("attempts")
+    if not isinstance(attempts, list):
+        return None
+    for attempt in reversed(attempts):
+        if not isinstance(attempt, dict):
+            continue
+        argv = attempt.get("argv")
+        if not isinstance(argv, list):
+            continue
+        try:
+            value = argv[argv.index("--output-last-message") + 1]
+        except (ValueError, IndexError):
+            continue
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _last_raw_codex_agent_message(raw_events_path: Path) -> str | None:
+    last_message: str | None = None
+    with raw_events_path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            msg = payload.get("msg")
+            if isinstance(msg, dict) and msg.get("type") == "agent_message":
+                message = msg.get("message")
+                if isinstance(message, str):
+                    last_message = message
+
+            if payload.get("type") == "agent_message":
+                text = payload.get("text")
+                if isinstance(text, str):
+                    last_message = text
+
+            if payload.get("type") == "item.completed":
+                item = payload.get("item")
+                if isinstance(item, dict) and item.get("type") == "agent_message":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        last_message = text
+    return last_message
+
+
+def _copy_tracked_workspace(repo_root: Path, destination: Path) -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    if tracked.returncode != 0:
+        raise RuntimeError(
+            "Could not enumerate the reviewed workspace for the live probe: "
+            f"{tracked.stderr.decode(errors='replace').strip()}"
+        )
+    destination.mkdir(parents=True)
+    for raw_relative_path in tracked.stdout.split(b"\0"):
+        if not raw_relative_path:
+            continue
+        relative_path = Path(os.fsdecode(raw_relative_path))
+        source = repo_root / relative_path
+        target = destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def _repository_python_environment(repo_root: Path) -> tuple[dict[str, str], dict[str, str]]:
+    source_roots = [repo_root / "apps" / "usertest" / "src"]
+    source_roots.extend(sorted((repo_root / "packages").glob("*/src")))
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(str(path.resolve()) for path in source_roots)
+
+    expected_roots = {
+        "usertest.cli": repo_root / "apps" / "usertest" / "src",
+        "agent_adapters.codex_cli": repo_root / "packages" / "agent_adapters" / "src",
+        "runner_core": repo_root / "packages" / "runner_core" / "src",
+    }
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            (
+                "import importlib, json; "
+                "names = ('usertest.cli', 'agent_adapters.codex_cli', 'runner_core'); "
+                "print(json.dumps({name: importlib.import_module(name).__file__ "
+                "for name in names}))"
+            ),
+        ],
+        cwd=repo_root,
+        env=environment,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "Could not validate the repository-local live probe environment: "
+            f"{probe.stderr.strip()}"
+        )
+    try:
+        origins = json.loads(probe.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Repository-local import probe returned invalid JSON") from exc
+    if not isinstance(origins, dict):
+        raise RuntimeError("Repository-local import probe returned a non-object")
+
+    validated_origins: dict[str, str] = {}
+    for module_name, expected_root in expected_roots.items():
+        origin = origins.get(module_name)
+        if not isinstance(origin, str):
+            raise RuntimeError(f"Import probe did not report an origin for {module_name}")
+        resolved_origin = Path(origin).resolve()
+        if not resolved_origin.is_relative_to(expected_root.resolve()):
+            raise RuntimeError(
+                f"{module_name} resolved outside the reviewed workspace: {resolved_origin}"
+            )
+        validated_origins[module_name] = str(resolved_origin)
+    return environment, validated_origins
+
+
+def _run_live_codex_docker(repo_root: Path) -> dict[str, Any]:
+    # Omit --exec-backend deliberately: this is an outcome probe for the default
+    # Windows-host/Linux-container boundary rather than for an explicitly selected
+    # alternate backend. A list argv also avoids adding another shell/path boundary.
+    environment, source_origins = _repository_python_environment(repo_root)
+    # The runner acquires git repositories with `git clone --no-local`, which requires
+    # Git's sh.exe on Windows. Restricted-token verification hosts cannot create the
+    # shell signal pipe, so use an equivalent tracked-file snapshot that follows the
+    # runner's copy-and-init acquisition path instead.
+    with tempfile.TemporaryDirectory(prefix="usertest-live-codex-source-") as scratch:
+        repo_snapshot = Path(scratch) / "repo"
+        _copy_tracked_workspace(repo_root, repo_snapshot)
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-P",
+                "-m",
+                "usertest.cli",
+                "run",
+                "--repo-root",
+                str(repo_root),
+                "--repo",
+                str(repo_snapshot),
+                "--agent",
+                "codex",
+                "--policy",
+                _LIVE_POLICY_NAME,
+            ],
+            cwd=repo_root,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=7_200,
+            check=False,
+        )
+    combined_output = f"{child.stdout}\n{child.stderr}"
+    run_dir = _run_dir_from_output(combined_output)
+
+    output_last_message_arg = _output_last_message_arg(run_dir)
+    output_last_message_arg_is_posix = bool(
+        output_last_message_arg
+        and output_last_message_arg.startswith("/run_dir/")
+        and "\\" not in output_last_message_arg
+    )
+
+    last_message_path = run_dir / "agent_last_message.txt"
+    last_message_text = (
+        last_message_path.read_text(encoding="utf-8") if last_message_path.is_file() else ""
+    )
+    agent_last_message_nonempty = bool(last_message_text)
+
+    report_path = run_dir / "report.json"
+    schema_path = run_dir / "report.schema.json"
+    report_json_exists = report_path.is_file()
+    report: dict[str, Any] | None = None
+    report_schema_valid = False
+    if report_json_exists and schema_path.is_file():
+        from jsonschema import Draft202012Validator
+
+        report = _load_json_object(report_path)
+        schema = _load_json_object(schema_path)
+        report_schema_valid = not list(Draft202012Validator(schema).iter_errors(report))
+
+    raw_message = (
+        _last_raw_codex_agent_message(run_dir / "raw_events.jsonl")
+        if (run_dir / "raw_events.jsonl").is_file()
+        else None
+    )
+    raw_event_final_message_matches_artifact = bool(
+        agent_last_message_nonempty and raw_message == last_message_text
+    )
+    report_status = report.get("status") if isinstance(report, dict) else None
+
+    observation: dict[str, Any] = {
+        "mode": "live-codex-docker",
+        "child_exit_code": child.returncode,
+        "output_last_message_arg": output_last_message_arg,
+        "output_last_message_arg_is_posix": output_last_message_arg_is_posix,
+        "agent_last_message_nonempty": agent_last_message_nonempty,
+        "report_json_exists": report_json_exists,
+        "report_schema_valid": report_schema_valid,
+        "report_status": report_status,
+        "raw_event_final_message_matches_artifact": (raw_event_final_message_matches_artifact),
+        "run_dir": str(run_dir),
+        "source_origins": source_origins,
+    }
+    observation["ok"] = all(
+        (
+            observation["child_exit_code"] == 0,
+            observation["output_last_message_arg_is_posix"] is True,
+            observation["agent_last_message_nonempty"] is True,
+            observation["report_json_exists"] is True,
+            observation["report_schema_valid"] is True,
+            observation["report_status"] == "success",
+            observation["raw_event_final_message_matches_artifact"] is True,
+        )
+    )
+    return observation
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify the Windows offline-first quickstart.")
     parser.add_argument(
         "--mode",
-        choices=("readme-git-bash", "live-claude"),
+        choices=("readme-git-bash", "live-claude", "live-codex-docker"),
         required=True,
     )
     return parser
@@ -435,8 +694,10 @@ def main(argv: list[str] | None = None) -> int:
         repo_root = _repo_root()
         if args.mode == "readme-git-bash":
             observation = _run_readme_git_bash(repo_root)
-        else:
+        elif args.mode == "live-claude":
             observation = _run_live_claude(repo_root)
+        else:
+            observation = _run_live_codex_docker(repo_root)
     except Exception as exc:
         observation = {
             "mode": args.mode,

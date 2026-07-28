@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from agent_adapters.codex_cli import (
+# The contracted command can run under a maintenance interpreter that also has an
+# older agent_adapters installed. Put this checkout first before importing the
+# production symbol so the oracle always exercises the reviewed implementation.
+_AGENT_ADAPTERS_SOURCE = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(_AGENT_ADAPTERS_SOURCE))
+
+from agent_adapters.codex_cli import (  # noqa: E402
     CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS,
     CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
     CodexLoginStatusResult,
@@ -153,7 +159,7 @@ def _make_completed_turn_hanging_dummy_codex(tmp_path: Path) -> str:
                 "print(json.dumps({'type': 'agent_message', 'text': "
                 "'{\"status\":\"partial\"}'}), flush=True)",
                 "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)",
-                "time.sleep(15)",
+                "time.sleep(30)",
                 "raise SystemExit(7)",
                 "",
             ]
@@ -699,9 +705,13 @@ def test_run_codex_exec_salvages_persisted_terminal_turn_from_orphaned_process(
         sandbox="read-only",
         ask_for_approval="never",
         binary=dummy_binary,
+        agent_last_message_path="",
     )
 
-    assert time.monotonic() - started < 10.0
+    # Windows process-tree cleanup can take more than ten seconds in restricted-token
+    # environments. The dummy sleeps for 30 seconds, so this wider bound still proves
+    # that the completed turn was salvaged before the orphan exited naturally.
+    assert time.monotonic() - started < 20.0
     assert result.exit_code == 0
     assert result.terminal_turn_salvaged is True
     assert result.thread_id == "019f2cca-9011-7e32-88ae-6c25af578b49"
@@ -710,6 +720,33 @@ def test_run_codex_exec_salvages_persisted_terminal_turn_from_orphaned_process(
     }
     assert '"type": "turn.completed"' in raw_events_path.read_text(encoding="utf-8")
     assert "retained the completed turn" in stderr_path.read_text(encoding="utf-8")
+
+
+def test_run_codex_exec_preserves_agent_visible_last_message_path(
+    tmp_path: Path,
+) -> None:
+    dummy_binary = _make_argv_dump_dummy_codex(tmp_path)
+    argv_path = tmp_path / "argv.json"
+    agent_last_message_path = "/run_dir/attempts/attempt_001/agent_last_message.txt"
+
+    result = run_codex_exec(
+        workspace_dir=tmp_path,
+        prompt="test",
+        raw_events_path=tmp_path / "raw_events.jsonl",
+        last_message_path=tmp_path / "last_message.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        sandbox="read-only",
+        ask_for_approval="never",
+        binary=dummy_binary,
+        agent_last_message_path=agent_last_message_path,
+        env_overrides={"CODEX_ARGV_OUT": str(argv_path)},
+    )
+
+    assert result.exit_code == 0
+    argv = json.loads(argv_path.read_text(encoding="utf-8"))
+    output_last_message_arg = argv[argv.index("--output-last-message") + 1]
+    print(json.dumps({"output_last_message_arg": output_last_message_arg}))
+    assert output_last_message_arg == agent_last_message_path
 
 
 def test_run_codex_exec_ignores_user_config_for_headless_runs(tmp_path: Path) -> None:
