@@ -699,6 +699,7 @@ def test_run_codex_exec_salvages_persisted_terminal_turn_from_orphaned_process(
         sandbox="read-only",
         ask_for_approval="never",
         binary=dummy_binary,
+        agent_last_message_path="",
     )
 
     assert time.monotonic() - started < 10.0
@@ -710,6 +711,33 @@ def test_run_codex_exec_salvages_persisted_terminal_turn_from_orphaned_process(
     }
     assert '"type": "turn.completed"' in raw_events_path.read_text(encoding="utf-8")
     assert "retained the completed turn" in stderr_path.read_text(encoding="utf-8")
+
+
+def test_run_codex_exec_preserves_agent_visible_last_message_path(
+    tmp_path: Path,
+) -> None:
+    dummy_binary = _make_argv_dump_dummy_codex(tmp_path)
+    argv_path = tmp_path / "argv.json"
+    agent_last_message_path = "/run_dir/attempts/attempt_001/agent_last_message.txt"
+
+    result = run_codex_exec(
+        workspace_dir=tmp_path,
+        prompt="test",
+        raw_events_path=tmp_path / "raw_events.jsonl",
+        last_message_path=tmp_path / "last_message.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        sandbox="read-only",
+        ask_for_approval="never",
+        binary=dummy_binary,
+        agent_last_message_path=agent_last_message_path,
+        env_overrides={"CODEX_ARGV_OUT": str(argv_path)},
+    )
+
+    assert result.exit_code == 0
+    argv = json.loads(argv_path.read_text(encoding="utf-8"))
+    output_last_message_arg = argv[argv.index("--output-last-message") + 1]
+    print(json.dumps({"output_last_message_arg": output_last_message_arg}))
+    assert output_last_message_arg == agent_last_message_path
 
 
 def test_run_codex_exec_ignores_user_config_for_headless_runs(tmp_path: Path) -> None:

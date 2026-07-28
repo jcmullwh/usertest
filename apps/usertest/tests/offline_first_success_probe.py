@@ -417,11 +417,175 @@ def _run_live_claude(repo_root: Path) -> dict[str, Any]:
     return observation
 
 
+def _load_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected a JSON object: {path}")
+    return payload
+
+
+def _run_dir_from_output(output: str) -> Path:
+    # `usertest run` prints the run directory as its own line after run_once returns.
+    # Work backwards so any earlier diagnostics containing paths cannot win.
+    for line in reversed(output.splitlines()):
+        raw_path = line.strip().strip('"')
+        if not raw_path:
+            continue
+        candidate = Path(raw_path)
+        try:
+            if candidate.is_dir() and (candidate / "report.schema.json").is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    raise RuntimeError("Could not resolve the emitted usertest run directory")
+
+
+def _output_last_message_arg(run_dir: Path) -> str | None:
+    attempts_payload = _load_json_object(run_dir / "agent_attempts.json")
+    attempts = attempts_payload.get("attempts")
+    if not isinstance(attempts, list):
+        return None
+    for attempt in reversed(attempts):
+        if not isinstance(attempt, dict):
+            continue
+        argv = attempt.get("argv")
+        if not isinstance(argv, list):
+            continue
+        try:
+            value = argv[argv.index("--output-last-message") + 1]
+        except (ValueError, IndexError):
+            continue
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _last_raw_codex_agent_message(raw_events_path: Path) -> str | None:
+    last_message: str | None = None
+    with raw_events_path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            msg = payload.get("msg")
+            if isinstance(msg, dict) and msg.get("type") == "agent_message":
+                message = msg.get("message")
+                if isinstance(message, str):
+                    last_message = message
+
+            if payload.get("type") == "agent_message":
+                text = payload.get("text")
+                if isinstance(text, str):
+                    last_message = text
+
+            if payload.get("type") == "item.completed":
+                item = payload.get("item")
+                if isinstance(item, dict) and item.get("type") == "agent_message":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        last_message = text
+    return last_message
+
+
+def _run_live_codex_docker(repo_root: Path) -> dict[str, Any]:
+    # Omit --exec-backend deliberately: this is an outcome probe for the default
+    # Windows-host/Linux-container boundary rather than for an explicitly selected
+    # alternate backend. A list argv also avoids adding another shell/path boundary.
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest.cli",
+            "run",
+            "--repo-root",
+            str(repo_root),
+            "--repo",
+            str(repo_root),
+            "--agent",
+            "codex",
+            "--policy",
+            _LIVE_POLICY_NAME,
+        ],
+        cwd=repo_root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=7_200,
+        check=False,
+    )
+    combined_output = f"{child.stdout}\n{child.stderr}"
+    run_dir = _run_dir_from_output(combined_output)
+
+    output_last_message_arg = _output_last_message_arg(run_dir)
+    output_last_message_arg_is_posix = bool(
+        output_last_message_arg
+        and output_last_message_arg.startswith("/run_dir/")
+        and "\\" not in output_last_message_arg
+    )
+
+    last_message_path = run_dir / "agent_last_message.txt"
+    last_message_text = (
+        last_message_path.read_text(encoding="utf-8") if last_message_path.is_file() else ""
+    )
+    agent_last_message_nonempty = bool(last_message_text)
+
+    report_path = run_dir / "report.json"
+    schema_path = run_dir / "report.schema.json"
+    report_json_exists = report_path.is_file()
+    report: dict[str, Any] | None = None
+    report_schema_valid = False
+    if report_json_exists and schema_path.is_file():
+        from jsonschema import Draft202012Validator
+
+        report = _load_json_object(report_path)
+        schema = _load_json_object(schema_path)
+        report_schema_valid = not list(Draft202012Validator(schema).iter_errors(report))
+
+    raw_message = (
+        _last_raw_codex_agent_message(run_dir / "raw_events.jsonl")
+        if (run_dir / "raw_events.jsonl").is_file()
+        else None
+    )
+    raw_event_final_message_matches_artifact = bool(
+        agent_last_message_nonempty and raw_message == last_message_text
+    )
+    report_status = report.get("status") if isinstance(report, dict) else None
+
+    observation: dict[str, Any] = {
+        "mode": "live-codex-docker",
+        "child_exit_code": child.returncode,
+        "output_last_message_arg": output_last_message_arg,
+        "output_last_message_arg_is_posix": output_last_message_arg_is_posix,
+        "agent_last_message_nonempty": agent_last_message_nonempty,
+        "report_json_exists": report_json_exists,
+        "report_schema_valid": report_schema_valid,
+        "report_status": report_status,
+        "raw_event_final_message_matches_artifact": (raw_event_final_message_matches_artifact),
+        "run_dir": str(run_dir),
+    }
+    observation["ok"] = all(
+        (
+            observation["child_exit_code"] == 0,
+            observation["output_last_message_arg_is_posix"] is True,
+            observation["agent_last_message_nonempty"] is True,
+            observation["report_json_exists"] is True,
+            observation["report_schema_valid"] is True,
+            observation["report_status"] == "success",
+            observation["raw_event_final_message_matches_artifact"] is True,
+        )
+    )
+    return observation
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify the Windows offline-first quickstart.")
     parser.add_argument(
         "--mode",
-        choices=("readme-git-bash", "live-claude"),
+        choices=("readme-git-bash", "live-claude", "live-codex-docker"),
         required=True,
     )
     return parser
@@ -435,8 +599,10 @@ def main(argv: list[str] | None = None) -> int:
         repo_root = _repo_root()
         if args.mode == "readme-git-bash":
             observation = _run_readme_git_bash(repo_root)
-        else:
+        elif args.mode == "live-claude":
             observation = _run_live_claude(repo_root)
+        else:
+            observation = _run_live_codex_docker(repo_root)
     except Exception as exc:
         observation = {
             "mode": args.mode,

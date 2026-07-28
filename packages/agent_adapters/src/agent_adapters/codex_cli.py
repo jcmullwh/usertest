@@ -912,8 +912,12 @@ def run_codex_exec(
         argv.extend(["--model", model])
     for override in config_overrides:
         argv.extend(["-c", override])
-    effective_last_message_path = Path(agent_last_message_path or str(last_message_path))
-    argv.extend(["--output-last-message", str(effective_last_message_path)])
+    # This override is already expressed in the agent's filesystem namespace. In
+    # particular, a Docker-backed run on Windows supplies a POSIX path below
+    # /run_dir. Passing it through the host's pathlib implementation would change
+    # its separators before it crosses the container boundary.
+    output_last_message_path = agent_last_message_path or str(last_message_path)
+    argv.extend(["--output-last-message", output_last_message_path])
     if canonical_resume_session_id is not None:
         argv.append(canonical_resume_session_id)
     argv.append("-")
@@ -1059,7 +1063,10 @@ def run_codex_exec(
                 _kill_process_tree(proc)
                 break
 
-            if saw_terminal_turn_completed.is_set() and effective_last_message_path.is_file():
+            # Persistence is observed from the host, so this check must remain bound
+            # to the physical path even when the subprocess received an agent-visible
+            # container path.
+            if saw_terminal_turn_completed.is_set() and last_message_path.is_file():
                 if terminal_completion_observed_at is None:
                     terminal_completion_observed_at = time.monotonic()
                 elif time.monotonic() - terminal_completion_observed_at >= 2.0:
