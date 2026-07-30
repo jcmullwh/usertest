@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,53 @@ def _read_readme_windows_command(repo_root: Path) -> str:
     if match is None:
         raise RuntimeError("README Windows quickstart command was not found")
     return match.group("command").strip()
+
+
+def _read_readme_codex_command(repo_root: Path) -> str:
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    try:
+        run_section = readme.split("## Run a single target", 1)[1]
+        run_section = run_section.split("## Backlog CLI", 1)[0]
+    except IndexError as exc:
+        raise RuntimeError("README representative run section was not found") from exc
+
+    match = re.search(
+        r"Representative validation \(default built-in path\):\s*"
+        r"`(?P<command>python -m usertest\.cli run [^`\r\n]+)`",
+        run_section,
+    )
+    if match is None:
+        raise RuntimeError("README representative Codex command was not found")
+    return match.group("command").strip()
+
+
+def _documented_run_argv(command: str) -> list[str]:
+    tokens = shlex.split(command, posix=True)
+    if tokens[:3] == ["python", "-m", "usertest.cli"]:
+        return tokens[3:]
+    if tokens[:1] == ["usertest"]:
+        return tokens[1:]
+    raise RuntimeError(f"Unsupported documented command prefix: {command}")
+
+
+def _replace_option(argv: list[str], option: str, value: str) -> list[str]:
+    replaced = list(argv)
+    try:
+        option_index = replaced.index(option)
+        replaced[option_index + 1] = value
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError(f"Documented command is missing {option}") from exc
+    return replaced
+
+
+def _without_option(argv: list[str], option: str) -> list[str]:
+    reduced = list(argv)
+    try:
+        option_index = reduced.index(option)
+        del reduced[option_index : option_index + 2]
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError(f"Documented command is missing {option}") from exc
+    return reduced
 
 
 def _require_expected_command(command: str) -> None:
@@ -574,6 +622,270 @@ def _repository_python_environment(repo_root: Path) -> tuple[dict[str, str], dic
     return environment, validated_origins
 
 
+def _load_repository_backend_modules(repo_root: Path) -> tuple[Any, Any, Any, Any]:
+    source_roots = [repo_root / "apps" / "usertest" / "src"]
+    source_roots.extend(sorted((repo_root / "packages").glob("*/src")))
+    for source_root in reversed(source_roots):
+        source_text = str(source_root.resolve())
+        if source_text not in sys.path:
+            sys.path.insert(0, source_text)
+
+    import sandbox_runner.docker as docker_module
+    from runner_core.execution_backend import prepare_execution_backend
+    from runner_core.runner import RunRequest
+
+    import usertest.cli as cli_module
+
+    origins = (cli_module, docker_module, sys.modules[prepare_execution_backend.__module__])
+    for module in origins:
+        origin = Path(module.__file__).resolve()
+        if not origin.is_relative_to(repo_root.resolve()):
+            raise RuntimeError(f"Probe import resolved outside the reviewed workspace: {origin}")
+    return cli_module, docker_module, prepare_execution_backend, RunRequest
+
+
+def _run_documented_local_backend(repo_root: Path) -> dict[str, Any]:
+    cli_module, docker_module, prepare_execution_backend, run_request_type = (
+        _load_repository_backend_modules(repo_root)
+    )
+    command = _read_readme_codex_command(repo_root)
+    documented_argv = _documented_run_argv(command)
+    parser = cli_module.build_parser()
+    documented_args = parser.parse_args(documented_argv)
+    no_flag_args = parser.parse_args(_without_option(documented_argv, "--exec-backend"))
+    docker_argv = _replace_option(documented_argv, "--exec-backend", "docker")
+    docker_args = parser.parse_args(docker_argv)
+
+    def request_from_args(args: Any, *, docker_context: Path | None = None) -> Any:
+        return run_request_type(
+            repo=args.repo,
+            agent=args.agent,
+            policy=args.policy,
+            persona_id=args.persona_id,
+            mission_id=args.mission_id,
+            exec_backend=args.exec_backend,
+            exec_docker_context=docker_context,
+            exec_dockerfile=(docker_context / "Dockerfile" if docker_context else None),
+        )
+
+    docker_calls: list[list[str]] = []
+
+    def unavailable_docker(
+        argv: list[str],
+        *,
+        cwd: Path | None = None,
+        check: bool = True,
+        timeout_seconds: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, check, timeout_seconds
+        docker_calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="deterministic unavailable Docker daemon",
+        )
+
+    original_docker_run = docker_module._docker_run
+    try:
+        docker_module._docker_run = unavailable_docker
+        with tempfile.TemporaryDirectory(prefix="usertest-documented-local-backend-") as scratch:
+            scratch_path = Path(scratch)
+            run_dir = scratch_path / "run"
+            workspace_dir = scratch_path / "workspace"
+            docker_context = scratch_path / "docker-context"
+            run_dir.mkdir()
+            workspace_dir.mkdir()
+            docker_context.mkdir()
+            (docker_context / "Dockerfile").write_text(
+                "FROM scratch\n", encoding="utf-8", newline="\n"
+            )
+
+            context = prepare_execution_backend(
+                repo_root=repo_root,
+                run_dir=run_dir,
+                workspace_dir=workspace_dir,
+                request=request_from_args(documented_args),
+                workspace_id="documented-local",
+            )
+            local_docker_calls = list(docker_calls)
+            result_kind = "return"
+            command_prefix = context.command_prefix
+            sandbox_instance = (
+                None
+                if context.sandbox_instance is None
+                else type(context.sandbox_instance).__name__
+            )
+            context.close()
+
+            docker_error: str | None = None
+            try:
+                explicit_docker_context = prepare_execution_backend(
+                    repo_root=repo_root,
+                    run_dir=run_dir,
+                    workspace_dir=workspace_dir,
+                    request=request_from_args(docker_args, docker_context=docker_context),
+                    workspace_id="explicit-docker",
+                )
+                explicit_docker_context.close()
+                explicit_docker_result_kind = "return"
+            except RuntimeError as exc:
+                explicit_docker_result_kind = "exception"
+                docker_error = str(exc)
+            explicit_docker_calls = docker_calls[len(local_docker_calls) :]
+    finally:
+        docker_module._docker_run = original_docker_run
+
+    observation: dict[str, Any] = {
+        "mode": "documented-local-backend",
+        "exec_backend": documented_args.exec_backend,
+        "result_kind": result_kind,
+        "command_prefix": command_prefix,
+        "sandbox_instance": sandbox_instance,
+        "docker_calls": local_docker_calls,
+        "no_flag_exec_backend": no_flag_args.exec_backend,
+        "explicit_docker_exec_backend": docker_args.exec_backend,
+        "explicit_docker_result_kind": explicit_docker_result_kind,
+        "explicit_docker_error": docker_error,
+        "explicit_docker_calls": explicit_docker_calls,
+    }
+    observation["ok"] = all(
+        (
+            observation["exec_backend"] == "local",
+            observation["result_kind"] == "return",
+            observation["command_prefix"] == [],
+            observation["sandbox_instance"] is None,
+            observation["docker_calls"] == [],
+            observation["no_flag_exec_backend"] == "docker",
+            observation["explicit_docker_exec_backend"] == "docker",
+            observation["explicit_docker_result_kind"] == "exception",
+            isinstance(observation["explicit_docker_error"], str)
+            and "Docker is unavailable" in observation["explicit_docker_error"],
+            observation["explicit_docker_calls"] == [["docker", "version"]],
+        )
+    )
+    return observation
+
+
+def _docker_is_usable() -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "version"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _run_live_codex_local(repo_root: Path) -> dict[str, Any]:
+    command = _read_readme_codex_command(repo_root)
+    documented_argv = _documented_run_argv(command)
+    cli_module, _, _, _ = _load_repository_backend_modules(repo_root)
+    documented_args = cli_module.build_parser().parse_args(documented_argv)
+    docker_usable = _docker_is_usable()
+    if docker_usable:
+        return {
+            "mode": "live-codex-local",
+            "docker_usable": True,
+            "exec_backend": documented_args.exec_backend,
+            "ok": False,
+            "error": "Live local probe requires Docker to be genuinely unusable",
+        }
+    if documented_args.exec_backend != "local":
+        raise RuntimeError("README representative command did not select the local backend")
+
+    environment, source_origins = _repository_python_environment(repo_root)
+    with tempfile.TemporaryDirectory(prefix="usertest-live-codex-local-source-") as scratch:
+        repo_snapshot = Path(scratch) / "repo"
+        _copy_tracked_workspace(repo_root, repo_snapshot)
+        child_argv = _replace_option(documented_argv, "--repo-root", str(repo_root))
+        child_argv = _replace_option(child_argv, "--repo", str(repo_snapshot))
+        child = subprocess.run(
+            [sys.executable, "-P", "-m", "usertest.cli", *child_argv],
+            cwd=repo_root,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=7_200,
+            check=False,
+        )
+    combined_output = f"{child.stdout}\n{child.stderr}"
+    run_dir = _run_dir_from_output(combined_output)
+
+    required_artifacts = {
+        "report_json_exists": run_dir / "report.json",
+        "report_md_exists": run_dir / "report.md",
+        "metrics_json_exists": run_dir / "metrics.json",
+        "raw_events_jsonl_exists": run_dir / "raw_events.jsonl",
+        "normalized_events_jsonl_exists": run_dir / "normalized_events.jsonl",
+        "target_ref_json_exists": run_dir / "target_ref.json",
+    }
+    artifact_exists = {
+        field_name: artifact_path.is_file()
+        for field_name, artifact_path in required_artifacts.items()
+    }
+
+    report_path = run_dir / "report.json"
+    schema_path = run_dir / "report.schema.json"
+    report_schema_valid = False
+    report: dict[str, Any] | None = None
+    if report_path.is_file() and schema_path.is_file():
+        from jsonschema import Draft202012Validator
+
+        report = _load_json_object(report_path)
+        schema = _load_json_object(schema_path)
+        report_schema_valid = not list(Draft202012Validator(schema).iter_errors(report))
+
+    last_message_path = run_dir / "agent_last_message.txt"
+    last_message_text = (
+        last_message_path.read_text(encoding="utf-8") if last_message_path.is_file() else ""
+    )
+    agent_last_message_nonempty = bool(last_message_text)
+    raw_message = (
+        _last_raw_codex_agent_message(run_dir / "raw_events.jsonl")
+        if (run_dir / "raw_events.jsonl").is_file()
+        else None
+    )
+    raw_event_final_message_matches_artifact = bool(
+        agent_last_message_nonempty and raw_message == last_message_text
+    )
+
+    observation: dict[str, Any] = {
+        "mode": "live-codex-local",
+        "docker_usable": docker_usable,
+        "exec_backend": documented_args.exec_backend,
+        "child_exit_code": child.returncode,
+        **artifact_exists,
+        "report_schema_valid": report_schema_valid,
+        "report_status": report.get("status") if isinstance(report, dict) else None,
+        "agent_last_message_nonempty": agent_last_message_nonempty,
+        "raw_event_final_message_matches_artifact": raw_event_final_message_matches_artifact,
+        "run_dir": str(run_dir),
+        "source_origins": source_origins,
+    }
+    observation["ok"] = all(
+        (
+            observation["docker_usable"] is False,
+            observation["exec_backend"] == "local",
+            observation["child_exit_code"] == 0,
+            all(artifact_exists.values()),
+            observation["report_schema_valid"] is True,
+            observation["report_status"] == "success",
+            observation["agent_last_message_nonempty"] is True,
+            observation["raw_event_final_message_matches_artifact"] is True,
+        )
+    )
+    return observation
+
+
 def _run_live_codex_docker(repo_root: Path) -> dict[str, Any]:
     # Omit --exec-backend deliberately: this is an outcome probe for the default
     # Windows-host/Linux-container boundary rather than for an explicitly selected
@@ -680,7 +992,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify the Windows offline-first quickstart.")
     parser.add_argument(
         "--mode",
-        choices=("readme-git-bash", "live-claude", "live-codex-docker"),
+        choices=(
+            "readme-git-bash",
+            "live-claude",
+            "documented-local-backend",
+            "live-codex-local",
+            "live-codex-docker",
+        ),
         required=True,
     )
     return parser
@@ -696,6 +1014,10 @@ def main(argv: list[str] | None = None) -> int:
             observation = _run_readme_git_bash(repo_root)
         elif args.mode == "live-claude":
             observation = _run_live_claude(repo_root)
+        elif args.mode == "documented-local-backend":
+            observation = _run_documented_local_backend(repo_root)
+        elif args.mode == "live-codex-local":
+            observation = _run_live_codex_local(repo_root)
         else:
             observation = _run_live_codex_docker(repo_root)
     except Exception as exc:

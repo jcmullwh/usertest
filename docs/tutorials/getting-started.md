@@ -292,8 +292,12 @@ and what “success” means. If present, it is snapshotted into the run directo
 Representative validation (default built-in path):
 
 ```text
-usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend local
 ```
+
+This first-run command selects local execution explicitly. Agent operations run on the host without
+Docker isolation. Omitting `--exec-backend` still selects Docker; use the explicit Docker command in
+the troubleshooting section when you require isolation and have a reachable Docker daemon.
 
 Defaults come from `configs/catalog.yaml`:
 
@@ -350,7 +354,8 @@ Full guide: `docs/how-to/personas-and-missions.md`.
 
 - If the agent is blocked by policy during a representative workflow, switch to `--policy write`.
 - If you only need a preflight probe, switch to `--policy inspect` (read-only + shell).
-- If you need isolation or want fewer OS-specific shell issues, use the Docker backend:
+- If you need isolation or want fewer OS-specific shell issues, use the Docker backend (an installed
+  Docker CLI and reachable daemon are required):
 
 ```bash
 usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker

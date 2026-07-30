@@ -1631,6 +1631,12 @@ def prepare_execution_backend(
     workspace_id: str,
     agent_cfg: dict[str, Any] | None = None,
 ) -> ExecutionBackendContext:
+    """Prepare the execution context selected by ``RunRequest.exec_backend``.
+
+    Maintained representative first-run commands pass ``exec_backend=local`` explicitly. That
+    existing branch intentionally runs on the host and returns a context with no sandbox, command
+    prefix, workspace mount, or run-directory mount. The CLI omitted-value default remains Docker.
+    """
     backend = str(getattr(request, "exec_backend", "local") or "local").strip().lower()
     if backend == "local":
         return ExecutionBackendContext(

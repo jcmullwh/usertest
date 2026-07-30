@@ -15,12 +15,16 @@ If you don’t yet have a working environment, start with `docs/tutorials/gettin
 ### Representative validation (default built-in path)
 
 ```text
-python -m usertest.cli run --repo-root . --repo "PATH/TO/TARGET" --agent codex --policy write
+python -m usertest.cli run --repo-root . --repo "PATH/TO/TARGET" --agent codex --policy write --exec-backend local
 ```
 
 ```text
-python -m usertest.cli run --repo-root . --repo "https://github.com/org/repo.git" --agent codex --policy write
+python -m usertest.cli run --repo-root . --repo "https://github.com/org/repo.git" --agent codex --policy write --exec-backend local
 ```
+
+These first-run examples opt into local execution, so agent operations run on the host without Docker
+isolation. Omitting `--exec-backend` retains the Docker default. Use the explicit Docker workflow below
+when you require isolation and have an installed Docker CLI and reachable daemon.
 
 Defaults come from `configs/catalog.yaml`:
 
@@ -142,6 +146,8 @@ The Docker backend is useful when you want:
 - stronger isolation
 - fewer host OS quirks (especially around shell commands)
 - a more repeatable environment
+
+An installed Docker CLI and reachable daemon are required.
 
 ```text
 python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker
