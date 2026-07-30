@@ -15,7 +15,7 @@ from reporter import validate_report
 from run_artifacts.history import load_run_record
 
 import runner_core.target_acquire as target_acquire_mod
-from runner_core import RunnerConfig, RunRequest, run_once
+from runner_core import RunnerConfig, RunRequest, RunResult, run_once
 
 
 def _write(path: Path, text: str) -> None:
@@ -214,7 +214,28 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 ),
                 "        return 0",
                 "",
-                "    if mode in {'task_run_valid', 'task_run_missing_kind'}:",
+                (
+                    "    if mode in {"
+                    "'task_run_valid', 'task_run_missing_kind', 'task_run_live_output'"
+                    "}:"
+                ),
+                "        outputs = []",
+                "        if mode == 'task_run_live_output':",
+                "            output_path = Path('artifacts/representative_events.jsonl').resolve()",
+                "            output_path.parent.mkdir(parents=True, exist_ok=True)",
+                "            events = [",
+                "                {'type': 'agent.started'},",
+                "                {'type': 'agent.completed'},",
+                "            ]",
+                "            output_path.write_text(",
+                "                ''.join(json.dumps(event) + '\\n' for event in events),",
+                "                encoding='utf-8',",
+                "            )",
+                "            outputs = [{",
+                "                'label': 'Representative events',",
+                "                'path': str(output_path),",
+                "                'description': 'Two representative agent lifecycle events.',",
+                "            }]",
                 "        report = {",
                 "            'schema_version': 1,",
                 "            'kind': 'task_run_v1',",
@@ -226,7 +247,7 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 "                'attempts': [{'action': 'return report'}],",
                 "                'outcome': 'report returned',",
                 "            }],",
-                "            'outputs': [],",
+                "            'outputs': outputs,",
                 "            'next_actions': ['No action required.'],",
                 "        }",
                 "        if mode == 'task_run_missing_kind':",
@@ -397,6 +418,148 @@ def _use_task_run_schema(runner_root: Path) -> dict[str, object]:
         encoding="utf-8",
     )
     return schema
+
+
+def _run_task_report_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> RunResult:
+    runner_root = _setup_runner_root(tmp_path)
+    _use_task_run_schema(runner_root)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(tmp_path / "task_report_attempt_state.txt"))
+    monkeypatch.setenv("DUMMY_MODE", mode)
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+    return run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            keep_workspace=False,
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=0,
+        ),
+    )
+
+
+def test_run_once_retains_workspace_for_live_reported_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run_task_report_mode(tmp_path, monkeypatch, "task_run_live_output")
+
+    assert result.exit_code == 0
+    assert result.report_validation_errors == []
+    report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
+    reported_path = Path(report["outputs"][0]["path"])
+    reported_events = [
+        json.loads(line) for line in reported_path.read_text(encoding="utf-8").splitlines()
+    ]
+    workspace_ref = json.loads(
+        (result.run_dir / "workspace_ref.json").read_text(encoding="utf-8")
+    )
+    workspace_dir = Path(workspace_ref["workspace_dir"])
+    observation = {
+        "reported_path_exists_after_run_once": reported_path.is_file(),
+        "reported_output_event_types": [event["type"] for event in reported_events],
+        "workspace_exists_after_run_once": workspace_dir.is_dir(),
+        "workspace_ref_cleanup_suppressed_reason": workspace_ref.get(
+            "cleanup_suppressed_reason"
+        ),
+        "workspace_ref_will_cleanup_workspace": workspace_ref["will_cleanup_workspace"],
+    }
+
+    assert observation == {
+        "reported_path_exists_after_run_once": True,
+        "reported_output_event_types": ["agent.started", "agent.completed"],
+        "workspace_exists_after_run_once": True,
+        "workspace_ref_cleanup_suppressed_reason": "reported_output_retention",
+        "workspace_ref_will_cleanup_workspace": False,
+    }
+    print(json.dumps(observation, sort_keys=True))
+
+
+def test_reported_output_retention_qualification_rejects_nonqualifying_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import runner_core.runner as runner_mod
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = workspace / "missing.jsonl"
+    external = tmp_path / "external.jsonl"
+    external.write_text("external\n", encoding="utf-8")
+    directory = workspace / "artifacts"
+    directory.mkdir()
+    symlink_candidate = workspace / "symlink.jsonl"
+    symlink_candidate.write_text("target\n", encoding="utf-8")
+
+    original_is_symlink = Path.is_symlink
+
+    def controlled_is_symlink(path: Path) -> bool:
+        if path == symlink_candidate:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", controlled_is_symlink)
+
+    def qualifies(path: Path) -> bool:
+        return runner_mod._report_has_live_workspace_output(
+            {"outputs": [{"path": str(path)}]}, workspace
+        )
+
+    observation = {
+        "directory_output_qualifies": qualifies(directory.resolve()),
+        "external_output_qualifies": qualifies(external.resolve()),
+        "missing_output_qualifies": qualifies(missing.absolute()),
+        "symlink_output_qualifies": qualifies(symlink_candidate.absolute()),
+    }
+    assert observation == {
+        "directory_output_qualifies": False,
+        "external_output_qualifies": False,
+        "missing_output_qualifies": False,
+        "symlink_output_qualifies": False,
+    }
+    print(json.dumps(observation, sort_keys=True))
+
+
+def test_run_once_cleans_workspace_without_qualifying_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run_task_report_mode(tmp_path, monkeypatch, "task_run_valid")
+
+    assert result.exit_code == 0
+    assert result.report_validation_errors == []
+    workspace_ref = json.loads(
+        (result.run_dir / "workspace_ref.json").read_text(encoding="utf-8")
+    )
+    observation = {
+        "nonqualifying_workspace_exists_after_run_once": Path(
+            workspace_ref["workspace_dir"]
+        ).exists(),
+        "workspace_ref_cleanup_suppressed_reason_present": (
+            "cleanup_suppressed_reason" in workspace_ref
+        ),
+        "workspace_ref_will_cleanup_workspace": workspace_ref["will_cleanup_workspace"],
+    }
+    assert observation == {
+        "nonqualifying_workspace_exists_after_run_once": False,
+        "workspace_ref_cleanup_suppressed_reason_present": False,
+        "workspace_ref_will_cleanup_workspace": True,
+    }
+    print(json.dumps(observation, sort_keys=True))
 
 
 def test_run_once_retries_provider_capacity_then_succeeds(

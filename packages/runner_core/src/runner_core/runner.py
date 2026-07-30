@@ -227,6 +227,45 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
+def _report_has_live_workspace_output(report: object, workspace_dir: Path) -> bool:
+    """Return whether a report names a live regular file in the acquired workspace."""
+    if not isinstance(report, dict):
+        return False
+    outputs = report.get("outputs")
+    if not isinstance(outputs, list):
+        return False
+
+    try:
+        resolved_workspace = workspace_dir.resolve(strict=True)
+        if not resolved_workspace.is_dir():
+            return False
+    except (OSError, RuntimeError):
+        return False
+
+    for output in outputs:
+        if not isinstance(output, dict):
+            continue
+        path_value = output.get("path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            continue
+
+        candidate = Path(path_value)
+        if not candidate.is_absolute():
+            continue
+        try:
+            if candidate.is_symlink():
+                continue
+            resolved_candidate = candidate.resolve(strict=True)
+            if not resolved_candidate.is_file():
+                continue
+            resolved_candidate.relative_to(resolved_workspace)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        return True
+
+    return False
+
+
 def _codex_subscription_external_wait(text: str) -> dict[str, Any] | None:
     """Project a provider usage-limit message into a resumable, non-API wait state."""
     usage_limit = _extract_codex_subscription_usage_limit(text)
@@ -3688,6 +3727,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
 
     acquired = None
+    workspace_ref_payload: dict[str, Any] | None = None
+    retain_workspace_for_reported_output = False
     codex_execpolicy_overlay: ControlledCodexExecpolicyOverlay | None = None
     controlled_codex_binary: str | None = None
     controlled_codex_env_overrides: dict[str, str] | None = None
@@ -3767,22 +3808,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
         using_existing_workspace = acquired.mode == "existing"
 
-        _write_json(
-            run_dir / "workspace_ref.json",
-            {
-                "schema_version": 1,
-                "workspace_id": workspace_id,
-                "workspace_dir": str(acquired.workspace_dir),
-                "keep_workspace_requested": bool(request.keep_workspace),
-                "will_cleanup_workspace": (
-                    not using_existing_workspace
-                    and not (request.keep_workspace or request.exec_keep_container)
-                ),
-                "resume_workspace_requested": (
-                    str(resume_workspace_dir) if resume_workspace_dir is not None else None
-                ),
-            },
-        )
+        workspace_ref_payload = {
+            "schema_version": 1,
+            "workspace_id": workspace_id,
+            "workspace_dir": str(acquired.workspace_dir),
+            "keep_workspace_requested": bool(request.keep_workspace),
+            "will_cleanup_workspace": (
+                not using_existing_workspace
+                and not (request.keep_workspace or request.exec_keep_container)
+            ),
+            "resume_workspace_requested": (
+                str(resume_workspace_dir) if resume_workspace_dir is not None else None
+            ),
+        }
+        _write_json(run_dir / "workspace_ref.json", workspace_ref_payload)
 
         agent_cfg = config.agents.get(request.agent, {}) if isinstance(config.agents, dict) else {}
         agent_cfg_dict = agent_cfg if isinstance(agent_cfg, dict) else {}
@@ -8143,6 +8182,22 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         elif agent_exit_code != 0 and not report_validation_errors:
             report_validation_errors = run_errors
 
+        if (
+            report_json is not None
+            and not report_validation_errors
+            and workspace_ref_payload is not None
+            and workspace_ref_payload["will_cleanup_workspace"] is True
+            and _report_has_live_workspace_output(report_json, acquired.workspace_dir)
+        ):
+            retained_workspace_ref = {
+                **workspace_ref_payload,
+                "will_cleanup_workspace": False,
+                "cleanup_suppressed_reason": "reported_output_retention",
+            }
+            _write_json(run_dir / "workspace_ref.json", retained_workspace_ref)
+            workspace_ref_payload = retained_workspace_ref
+            retain_workspace_for_reported_output = True
+
         if report_validation_errors:
             _write_json(run_dir / "report_validation_errors.json", report_validation_errors)
 
@@ -8294,6 +8349,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             acquired is not None
             and acquired.mode != "existing"
             and not (request.keep_workspace or request.exec_keep_container)
+            and not retain_workspace_for_reported_output
             and acquired.workspace_dir.exists()
         ):
             cleanup_wall_start = time.monotonic()
