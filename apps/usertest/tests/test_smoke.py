@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +11,95 @@ from pathlib import Path
 import pytest
 
 from usertest.cli import build_parser
+
+_DOCUMENTED_RUN_SECTIONS = (
+    ("README.md", "## Run a single target", "## Backlog CLI", 2),
+    (
+        "docs/tutorials/getting-started.md",
+        "### 4) Run",
+        "### 5) Inspect the output",
+        1,
+    ),
+    (
+        "docs/how-to/run-usertest.md",
+        "### Representative validation (default built-in path)",
+        "### Faster preflight probe",
+        2,
+    ),
+    (
+        "apps/usertest/README.md",
+        "### `usertest run`",
+        "### `usertest batch`",
+        1,
+    ),
+)
+_RUN_COMMAND_RE = re.compile(
+    r"```[^\r\n]*\r?\n(?P<fenced>.*?)```"
+    r"|`(?P<inline>(?:python -m usertest\.cli|usertest) run [^`\r\n]+)`",
+    re.DOTALL,
+)
+
+
+def _normalize_documented_command(command: str) -> str:
+    parts = []
+    for line in command.splitlines():
+        part = line.strip()
+        if part.endswith("\\"):
+            part = part[:-1].rstrip()
+        if part:
+            parts.append(part)
+    return " ".join(parts)
+
+
+def _run_commands(markdown: str) -> list[str]:
+    commands = []
+    for match in _RUN_COMMAND_RE.finditer(markdown):
+        command = _normalize_documented_command(match.group("fenced") or match.group("inline"))
+        if command.startswith(("python -m usertest.cli run ", "usertest run ")):
+            commands.append(command)
+    return commands
+
+
+def _documented_command_argv(command: str) -> list[str]:
+    tokens = shlex.split(command, posix=True)
+    if tokens[:3] == ["python", "-m", "usertest.cli"]:
+        return tokens[3:]
+    if tokens[:1] == ["usertest"]:
+        return tokens[1:]
+    raise AssertionError(f"unsupported documented command prefix: {command}")
+
+
+def _assert_maintained_codex_commands(parser: argparse.ArgumentParser) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    maintained_count = 0
+    for relative_path, start_heading, end_heading, expected_count in _DOCUMENTED_RUN_SECTIONS:
+        document = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert start_heading in document
+        section = document.split(start_heading, 1)[1]
+        assert end_heading in section
+        section = section.split(end_heading, 1)[0]
+
+        commands = [
+            command
+            for command in _run_commands(section)
+            if "--agent codex" in command
+            and "--policy write" in command
+            and "--exec-backend local" in command
+        ]
+        assert len(commands) == expected_count, relative_path
+        for command in commands:
+            args = parser.parse_args(_documented_command_argv(command))
+            assert args.exec_backend == "local", (relative_path, command)
+        maintained_count += len(commands)
+
+        docker_commands = [
+            command
+            for command in _run_commands(document)
+            if "--agent codex" in command and "--exec-backend docker" in command
+        ]
+        assert docker_commands, f"{relative_path} must retain an explicit Docker workflow"
+
+    assert maintained_count == 6
 
 
 def test_parser_smoke() -> None:
@@ -55,6 +147,7 @@ def test_parser_smoke() -> None:
     assert args.exec_use_target_sandbox_cli_install is True
     args = parser.parse_args(["run", "--repo", "C:\\tmp\\x"])
     assert args.exec_backend == "docker"
+    _assert_maintained_codex_commands(parser)
     assert args.exec_use_host_agent_login is True
     args = parser.parse_args(
         [

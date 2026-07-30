@@ -59,7 +59,21 @@ usertest run \
   --repo-root . \
   --repo "PATH_OR_GIT_URL" \
   --agent codex \
-  --policy write
+  --policy write \
+  --exec-backend local
+```
+
+This first-run example selects local execution explicitly. Agent operations run on the host without
+Docker isolation. Omitting `--exec-backend` still selects Docker. If you require isolation and have an
+installed Docker CLI with a reachable daemon, select Docker explicitly:
+
+```bash
+usertest run \
+  --repo-root . \
+  --repo "PATH_OR_GIT_URL" \
+  --agent codex \
+  --policy write \
+  --exec-backend docker
 ```
 
 ### `usertest batch`

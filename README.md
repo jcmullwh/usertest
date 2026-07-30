@@ -240,7 +240,11 @@ macOS/Linux:
 
 Representative validation (default built-in path):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write --exec-backend local`
+
+These first-run examples select `local` explicitly. Local execution runs agent operations on the host
+without Docker isolation. Omitting `--exec-backend` still selects Docker; if you require isolation,
+use the explicit Docker workflow below with an installed CLI and a reachable Docker daemon.
 
 Defaults come from `configs/catalog.yaml`:
 
@@ -261,7 +265,7 @@ Local directory example (initializes `.usertest/` scaffold):
 
 Then run against that directory with representative validation (requires an agent CLI + credentials):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result`
+`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend local`
 
 List built-in personas/missions:
 
@@ -353,6 +357,8 @@ anything printed by tools). Review and redact before sharing or archiving in CI;
 ### Docker execution backend (optional)
 
 `python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker`
+
+This explicit Docker workflow requires an installed Docker CLI and a reachable daemon.
 
 Docker runs default to:
 
