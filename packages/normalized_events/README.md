@@ -68,6 +68,37 @@ Each normalized event is a JSON object with:
 - `write_events_jsonl(path, events)`: writes one JSON object per line
 - `iter_events_jsonl(path)`: iterates parsed JSON objects from a `*.jsonl` file
 
+### Write and read a JSONL file
+
+This example writes `normalized-events-example.jsonl` in the current directory and prints the
+events read back from the file.
+
+```python
+import json
+from pathlib import Path
+
+from normalized_events import iter_events_jsonl, make_event, write_events_jsonl
+
+
+events_path = Path("normalized-events-example.jsonl")
+events = [
+    make_event(
+        "run.started",
+        {"run_id": "demo"},
+        ts="2026-01-01T00:00:00Z",
+    ),
+    make_event(
+        "run.completed",
+        {"run_id": "demo", "status": "success"},
+        ts="2026-01-01T00:00:01Z",
+    ),
+]
+
+write_events_jsonl(events_path, events)
+read_back = list(iter_events_jsonl(events_path))
+print(json.dumps(read_back, sort_keys=True))
+```
+
 This package is intended to be a neutral contract shared by `agent_adapters`, `reporter`, and `runner_core`.
 
 ## Contract checks
