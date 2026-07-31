@@ -1,2 +1,0 @@
-{"type": "read_file", "data": {"path": "docs/large.json", "bytes": 792933, "file_size_bytes": 792933, "observed_bytes": 1466, "whole_file_observed": false}}
-{"type": "read_file", "data": {"path": "src/whole.py", "bytes": 2048, "file_size_bytes": 2048, "observed_bytes": 2048, "whole_file_observed": true}}

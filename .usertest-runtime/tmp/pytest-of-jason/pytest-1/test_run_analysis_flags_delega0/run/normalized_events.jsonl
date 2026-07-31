@@ -1,2 +1,0 @@
-{"type": "delegation_invocation", "data": {"tool_name": "Agent"}}
-{"type": "delegation_result", "data": {"tool_name": "Agent", "result_kind": "raw_broad_source_leak", "output_chars": 50000, "output_lines": 1000, "source_like_lines": 800, "raw_broad_source_leak": true}}
