@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "blocked",
+  "phase": "blocking",
+  "completed_count": 0,
+  "failed_count": 1,
+  "global_blocker_count": 1
+}

@@ -1,0 +1,2 @@
+{"type": "delegation_invocation", "data": {"tool_name": "invoke_agent", "prompt_chars": 80, "input_keys": ["prompt"]}}
+{"type": "delegation_result", "data": {"tool_name": "invoke_agent", "result_kind": "parent_context_summary", "output_chars": 320, "output_lines": 8, "raw_broad_source_leak": false, "token_usage": {"input_tokens": 5000, "cached_input_tokens": 0, "uncached_input_tokens": 5000, "output_tokens": 500, "reasoning_output_tokens": 0, "total_tokens": 5500}}}

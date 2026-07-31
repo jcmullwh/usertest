@@ -1,0 +1,15 @@
+{
+  "attempts": [
+    {
+      "attempt": 1
+    },
+    {
+      "attempt": 2
+    },
+    {
+      "attempt": 3
+    }
+  ],
+  "followup_attempts_used": 0,
+  "rate_limit_retries_used": 2
+}

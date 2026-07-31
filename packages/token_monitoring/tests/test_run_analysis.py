@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from token_monitoring.batch import analyze_batch_context
 from token_monitoring.run_analysis import analyze_run, write_run_monitoring
@@ -104,6 +105,130 @@ def test_run_analysis_emits_actionable_signals_without_raw_output(tmp_path: Path
     rendered = json.dumps(analysis)
     assert "SECRET_PROMPT_TEXT" not in rendered
     assert analysis["privacy"]["contains_raw_command_output"] is False
+
+
+def test_run_analysis_ignores_attempt_cardinality_without_retry_counters(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    sessions = tmp_path / "sessions"
+    _base_run(run_dir)
+    attempts: dict[str, Any] = {
+        "attempts": [{"attempt": 1}, {"attempt": 1}],
+        "followup_attempts_used": 0,
+        "rate_limit_retries_used": 0,
+    }
+    _write_json(run_dir / "agent_attempts.json", attempts)
+    _write_jsonl(
+        sessions / "rollout-thread-1.jsonl",
+        [
+            {"type": "session_meta", "payload": {"session_id": "thread-1"}},
+            _token_event(100, 100),
+            _call("pwd"),
+        ],
+    )
+
+    analysis = analyze_run(run_dir, codex_sessions_root=sessions)
+    retry_signal_present = any(
+        signal["signal_id"] == "retry_after_known_failure" for signal in analysis["signals"]
+    )
+
+    assert analysis["token_summary"]["authoritative"] is True
+    assert retry_signal_present is False
+    print(
+        json.dumps(
+            {
+                "attempt_count": len(attempts["attempts"]),
+                "authoritative": analysis["token_summary"]["authoritative"],
+                "retry_count": attempts["followup_attempts_used"]
+                + attempts["rate_limit_retries_used"],
+                "retry_signal_present": retry_signal_present,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def test_run_analysis_preserves_counter_confirmed_retry_signal(tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    scenarios: dict[str, dict[str, Any]] = {
+        "followup": {
+            "thread_id": "followup-thread",
+            "attempts": [{"attempt": 1}, {"attempt": 2}],
+            "followup_attempts_used": 1,
+            "rate_limit_retries_used": 0,
+        },
+        "rate_limit": {
+            "thread_id": "rate-limit-thread",
+            "attempts": [{"attempt": 1}, {"attempt": 2}, {"attempt": 3}],
+            "followup_attempts_used": 0,
+            "rate_limit_retries_used": 2,
+        },
+    }
+    observations: dict[str, dict[str, object]] = {}
+    expected_signal_keys = {
+        "signal_id",
+        "confidence",
+        "causal_mechanism",
+        "token_dimensions_affected",
+        "evidence_path",
+        "evidence",
+        "mitigation_lever",
+        "false_positive_risk",
+        "confirmed_by_counters",
+    }
+
+    for name, attempts in scenarios.items():
+        thread_id = str(attempts["thread_id"])
+        run_dir = tmp_path / name
+        _base_run(run_dir, thread_id=thread_id)
+        _write_json(
+            run_dir / "agent_attempts.json",
+            {
+                "attempts": attempts["attempts"],
+                "followup_attempts_used": attempts["followup_attempts_used"],
+                "rate_limit_retries_used": attempts["rate_limit_retries_used"],
+            },
+        )
+        _write_jsonl(
+            sessions / f"rollout-{thread_id}.jsonl",
+            [
+                {"type": "session_meta", "payload": {"session_id": thread_id}},
+                _token_event(100, 100),
+                _call("pwd"),
+            ],
+        )
+
+        analysis = analyze_run(run_dir, codex_sessions_root=sessions)
+        signal = next(
+            signal
+            for signal in analysis["signals"]
+            if signal["signal_id"] == "retry_after_known_failure"
+        )
+        attempt_count = len(attempts["attempts"])
+        retry_count = int(attempts["followup_attempts_used"]) + int(
+            attempts["rate_limit_retries_used"]
+        )
+
+        assert set(signal) == expected_signal_keys
+        assert signal["signal_id"] == "retry_after_known_failure"
+        assert signal["confirmed_by_counters"] is True
+        assert signal["evidence"] == {
+            "attempt_count": attempt_count,
+            "retry_count": retry_count,
+        }
+        assert (
+            "cannot isolate each retry without richer attempt telemetry"
+            in signal["causal_mechanism"]
+        )
+        observations[name] = {
+            "attempt_count": signal["evidence"]["attempt_count"],
+            "confirmed_by_counters": signal["confirmed_by_counters"],
+            "retry_count": signal["evidence"]["retry_count"],
+            "signal_id": signal["signal_id"],
+        }
+
+    print(json.dumps(observations, sort_keys=True))
 
 
 def test_source_read_evidence_ranks_observed_bytes_not_total_file_size(

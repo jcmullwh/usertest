@@ -1,0 +1,12 @@
+{
+  "attempts": [
+    {
+      "attempt": 1
+    },
+    {
+      "attempt": 1
+    }
+  ],
+  "followup_attempts_used": 0,
+  "rate_limit_retries_used": 0
+}

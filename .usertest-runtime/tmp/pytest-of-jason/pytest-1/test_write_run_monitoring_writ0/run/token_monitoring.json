@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-31T05:04:27Z",
+  "run_dir": "I:\\code\\usertest\\runs\\usertest_implement\\_workspaces\\usertest_20260731T044445Z_codex_0\\.usertest-runtime\\tmp\\pytest-of-jason\\pytest-1\\test_write_run_monitoring_writ0\\run",
+  "agent": "codex",
+  "status_class": "completed_report",
+  "join": {
+    "thread_id": "thread-1",
+    "session_path": "I:\\code\\usertest\\runs\\usertest_implement\\_workspaces\\usertest_20260731T044445Z_codex_0\\.usertest-runtime\\tmp\\pytest-of-jason\\pytest-1\\test_write_run_monitoring_writ0\\sessions\\rollout-thread-1.jsonl",
+    "confidence": "authoritative",
+    "exception": null
+  },
+  "token_summary": {
+    "authoritative": true,
+    "dimensions": {
+      "total_tokens": 10,
+      "input_tokens": 10,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 10,
+      "output_tokens": 0,
+      "reasoning_output_tokens": 0
+    },
+    "model_call_count": 1,
+    "token_event_count": 1,
+    "peak_call": {
+      "schema_version": 1,
+      "call_index": 1,
+      "timestamp": "2026-07-05T00:00:00Z",
+      "source_line": 2,
+      "token_usage": {
+        "total_tokens": 10,
+        "input_tokens": 10,
+        "cached_input_tokens": 0,
+        "uncached_input_tokens": 10,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0
+      },
+      "action": {
+        "type": "tool",
+        "tool_name": "exec_command",
+        "command_class": "tool",
+        "command_excerpt": "pwd",
+        "paths": [],
+        "yield_time_ms": null,
+        "max_output_tokens": null
+      },
+      "context_evidence": {},
+      "state_change": null,
+      "confidence": "authoritative"
+    },
+    "parent_input_tokens": 10,
+    "parent_total_tokens": 10,
+    "delegated_token_dimensions": {
+      "total_tokens": 0,
+      "input_tokens": 0,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_output_tokens": 0
+    },
+    "combined_token_dimensions": {
+      "total_tokens": 10,
+      "input_tokens": 10,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 10,
+      "output_tokens": 0,
+      "reasoning_output_tokens": 0
+    },
+    "combined_total_tokens": 10
+  },
+  "delegation_summary": {
+    "classification": "no_delegation",
+    "interpretation": "No normalized delegation/subagent tool invocation was observed.",
+    "invocation_count": 0,
+    "result_count": 0,
+    "summary_count": 0,
+    "raw_broad_source_leak_count": 0,
+    "error_count": 0,
+    "delegated_token_dimensions": {
+      "total_tokens": 0,
+      "input_tokens": 0,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_output_tokens": 0
+    },
+    "invocations": [],
+    "results": [],
+    "token_totals": {
+      "parent": {
+        "total_tokens": 10,
+        "input_tokens": 10,
+        "cached_input_tokens": 0,
+        "uncached_input_tokens": 10,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0
+      },
+      "delegated": {
+        "total_tokens": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "uncached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0
+      },
+      "combined": {
+        "total_tokens": 10,
+        "input_tokens": 10,
+        "cached_input_tokens": 0,
+        "uncached_input_tokens": 10,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0
+      },
+      "parent_input_tokens": 10,
+      "parent_total_tokens": 10,
+      "delegated_total_tokens": 0,
+      "combined_total_tokens": 10
+    }
+  },
+  "signals": [],
+  "exceptions": [],
+  "privacy": {
+    "contains_raw_prompt": false,
+    "contains_raw_source": false,
+    "contains_raw_command_output": false
+  }
+}
