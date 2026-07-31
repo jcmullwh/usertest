@@ -651,7 +651,7 @@ def _build_signals(
         attempts.get("rate_limit_retries_used", 0)
     )
     attempt_count = int(attempts.get("attempt_count", 0))
-    if retry_count > 0 or attempt_count > 1:
+    if retry_count > 0:
         signals.append(
             _signal(
                 signal_id="retry_after_known_failure",

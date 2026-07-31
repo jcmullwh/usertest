@@ -49,6 +49,9 @@ node_modules/
 ############################################
 # Repo-specific artifacts
 ############################################
+# Workspace-local runtime and test artifacts
+.usertest-runtime/
+
 # Per-run artifacts (runner output)
 runs/
 usertest/runs/
