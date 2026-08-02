@@ -255,6 +255,7 @@ def _run_probe(*, mode: str, repo: Path, runs_dir: Path) -> dict[str, bool | str
     original_clone = target_acquire_mod._git_clone
     preferred_destinations: list[Path] = []
     enospc_observations: list[Path] = []
+    core_longpaths_observations: list[bool] = []
     try:
         temp_workspace_root = probe_root / "temp"
         temp_workspace_root.mkdir()
@@ -269,7 +270,10 @@ def _run_probe(*, mode: str, repo: Path, runs_dir: Path) -> dict[str, bool | str
         invocation_log = probe_root / "invocations.jsonl"
         dummy_binary = _make_dummy_codex(runner_root, invocation_log)
 
-        def observed_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
+        def observed_clone(
+            *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+        ) -> None:
+            core_longpaths_observations.append(core_longpaths)
             destination_volume = target_acquire_mod._windows_volume_identity(dest_dir)
             if mode == "controlled" and destination_volume == runs_volume:
                 preferred_destinations.append(dest_dir)
@@ -278,7 +282,12 @@ def _run_probe(*, mode: str, repo: Path, runs_dir: Path) -> dict[str, bool | str
                 enospc_observations.append(dest_dir)
                 raise RuntimeError("checkout failed: No space left on device")
             try:
-                original_clone(repo=repo, dest_dir=dest_dir, no_local=no_local)
+                original_clone(
+                    repo=repo,
+                    dest_dir=dest_dir,
+                    no_local=no_local,
+                    core_longpaths=core_longpaths,
+                )
             except RuntimeError as error:
                 if (
                     destination_volume == runs_volume
@@ -325,6 +334,8 @@ def _run_probe(*, mode: str, repo: Path, runs_dir: Path) -> dict[str, bool | str
 
         if len(preferred_destinations) != 2 or len(enospc_observations) != 2:
             raise RuntimeError("both runner acquisitions must observe initial clone ENOSPC")
+        if any(core_longpaths_observations):
+            raise RuntimeError("the unrelated ENOSPC path unexpectedly enabled core.longpaths")
         if any(os.path.lexists(path) for path in preferred_destinations):
             raise RuntimeError("an initial partial destination remained after recovery")
         cleanup_removed = not workspaces[0].exists()
@@ -350,6 +361,7 @@ def _run_probe(*, mode: str, repo: Path, runs_dir: Path) -> dict[str, bool | str
             "agent_invoked": True,
             "cleanup_removed_relocated_workspace": cleanup_removed,
             "commit_sha_matches": True,
+            "core_longpaths_disabled": True,
             "fallback_volume_differs": True,
             "keep_preserved_relocated_workspace": keep_preserved,
             "partial_destination_exists": False,

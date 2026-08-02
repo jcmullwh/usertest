@@ -797,18 +797,25 @@ def test_run_once_uses_relocated_workspace_after_clone_enospc(
     unrelated = tmp_path / "unrelated"
     unrelated.mkdir()
     (unrelated / "sentinel").write_text("keep\n", encoding="utf-8")
-    clone_calls: list[Path] = []
+    clone_calls: list[tuple[Path, bool]] = []
     runner_cleanup_calls: list[Path] = []
     original_clone = target_acquire_mod._git_clone
     original_runner_cleanup = runner_mod.remove_acquired_workspace
 
-    def controlled_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
-        clone_calls.append(dest_dir)
+    def controlled_clone(
+        *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+    ) -> None:
+        clone_calls.append((dest_dir, core_longpaths))
         if len(clone_calls) == 1:
             dest_dir.mkdir(parents=True)
             (dest_dir / "partial").write_text("partial\n", encoding="utf-8")
             raise RuntimeError("checkout: No space left on device")
-        original_clone(repo=repo, dest_dir=dest_dir, no_local=no_local)
+        original_clone(
+            repo=repo,
+            dest_dir=dest_dir,
+            no_local=no_local,
+            core_longpaths=core_longpaths,
+        )
 
     def tracked_runner_cleanup(path: Path) -> None:
         runner_cleanup_calls.append(path)
@@ -852,8 +859,8 @@ def test_run_once_uses_relocated_workspace_after_clone_enospc(
         assert result.exit_code == 0
         assert result.report_validation_errors == []
         assert len(clone_calls) == 2
-        preferred = clone_calls[0]
-        assert clone_calls[1] == fallback
+        preferred = clone_calls[0][0]
+        assert clone_calls == [(preferred, False), (fallback, False)]
         assert not preferred.exists()
         assert target.exists()
         assert (unrelated / "sentinel").read_text(encoding="utf-8") == "keep\n"

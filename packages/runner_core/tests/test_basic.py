@@ -240,20 +240,27 @@ def test_acquire_target_recovers_enospc_on_distinct_volume(
     fallback = Path(tempfile.gettempdir()) / f"ut_enospc_{uuid4().hex}"
     original_clone = target_acquire_mod._git_clone
     original_connectivity = target_acquire_mod._verify_git_workspace_connectivity
-    clone_calls: list[tuple[Path, bool]] = []
-    connectivity_calls: list[Path] = []
+    clone_calls: list[tuple[Path, bool, bool]] = []
+    connectivity_calls: list[tuple[Path, bool]] = []
 
-    def controlled_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
-        clone_calls.append((dest_dir, no_local))
+    def controlled_clone(
+        *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+    ) -> None:
+        clone_calls.append((dest_dir, no_local, core_longpaths))
         if len(clone_calls) == 1:
             dest_dir.mkdir(parents=True)
             (dest_dir / "partial").write_text("partial\n", encoding="utf-8")
             raise RuntimeError("error: checkout failed: No space left on device")
-        original_clone(repo=repo, dest_dir=dest_dir, no_local=no_local)
+        original_clone(
+            repo=repo,
+            dest_dir=dest_dir,
+            no_local=no_local,
+            core_longpaths=core_longpaths,
+        )
 
-    def checked_connectivity(*, cwd: Path) -> None:
-        connectivity_calls.append(cwd)
-        original_connectivity(cwd=cwd)
+    def checked_connectivity(*, cwd: Path, core_longpaths: bool = False) -> None:
+        connectivity_calls.append((cwd, core_longpaths))
+        original_connectivity(cwd=cwd, core_longpaths=core_longpaths)
 
     monkeypatch.setattr(target_acquire_mod, "_is_windows", lambda: True)
     monkeypatch.setattr(target_acquire_mod, "_workspace_candidates", lambda **_: [fallback])
@@ -279,14 +286,14 @@ def test_acquire_target_recovers_enospc_on_distinct_volume(
         assert acquired.workspace_dir == fallback
         assert acquired.ref == "recovery-ref"
         assert acquired.commit_sha == expected_sha == actual_sha
-        assert clone_calls == [(preferred, True), (fallback, True)]
-        assert connectivity_calls == [fallback]
+        assert clone_calls == [(preferred, True, False), (fallback, True, False)]
+        assert connectivity_calls == [(fallback, False)]
         assert not preferred.exists()
         assert (fallback / "README.md").is_file()
 
         observation = {
             "commit_sha_matches": actual_sha == expected_sha,
-            "connectivity_checked": connectivity_calls == [fallback],
+            "connectivity_checked": connectivity_calls == [(fallback, False)],
             "fallback_volume_differs": True,
             "partial_destination_exists": preferred.exists(),
             "requested_ref_matches": acquired.ref == "recovery-ref",
@@ -307,8 +314,10 @@ def test_acquire_target_does_not_retry_non_enospc_clone_failure(
     unrelated.mkdir()
     calls: list[Path] = []
 
-    def failing_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
-        del repo, no_local
+    def failing_clone(
+        *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+    ) -> None:
+        del repo, no_local, core_longpaths
         calls.append(dest_dir)
         dest_dir.mkdir(parents=True)
         raise RuntimeError("fatal: Authentication failed")
@@ -342,8 +351,10 @@ def test_acquire_target_rejects_unsafe_enospc_candidates_without_deleting_them(
         (candidate / "sentinel").write_text("keep\n", encoding="utf-8")
     calls: list[Path] = []
 
-    def failing_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
-        del repo, no_local
+    def failing_clone(
+        *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+    ) -> None:
+        del repo, no_local, core_longpaths
         calls.append(dest_dir)
         dest_dir.mkdir(parents=True)
         raise RuntimeError("No SpAcE LeFt On DeViCe")
@@ -387,8 +398,10 @@ def test_acquire_target_enospc_fallback_failure_reports_both_and_cleans_partials
     fallback = tmp_path / "fallback"
     calls: list[Path] = []
 
-    def failing_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
-        del repo, no_local
+    def failing_clone(
+        *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+    ) -> None:
+        del repo, no_local, core_longpaths
         calls.append(dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
         if len(calls) == 1:
@@ -427,8 +440,10 @@ def test_acquire_target_enospc_does_not_delete_candidate_created_during_selectio
     fallback = tmp_path / "fallback"
     clone_calls: list[Path] = []
 
-    def initial_failure(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
-        del repo, no_local
+    def initial_failure(
+        *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+    ) -> None:
+        del repo, no_local, core_longpaths
         clone_calls.append(dest_dir)
         dest_dir.mkdir(parents=True)
         raise RuntimeError("No space left on device")
@@ -489,18 +504,25 @@ def test_acquire_target_enospc_fallback_validation_failure_keeps_context_and_cle
     original_run_git = target_acquire_mod._run_git
     clone_count = 0
 
-    def controlled_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
+    def controlled_clone(
+        *, repo: str, dest_dir: Path, no_local: bool = False, core_longpaths: bool = False
+    ) -> None:
         nonlocal clone_count
         clone_count += 1
         if clone_count == 1:
             dest_dir.mkdir(parents=True)
             raise RuntimeError("No space left on device")
-        original_clone(repo=repo, dest_dir=dest_dir, no_local=no_local)
+        original_clone(
+            repo=repo,
+            dest_dir=dest_dir,
+            no_local=no_local,
+            core_longpaths=core_longpaths,
+        )
 
-    def controlled_run_git(args: list[str], *, cwd: Path) -> str:
+    def controlled_run_git(args: list[str], *, cwd: Path, core_longpaths: bool = False) -> str:
         if validation_stage == "commit" and cwd == fallback and args == ["rev-parse", "HEAD"]:
             raise RuntimeError("commit validation exploded")
-        return original_run_git(args, cwd=cwd)
+        return original_run_git(args, cwd=cwd, core_longpaths=core_longpaths)
 
     monkeypatch.setattr(target_acquire_mod, "_is_windows", lambda: True)
     monkeypatch.setattr(target_acquire_mod, "_git_clone", controlled_clone)
