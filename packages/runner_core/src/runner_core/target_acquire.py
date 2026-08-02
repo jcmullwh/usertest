@@ -29,8 +29,15 @@ class AcquiredTarget:
 @dataclass(frozen=True)
 class _GitCloneOutcome:
     destination: Path
+    requires_core_longpaths: bool = False
     failed_enospc_destination: Path | None = None
     original_enospc_error: str | None = None
+
+
+@dataclass(frozen=True)
+class _WindowsLongPathDecision:
+    destination: Path
+    requires_core_longpaths: bool
 
 
 COPYTREE_ALWAYS_IGNORE: frozenset[str] = frozenset(
@@ -90,10 +97,13 @@ def _ignore_names_for_copytree(*, src_root: Path) -> Callable[[str, list[str]], 
     return _ignore
 
 
-def _run_git(args: list[str], *, cwd: Path) -> str:
+def _run_git(args: list[str], *, cwd: Path, core_longpaths: bool = False) -> str:
     safe_dir = str(cwd.resolve()).replace("\\", "/")
+    config_args = ["-c", f"safe.directory={safe_dir}"]
+    if core_longpaths:
+        config_args.extend(["-c", "core.longpaths=true"])
     proc = subprocess.run(
-        ["git", "-c", f"safe.directory={safe_dir}", *args],
+        ["git", *config_args, *args],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -128,8 +138,17 @@ def _relocate_dest_if_within_source(*, src: Path, dest_dir: Path) -> Path:
     return base / dest_dir.name
 
 
-def _git_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
-    argv = ["git", "clone"]
+def _git_clone(
+    *,
+    repo: str,
+    dest_dir: Path,
+    no_local: bool = False,
+    core_longpaths: bool = False,
+) -> None:
+    argv = ["git"]
+    if core_longpaths:
+        argv.extend(["-c", "core.longpaths=true"])
+    argv.append("clone")
     if no_local:
         argv.append("--no-local")
     argv.extend([repo, str(dest_dir)])
@@ -147,8 +166,12 @@ def _git_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
     raise RuntimeError(msg)
 
 
-def _verify_git_workspace_connectivity(*, cwd: Path) -> None:
-    _run_git(["fsck", "--connectivity-only", "--no-dangling"], cwd=cwd)
+def _verify_git_workspace_connectivity(*, cwd: Path, core_longpaths: bool = False) -> None:
+    _run_git(
+        ["fsck", "--connectivity-only", "--no-dangling"],
+        cwd=cwd,
+        core_longpaths=core_longpaths,
+    )
 
 
 def _is_windows_path_too_long_error(msg: str) -> bool:
@@ -355,21 +378,33 @@ def _relocate_dest_for_windows_longpaths(
     dest_dir: Path,
     max_file_rel: int | None,
     max_dir_rel: int | None,
-) -> Path:
+) -> _WindowsLongPathDecision:
     if not _is_windows():
-        return dest_dir
+        return _WindowsLongPathDecision(
+            destination=dest_dir,
+            requires_core_longpaths=False,
+        )
 
     candidates = _workspace_candidates(dest_dir=dest_dir)
     if max_file_rel is None or max_dir_rel is None:
-        return candidates[-1]
+        return _WindowsLongPathDecision(
+            destination=candidates[-1],
+            requires_core_longpaths=True,
+        )
 
     for candidate in candidates:
         if _windows_path_lengths_ok(
             dest_dir=candidate, max_file_rel=max_file_rel, max_dir_rel=max_dir_rel
         ):
-            return candidate
+            return _WindowsLongPathDecision(
+                destination=candidate,
+                requires_core_longpaths=False,
+            )
 
-    return candidates[-1]
+    return _WindowsLongPathDecision(
+        destination=candidates[-1],
+        requires_core_longpaths=True,
+    )
 
 
 def _git_clone_with_windows_recovery(
@@ -377,14 +412,23 @@ def _git_clone_with_windows_recovery(
     repo: str,
     dest_dir: Path,
     no_local: bool,
+    requires_core_longpaths: bool,
     protected_source: Path | None,
     enospc_owned_destinations: list[Path],
 ) -> _GitCloneOutcome:
     """Clone once, retaining long-path recovery and adding one bounded ENOSPC reacquisition."""
 
     try:
-        _git_clone(repo=repo, dest_dir=dest_dir, no_local=no_local)
-        return _GitCloneOutcome(destination=dest_dir)
+        _git_clone(
+            repo=repo,
+            dest_dir=dest_dir,
+            no_local=no_local,
+            core_longpaths=requires_core_longpaths,
+        )
+        return _GitCloneOutcome(
+            destination=dest_dir,
+            requires_core_longpaths=requires_core_longpaths,
+        )
     except RuntimeError as initial_error:
         initial_message = str(initial_error)
         initial_cause = initial_error
@@ -392,14 +436,23 @@ def _git_clone_with_windows_recovery(
     # Preserve the existing long-path recovery priority and behavior. In particular, a failure
     # of that established fallback is not treated as a fresh initial clone failure.
     if _is_windows() and _is_windows_path_too_long_error(initial_message):
-        alt_dest = _relocate_dest_for_windows_longpaths(
+        long_path_decision = _relocate_dest_for_windows_longpaths(
             dest_dir=dest_dir,
             max_file_rel=None,
             max_dir_rel=None,
         )
+        alt_dest = long_path_decision.destination
         alt_dest.parent.mkdir(parents=True, exist_ok=True)
-        _git_clone(repo=repo, dest_dir=alt_dest, no_local=no_local)
-        return _GitCloneOutcome(destination=alt_dest)
+        _git_clone(
+            repo=repo,
+            dest_dir=alt_dest,
+            no_local=no_local,
+            core_longpaths=long_path_decision.requires_core_longpaths,
+        )
+        return _GitCloneOutcome(
+            destination=alt_dest,
+            requires_core_longpaths=long_path_decision.requires_core_longpaths,
+        )
 
     if not (_is_windows() and _is_windows_checkout_enospc_error(initial_message)):
         raise RuntimeError(initial_message) from initial_cause
@@ -448,7 +501,12 @@ def _git_clone_with_windows_recovery(
     enospc_owned_destinations.append(fallback_dest)
 
     try:
-        _git_clone(repo=repo, dest_dir=fallback_dest, no_local=no_local)
+        _git_clone(
+            repo=repo,
+            dest_dir=fallback_dest,
+            no_local=no_local,
+            core_longpaths=requires_core_longpaths,
+        )
     except Exception as fallback_error:
         try:
             _remove_acquisition_destination(fallback_dest)
@@ -467,6 +525,7 @@ def _git_clone_with_windows_recovery(
 
     return _GitCloneOutcome(
         destination=fallback_dest,
+        requires_core_longpaths=requires_core_longpaths,
         failed_enospc_destination=dest_dir,
         original_enospc_error=initial_message,
     )
@@ -529,6 +588,7 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
 
     is_local_path = _looks_like_existing_path(repo)
     src: Path | None = None
+    requires_core_longpaths = False
 
     if is_local_path:
         src = Path(repo).expanduser().resolve()
@@ -547,9 +607,11 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
             if not _windows_path_lengths_ok(
                 dest_dir=dest_dir, max_file_rel=max_file, max_dir_rel=max_dir
             ):
-                dest_dir = _relocate_dest_for_windows_longpaths(
+                long_path_decision = _relocate_dest_for_windows_longpaths(
                     dest_dir=dest_dir, max_file_rel=max_file, max_dir_rel=max_dir
                 )
+                dest_dir = long_path_decision.destination
+                requires_core_longpaths = long_path_decision.requires_core_longpaths
 
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
     if os.path.lexists(dest_dir):
@@ -591,18 +653,39 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
                     repo=str(src),
                     dest_dir=dest_dir,
                     no_local=True,
+                    requires_core_longpaths=requires_core_longpaths,
                     protected_source=src,
                     enospc_owned_destinations=enospc_owned_destinations,
                 )
                 dest_dir = clone_outcome.destination
+                core_longpaths = clone_outcome.requires_core_longpaths
                 try:
                     if resolved_ref is not None:
-                        _run_git(["fetch", "--no-tags", str(src), resolved_ref], cwd=dest_dir)
-                        _run_git(["checkout", "--detach", resolved_ref], cwd=dest_dir)
+                        _run_git(
+                            ["fetch", "--no-tags", str(src), resolved_ref],
+                            cwd=dest_dir,
+                            core_longpaths=core_longpaths,
+                        )
+                        _run_git(
+                            ["checkout", "--detach", resolved_ref],
+                            cwd=dest_dir,
+                            core_longpaths=core_longpaths,
+                        )
                     elif ref is not None:
-                        _run_git(["checkout", ref], cwd=dest_dir)
-                    _verify_git_workspace_connectivity(cwd=dest_dir)
-                    sha = _run_git(["rev-parse", "HEAD"], cwd=dest_dir)
+                        _run_git(
+                            ["checkout", ref],
+                            cwd=dest_dir,
+                            core_longpaths=core_longpaths,
+                        )
+                    _verify_git_workspace_connectivity(
+                        cwd=dest_dir,
+                        core_longpaths=core_longpaths,
+                    )
+                    sha = _run_git(
+                        ["rev-parse", "HEAD"],
+                        cwd=dest_dir,
+                        core_longpaths=core_longpaths,
+                    )
                 except Exception as validation_error:
                     _raise_enospc_validation_error(
                         clone_outcome=clone_outcome,
@@ -645,14 +728,24 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
             repo=repo,
             dest_dir=dest_dir,
             no_local=False,
+            requires_core_longpaths=False,
             protected_source=None,
             enospc_owned_destinations=enospc_owned_destinations,
         )
         dest_dir = clone_outcome.destination
+        core_longpaths = clone_outcome.requires_core_longpaths
         try:
             if ref is not None:
-                _run_git(["checkout", ref], cwd=dest_dir)
-            sha = _run_git(["rev-parse", "HEAD"], cwd=dest_dir)
+                _run_git(
+                    ["checkout", ref],
+                    cwd=dest_dir,
+                    core_longpaths=core_longpaths,
+                )
+            sha = _run_git(
+                ["rev-parse", "HEAD"],
+                cwd=dest_dir,
+                core_longpaths=core_longpaths,
+            )
         except Exception as validation_error:
             _raise_enospc_validation_error(
                 clone_outcome=clone_outcome,
