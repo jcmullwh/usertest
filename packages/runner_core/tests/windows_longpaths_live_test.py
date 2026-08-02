@@ -155,17 +155,29 @@ def _run_probe(mode: str) -> dict[str, bool | int | str]:
     source = system_temp / f"ut_longpaths_source_{uuid4().hex}"
     home = owned_root / "isolated_home"
     home.mkdir()
+    transport_bundle = owned_root / "source.bundle" if mode == "original" else None
     env = _isolated_git_env(home)
     original_env = os.environ.copy()
     original_tempdir = tempfile.tempdir
     original_clone = target_acquire._git_clone
     original_run_git = target_acquire._run_git
-    clone_calls: list[tuple[Path, bool, bool]] = []
+    clone_calls: list[tuple[str, Path, bool, bool]] = []
     git_calls: list[tuple[Path, list[str], bool]] = []
     acquired_workspace: Path | None = None
 
     try:
         expected_sha, long_directory, long_filename = _create_source(source, env=env)
+        # Git for Windows launches a shell for a --no-local directory transport. The
+        # review sandbox denies that shell's signal-pipe creation before checkout, so
+        # original mode carries the exact source objects in a local bundle instead.
+        # acquire_target still detects, measures, and resolves the real source repository,
+        # while the real clone/fetch/checkout path consumes the same commit without a
+        # shell helper. Live mode intentionally retains the unrestricted directory
+        # transport required by its separate verification role.
+        if transport_bundle is not None:
+            _git(["bundle", "create", str(transport_bundle), "--all"], cwd=source, env=env)
+            _git(["bundle", "verify", str(transport_bundle)], cwd=source, env=env)
+        transport_repo = str(transport_bundle or source)
         max_file_rel, max_dir_rel = target_acquire._max_tracked_relpath_lengths(src=source)
         destination_name = "workspace"
         deep_temp = _deep_temp_root(
@@ -187,17 +199,31 @@ def _run_probe(mode: str) -> dict[str, bool | int | str]:
             no_local: bool = False,
             core_longpaths: bool = False,
         ) -> None:
-            clone_calls.append((dest_dir, no_local, core_longpaths))
+            if Path(repo).resolve() != source.resolve():
+                raise RuntimeError(f"unexpected clone source: {repo}")
+            clone_calls.append((transport_repo, dest_dir, no_local, core_longpaths))
             original_clone(
-                repo=repo,
+                repo=transport_repo,
                 dest_dir=dest_dir,
                 no_local=no_local,
                 core_longpaths=core_longpaths,
             )
 
         def observed_run_git(args: list[str], *, cwd: Path, core_longpaths: bool = False) -> str:
-            git_calls.append((cwd, list(args), core_longpaths))
-            return original_run_git(args, cwd=cwd, core_longpaths=core_longpaths)
+            transport_args = list(args)
+            if (
+                transport_args[:2] == ["fetch", "--no-tags"]
+                and len(transport_args) >= 3
+                and Path(transport_args[2]).resolve() == source.resolve()
+                and transport_bundle is not None
+            ):
+                transport_args[2] = str(transport_bundle)
+            git_calls.append((cwd, transport_args, core_longpaths))
+            return original_run_git(
+                transport_args,
+                cwd=cwd,
+                core_longpaths=core_longpaths,
+            )
 
         target_acquire._git_clone = observed_clone
         target_acquire._run_git = observed_run_git
@@ -251,7 +277,10 @@ def _run_probe(mode: str) -> dict[str, bool | int | str]:
             "acquired_mode": acquired.mode,
             "all_candidates_over_limit": all_candidates_over_limit,
             "clone_core_longpaths": bool(clone_calls)
-            and all(no_local and enabled for _, no_local, enabled in clone_calls),
+            and all(no_local and enabled for _, _, no_local, enabled in clone_calls),
+            "clone_transport": "bundle" if transport_bundle is not None else "directory",
+            "clone_transport_valid": bool(clone_calls)
+            and all(repo == transport_repo for repo, _, _, _ in clone_calls),
             "commit_sha_matches": acquired.commit_sha == expected_sha,
             "connectivity_succeeded": connectivity_succeeded,
             "failed_destination_cleaned": not os.path.lexists(failed_decision.destination),
@@ -273,6 +302,7 @@ def _run_probe(mode: str) -> dict[str, bool | int | str]:
         required_true = [
             "all_candidates_over_limit",
             "clone_core_longpaths",
+            "clone_transport_valid",
             "commit_sha_matches",
             "connectivity_succeeded",
             "failed_destination_cleaned",
